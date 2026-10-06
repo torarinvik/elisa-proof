@@ -70,6 +70,30 @@ extend ElisaProof:
         def test_summary_source_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
             return proof_replay_summary_source_call(report, trace, summary)
 
+        def test_deterministic_source_call_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+            return proof_replay_deterministic_call_source_site(report, trace, call)
+
+        def test_deterministic_source_call_matches(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> (known: bool, matches: usize):
+            matches: mutable usize = 0
+            owner_line: mutable u32 = report.replay_owner_line
+            owner_line <- 0 if owner_line == 4294967295
+            known: bool = proof_replay_deterministic_call_source_declarations(report.source_declarations, trace.name, owner_line, call, trace.line, &matches, 0)
+            return (known, matches)
+
+        def test_deterministic_source_contains(report: ProofReport&, owner: sview, call: Ast::Expr) -> bool:
+            for declaration in report.source_declarations |declaration, owner, call|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, _) if name == owner:
+                        for statement in body |statement, call|:
+                            match statement:
+                                Ast::Stmt.VarDecl(_, _, expression, _):
+                                    return proof_replay_deterministic_call_source_contains(expression, call, 0)
+                                _:
+                                    pass
+                    _:
+                        pass
+            return false
+
         def test_local_return_position(body: darray[Ast::Stmt]&, local_name: sview, position: mutable Ast::Pos&, found: mutable bool&) -> bool:
             for statement in body |local_name, position, found|:
                 match statement:
@@ -101,10 +125,11 @@ using ElisaProof
 const FORGED_LOCAL_BINDING_VALUE: i64 = 987654321
 const FORGED_LOCAL_BINDING_ENCODING_FAILED: i64 = 25
 const FORGED_LOCAL_BINDING_ACCEPTED: i64 = 26
+const SCOPED_CALLER_SOURCE_LINE: u32 = 32
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 34 if not test_summary_argument_order_replay()
-    text: sview = "module Gate:\n    module Inner:\n        public:\n            def bounded(x: i64) -> i64:\n                requires x >= 0\n                ensure result >= 0\n                return x\n\nmodule Elsewhere:\n    module Inner:\n        public:\n            def unrelated(x: i64) -> i64:\n                return x\n\ndef caller(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return Gate::Inner::bounded(x)\n\ndef caller_local(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    result_value: i64 = Gate::Inner::bounded(x)\n    return result_value\n\ndef caller_guard(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return 1 if Gate::Inner::bounded(x) < 0\n    return 0\n"
+    text: sview = "module Gate:\n    module Inner:\n        public:\n            def bounded(x: i64) -> i64:\n                requires x >= 0\n                ensure result >= 0\n                return x\n\nmodule Elsewhere:\n    module Inner:\n        public:\n            def unrelated(x: i64) -> i64:\n                return x\n\ndef caller(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return Gate::Inner::bounded(x)\n\ndef caller_local(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    result_value: i64 = Gate::Inner::bounded(x)\n    return result_value\n\ndef caller_guard(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    return 1 if Gate::Inner::bounded(x) < 0\n    return 0\n\ndef caller_scoped(x: i64) -> i64:\n    requires x >= 0\n    ensure result >= 0\n    result_value: i64 =\n        Gate::Inner::bounded(x)\n    return result_value\n"
     source: mutable darray[u8] = []
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
@@ -113,6 +138,28 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report: mutable ProofReport = proof_empty_report()
     proof_check(file, &report)
     proof_replay_certificates(&report)
+
+    scoped_trace_index: mutable usize = report.fact_traces.count
+    for index in 0..<report.fact_traces.count |index, report, scoped_trace_index|:
+        candidate: ProofFactTrace = report.fact_traces[index]
+        if candidate.kind == "function-summary" and candidate.name == "caller_scoped" and candidate.dependency == "bounded":
+            scoped_trace_index <- index
+            break
+    return 45 if scoped_trace_index >= report.fact_traces.count
+    scoped_trace: mutable ProofFactTrace = report.fact_traces[scoped_trace_index]
+    scoped_call_index: usize = scoped_trace.summary_bindings_start + scoped_trace.summary_bindings_count - 1
+    return 46 if scoped_call_index >= report.fact_trace_summary_values.count
+    scoped_call: Ast::Expr = report.fact_trace_summary_values[scoped_call_index]
+    return 49 if Ast::expr_pos(scoped_call).line != scoped_trace.line
+    return 52 if not test_deterministic_source_contains(&report, scoped_trace.name, scoped_call)
+    report.replay_owner_line <- SCOPED_CALLER_SOURCE_LINE
+    source_site_status: (known: bool, matches: usize) = test_deterministic_source_call_matches(&report, scoped_trace, scoped_call)
+    return 50 if not source_site_status.known
+    return 51 if source_site_status.matches != 1
+    return 47 if not test_deterministic_source_call_site(&report, scoped_trace, scoped_call)
+    wrong_scoped_owner: ProofFactTrace = ProofFactTrace{expression: scoped_trace.expression, kernel_expression: scoped_trace.kernel_expression, kind: scoped_trace.kind, line: scoped_trace.line, name: "caller", dependency: scoped_trace.dependency, premises_start: scoped_trace.premises_start, premises_count: scoped_trace.premises_count, kernel_premises_start: scoped_trace.kernel_premises_start, kernel_premises_count: scoped_trace.kernel_premises_count, summary_bindings_start: scoped_trace.summary_bindings_start, summary_bindings_count: scoped_trace.summary_bindings_count, summary_requires_start: scoped_trace.summary_requires_start, summary_requires_count: scoped_trace.summary_requires_count, summary_ensure_index: scoped_trace.summary_ensure_index, owner_line: scoped_trace.owner_line}
+    return 48 if test_deterministic_source_call_site(&report, wrong_scoped_owner, scoped_call)
+    report.replay_owner_line <- 0
 
     summary_index: mutable usize = report.fact_traces.count
     for index in 0..<report.fact_traces.count |index, report, summary_index|:
@@ -317,7 +364,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("qualified call-summary replay: assignment RHS, exact local binding, argument order and reassignment checks hold; forged arguments, call spans, wrong modules and local-binding claims rejected")
+    print("qualified call-summary replay: nested value-block calls bind to their source owner; omitted, duplicate and wrong-owner claims fail; existing argument, source-span, reassignment and wrong-module adversarial checks hold")
 
 
 if __name__ == "__main__":
