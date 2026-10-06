@@ -6251,15 +6251,21 @@ result. Keep the failure reason stable and machine-readable.
     binding, obligation inventory, replay, casts, loops, collections, package input, result lattice,
     and crash controls on every commit. Promote only cases whose exact identity and output are saved.
 
-**Q0.11 — Current-pair qualified-constant crash triage (2026-10-06): historical crash not reproduced.**
-The exact minimized return repro passed on fresh Stage1 O2 pair generation
-`16b967120e5e46498ce5dbfa7ff4709f` (one obligation/certificate, zero replay gaps). The pair is
-identity-checked, but its Stage1 checkout is marked dirty; see
-[`docs/evidence/2026-10-06-q011-qualified-crash-current-pair.md`](docs/evidence/2026-10-06-q011-qualified-crash-current-pair.md).
-The historical binary and exact dirty source state remain unavailable, so P-00's cause/fix gate stays
-open. The broader qualified-constant test script stopped before the minimized case at a distinct
-body replay gap (4 obligations, 3 replayed, 1 gap); the minimized case was run directly. No crash was
-available for debugger/LLDB inspection and no speculative source change was made.
+**Q0.11 — Current-pair qualified-constant crash triage (2026-10-06): current repro controlled; historical cause unresolved.**
+The exact 51-byte input and six neighboring controls pass on fresh strict Stage1 O0 and O2 proof
+products built from clean proof HEAD `1f9f8ab9` and pinned clean compiler/frontend
+`3778d8fd7ec8679371199458dacb9ff414d73a0c`; each exact case emits complete JSON, proves/replays
+1/1, and has zero gaps. LLDB reproduces the retained historical executable's fault at the indexed
+store in `proof_qualified_body_rewrite`, with a stack-address-shaped index, but does not identify
+how that state was produced. Source history gives plausible regions to investigate, not causation;
+the historic dirty source tree is unrecoverable. No speculative source/compiler change was made.
+The focused script executes the minimized regression, then fails at the separate
+`qualified_constants_body.elisa` replay-gap/status assertion (4 obligations, 3 replayed, 1 gap);
+it is not a full-suite pass. Exact identities, LLDB evidence, commands and confirmed-vs-hypothesis
+boundaries are recorded in
+[`docs/evidence/2026-10-06-q011-causal-source-audit.md`](docs/evidence/2026-10-06-q011-causal-source-audit.md).
+P-00's causal fix gate remains open until a source-level failure is isolated or the exact historical
+compiler/proof inputs are recovered and differentially reproduced.
 
 **P0 exit gate:** no observed case can gain a theorem from stale or foreign source facts; every
 supported source obligation is inventoried; all admitted certificates replay with zero gaps; partial
