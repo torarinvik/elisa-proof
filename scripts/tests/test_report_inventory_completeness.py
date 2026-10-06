@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PROOF = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 INVARIANT_HARNESS = Path(os.environ.get("ELISA_REPORT_INVENTORY_HARNESS", ""))
 BRANCH_HARNESS = Path(os.environ.get("ELISA_ASSERT_BY_BRANCH_HARNESS", ""))
+LOOP_HARNESS = Path(os.environ.get("ELISA_ASSERT_BY_LOOP_HARNESS", ""))
 
 
 def run_report(source: Path) -> tuple[int, dict]:
@@ -24,13 +25,15 @@ def run_report(source: Path) -> tuple[int, dict]:
     return result.returncode, report
 
 
-def check_emitted_inventory(report: dict, *, proved: bool) -> None:
+def check_emitted_inventory(report: dict, *, proved: bool, expect_loops: bool = False) -> None:
     inventory = report["source_obligation_inventory"]
     assert inventory["coverage"] == "partial"
     assert inventory["whole_program"] is False
     assert "Boolean-literal assert-by" in inventory["supported_subset"]
     assert "direct if/match branches" in inventory["supported_subset"]
-    assert "nested branch and scoped bodies are unsupported" in inventory["supported_subset"]
+    if expect_loops:
+        assert "direct while/for loop bodies" in inventory["supported_subset"]
+        assert "nested loop/branch paths and scoped bodies are unsupported" in inventory["supported_subset"]
     summary = report["summary"]
     declarations = report["declaration_details"]
     goals = report["goals"]
@@ -75,6 +78,10 @@ def main() -> None:
         "test runner must provide the executable compiled from "
         "examples/source_assert_by_branch_inventory_runtime.elisa"
     )
+    assert LOOP_HARNESS.is_file(), (
+        "test runner must provide the executable compiled from "
+        "examples/source_assert_by_loop_inventory_runtime.elisa"
+    )
 
     # The Elisa harness imports the exact report_invariants module used by CLI admission,
     # retains source declarations outside the mutable report, and checks both an intact
@@ -91,6 +98,13 @@ def main() -> None:
         "if/match branches and reject omission, duplication, false claims, wrong owners, "
         "wrong-branch substitution, bad offsets, and unsupported nested scopes: "
         f"exit={branch_mutations.returncode}, stderr={branch_mutations.stderr[:500]!r}"
+    )
+    loop_mutations = subprocess.run([str(LOOP_HARNESS)], capture_output=True, timeout=30)
+    assert loop_mutations.returncode == 0, (
+        "R-004 loop source-identity regression failed: the harness did not accept direct "
+        "while/for bodies and reject omission, duplication, false claims, wrong owners, "
+        "wrong-loop/branch substitution, changed offsets, and nested scopes: "
+        f"exit={loop_mutations.returncode}, stderr={loop_mutations.stderr[:500]!r}"
     )
 
     # Exercise the production CLI gate with a source function inside the explicitly supported
@@ -181,6 +195,35 @@ def main() -> None:
     assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in branch_goals)
     assert all(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is True for goal in branch_goals)
 
+    # Direct top-level while/for bodies retain their enclosing function identity and exact
+    # source offsets. Their nested control flow remains unsupported by the inventory.
+    code, loop_assert_by = run_report(ROOT / "examples/source_obligation_assert_by_loops.elisa")
+    assert code == 0
+    check_emitted_inventory(loop_assert_by, proved=True, expect_loops=True)
+    loop_goals = [
+        goal for goal in loop_assert_by["goals"]
+        if goal["name"] == "source_assert_by_loops"
+        and goal["rule"] == "goal"
+        and goal["line"] in (5, 6, 8, 9, 11, 12)
+    ]
+    assert len(loop_goals) == 6
+    assert sorted(goal["line"] for goal in loop_goals) == [5, 6, 8, 9, 11, 12]
+    assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in loop_goals)
+    assert all(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is True for goal in loop_goals)
+
+    code, loop_false = run_report(ROOT / "examples/source_obligation_assert_by_loop_false.elisa")
+    assert code == 1
+    check_emitted_inventory(loop_false, proved=False, expect_loops=True)
+    false_loop_targets = [
+        goal for goal in loop_false["goals"]
+        if goal["name"] == "source_assert_by_loop_false"
+        and goal["line"] == 5
+        and goal["rule"] == "goal"
+    ]
+    assert false_loop_targets
+    assert any(goal["goal"]["kind"] == "bool" and goal["goal"]["value"] is False for goal in false_loop_targets)
+    assert any(not goal["proven"] for goal in false_loop_targets)
+
     code, branch_false = run_report(ROOT / "examples/source_obligation_assert_by_branch_false.elisa")
     assert code == 1
     check_emitted_inventory(branch_false, proved=False)
@@ -253,7 +296,7 @@ def main() -> None:
     assert unsupported["verification_state"] == "unsupported"
     assert any(finding["status"] == "unsupported" for finding in unsupported["findings"])
 
-    print("R-004 slices: direct if/match branch BoolLit assert-by inventory validated; false goals remain open; omission, duplicate, false-claim, wrong-owner, wrong-branch, source-offset and malformed-source mutations rejected; nested branch/lambda/module scopes fail closed; nonliteral formulas remain checker/replay-owned")
+    print("R-004 slices: direct if/match and while/for BoolLit assert-by inventory validated; false goals remain open; omission, duplicate, false-claim, wrong-owner, wrong-branch/loop and source-offset mutations rejected; nested control-flow/lambda/module scopes fail closed; nonliteral formulas remain checker/replay-owned")
 
 
 if __name__ == "__main__":
