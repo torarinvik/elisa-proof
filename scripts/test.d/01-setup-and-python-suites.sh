@@ -84,10 +84,11 @@ run_py_test test_build_manifest_sidecar_integrity.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
 run_py_test test_cycle_arena_runtime_rejection.py
+run_py_test tests/test_json_result_lattice.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
-# The downstream assertions still check the report's expected shape; this adapter checks that the
-# whole JSON document parsed and that the verifier's process exit agrees with its top-level verdict.
+# `proved_with_replay_gaps` is a valid, incomplete report state—not malformed JSON—and, like
+# `failed`, is explicitly non-successful. Preserve that lattice state for downstream assertions.
 run_json_report() {
     local source_path="$1"
     local report_path
@@ -115,22 +116,8 @@ run_json_report() {
     else
         proof_status=$?
     fi
-    if ! expected_status="$(python3 - "$report_path" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as handle:
-    report = json.load(handle)
-status = report.get("status")
-if status == "proved":
-    print(0)
-elif status == "failed":
-    print(1)
-else:
-    raise SystemExit(f"unexpected --json verdict: {status!r}")
-PY
-)"; then
-        printf 'proof test matrix failed: verifier emitted an incomplete or malformed JSON report for %s (exit=%s)\n' "$source_path" "$proof_status" >&2
+    if ! expected_status="$(python3 "$ROOT_DIR/scripts/report_exit_status.py" "$report_path")"; then
+        printf 'proof test matrix failed: could not classify verifier JSON result for %s (exit=%s)\n' "$source_path" "$proof_status" >&2
         rm -f "$report_path"
         return 98
     fi

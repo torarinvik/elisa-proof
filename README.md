@@ -47,6 +47,16 @@ report with the compatibility verdict, an explicit `verification_state` (`proved
 `unsupported`, or `unknown`), the expanded-source byte count and observational FNV-1a fingerprint,
 trust-boundary counters, structured findings, replay coverage, compiler semantic diagnostics, and
 every goal attempt (including failed goals) with its hypotheses and structured expression tree.
+The top-level `status` is `proved`, `failed`, or `proved_with_replay_gaps`; the last is a valid but
+incomplete report and always has `verification_state: "unknown"` with at least one replay gap.
+`--json` exits `0` only for a complete proved source and `1` for failed or replay-gap reports;
+valid incomplete JSON is never treated as malformed output. `--goal` and `--proof` exit `0` only
+when the selected goal has a replayed kernel certificate and the whole source is complete and
+admissible (`--proof` then renders `proof ... qed`). Open, unsupported, incomplete, and replay-gap
+goals exit `1`; a missing goal exits `2`. For `--check-proof`, `status` describes text fidelity
+(`matches` or `diverges`) while `verification_state` describes proof status. A matching open block
+therefore reports `matches` with a non-proved verification state and exits `1`; only an exact
+matching block for a proved goal exits `0`. Unreadable blocks and missing goal IDs exit `2`.
 In `summary`, `unproven` is `obligations - proven`; `finding_count` is the number of entries in
 the top-level `findings` array. The legacy `failed` field remains an alias for that finding count,
 not a count of unproven obligations, because one obligation may also produce non-goal diagnostics.
