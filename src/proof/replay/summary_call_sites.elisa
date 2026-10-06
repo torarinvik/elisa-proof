@@ -75,8 +75,46 @@ extend ElisaProof:
                         pass
             return true
 
+        # Entry preconditions are checked at the function declaration site, but a pure call
+        # summary introduced while unfolding one of those preconditions must still be tied to
+        # the call's actual source span. `trace.line` is the owning function's declaration line,
+        # not the line of the nested call expression, so the ordinary executable-call scan
+        # cannot find (for example) `is_digit(c)` in a `requires` on the following line.
+        # Inspect only top-level `requires` contracts, count the exact call span, and require a
+        # unique owning declaration. This admits no body-text summary: the callee's checked
+        # summary, argument mapping, and dependency certificate are still validated separately.
+        def proof_replay_summary_requires_call_body(body: darray[Ast::Stmt]&, call: Ast::Expr, matches: mutable usize&) -> void:
+            for statement in body |call, matches|:
+                match statement:
+                    Ast::Stmt.Contract("requires", expression, _):
+                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains(expression, call, 0)
+                    _:
+                        pass
+
+        def proof_replay_summary_requires_call_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, call: Ast::Expr, matches: mutable usize&, owners: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |owner, owner_line, call, matches, owners, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            owners <- owners + 1
+                            proof_replay_summary_requires_call_body(body, call, matches)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_requires_call_declarations(nested, owner, owner_line, call, matches, owners, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_summary_requires_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+            owner_line: u32 = report.replay_owner_line
+            return false if owner_line == 0 or owner_line == 4294967295 or trace.name == "" or trace.line != owner_line
+            matches: mutable usize = 0
+            owners: mutable usize = 0
+            return false if not proof_replay_summary_requires_call_declarations(report.source_declarations, trace.name, owner_line, call, &matches, &owners, 0)
+            return owners == 1 and matches == 1
+
         def proof_replay_summary_direct_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
-            return proof_replay_deterministic_call_source_site(report, trace, call)
+            return proof_replay_deterministic_call_source_site(report, trace, call) or proof_replay_summary_requires_call_source_site(report, trace, call)
 
         def proof_replay_summary_local_call_statement(body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
