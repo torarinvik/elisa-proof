@@ -96,6 +96,7 @@ def assert_no_publication(directory, label, payload, expected_reason):
     code, result = write_and_replay(directory, label, payload)
     assert code == 1 and result["status"] == "malformed" \
         and result.get("reason") == expected_reason, (label, code, result)
+    assert result["kernel"] == {"nodes": 0, "children": 0}, (label, result)
     assert result["theorems"] == [], (label, result)
     assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, (label, result)
 
