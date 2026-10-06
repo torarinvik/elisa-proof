@@ -139,5 +139,99 @@ extend ElisaProof:
                 _:
                     return false
 
+        # `root < limit / k` entails `k*root + 1 < limit` without wrap when
+        # k >= 2: root+1 <= floor(limit/k), hence k*root+1 < k*(root+1)
+        # <= k*floor(limit/k) <= limit. The same nonwrapping value is strictly
+        # above root. Permit only the two commutative AST spellings of
+        # (literal * root) + literal-one and consume the exact strict quotient
+        # witness; no modular sum is treated as unbounded without that witness.
+        def proof_unsigned_scaled_child_quotient_shape(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            match proof_strip_parens(goal):
+                Ast::Expr.Binary(child, operator, target, _):
+                    return false if operator != TokenKind.Gt and operator != TokenKind.Lt
+                    match proof_strip_parens(child):
+                        Ast::Expr.Binary(child_left, TokenKind.Plus, child_right, _):
+                            product: mutable Ast::Expr = child_left
+                            one: mutable Ast::Expr = child_right
+                            match proof_strip_parens(one):
+                                Ast::Expr.IntLit(one_value, one_position):
+                                    return false if one_value != 1
+                                    one_sort: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, one_position.line, one_position.column, one_value)
+                                    return false if one_sort.known and (not one_sort.unsigned or one_sort.width != proof_unsigned_width_in_expression(child, facts))
+                                _:
+                                    match proof_strip_parens(child_left):
+                                        Ast::Expr.IntLit(one_value, one_position):
+                                            return false if one_value != 1
+                                            one <- child_left
+                                            product <- child_right
+                                            one_sort: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, one_position.line, one_position.column, one_value)
+                                            return false if one_sort.known and (not one_sort.unsigned or one_sort.width != proof_unsigned_width_in_expression(child, facts))
+                                        _:
+                                            return false
+                            match proof_strip_parens(product):
+                                Ast::Expr.Binary(product_left, TokenKind.Star, product_right, _):
+                                    factor_expression: mutable Ast::Expr = product_left
+                                    root: mutable Ast::Expr = product_right
+                                    factor_value_checked: mutable i64 = 0
+                                    match proof_strip_parens(product_left):
+                                        Ast::Expr.IntLit(factor_value, factor_position):
+                                            return false if factor_value < 2
+                                            factor_value_checked <- factor_value
+                                            factor_sort: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, factor_position.line, factor_position.column, factor_value)
+                                            return false if factor_sort.known and (not factor_sort.unsigned or factor_sort.width != proof_unsigned_width_in_expression(root, facts))
+                                        _:
+                                            match proof_strip_parens(product_right):
+                                                Ast::Expr.IntLit(factor_value, factor_position):
+                                                    return false if factor_value < 2
+                                                    factor_value_checked <- factor_value
+                                                    factor_expression <- product_right
+                                                    root <- product_left
+                                                    factor_sort: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, factor_position.line, factor_position.column, factor_value)
+                                                    return false if factor_sort.known and (not factor_sort.unsigned or factor_sort.width != proof_unsigned_width_in_expression(root, facts))
+                                                _:
+                                                    return false
+                                    witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(product, facts, true)
+                                    return false if not witness.known or witness.factor < 2 or not proof_expr_equal(witness.base, root)
+                                    width: i64 = proof_unsigned_width_in_expression(root, facts)
+                                    return false if width == 0
+                                    return false if proof_unsigned_width_in_expression(product, facts) != width
+                                    return false if proof_unsigned_width_in_expression(child, facts) != width
+                                    return false if proof_unsigned_width_in_expression(witness.bound, facts) != width
+                                    return false if not proof_unsigned_constants_fit(child, width, 0)
+                                    # The width walker intentionally treats a literal's width as
+                                    # unknown. Check explicit literal annotations and every
+                                    # division/comparison operand instead of letting the binary
+                                    # minimum-width heuristic silently accept a mixed-width fact.
+                                    quotient_seen: mutable bool = false
+                                    conjuncts: darray[Ast::Expr] = proof_conjunct_facts(facts)
+                                    for fact in conjuncts |fact, root, witness, width, quotient_seen, annotations, facts|:
+                                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                                        continue if not order.known or order.operator != TokenKind.Lt or not proof_expr_equal(order.left, root)
+                                        match proof_strip_parens(order.right):
+                                            Ast::Expr.Binary(ceiling, TokenKind.Slash, divisor, _):
+                                                continue if not proof_expr_equal(ceiling, witness.bound)
+                                                continue if proof_unsigned_width_in_expression(order.left, facts) != width
+                                                continue if proof_unsigned_width_in_expression(order.right, facts) != width
+                                                continue if proof_unsigned_width_in_expression(ceiling, facts) != width
+                                                match proof_strip_parens(divisor):
+                                                    Ast::Expr.IntLit(divisor_value, divisor_position):
+                                                        continue if divisor_value != factor_value_checked
+                                                        divisor_sort: (known: bool, bits: u64, unsigned: bool, width: i64) = proof_replay_numeric_literal_sort(annotations, divisor_position.line, divisor_position.column, divisor_value)
+                                                        continue if divisor_sort.known and (not divisor_sort.unsigned or divisor_sort.width != width)
+                                                        quotient_seen <- true
+                                                    _:
+                                                        continue
+                                            _:
+                                                continue
+                                    return false if not quotient_seen
+                                    return proof_expr_equal(target, root) if operator == TokenKind.Gt
+                                    return proof_expr_equal(target, witness.bound)
+                                _:
+                                    return false
+                        _:
+                            return false
+                _:
+                    return false
+
         # The nonnegativity rule addressed by the whole goal rather than by its operands, so it
         # can be tried before the wrap guards that would otherwise refuse the goal outright.

@@ -2,6 +2,15 @@
 # Part 7 of scripts/dogfood.sh; sourced in order by it, never run alone.
 printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
 
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/literal-helpers-runtime.o" "$ROOT_DIR/examples/kernel_literal_comparison_helpers_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/literal-helpers-runtime" "$runtime_dir/literal-helpers-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/literal-helpers-runtime" "$runtime_dir/literal-helpers-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/literal-helpers-runtime"
+printf 'dogfood literal_helpers_runtime: integer comparisons and bounded unary literal controls passed\n'
+
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
     link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
@@ -22,6 +31,16 @@ else
 fi
 "$runtime_dir/congruence-runtime"
 printf 'dogfood congruence_runtime: participating formers carried equalities and excluded formers refused\n'
+
+# Marker-query caching must preserve strict malformed-marker and overload-veto behavior.
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/primitive-witness-marker-runtime.o" "$ROOT_DIR/examples/kernel_primitive_witness_marker_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/primitive-witness-marker-runtime" "$runtime_dir/primitive-witness-marker-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/primitive-witness-marker-runtime" "$runtime_dir/primitive-witness-marker-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/primitive-witness-marker-runtime"
+printf 'dogfood primitive_witness_marker_runtime: malformed and overloaded marker controls refused; witnessed scalar replay passed\n'
 
 # Propositional fact projection is exercised against the kernel directly: a conjunction entails
 # each conjunct, a negated disjunction entails each negated disjunct, a double negation cancels,
@@ -71,7 +90,7 @@ if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
-    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
+    for bootstrap_example in kernel_literal_comparison_helpers_runtime kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
         if ! compile_bootstrap_object "$ROOT_DIR/examples/$bootstrap_example.elisa" "$runtime_dir/bootstrap-$bootstrap_example.o"; then
             exit 1
         fi

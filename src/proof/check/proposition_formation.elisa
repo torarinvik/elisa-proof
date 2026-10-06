@@ -71,17 +71,21 @@ extend ElisaProof:
                         pass
             return (count, selected)
 
-        def proof_source_inferred_tuple_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+        def proof_source_inferred_tuple_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, local_names: darray[sview]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
             requires depth <= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             decreases PROOF_PROPOSITION_TYPE_DEPTH_LIMIT - depth
             return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(Ast::Expr.Ident(function_name, _), _, _, _):
+                    # Lexical bindings take precedence over same-spelled declarations.
+                    # A local callable needs its own resolved signature; never borrow
+                    # a global function's tuple type for an opaque or invalid call.
+                    return Ast::Expr.Absent if any local_name in local_names where local_name == function_name
                     found: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(declarations, function_name, 0)
                     return found.type_expression if found.count == 1
                     return Ast::Expr.Absent
                 Ast::Expr.Paren(inner, _):
-                    return proof_source_inferred_tuple_type(inner, declarations, depth + 1)
+                    return proof_source_inferred_tuple_type(inner, declarations, local_names, depth + 1)
                 _:
                     return Ast::Expr.Absent
 
@@ -185,10 +189,30 @@ extend ElisaProof:
                         if not has_declared_type:
                             inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
                             type_name <- proof_source_inferred_type_spelling(inferred)
-                            context_type <- proof_source_inferred_tuple_type(initializer, file.top_decls, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
+                            context_type <- proof_source_inferred_tuple_type(initializer, file.top_decls, names, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
                         names.push(local_name)
                         types.push(type_name)
                         source_types.push(context_type)
+                    Ast::Stmt.Assign(target, TokenKind.Assign, initializer, _):
+                        # The parser represents inferred `name = value` declarations
+                        # as assignments. Enter their type before validating later
+                        # guards, using the same semantic inference as unannotated
+                        # VarDecls. This grants a sort, never an executable fact.
+                        local_name: sview = proof_ident_name(target)
+                        if local_name != "":
+                            inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
+                            declared_return: Ast::Expr = proof_source_inferred_tuple_type(initializer, file.top_decls, names, 0)
+                            context_type: mutable Ast::Expr = Ast::Expr.Absent
+                            type_name: mutable sview = proof_source_inferred_type_spelling(inferred)
+                            match declared_return:
+                                Ast::Expr.Tuple(_, _):
+                                    context_type <- declared_return
+                                    type_name <- "tuple"
+                                _:
+                                    pass
+                            names.push(local_name)
+                            types.push(type_name)
+                            source_types.push(context_type)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         proof_source_validate_context_proposition(condition, name, names, types, source_types, global_kernel_bindings, kernel_workspace, validation_workspace, file, table, report)
                         then_name_mark: usize = names.count

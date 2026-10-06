@@ -239,6 +239,12 @@ python3 "$ROOT_DIR/scripts/tests/test_portable_package_theorem_budget.py"
 python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
 python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark_hardening.py"
 python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
+run_py_test test_resource_projection_e144_coverage.py
+run_py_test test_resource_projection_harness.py
+run_py_test test_inferred_tuple_summary.py
+run_py_test test_tuple_callee_shadow.py
+run_py_test test_alias_boundary_regression.py
+run_py_test test_conjunction_denial.py
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
@@ -256,6 +262,7 @@ run_py_test test_vector_index_arithmetic.py
 run_py_test test_adt_recursive_payload.py
 run_py_test test_call_sum_premise.py
 run_py_test test_nested_conditional_split.py
+run_py_test test_conditional_result_branchwise.py
 run_py_test test_goal_disjunct_split.py
 run_py_test test_include_constant_scope.py
 run_py_test test_include_function_scope.py
@@ -337,6 +344,12 @@ fi
 assert_by_branch_compile_status=$?
 if [[ "$assert_by_branch_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: assert-by branch identity harness did not compile\n' >&2
+    exit 1
+fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/assert-by-loop-invariants.o" "$ROOT_DIR/examples/source_assert_by_loop_inventory_runtime.elisa" >/dev/null 2>&1
+assert_by_loop_compile_status=$?
+if [[ "$assert_by_loop_compile_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: assert-by loop identity harness did not compile\n' >&2
     exit 1
 fi
 ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1

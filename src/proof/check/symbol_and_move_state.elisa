@@ -1,16 +1,51 @@
 extend ElisaProof:
     private:
-        def proof_clear_facts_after_call(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview) -> void:
+        def proof_clear_facts_after_call(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            source: darray[Ast::Expr] = proof_copy_exprs(facts)
+            rebind_paths: mutable darray[Ast::Expr] = []
+            rebind_values: mutable darray[Ast::Expr] = []
+            for fact in source |rebind_paths, rebind_values, source, names, report, owner|:
+                binding: (known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding(report, fact, owner, names)
+                if binding.known:
+                    rebind_paths.push(binding.path)
+                    rebind_values.push(binding.value)
+            # A compiler rebind symbol can have a verified range summary while the source local
+            # is represented separately by local == __elisa_rebind_N. Materialize the
+            # equality-substituted summary through the ordinary proof-step path before applying
+            # the call frame; downstream goals can then use the local directly, and replay
+            # checks both the source facts and the equality. The later stability filter still
+            # drops this fact whenever the call can reach that local.
+            annotations: darray[Ast::EnumAnnotation] = []
+            budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
+            for fact in source |fact, source, rebind_paths, rebind_values, facts, report, owner, annotations, budget|:
+                continue if budget == 0
+                probe: mutable Ast::Expr = fact
+                changed: mutable bool = false
+                for path_index in 0..<rebind_paths.count |path_index, probe, changed, rebind_paths, rebind_values|:
+                    replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, rebind_paths[path_index], rebind_values[path_index])
+                    changed <- changed or replaced.changed
+                    probe <- replaced.value if replaced.changed
+                continue if not changed or any existing in facts where proof_expr_equal(existing, probe)
+                continue if not proof_goal(source, probe, annotations)
+                budget <- budget - 1
+                proof_add_derived_fact_from(facts, report, probe, source, "proof-step", Ast::expr_pos(fact).line, owner)
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             keep: mutable darray[bool] = []
-            for fact in original |keep, original, names, parameters, report, owner, analyzed|:
+            for fact in original |keep, original, names, parameters, report, owner, analyzed, rebind_paths, rebind_values|:
                 bound_name: sview = proof_type_bound_name(fact)
                 retained: mutable bool = false
                 retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
                 retained <- true if not retained and proof_unique_builtin_const_enum_member_witness(fact, report) and proof_fact_is_type_bound(report, fact, owner)
                 retained <- true if not retained and proof_fact_is_source_global_constant(report, fact, owner)
-                retained <- true if not retained and analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                stable: mutable bool = analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                if not retained and analyzed and not stable and rebind_paths.count > 0:
+                    probe: mutable Ast::Expr = fact
+                    for path_index in 0..<rebind_paths.count |path_index, probe, rebind_paths, rebind_values|:
+                        replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, rebind_paths[path_index], rebind_values[path_index])
+                        probe <- replaced.value if replaced.changed
+                    stable <- proof_expr_call_stable(probe, original, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                retained <- true if not retained and stable
                 keep.push(retained)
             write_index: mutable usize = 0
             for read_index in 0..<original.count |facts, original, keep, write_index|:

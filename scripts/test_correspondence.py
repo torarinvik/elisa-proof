@@ -11,6 +11,9 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+if not __debug__:
+    raise SystemExit("run without Python -O: correspondence assertions are required")
+
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-correspondence-"))

@@ -116,6 +116,53 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_nested_condition_stable(nodes, node.left, depth + 1) and proof_kernel_replay_nested_condition_stable(nodes, node.right, depth + 1) if node.kind == "binary"
             return false
 
+        # A disjunction may state two bounds on the same conditional result. Split that
+        # result once, with the exact guard (and its negation), before generic arithmetic
+        # search spends the remaining replay budget. Matching is structural and exact: both
+        # disjuncts must contain the same conditional, and both substituted goals must replay.
+        def proof_kernel_replay_conditional_result_guard(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary" and node.operator == "not":
+                return proof_kernel_replay_conditional_result_guard(nodes, children, facts, node.left, depth + 1)
+            if node.kind == "binary" and (node.operator == "and" or node.operator == "or"):
+                return proof_kernel_replay_conditional_result_guard(nodes, children, facts, node.left, depth + 1) and proof_kernel_replay_conditional_result_guard(nodes, children, facts, node.right, depth + 1)
+            if node.kind == "binary" and (node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == "<=" or node.operator == ">" or node.operator == ">="):
+                return proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            return proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, root, depth)
+
+        def proof_kernel_replay_conditional_result_disjunction(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return false if remaining <= 1 or split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, goal_root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            return false if goal.kind != "binary" or goal.operator != "or"
+            conditional: (found: bool, root: usize) = proof_kernel_replay_first_nested_conditional(nodes, goal_root, 0)
+            return false if not conditional.found or not proof_kernel_replay_valid(nodes, conditional.root)
+            branch: ElisaProofKernelCore::ProofKernelNode = nodes[conditional.root]
+            return false if branch.kind != "if" or not proof_kernel_replay_conditional_result_guard(nodes, children, facts, branch.left, 0)
+            return false if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, branch.right, 0) or not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, branch.auxiliary, 0)
+            # Establish exact occurrence in each side separately. A matching guard alone or a
+            # merely similar conditional in one arm is insufficient for this shared-result rule.
+            left_occurrence: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, goal.left, conditional.root, branch.right, 0)
+            right_occurrence: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, goal.right, conditional.root, branch.right, 0)
+            return false if not left_occurrence.changed or not right_occurrence.changed
+            then_rewrite: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, goal_root, conditional.root, branch.right, 0)
+            else_rewrite: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, goal_root, conditional.root, branch.auxiliary, 0)
+            return false if not then_rewrite.changed or not else_rewrite.changed
+            then_facts: mutable darray[usize] = []
+            else_facts: mutable darray[usize] = []
+            for fact in facts |fact, nodes, children, conditional, branch, then_facts, else_facts|:
+                then_facts.push(proof_kernel_replay_replace_exact(nodes, children, fact, conditional.root, branch.right, 0).value)
+                else_facts.push(proof_kernel_replay_replace_exact(nodes, children, fact, conditional.root, branch.auxiliary, 0).value)
+            then_facts.push(branch.left)
+            else_facts.push(ElisaProofKernelCore::add_node_reused(nodes, "unary", "not", branch.left, 0, 0))
+            return proof_kernel_replay_goal_depth_remaining(nodes, children, then_facts, then_rewrite.value, split_depth + 1, depth + 1, remaining: remaining - 1) and proof_kernel_replay_goal_depth_remaining(nodes, children, else_facts, else_rewrite.value, split_depth + 1, depth + 1, remaining: remaining - 1)
+
         def proof_kernel_replay_conditional_equality_other(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, comparison_root: usize, conditional_root: usize) -> (known: bool, other: usize):
             return (false, 0) if not proof_kernel_replay_valid(nodes, comparison_root)
             comparison: ElisaProofKernelCore::ProofKernelNode = nodes[comparison_root]

@@ -1,0 +1,134 @@
+# Exact owner, loop, and source-offset mutation controls for direct loop-body obligations.
+include "report_inventory_test_support.elisa"
+using ElisaProof
+
+const LOOP_MUTATION_REJECTED: i64 = 1
+const LOOP_OMISSION_ADMITTED: i64 = 2
+const LOOP_DUPLICATE_ADMITTED: i64 = 3
+const LOOP_FALSE_CLAIM_ADMITTED: i64 = 4
+const LOOP_WRONG_OWNER_ADMITTED: i64 = 5
+const LOOP_WRONG_LOOP_ADMITTED: i64 = 6
+const LOOP_WRONG_BRANCH_ADMITTED: i64 = 7
+const LOOP_CHANGED_OFFSET_ADMITTED: i64 = 8
+const LOOP_NESTED_SCOPE_SUPPORTED: i64 = 9
+
+def loop_source_pos(line: u32, offset: u32) -> Ast::Pos:
+    return Ast::Pos{line: line, column: 1, offset: offset, end_line: line, end_column: 2, end_offset: offset + 1}
+
+def loop_assert_by(line: u32, offset: u32) -> Ast::Stmt:
+    target_pos: Ast::Pos = loop_source_pos(line, offset)
+    step_pos: Ast::Pos = loop_source_pos(line + 1, offset + 10)
+    target: Ast::Expr = Ast::Expr.BoolLit(true, target_pos)
+    step: Ast::Expr = Ast::Expr.BoolLit(true, step_pos)
+    target_assert: Ast::Stmt = Ast::Stmt.Contract("assert", target, target_pos)
+    step_assert: Ast::Stmt = Ast::Stmt.Contract("assert", step, step_pos)
+    return Ast::Stmt.Block("assert_by", [], "", [target_assert, step_assert], target_pos)
+
+def empty_loop_report() -> ProofReport:
+    return ProofReport{declarations: 0, obligations: 0, proven: 0, failed: 0, findings: [], source_declarations: [], declaration_details: [], goal_attempts: [], obligation_inventory: [], certificates: [], theorem_summaries: []}
+
+def append_loop_attempt(report: mutable ProofReport&, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool), value: bool, owner: sview, line: u32, offset: u32) -> void can[Memory.Allocate, Abort.Panic]:
+    position: Ast::Pos = loop_source_pos(line, offset)
+    goal: Ast::Expr = Ast::Expr.BoolLit(value, position)
+    index: usize = report.certificates.count
+    report.goal_attempts.push(ProofGoalAttempt{goal: goal, budget_exhausted: false, facts_start: 0, facts_count: 0, kernel_goal: index, kernel_facts_start: 0, kernel_facts_count: 0, line: expected.attempt_line, name: owner, rule: "goal", proven: true, has_certificate: true, certificate_index: index})
+    report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: 0, facts_count: 0, kernel_goal: index, kernel_facts_start: 0, kernel_facts_count: 0, line: expected.attempt_line, name: owner, rule: "goal", replayed: true})
+
+def append_loop_report(report: mutable ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, omit: usize, mutation: i64) -> void can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<inventory.count |index, report, inventory, omit, mutation|:
+        if index != omit:
+            expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[index]
+            value: mutable bool = expected.expected_value
+            owner: mutable sview = expected.name
+            line: mutable u32 = expected.goal_line
+            offset: mutable u32 = expected.goal_offset
+            value <- false if mutation == 1 and index == 0
+            owner <- "different_owner" if mutation == 2 and index == 0
+            line <- inventory[2].goal_line if mutation == 3 and index == 0
+            offset <- inventory[2].goal_offset if mutation == 3 and index == 0
+            line <- inventory[4].goal_line if mutation == 4 and index == 0
+            offset <- inventory[4].goal_offset if mutation == 4 and index == 0
+            offset <- offset + 1 if mutation == 5 and index == 0
+            append_loop_attempt(report, expected, value, owner, line, offset)
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    while_assert: Ast::Stmt = loop_assert_by(12, 120)
+    while_loop: Ast::Stmt = Ast::Stmt.While(Ast::Expr.BoolLit(true, loop_source_pos(10, 100)), [while_assert], loop_source_pos(9, 90))
+
+    for_assert: Ast::Stmt = loop_assert_by(22, 220)
+    iterable: Ast::Expr = Ast::Expr.Array([Ast::Expr.IntLit(0, loop_source_pos(20, 200))], loop_source_pos(20, 199))
+    for_loop: Ast::Stmt = Ast::Stmt.For("item", ["item"], iterable, [for_assert], loop_source_pos(19, 190))
+
+    branch_assert: Ast::Stmt = loop_assert_by(32, 320)
+    branch: Ast::Stmt = Ast::Stmt.If(Ast::Expr.BoolLit(true, loop_source_pos(30, 300)), [branch_assert], [], loop_source_pos(29, 290))
+    function: Ast::Decl = Ast::Decl.Func("loop_owner", [], Ast::Expr.Absent, [while_loop, for_loop, branch], [], [], loop_source_pos(1, 1))
+    declarations: darray[Ast::Decl] = [function]
+    inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(declarations)
+    return LOOP_MUTATION_REJECTED if inventory.count != 6
+    for expected in inventory:
+        return LOOP_MUTATION_REJECTED if expected.name != "loop_owner" or not expected.supported or not expected.expected_value
+
+    valid: mutable ProofReport = empty_loop_report()
+    append_loop_report(&valid, inventory, inventory.count, 0)
+    return LOOP_MUTATION_REJECTED if not proof_source_assert_by_coverage(inventory, valid)
+
+    omitted: mutable ProofReport = empty_loop_report()
+    append_loop_report(&omitted, inventory, 0, 0)
+    return LOOP_OMISSION_ADMITTED if proof_source_assert_by_coverage(inventory, omitted)
+
+    duplicate: mutable ProofReport = empty_loop_report()
+    append_loop_report(&duplicate, inventory, inventory.count, 0)
+    append_loop_attempt(&duplicate, inventory[0], true, "loop_owner", inventory[0].goal_line, inventory[0].goal_offset)
+    return LOOP_DUPLICATE_ADMITTED if proof_source_assert_by_coverage(inventory, duplicate)
+
+    false_claim: mutable ProofReport = empty_loop_report()
+    append_loop_report(&false_claim, inventory, inventory.count, 1)
+    return LOOP_FALSE_CLAIM_ADMITTED if proof_source_assert_by_coverage(inventory, false_claim)
+
+    wrong_owner: mutable ProofReport = empty_loop_report()
+    append_loop_report(&wrong_owner, inventory, inventory.count, 2)
+    return LOOP_WRONG_OWNER_ADMITTED if proof_source_assert_by_coverage(inventory, wrong_owner)
+
+    wrong_loop: mutable ProofReport = empty_loop_report()
+    append_loop_report(&wrong_loop, inventory, inventory.count, 3)
+    return LOOP_WRONG_LOOP_ADMITTED if proof_source_assert_by_coverage(inventory, wrong_loop)
+
+    wrong_branch: mutable ProofReport = empty_loop_report()
+    append_loop_report(&wrong_branch, inventory, inventory.count, 4)
+    return LOOP_WRONG_BRANCH_ADMITTED if proof_source_assert_by_coverage(inventory, wrong_branch)
+
+    changed_offset: mutable ProofReport = empty_loop_report()
+    append_loop_report(&changed_offset, inventory, inventory.count, 5)
+    return LOOP_CHANGED_OFFSET_ADMITTED if proof_source_assert_by_coverage(inventory, changed_offset)
+
+    nested_assert: Ast::Stmt = loop_assert_by(42, 420)
+    nested_loop: Ast::Stmt = Ast::Stmt.While(Ast::Expr.BoolLit(true, loop_source_pos(41, 410)), [nested_assert], loop_source_pos(40, 400))
+    outer_loop: Ast::Stmt = Ast::Stmt.For("outer", ["outer"], iterable, [nested_loop], loop_source_pos(39, 390))
+    nested_function: Ast::Decl = Ast::Decl.Func("nested_loop_owner", [], Ast::Expr.Absent, [outer_loop], [], [], loop_source_pos(38, 380))
+    nested_declarations: darray[Ast::Decl] = [nested_function]
+    nested_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(nested_declarations)
+    return LOOP_NESTED_SCOPE_SUPPORTED if nested_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(nested_inventory) or proof_source_assert_by_coverage(nested_inventory, empty_loop_report())
+
+    loop_in_branch: Ast::Stmt = Ast::Stmt.For("inner", ["inner"], iterable, [loop_assert_by(52, 520)], loop_source_pos(50, 500))
+    if_statement: Ast::Stmt = Ast::Stmt.If(Ast::Expr.BoolLit(true, loop_source_pos(49, 490)), [loop_in_branch], [], loop_source_pos(48, 480))
+    branch_function: Ast::Decl = Ast::Decl.Func("loop_branch_owner", [], Ast::Expr.Absent, [if_statement], [], [], loop_source_pos(47, 470))
+    branch_declarations: darray[Ast::Decl] = [branch_function]
+    branch_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(branch_declarations)
+    return LOOP_NESTED_SCOPE_SUPPORTED if branch_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(branch_inventory) or proof_source_assert_by_coverage(branch_inventory, empty_loop_report())
+
+    module_loop: Ast::Stmt = Ast::Stmt.While(Ast::Expr.BoolLit(true, loop_source_pos(61, 610)), [loop_assert_by(62, 620)], loop_source_pos(60, 600))
+    module_function: Ast::Decl = Ast::Decl.Func("module_loop_owner", [], Ast::Expr.Absent, [module_loop], [], [], loop_source_pos(59, 590))
+    module: Ast::Decl = Ast::Decl.Module("Nested", [module_function], loop_source_pos(58, 580))
+    module_declarations: darray[Ast::Decl] = [module]
+    module_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(module_declarations)
+    return LOOP_NESTED_SCOPE_SUPPORTED if module_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(module_inventory) or proof_source_assert_by_coverage(module_inventory, empty_loop_report())
+
+    lambda_assert: Ast::Stmt = loop_assert_by(72, 720)
+    lambda_expression: Ast::Expr = Ast::Expr.Lambda([], [lambda_assert], loop_source_pos(71, 710))
+    lambda_statement: Ast::Stmt = Ast::Stmt.Expr(lambda_expression, loop_source_pos(71, 710))
+    lambda_loop: Ast::Stmt = Ast::Stmt.For("lambda", ["lambda"], iterable, [lambda_statement], loop_source_pos(70, 700))
+    lambda_function: Ast::Decl = Ast::Decl.Func("lambda_loop_owner", [], Ast::Expr.Absent, [lambda_loop], [], [], loop_source_pos(69, 690))
+    lambda_declarations: darray[Ast::Decl] = [lambda_function]
+    lambda_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(lambda_declarations)
+    return LOOP_NESTED_SCOPE_SUPPORTED if lambda_inventory.count != 2 or not proof_source_assert_by_inventory_has_unsupported(lambda_inventory) or proof_source_assert_by_coverage(lambda_inventory, empty_loop_report())
+    return 0

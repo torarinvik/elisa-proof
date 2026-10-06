@@ -95,3 +95,46 @@ extend ElisaProof:
                 proof_kernel_budget_note(report, name)
                 return
             state.trace_events.push(event)
+
+        # A verified by-value collection return carries the caller's arena lifetime but is not
+        # an alias of a source place. This event installs that lifetime on the fresh value; replay
+        # binds it only after matching its type and region against the callee's checked return.
+        def proof_resource_record_region_call_value[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, call: usize, type_expression: Ast::Expr, name: sview, region: sview, writable: bool, position: Ast::Pos, functions: ProofFunctionTable&) -> bool:
+            return false if not proof_resource_region_collection_value_type(type_expression, functions)
+            return false if not proof_resource_region_is_active(state, region)
+            return false if state.trace_events.count == 0
+            return false if call >= report.kernel.nodes.count or report.kernel.nodes[call].kind != "resource-call"
+            slot: usize = proof_resource_lookup(state, name)
+            return false if slot >= state.binding_names.count or proof_resource_binding_is_moved(state, slot)
+            type_tag: sview = proof_resource_region_collection_type_tag(type_expression, functions)
+            return false if type_tag == ""
+            type_witness: Ast::Expr = Ast::Expr.Ident(type_tag, position)
+            encoded: (known: bool, root: usize) = proof_resource_encode_expression(type_witness, report)
+            return false if not encoded.known or encoded.root >= report.kernel.nodes.count
+            return false if not proof_resource_kernel_capacity(report, 1, 0, name)
+            event: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-call-result", "value", call, encoded.root, PROOF_RESOURCE_WRITABLE_FLAG if writable else 0, 0, 0, 0, name, region)
+            return false if event >= report.kernel.nodes.count
+            state.binding_region[slot] <- region
+            state.binding_region_live[slot] <- true
+            state.binding_region_destroyed[slot] <- false
+            state.binding_region_owner[slot] <- false
+            state.trace_events.push(event)
+            return true
+
+        # A by-value darray return is not a reference return. Its witness identifies the live
+        # collection binding, and the exact scalar-element darray type is independently replayed.
+        def proof_resource_record_region_value_return[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, witness: usize, type_expression: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void:
+            type_tag: sview = proof_resource_region_collection_type_tag(type_expression, functions)
+            return if type_tag == ""
+            encoded: (known: bool, root: usize) = proof_resource_encode_expression(Ast::Expr.Ident(type_tag, position), report)
+            if not encoded.known or encoded.root >= report.kernel.nodes.count:
+                proof_resource_add_failing_obligation(report, "region-return-witness-unsupported", position, function_name, "the returned collection has no checked kernel type witness")
+                return
+            if not proof_resource_kernel_capacity(report, 1, 0, region):
+                proof_kernel_budget_note(report, region)
+                return
+            event: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-region-return", "value-param", witness, encoded.root, 0, 0, 0, 0, region, "")
+            if event >= report.kernel.nodes.count:
+                proof_kernel_budget_note(report, region)
+                return
+            state.trace_events.push(event)

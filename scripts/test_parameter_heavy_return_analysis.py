@@ -43,8 +43,16 @@ with tempfile.TemporaryDirectory(prefix="elisa-proof-selector-contract-") as scr
                for f in false_report["findings"]), false_report["findings"]
     assert not next(d for d in false_report["declaration_details"]
                     if d["name"] == "parameter_heavy_manifest_route")["verified"]
-over_limit_run = subprocess.run([str(BINARY), "--json", str(OVER_LIMIT_SOURCE)],
-                                capture_output=True, text=True, timeout=60)
+with tempfile.TemporaryDirectory(prefix="elisa-proof-selector-over-budget-") as scratch:
+    over_limit_source = Path(scratch) / OVER_LIMIT_SOURCE.name
+    text = OVER_LIMIT_SOURCE.read_text()
+    terminal = "            default_request\n"
+    assert text.count(terminal) == 1
+    # Keep this negative as a genuine hard-ceiling test after structural fuel
+    # scaling; do not rely on the former 64-step default to cause refusal.
+    over_limit_source.write_text(text.replace(terminal, "            pass\n" * 200 + terminal))
+    over_limit_run = subprocess.run([str(BINARY), "--json", str(over_limit_source)],
+                                    capture_output=True, text=True, timeout=60)
 assert over_limit_run.returncode == 1, (over_limit_run.returncode, over_limit_run.stderr)
 over_limit = json.loads(over_limit_run.stdout)
 assert over_limit["status"] == "failed" and over_limit["verification_state"] == "unsupported", over_limit
@@ -53,10 +61,11 @@ assert over_limit["replay"]["gaps"] == 0, over_limit["replay"]
 assert over_limit["replay"]["certificates"] == over_limit["replay"]["replayed"], over_limit["replay"]
 budget = next(f for f in over_limit["findings"]
               if f["kind"] == "control-flow-analysis-budget")
-# Its module constants carry their own fact headroom, so the body may run out of steps first.
-# Either way it stays at the ordinary 64 limit and unverified.
+# Its module constants carry their own fact headroom. It must still refuse under
+# either snapshot exhaustion or the same global 192-step ceiling.
 assert budget["budget"]["dimension"] in ("facts", "steps"), budget
-assert budget["budget"]["limit"] == 64 and budget["budget"]["observed"] > 64, budget
+assert budget["budget"]["limit"] <= 192, budget
+assert budget["budget"]["observed"] > budget["budget"]["limit"], budget
 over_limit_functions = {item["name"]: item for item in over_limit["declaration_details"]
                         if item.get("kind") == "function"}
 assert not over_limit_functions["parameter_heavy_manifest_route_over_limit"]["verified"], over_limit_functions

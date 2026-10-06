@@ -57,6 +57,17 @@ def main() -> None:
     report = json.load(sys.stdin)
     summary = report["summary"]
     replay = report["replay"]
+    for section, fields in (
+        (summary, ("semantic_errors", "obligations", "proven", "unproven")),
+        (replay, ("certificates", "replayed", "gaps")),
+    ):
+        for field in fields:
+            require(type(section[field]) is int and section[field] >= 0,
+                    f"malformed nonnegative integer counter {field}: {section[field]!r}")
+    require(summary["proven"] + summary["unproven"] == summary["obligations"],
+            "standalone obligation accounting is incomplete")
+    require(replay["certificates"] == summary["proven"],
+            "not every proven standalone obligation has a replay certificate")
 
     require(report["status"] == "failed", "standalone audit must remain a failed corpus")
     require(report["verification_state"] != "proved", "standalone audit unexpectedly became proved")
@@ -91,8 +102,9 @@ def main() -> None:
             budget = finding.get("budget")
             require(isinstance(budget, dict), f"budget finding lacks measured state: {finding}")
             require(
-                isinstance(budget.get("observed"), int)
-                and isinstance(budget.get("limit"), int)
+                type(budget.get("observed")) is int
+                and type(budget.get("limit")) is int
+                and budget["limit"] >= 0
                 and budget["observed"] > budget["limit"],
                 f"budget finding has inconsistent measurements: {finding}",
             )
