@@ -14,6 +14,14 @@ if [[ "$region_allocation_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: new[r] allocation/binding/discard transitions were not replayed\n' >&2
     exit 1
 fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_region_new_reference_as_value.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions={item["name"]: item for item in report["declaration_details"] if item["kind"] == "function"}; plain_value_names={"rejected_region_new_reference_as_value", "rejected_region_new_reference_assignment_as_value"}; assert all(not functions[name]["verified"] for name in plain_value_names); assert all(any(finding["kind"] == "region-allocation-unsupported" and finding["name"] == name for finding in report["findings"]) for name in plain_value_names); stale_region_name="rejected_region_new_assignment_after_actual_region_destroy"; assert not functions[stale_region_name]["verified"]; assert any(finding["kind"] == "region-use-after-destroy" and finding["name"] == stale_region_name for finding in report["findings"])'
+new_reference_value_probe_status=${PIPESTATUS[1]}
+set -e
+if [[ "$new_reference_value_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: new[r] was modeled as a plain value instead of a region reference\n' >&2
+    exit 1
+fi
 run_json_report "$ROOT_DIR/examples/region_generic_allocation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-param" in kinds and "resource-region-return-alloc" in kinds and "resource-region-return" in kinds and "resource-call-region" in kinds and "resource-call-result" in kinds'
 region_generic_probe_status=${PIPESTATUS[1]}
 if [[ "$region_generic_probe_status" -ne 0 ]]; then
