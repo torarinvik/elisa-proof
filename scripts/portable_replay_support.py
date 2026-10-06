@@ -48,7 +48,7 @@ TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapte
          "source_authenticated": False}
 SCALAR_KINDS = {
     "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
-    "field-init", "float", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
+    "field-init", "float", "opaque-float-literal", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
     "resource-call-formal", "resource-call-lend", "resource-call-region", "resource-call-result",
     "resource-disjoint", "resource-join-move", "resource-move", "resource-region-alloc",
     "resource-region-alloc-discard", "resource-region-assign", "resource-region-bind",

@@ -51,6 +51,10 @@ def main():
     helper = "def is_digit(c: i64) -> bool:\n    return c >= 48 and c <= 57\n\n"
     # Adversarial: the unfolded summary is exact, so a claim past it stays unproven.
     check("wrong-bound", helper + "def f(c: i64) -> i64:\n    requires is_digit(c)\n    ensures result <= 8\n    return c - 48\n", [7])
+    # A helper guard cannot turn an empty range into a strict upper bound. This keeps the
+    # source-replayed call summary separate from the counting loop's range facts.
+    space_helper = "def is_space(c: usize) -> bool:\n    return c == 32 or c == 9 or c == 13\n\n"
+    check("guarded-empty-range", space_helper + "def f(stop: usize) -> usize:\n    ensures result < stop\n    for index in 0..<stop:\n        if is_space(index) or index == 3:\n            return index\n    return stop\n", [9])
     # A written ensure disables synthesis; the weaker contract is all a caller sees.
     check("written-ensure", "def g(x: i64) -> i64:\n    requires x >= 0 and x <= 10\n    ensures result >= 0\n    return x + 1\n\ndef h(x: i64) -> i64:\n    requires x >= 0 and x <= 10\n    ensures result == x + 1\n    return g(x)\n", [9])
     # Recursion is refused: the helper has two statements and calls itself.
