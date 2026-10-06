@@ -388,7 +388,7 @@ for float_probe in rejected_float_le_guard rejected_float_nan_order; do
     fi
 done
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert [(f["name"], f["kind"]) for f in r["findings"]] == [("float_normalize_le", "call-requires-unproven")]' "$standalone_probe_dir/rejected_float_le_guard.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert sorted(f["name"] for f in r["findings"] if f["kind"] == "ensure-unproven") == ["float_not_self_unequal", "float_trichotomy"]; assert not any(g["proven"] for g in r["goals"] if g["rule"] == "goal")' "$standalone_probe_dir/rejected_float_nan_order.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert sorted(f["name"] for f in r["findings"] if f["kind"] == "ensure-unproven") == ["float_nan_is_not_nonnegative", "float_negated_less_implies_greater_equal", "float_not_self_unequal", "float_trichotomy"]; assert not any(g["proven"] for g in r["goals"] if g["rule"] == "goal"); assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]'
 unsigned_alias_rejection_report="$standalone_probe_dir/rejected-unsigned-alias.json"
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_unsigned_alias.elisa" >"$unsigned_alias_rejection_report"
