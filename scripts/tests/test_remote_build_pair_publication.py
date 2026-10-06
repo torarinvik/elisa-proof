@@ -22,11 +22,13 @@ SOURCE_IDENTITY = {
 
 SHARED_IDENTITY = {
     "schema": "elisa-proof-build-manifest-v1",
-    "frontend": {"revision": "frontend-revision", "tree": "1" * 40},
+    "frontend": {"revision": "a" * 40, "tree": "1" * 40},
     "compiler": {
         "stage": "stage1",
-        "stage1_revision": "stage1-revision",
-        "source_revision": "compiler-revision",
+        "stage1_revision": "a" * 40,
+        "source_revision": "a" * 40,
+        "source_tree_sha256": "a" * 64,
+        "build_recipe_sha256": "b" * 64,
         "source_dirty": False,
         "executable": {"path": "/toolchain/elisac-stage1", "sha256": "2" * 64, "bytes": 10},
         "product": {"path": "/toolchain/compiler-product", "sha256": "3" * 64, "bytes": 20},
@@ -132,11 +134,13 @@ def main() -> None:
             assert product["binary_sha256"] == sha256(Path(product["binary"]))
 
         mutations = (
-            ("frontend revision", lambda data: data["frontend"].update(revision="other-frontend")),
+            ("frontend revision", lambda data: data["frontend"].update(revision="c" * 40)),
             ("frontend tree", lambda data: data["frontend"].update(tree="f" * 40)),
             ("compiler stage", lambda data: data["compiler"].update(stage="stage0")),
-            ("Stage1 revision", lambda data: data["compiler"].update(stage1_revision="other-stage1")),
-            ("compiler source", lambda data: data["compiler"].update(source_revision="other-source")),
+            ("Stage1 revision", lambda data: (data["compiler"].update(
+                stage1_revision="c" * 40, source_revision="c" * 40),
+                data["frontend"].update(revision="c" * 40))),
+            ("compiler source tree", lambda data: data["compiler"].update(source_tree_sha256="c" * 64)),
             ("compiler source state", lambda data: data["compiler"].update(source_dirty=True)),
             ("compiler executable", lambda data: data["compiler"]["executable"].update(sha256="6" * 64)),
             ("compiler product", lambda data: data["compiler"]["product"].update(sha256="7" * 64)),
@@ -151,8 +155,22 @@ def main() -> None:
             case_root = root / f"mismatch-{index}"
             case_binaries, case_manifests = create_staged_pair(case_root / "staged", mutation)
             rejected = publish(case_root / "generations", case_binaries, case_manifests)
-            assert_rejected(rejected, "different toolchain/build identities")
+            expected = ("Stage1 source revision differs from imported frontend revision"
+                        if label == "frontend revision"
+                        else "different toolchain/build identities")
+            assert_rejected(rejected, expected)
             assert not (case_root / "generations" / GENERATION).exists(), label
+
+        for missing_field in ("stage1_revision", "source_revision", "source_tree_sha256",
+                              "build_recipe_sha256"):
+            case_root = root / f"missing-{missing_field}"
+            case_binaries, case_manifests = create_staged_pair(case_root / "staged")
+            payload = json.loads(case_manifests[0].read_text())
+            payload["compiler"][missing_field] = None
+            write_manifest(case_manifests[0], payload)
+            rejected = publish(case_root / "generations", case_binaries, case_manifests)
+            assert rejected.returncode == 2, (missing_field, rejected.stderr)
+            assert not (case_root / "generations" / GENERATION).exists(), missing_field
 
         # A missing identity dimension must fail closed, not degrade to provenance-only
         # comparison. The manifests are correctly resealed so this tests semantic checks.

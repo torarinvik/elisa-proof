@@ -181,29 +181,29 @@ cd "$ROOT_DIR"
 # Compile against the pinned compiler export, never the live sibling checkout.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
+COMPILER_PRODUCT="$COMPILER"
 if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     stage1_root=""
-    # A bare stage1 binary (scripts/linux_toolchain.sh) names the checkout it was built from, so
-    # the manifest can record that checkout's revision instead of none.
     if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
         stage1_root="$ELISA_STAGE1_ROOT"
     elif [[ -n "${driver:-}" ]]; then
         stage1_root="${driver%/scripts/elisac_stage1.sh}"
+    elif [[ -n "${ELISA_STAGE1_BIN:-}" ]]; then
+        stage1_root="$(cd "$(dirname -- "$ELISA_STAGE1_BIN")/.." && pwd -P)"
+    elif [[ "$(basename -- "$COMPILER")" == "elisac-stage1" ]]; then
+        stage1_root="$(cd "$(dirname -- "$COMPILER")/.." && pwd -P)"
     elif [[ -f "${HOME}/.elisac/stage1/SNAPSHOT" ]]; then
         stage1_root="${HOME}/.elisac/stage1"
     fi
-    stage1_revision=""
-    if [[ -n "$stage1_root" && -f "$stage1_root/SNAPSHOT" ]]; then
-        stage1_revision="$(awk '$1 == "revision:" { print $2; exit }' "$stage1_root/SNAPSHOT")"
+    if [[ -n "${ELISA_STAGE1_BIN:-}" ]]; then
+        COMPILER_PRODUCT="$ELISA_STAGE1_BIN"
+    elif [[ -n "$stage1_root" && -x "$stage1_root/bin/elisac-stage1" ]]; then
+        COMPILER_PRODUCT="$stage1_root/bin/elisac-stage1"
     fi
-    if [[ -n "$stage1_revision" && "$ELISA_COMPILER_PINNED_REV" != "$stage1_revision"* ]]; then
-        printf 'stage1/frontend provenance mismatch: stage1=%s frontend=%s\n' "$stage1_revision" "$ELISA_COMPILER_PINNED_REV" >&2
-        exit 2
-    fi
-fi
-COMPILER_PRODUCT="$COMPILER"
-if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
-    COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
+    stage1_revision="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --resolve-stage1-provenance --compiler-product "$COMPILER_PRODUCT" \
+        --compiler-root "$stage1_root" --frontend-repo "$COMPILER_SRC" \
+        --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then

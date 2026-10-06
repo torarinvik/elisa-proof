@@ -105,9 +105,14 @@ def shared_build_identity(manifest: dict) -> dict:
         "stage": stage,
         "stage1_revision": compiler.get("stage1_revision"),
         "source_revision": compiler.get("source_revision"),
+        "source_tree_sha256": compiler.get("source_tree_sha256"),
+        "build_recipe_sha256": compiler.get("build_recipe_sha256"),
         "source_dirty": compiler.get("source_dirty"),
     }
-    if any(field not in compiler for field in ("stage1_revision", "source_revision", "source_dirty")):
+    if any(field not in compiler for field in (
+        "stage1_revision", "source_revision", "source_tree_sha256",
+        "build_recipe_sha256", "source_dirty",
+    )):
         raise ValueError("build manifest is missing compiler source provenance")
     if compiler_identity["stage1_revision"] is not None and not isinstance(compiler_identity["stage1_revision"], str):
         raise ValueError("build manifest has malformed Stage1 revision")
@@ -115,6 +120,18 @@ def shared_build_identity(manifest: dict) -> dict:
         raise ValueError("build manifest has malformed compiler source revision")
     if compiler_identity["source_dirty"] is not None and not isinstance(compiler_identity["source_dirty"], bool):
         raise ValueError("build manifest has malformed compiler dirty-source flag")
+    if stage == "stage1":
+        revision = compiler_identity["stage1_revision"]
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            raise ValueError("Stage1 build manifest is missing an exact source revision")
+        if compiler_identity["source_revision"] != revision:
+            raise ValueError("Stage1 source revision differs from product provenance")
+        if revision != frontend_revision:
+            raise ValueError("Stage1 source revision differs from imported frontend revision")
+        for field in ("source_tree_sha256", "build_recipe_sha256"):
+            if (not isinstance(compiler_identity[field], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", compiler_identity[field]) is None):
+                raise ValueError(f"Stage1 build manifest has no valid {field} provenance")
     for role in ("executable", "product"):
         artifact = compiler.get(role)
         if not isinstance(artifact, dict):
