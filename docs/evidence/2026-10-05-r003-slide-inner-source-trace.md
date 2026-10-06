@@ -1,5 +1,10 @@
 # R-003 `Slide.inner` source trace — 2026-10-05
 
+> Historical status: this trace predates the bounded signed-unit-shift replay rule. As of the
+> current audit, root 51 replays only for the exact range-checked signed-width shape documented
+> in [`R-003 root 51 current validation`](2026-10-06-r003-root51-current-validation.md). Keep the
+> refusal controls and limits below; the rule is not generalized conditional arithmetic.
+
 ## Reproduction
 
 Built `build/elisa-proof` from this clean proof tree with strict O2 using

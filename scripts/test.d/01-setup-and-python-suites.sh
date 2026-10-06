@@ -408,6 +408,14 @@ for ast_probe in field_equality_runtime marker_dispatch_runtime; do
         exit 1
     fi
 done
+if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
+    if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O2 -o "$standalone_probe_dir/conditional-signed-unit-shift-runtime.o" "$ROOT_DIR/examples/conditional_signed_unit_shift_runtime.elisa" >/dev/null 2>&1 ||
+        ! "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/conditional-signed-unit-shift-runtime" "$standalone_probe_dir/conditional-signed-unit-shift-runtime.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" ||
+        ! "$standalone_probe_dir/conditional-signed-unit-shift-runtime"; then
+        printf 'proof test matrix failed: Stage1 signed unit-shift runtime boundary control\n' >&2
+        exit 1
+    fi
+fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
     "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-sview-lifetimes"
