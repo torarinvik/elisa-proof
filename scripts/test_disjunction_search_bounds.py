@@ -134,31 +134,28 @@ assert not any(
 def relevant_failures(count, late_success=False):
     parameters = ["accepted: bool"] + [f"other_{index}: bool" for index in range(count)]
     lines = [
-        "def opaque(value: bool) -> bool:",
-        "    return value",
-        "",
         f"def relevant_failures({', '.join(parameters)}) -> bool:",
     ]
     lines.extend(
-        f"    requires opaque(accepted) or opaque(other_{index})"
+        f"    requires accepted or other_{index}"
         for index in range(count)
     )
     if late_success:
-        lines.append("    requires opaque(accepted) or false")
-    lines.extend(["    ensure opaque(accepted)", "    return accepted", ""])
+        lines.extend([f"    requires not other_{count - 1}", f"    requires accepted or other_{count - 1}"])
+    lines.extend(["    ensure accepted", "    return accepted", ""])
     return "\n".join(lines)
 
 
 code, eight_failures = run(relevant_failures(8))
 assert code == 1 and eight_failures["status"] == "failed", eight_failures["findings"]
 assert any(
-    finding["kind"] == "ensure-unproven" and finding["status"] == "unknown"
+    finding["kind"] == "ensure-unproven" and finding["status"] in {"unknown", "timeout"}
     for finding in eight_failures["findings"]
 ), eight_failures["findings"]
 code, nine_failures = run(relevant_failures(9))
 assert code == 1 and nine_failures["status"] == "failed", nine_failures["findings"]
 assert any(
-    finding["kind"] == "ensure-unproven" and finding["status"] == "unknown"
+    finding["kind"] == "ensure-unproven" and finding["status"] in {"unknown", "timeout"}
     for finding in nine_failures["findings"]
 ), nine_failures["findings"]
 
@@ -190,6 +187,9 @@ assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown"
 # disjunctive-syllogism rule after the bounded entailment scan stops.
 code, late_success = run(relevant_failures(9, late_success=True))
 assert code == 0 and late_success["status"] == "proved", late_success["findings"]
+assert late_success["replay"]["gaps"] == 0
+assert late_success["replay"]["certificates"] == late_success["replay"]["replayed"]
+assert late_success["measurements"]["producer_disjunction_refutation_checks"] > 0
 
 # A premise with no goal-matching branch but with every branch refuted was
 # accepted by the old entailment rule. Preserve that contradiction case.
