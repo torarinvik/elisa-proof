@@ -173,6 +173,7 @@ summary trace cannot be relabelled as one.
 | `match-exhaustiveness` | `check/returns/matches.elisa` | complete finite match over a uniquely declared enum's variants (re-validated against source declarations and proposition typing) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
+| `deterministic-call` | `check/function_contracts_and_frames.elisa` | a scalar witness for a verified, effect-free, acyclic by-value call; replay reconstructs and validates the call chain |
 | `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |
 | `runtime-guard` | `check/returns/matches.elisa` | an early-return guard's negation |
 | `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |

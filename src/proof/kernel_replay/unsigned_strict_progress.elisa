@@ -49,3 +49,105 @@ extend ElisaProofKernelReplay:
             sum: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, lower.right, "+")
             witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, sum.left, sum.right, facts)
             return witness.known and proof_kernel_replay_expr_equal(nodes, children, witness.bound, lower.left, 0)
+
+        # Replay the exact child form `(factor * root) + 1` from the strict
+        # quotient premise `root < limit / factor`.  For unsigned width w,
+        # root <= floor(limit/factor)-1, hence
+        # child <= factor*floor(limit/factor)-factor+1 <= limit-1 when
+        # factor >= 2.  This also proves neither multiplication nor the final
+        # increment wraps.  Keep the recognized expression and quotient exact:
+        # no affine or producer-supplied arithmetic certificate is accepted.
+        def proof_kernel_replay_unsigned_contextual_term_width(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, width: i64, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            return false if width <= 0
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "int":
+                return node.value >= 0 and node.value <= proof_kernel_replay_unsigned_width_max(width)
+            if node.kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(node)
+                return literal.known and literal.unsigned and literal.width == width
+            if node.kind == "ident" or node.kind == "field" or node.kind == "index" or node.kind == "index-n":
+                return proof_kernel_replay_peer_unsigned_width(nodes, children, root, facts) == width
+            if node.kind == "paren":
+                return proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, node.left, width, depth + 1)
+            if node.kind == "binary":
+                return false if node.operator != "+" and node.operator != "-" and node.operator != "*" and node.operator != "/" and node.operator != "%"
+                return proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, node.left, width, depth + 1) and proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, node.right, width, depth + 1)
+            return false
+
+        def proof_kernel_replay_unsigned_quotient_child(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], child_root: usize) -> (known: bool, base: usize, limit: usize, factor: i64, width: i64):
+            unknown: (known: bool, base: usize, limit: usize, factor: i64, width: i64) = (false, 0, 0, 0, 0)
+            increment: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, child_root, "+")
+            return unknown if not increment.known
+            one_left: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, increment.left, 0)
+            one_right: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, increment.right, 0)
+            product_root: mutable usize = increment.left
+            one_root: mutable usize = increment.right
+            if one_right.known and one_right.value == 1:
+                product_root <- increment.left
+            elif one_left.known and one_left.value == 1:
+                product_root <- increment.right
+                one_root <- increment.left
+            else:
+                return unknown
+            product: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, product_root, "*")
+            return unknown if not product.known
+            factor_left: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.left, 0)
+            factor_right: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, product.right, 0)
+            base: mutable usize = product.left
+            factor_expression: mutable usize = product.right
+            factor: mutable i64 = factor_right.value
+            if factor_right.known and factor_right.value >= 2:
+                base <- product.left
+                factor_expression <- product.right
+            elif factor_left.known and factor_left.value >= 2:
+                base <- product.right
+                factor_expression <- product.left
+                factor <- factor_left.value
+            else:
+                return unknown
+            width: i64 = proof_kernel_replay_peer_unsigned_width(nodes, children, base, facts)
+            return unknown if width <= 0
+            return unknown if factor > proof_kernel_replay_unsigned_width_max(width)
+            return unknown if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, child_root, width, 0)
+            return unknown if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, product_root, width, 0)
+            return unknown if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, factor_expression, width, 0)
+            return unknown if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, one_root, width, 0)
+            quotient_facts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
+            for fact in quotient_facts |fact, nodes, children, facts, base, factor_expression, factor, width|:
+                order: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, fact)
+                continue if not order.known
+                continue if order.operator != "<" and order.operator != ">"
+                quotient: mutable usize = 0
+                if order.operator == "<" and proof_kernel_replay_expr_equal(nodes, children, order.left, base, 0):
+                    quotient <- order.right
+                elif order.operator == ">" and proof_kernel_replay_expr_equal(nodes, children, order.right, base, 0):
+                    quotient <- order.left
+                else:
+                    continue
+                division: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands(nodes, quotient, "/")
+                continue if not division.known
+                continue if not proof_kernel_replay_expr_equal(nodes, children, division.right, factor_expression, 0)
+                divisor: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, division.right, 0)
+                continue if not divisor.known or divisor.value != factor
+                continue if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, quotient, width, 0)
+                continue if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, division.left, width, 0)
+                continue if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, division.right, width, 0)
+                continue if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, order.left, width, 0)
+                continue if not proof_kernel_replay_unsigned_contextual_term_width(nodes, children, facts, order.right, width, 0)
+                limit: usize = division.left
+                return (true, base, limit, factor, width)
+            return unknown
+
+        def proof_kernel_replay_unsigned_quotient_child_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            return false if goal_root >= nodes.count or not proof_kernel_replay_valid(nodes, goal_root)
+            goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
+            return false if goal.kind != "binary" or (goal.operator != ">" and goal.operator != "<")
+            child: usize = goal.left
+            other: usize = goal.right
+            witness: (known: bool, base: usize, limit: usize, factor: i64, width: i64) = proof_kernel_replay_unsigned_quotient_child(nodes, children, facts, child)
+            return false if not witness.known
+            return proof_kernel_replay_expr_equal(nodes, children, witness.base, other, 0) if goal.operator == ">"
+            return proof_kernel_replay_expr_equal(nodes, children, witness.limit, other, 0)

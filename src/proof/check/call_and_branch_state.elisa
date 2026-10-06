@@ -6,6 +6,29 @@ extend ElisaProof:
             proof_collect_aliased_in_expression(expression, functions, &roots, false, no_value_roots)
             return roots
 
+        def proof_local_rebind_binding(report: ProofReport&, expression: Ast::Expr, owner: sview, names: darray[sview]&) -> (known: bool, path: Ast::Expr, value: Ast::Expr):
+            for trace in report.traces.records:
+                continue if trace.name != owner or trace.kind != "local-binding"
+                continue if not proof_expr_equal(trace.expression, expression)
+                match expression:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        match left:
+                            Ast::Expr.Ident(local_name, _):
+                                match right:
+                                    Ast::Expr.Ident(rebind_name, _):
+                                        is_rebind: mutable bool = false
+                                        for index in 0..<PROOF_INTERNAL_REBIND_SYMBOL_COUNT |index, rebind_name, is_rebind|:
+                                            is_rebind <- true if rebind_name == proof_internal_rebind_name(index)
+                                        if is_rebind and (any live in names where live == local_name):
+                                            return (true, right, left)
+                                    _:
+                                        pass
+                            _:
+                                pass
+                    _:
+                        pass
+            return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
+
         def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, lends: darray[sview]) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
@@ -16,12 +39,12 @@ extend ElisaProof:
             blocked.extend(report.escaping_names)
             for lent in lends |blocked|:
                 proof_push_aliased(&blocked, lent)
-            # Two kinds of term denote one value for the whole body although the stability walk
-            # does not accept them: a qualified constant such as `Fade::FULL`, read from its
-            # traced fact `PATH == literal`, and a fresh rebind symbol a literal call argument
-            # was bound to, `__elisa_rebind_0 == 1000`. Source text can spell neither, and a
-            # rebind symbol is never reissued within a body. The probe stands the literal in for
-            # each; the original fact is what is kept.
+            # Terms whose source spelling the stability walk cannot resolve can still denote a
+            # fixed value: a qualified constant backed by its source trace; a fresh rebind symbol
+            # bound to a literal; or a compiler rebind symbol explicitly bound to a live local by
+            # a local-binding trace. For the last case, the normal stability walk on that local
+            # decides whether the call can reach it. These substitutions are probes only; the
+            # original, independently traced fact is what is kept.
             constant_paths: mutable darray[Ast::Expr] = []
             constant_values: mutable darray[Ast::Expr] = []
             for fact in source |constant_paths, constant_values, report, owner|:
@@ -39,6 +62,10 @@ extend ElisaProof:
                         if constant_path or literal_symbol:
                             constant_paths.push(left)
                             constant_values.push(right)
+                        binding: (known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding(report, fact, owner, names)
+                        if binding.known:
+                            constant_paths.push(binding.path)
+                            constant_values.push(binding.value)
                     _:
                         pass
             for fact in source |source, facts, names, parameters, report, blocked, constant_paths, constant_values|:
