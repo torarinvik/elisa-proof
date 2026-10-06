@@ -14,6 +14,10 @@ extend ElisaProof:
                     return true
                 "variant-exclusion":
                     return true
+                "const-enum-exclusion":
+                    return true
+                "const-enum-member-value":
+                    return true
                 "match-exhaustiveness":
                     return true
                 "runtime-assert":
@@ -59,6 +63,10 @@ extend ElisaProof:
                 return proof_replay_global_constant_fact_is_valid(report, trace)
             if trace.kind == "variant-exclusion":
                 return proof_replay_variant_exclusion_valid(report, trace)
+            if trace.kind == "const-enum-exclusion":
+                return proof_replay_const_enum_exclusion_valid(report, trace)
+            if trace.kind == "const-enum-member-value":
+                return proof_replay_const_enum_member_value_valid(report, trace)
             if trace.kind == "match-exhaustiveness":
                 return proof_replay_match_exhaustiveness_valid(report, trace)
             if trace.kind == "deterministic-call":
@@ -165,28 +173,34 @@ extend ElisaProof:
                     return false
             return false
 
-        # The producer can retain a witness for an explicitly qualified call. Replay admits
-        # that spelling only when the callee name is globally unique and its declaration is
-        # actually in the innermost qualified module. Ambiguous repeated names remain refused;
-        # this check never relies on the producer's call-resolution index.
-        def proof_replay_deterministic_qualified_target(declarations: darray[Ast::Decl]&, name: sview, qualifier: sview) -> bool:
-            return false if name == "" or qualifier == ""
-            source = proof_replay_effect_named_declaration(declarations, name, 0)
-            return false if source.matches != 1
-            match source.declaration:
-                Ast::Decl.Func(_, _, _, _, _, _, position):
-                    owner: mutable sview = ""
-                    owners: mutable usize = 0
-                    proof_replay_function_owner_module(declarations, name, position.line, "", &owner, &owners, 0)
-                    return owners == 1 and owner != "" and proof_replay_module_leaf_matches(owner, qualifier)
+        # Resolve a qualified deterministic call directly to the declaration under that exact
+        # source module path. Same-leaf functions in other modules are irrelevant to this lookup.
+        def proof_replay_deterministic_qualified_path_matches_owner(owner: sview, qualifier: Ast::Expr, caller_owner: sview) -> bool:
+            return true if proof_replay_exact_module_path_matches_owner(owner, qualifier)
+            match qualifier:
+                Ast::Expr.Ident(module_name, _):
+                    return proof_replay_relative_module_path_matches_owner(owner, module_name, caller_owner)
                 _:
                     return false
 
-        def proof_replay_deterministic_function(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, active: darray[sview]&, depth: usize) -> bool:
+        def proof_replay_deterministic_qualified_declaration(declarations: darray[Ast::Decl]&, wanted: sview, qualifier: Ast::Expr, caller_owner: sview, current: sview, selected: mutable Ast::Decl&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= 96 or wanted == ""
+            for declaration in declarations |wanted, qualifier, caller_owner, current, selected, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        if name == wanted and proof_replay_deterministic_qualified_path_matches_owner(current, qualifier, caller_owner):
+                            matches <- matches + 1
+                            selected <- declaration
+                    Ast::Decl.Module(module_name, body, _):
+                        proof_replay_deterministic_qualified_declaration(body, wanted, qualifier, caller_owner, module_name, selected, matches, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_deterministic_qualified_declaration(body, wanted, qualifier, caller_owner, current, selected, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_deterministic_function_declaration(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, declaration: Ast::Decl, active: darray[sview]&, depth: usize) -> bool:
             return false if depth >= 32 or name == "" or any current in active where current == name
-            source = proof_replay_effect_named_declaration(declarations, name, 0)
-            return false if source.matches != 1
-            match source.declaration:
+            match declaration:
                 Ast::Decl.Func(_, parameters, return_type, body, effects, _, _):
                     return false if effects.count != 0 or not proof_replay_deterministic_body_shape(body, 0)
                     if return_type is scalar_return:
@@ -211,6 +225,12 @@ extend ElisaProof:
                 _:
                     return false
 
+        def proof_replay_deterministic_function(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, active: darray[sview]&, depth: usize) -> bool:
+            return false if depth >= 32 or name == "" or any current in active where current == name
+            source = proof_replay_effect_named_declaration(declarations, name, 0)
+            return false if source.matches != 1
+            return proof_replay_deterministic_function_declaration(declarations, annotations, name, source.declaration, active, depth)
+
         def proof_replay_deterministic_call_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             marker = trace.expression
             match marker:
@@ -219,12 +239,23 @@ extend ElisaProof:
                     match arguments[0]:
                         Ast::Expr.Call(callee_expression, call_arguments, _, _):
                             callee: mutable sview = ""
+                            qualified_declaration: mutable Ast::Decl = Ast::Decl.Invalid
+                            qualified_call: mutable bool = false
                             match callee_expression:
                                 Ast::Expr.Ident(name, _):
                                     callee <- name
                                 Ast::Expr.Scope(base, name, _):
-                                    return false if not proof_replay_deterministic_qualified_target(report.source_declarations, name, proof_head_name(base))
+                                    qualified_matches: mutable usize = 0
+                                    caller_line: mutable u32 = 0
+                                    proof_replay_owner_function_line(report.source_declarations, trace.name, trace.line, &caller_line, 0)
+                                    caller_owner: mutable sview = ""
+                                    caller_count: mutable usize = 0
+                                    proof_replay_module_at_function_line(report.source_declarations, caller_line, "", &caller_owner, &caller_count, 0)
+                                    return false if caller_line == 0 or caller_count != 1
+                                    proof_replay_deterministic_qualified_declaration(report.source_declarations, name, base, caller_owner, "", qualified_declaration, qualified_matches, 0)
+                                    return false if qualified_matches != 1
                                     callee <- name
+                                    qualified_call <- true
                                 _:
                                     return false
                             for argument in call_arguments:
@@ -235,6 +266,7 @@ extend ElisaProof:
                                 return false if proof_replay_deterministic_parameter_type(argument, 0)
                             return false if not proof_replay_deterministic_call_source_site(report, trace, arguments[0])
                             active: mutable darray[sview] = []
+                            return proof_replay_deterministic_function_declaration(report.source_declarations, report.source_annotations, callee, qualified_declaration, active, 0) if qualified_call
                             return proof_replay_deterministic_function(report.source_declarations, report.source_annotations, callee, active, 0)
                         _:
                             return false

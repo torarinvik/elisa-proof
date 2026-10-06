@@ -198,14 +198,181 @@ extend ElisaProof:
             for index in 0..<rewritten.count |index, function_body, rewritten|:
                 function_body[index] <- rewritten[index] if index < function_body.count
 
+        # Return direct declarations in the function's lexical module. Scoped declarations are
+        # transparent; nested modules are followed only by their exact recorded declaration
+        # path, never by a short module name.
+        def proof_function_scope_declarations(file: Ast::File&, functions: ProofFunctionTable&, row: usize) -> (known: bool, declarations: darray[Ast::Decl]):
+            return (false, []) if row >= functions.declaration_path_starts.count or row >= functions.declaration_path_counts.count
+            start: usize = functions.declaration_path_starts[row]
+            count: usize = functions.declaration_path_counts[row]
+            return (false, []) if count == 0 or start > functions.all_declaration_path.count or count > functions.all_declaration_path.count - start
+            declarations: mutable darray[Ast::Decl] = file.top_decls
+            for depth in 0..<count - 1 |depth, declarations, functions, start, row, file|:
+                index: usize = functions.all_declaration_path[start + depth]
+                return (false, []) if index >= declarations.count
+                match declarations[index]:
+                    Ast::Decl.Module(_, body, _):
+                        declarations <- body
+                    Ast::Decl.Scoped(body, _):
+                        declarations <- body
+                    _:
+                        return (false, [])
+            return (true, declarations)
+
+        # A local enum spelling is expanded in a contract row only when that exact lexical
+        # declaration list contains one const enum with one matching member. This keeps the
+        # summary's member owner aligned with source scope and refuses sibling-name guessing.
+        def proof_scope_const_enum_member_count(declarations: darray[Ast::Decl]&, enum_name: sview, member_name: sview, depth: usize) -> usize:
+            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |enum_name, member_name, depth, count|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        if name == enum_name and is_const:
+                            for variant in variants |member_name, count|:
+                                count <- count + 1 if variant.name == member_name
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_scope_const_enum_member_count(body, enum_name, member_name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_scope_const_enum_type_count(declarations: darray[Ast::Decl]&, enum_name: sview, depth: usize) -> usize:
+            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |enum_name, depth, count|:
+                match declaration:
+                    Ast::Decl.Enum(name, _, is_const, _, _):
+                        count <- count + 1 if name == enum_name and is_const
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_scope_const_enum_type_count(body, enum_name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_function_parameter_named(functions: ProofFunctionTable&, row: usize, wanted: sview) -> bool:
+            return false if row >= functions.param_starts.count or row >= functions.param_counts.count
+            start: usize = functions.param_starts[row]
+            count: usize = functions.param_counts[row]
+            return false if start > functions.all_params.count or count > functions.all_params.count - start
+            for offset in 0..<count |offset, functions, start, wanted|:
+                return true if functions.all_params[start + offset] == wanted
+            return false
+
+        def proof_qualify_contract_enum_members(expression: Ast::Expr, declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: ProofFunctionTable&, row: usize, depth: usize) -> Ast::Expr:
+            return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Field(Ast::Expr.Ident(enum_name, type_position), member_name, position):
+                    if proof_scope_const_enum_type_count(declarations, enum_name, 0) == 1 and proof_scope_const_enum_member_count(declarations, enum_name, member_name, 0) == 1 and module_scope.count > 0 and not proof_function_parameter_named(functions, row, enum_name):
+                        type_path: mutable Ast::Expr = Ast::Expr.Ident(module_scope[0], type_position)
+                        for index in 1..<module_scope.count |index, module_scope, type_position, type_path|:
+                            type_path <- Ast::Expr.Scope(type_path, module_scope[index], type_position)
+                        type_path <- Ast::Expr.Scope(type_path, enum_name, type_position)
+                        return Ast::Expr.Field(type_path, member_name, position)
+                    return expression
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_qualify_contract_enum_members(left, declarations, module_scope, functions, row, depth + 1), operator, proof_qualify_contract_enum_members(right, declarations, module_scope, functions, row, depth + 1), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_qualify_contract_enum_members(operand, declarations, module_scope, functions, row, depth + 1), position)
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_qualify_contract_enum_members(inner, declarations, module_scope, functions, row, depth + 1), position)
+                Ast::Expr.If(condition, then_value, else_value, position):
+                    return Ast::Expr.If(proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, depth + 1), proof_qualify_contract_enum_members(then_value, declarations, module_scope, functions, row, depth + 1), proof_qualify_contract_enum_members(else_value, declarations, module_scope, functions, row, depth + 1), position)
+                _:
+                    return expression
+
+        # Body contracts are checked directly as well as copied into the call-summary table.
+        # Apply the same lexical const-enum qualification to those direct checks.
+        def proof_qualify_function_enum_contract(file: Ast::File&, functions: ProofFunctionTable&, row: usize, expression: Ast::Expr) -> Ast::Expr:
+            scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
+            return expression if not scope_declarations.known or row >= functions.declaration_path_starts.count or row >= functions.declaration_path_counts.count
+            module_scope: mutable darray[sview] = []
+            path_start: usize = functions.declaration_path_starts[row]
+            path_count: usize = functions.declaration_path_counts[row]
+            for depth in 0..<path_count - 1 |depth, module_scope, functions, path_start, file|:
+                declaration_index: usize = functions.all_declaration_path[path_start + depth]
+                declarations_at: mutable darray[Ast::Decl] = file.top_decls
+                for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
+                    prior_index: usize = functions.all_declaration_path[path_start + prior]
+                    match declarations_at[prior_index]:
+                        Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                            declarations_at <- body
+                        _:
+                            pass
+                match declarations_at[declaration_index]:
+                    Ast::Decl.Module(module_name, _, _):
+                        module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
+                    _:
+                        pass
+            proof_qualify_contract_enum_members(expression, scope_declarations.declarations, module_scope, functions, row, 0)
+
+        def proof_qualify_function_enum_body(file: Ast::File&, functions: ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, depth: usize) -> darray[Ast::Stmt]:
+            rewritten: mutable darray[Ast::Stmt] = []
+            for statement in body |rewritten, file, functions, row, depth|:
+                match statement:
+                    Ast::Stmt.Return(value, position):
+                        if value is returned:
+                            rewritten.push(Ast::Stmt.Return(proof_qualify_function_enum_contract(file, functions, row, returned), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                        rewritten.push(Ast::Stmt.VarDecl(name, type_expression, proof_qualify_function_enum_contract(file, functions, row, initializer), position))
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.If(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, then_body, depth + 1), proof_qualify_function_enum_body(file, functions, row, else_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.While(condition, while_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.While(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, while_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.For(label, variables, iterable, for_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualify_function_enum_contract(file, functions, row, iterable), proof_qualify_function_enum_body(file, functions, row, for_body, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.Assign(target, operator, assigned, position):
+                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualify_function_enum_contract(file, functions, row, assigned), position))
+                    Ast::Stmt.Expr(expression, position):
+                        rewritten.push(Ast::Stmt.Expr(proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                    Ast::Stmt.Contract(kind, expression, position):
+                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                    _:
+                        rewritten.push(statement)
+            return rewritten
+
         # Qualify every table row's own requires and ensures from that row, so a caller in
         # another module that instantiates the contract never re-resolves a bare name from
         # its own module.
-        def proof_qualify_repeated_contract_rows(functions: mutable ProofFunctionTable&) -> void:
+        def proof_qualify_repeated_contract_rows(file: Ast::File&, functions: mutable ProofFunctionTable&) -> void:
             no_shadow: darray[sview] = []
             for row in 0..<functions.names.count |row, functions, no_shadow|:
                 bounds: (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize) = proof_qualified_own_rows(functions, row)
-                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, no_shadow|:
-                    functions.all_requires[bounds.requires_start + offset] <- proof_qualified_call_rewrite(functions.all_requires[bounds.requires_start + offset], functions, row, no_shadow, 0)
-                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, no_shadow|:
-                    functions.all_ensures[bounds.ensures_start + offset] <- proof_qualified_call_rewrite(functions.all_ensures[bounds.ensures_start + offset], functions, row, no_shadow, 0)
+                scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
+                module_scope: mutable darray[sview] = []
+                if scope_declarations.known:
+                    path_start: usize = functions.declaration_path_starts[row]
+                    for depth in 0..<functions.declaration_path_counts[row] - 1 |depth, module_scope, functions, path_start, file|:
+                        declaration_index: usize = functions.all_declaration_path[path_start + depth]
+                        declarations_at: mutable darray[Ast::Decl] = file.top_decls
+                        for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
+                            prior_index: usize = functions.all_declaration_path[path_start + prior]
+                            match declarations_at[prior_index]:
+                                Ast::Decl.Module(_, body, _):
+                                    declarations_at <- body
+                                Ast::Decl.Scoped(body, _):
+                                    declarations_at <- body
+                                _:
+                                    pass
+                        match declarations_at[declaration_index]:
+                            Ast::Decl.Module(module_name, _, _):
+                                module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
+                            _:
+                                pass
+                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, no_shadow, scope_declarations, module_scope|:
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(functions.all_requires[bounds.requires_start + offset], functions, row, no_shadow, 0)
+                    functions.all_requires[bounds.requires_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known
+                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, no_shadow, scope_declarations, module_scope|:
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(functions.all_ensures[bounds.ensures_start + offset], functions, row, no_shadow, 0)
+                    functions.all_ensures[bounds.ensures_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known

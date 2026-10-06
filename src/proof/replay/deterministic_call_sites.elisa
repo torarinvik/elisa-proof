@@ -8,7 +8,7 @@ extend ElisaProof:
             for index in 0..<source.count |index, source, source_names, expected, expected_names|:
                 source_name: sview = source_names[index] if source_names.count > 0 else ""
                 expected_name: sview = expected_names[index] if expected_names.count > 0 else ""
-                return false if source_name != expected_name or not proof_replay_expr_equal(source[index], expected[index])
+                return false if source_name != expected_name or not proof_replay_deterministic_call_expression_equal(source[index], expected[index])
             return true
 
         def proof_replay_deterministic_call_expression_equal(source: Ast::Expr, expected: Ast::Expr) -> bool:
@@ -17,6 +17,24 @@ extend ElisaProof:
                     match expected:
                         Ast::Expr.Call(expected_callee, expected_arguments, expected_names, expected_position):
                             return source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and proof_replay_expr_equal(source_callee, expected_callee) and proof_replay_deterministic_call_arguments_equal(source_arguments, source_names, expected_arguments, expected_names)
+                        _:
+                            return false
+                Ast::Expr.Binary(source_left, source_operator, source_right, _):
+                    match expected:
+                        Ast::Expr.Binary(expected_left, expected_operator, expected_right, _):
+                            return source_operator == expected_operator and proof_replay_deterministic_call_expression_equal(source_left, expected_left) and proof_replay_deterministic_call_expression_equal(source_right, expected_right)
+                        _:
+                            return false
+                Ast::Expr.Unary(source_operator, source_inner, _):
+                    match expected:
+                        Ast::Expr.Unary(expected_operator, expected_inner, _):
+                            return source_operator == expected_operator and proof_replay_deterministic_call_expression_equal(source_inner, expected_inner)
+                        _:
+                            return false
+                Ast::Expr.Paren(source_inner, _):
+                    match expected:
+                        Ast::Expr.Paren(expected_inner, _):
+                            return proof_replay_deterministic_call_expression_equal(source_inner, expected_inner)
                         _:
                             return false
                 _:
@@ -133,6 +151,20 @@ extend ElisaProof:
             return false if depth >= 96
             return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(expression, expected, names, values, depth + 1)
 
+        # A call after a conditional can use an outer local only when both branches preserve
+        # its binding. Calls inside a branch are checked on that branch's local state.
+        def proof_replay_deterministic_branch_bindings_stable(body: darray[Ast::Stmt]&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |depth|:
+                match statement:
+                    Ast::Stmt.If(_, yes, no, _):
+                        return false if not proof_replay_deterministic_branch_bindings_stable(yes, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(no, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Return(_, _) | Ast::Stmt.Expr(_, _) | Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
         # Bind caller locals in statement order. This independent source walk reconstructs the
         # resolved actuals that the producer placed in the marker at the call's pre-state.
         # Control-flow joins and unsupported writes fail closed in this first bounded slice.
@@ -181,6 +213,7 @@ extend ElisaProof:
                         return (false, 0) if not no_matches.known
                         branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
                         return (true, branch_matches) if branch_matches > 0
+                        return (false, 0) if not proof_replay_deterministic_branch_bindings_stable(yes, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(no, depth + 1)
                     Ast::Stmt.Match(value, arms, position):
                         return (true, 0) if position.line > line
                         value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(value, expected, line, names, values, depth + 1) else 0

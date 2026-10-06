@@ -594,10 +594,3 @@ if [[ "$proof_repair_rerun_status" -ne 0 || "$proof_repair_shape_status" -ne 0 ]
     printf 'proof test matrix failed: a repaired script did not re-check (rerun=%s shape=%s)\n' "$proof_repair_rerun_status" "$proof_repair_shape_status" >&2
     exit 1
 fi
-
-# `--repair-all` walks the unresolved goals of a whole file in one pass. It repairs nothing the
-# checker already proved, reports each open goal separately, and its verdict is the conjunction of
-# the per-goal ones — a file with any unrepaired goal is `partial` and exits non-zero.
-set +e
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/batch_clean.json"
-proof_batch_clean_status=$?

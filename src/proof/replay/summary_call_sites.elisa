@@ -1,5 +1,164 @@
 extend ElisaProof:
     private:
+        def proof_replay_summary_call_owner_scope(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, current_scope, found_scope, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                            matches <- matches + 1
+                            found_scope.clear()
+                            found_scope.extend(current_scope)
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: mutable darray[sview] = proof_replay_global_constant_scope_with_module(current_scope, module_name)
+                        proof_replay_summary_call_owner_scope(body, owner, owner_line, &next_scope, found_scope, matches, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_summary_call_owner_scope(body, owner, owner_line, current_scope, found_scope, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_summary_call_constant_path_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, declaration: Ast::Expr) -> bool:
+            source_path: mutable darray[sview] = []
+            declaration_path: mutable darray[sview] = []
+            return false if not proof_replay_qualified_path(source, &source_path, 0) or not proof_replay_qualified_path(declaration, &declaration_path, 0)
+            owner_line: mutable u32 = report.replay_owner_line
+            owner_line <- 0 if owner_line == 4294967295
+            owner_scope: mutable darray[sview] = []
+            matches: mutable usize = 0
+            root_scope: mutable darray[sview] = []
+            proof_replay_summary_call_owner_scope(report.source_declarations, trace.name, owner_line, &root_scope, &owner_scope, &matches, 0)
+            return false if matches != 1
+            return true if proof_replay_global_constant_scope_equal(&declaration_path, &source_path)
+            relative_path: mutable darray[sview] = []
+            relative_path.extend(owner_scope)
+            relative_path.extend(source_path)
+            return proof_replay_global_constant_scope_equal(&declaration_path, &relative_path)
+
+        def proof_replay_summary_call_global_constant_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr) -> bool:
+            expected_value = proof_replay_global_constant_fact_value(expected)
+            return false if not expected_value.known
+            for candidate in report.traces.records |candidate, trace, source, expected_value|:
+                continue if candidate.name != trace.name
+                continue if candidate.kind != "global-constant" and candidate.kind != "global-constant-qualified"
+                match candidate.expression:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        decoded = proof_replay_global_constant_fact_value(right)
+                        return true if decoded.known and decoded.value == expected_value.value and proof_replay_summary_call_constant_path_matches(report, trace, source, left) and proof_replay_global_constant_fact_is_valid(report, candidate)
+                    _:
+                        pass
+            return false
+
+        def proof_replay_summary_call_rebind_argument_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr) -> bool:
+            match expected:
+                Ast::Expr.Ident(symbol, _):
+                    return false if not proof_internal_name_is_rebind(symbol)
+                    for candidate in report.traces.records |candidate, report, trace, source, symbol|:
+                        continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                        match candidate.expression:
+                            Ast::Expr.Binary(Ast::Expr.Ident(bound_name, _), TokenKind.EqEq, literal, _):
+                                continue if bound_name != symbol or (not proof_replay_expr_equal(literal, source) and not proof_replay_summary_call_global_constant_matches(report, trace, source, literal))
+                                return true if proof_replay_local_binding_literal_call_argument_source(report, candidate)
+                            _:
+                                pass
+                    return false
+                _:
+                    return false
+
+        def proof_replay_summary_call_argument_equal(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr) -> bool:
+            match source:
+                Ast::Expr.Call(source_callee, source_arguments, source_names, source_position):
+                    match expected:
+                        Ast::Expr.Call(expected_callee, expected_arguments, expected_names, expected_position):
+                            return false if source_position.line != expected_position.line or source_position.column != expected_position.column or source_position.offset != expected_position.offset or source_position.end_line != expected_position.end_line or source_position.end_column != expected_position.end_column or source_position.end_offset != expected_position.end_offset
+                            return false if not proof_replay_expr_equal(source_callee, expected_callee) or source_arguments.count != expected_arguments.count or source_names.count != expected_names.count
+                            for index in 0..<source_arguments.count |index, source_arguments, expected_arguments, source_names, expected_names, report, trace|:
+                                return false if source_names[index] != expected_names[index] or not proof_replay_summary_call_argument_equal(report, trace, source_arguments[index], expected_arguments[index])
+                            return true
+                        _:
+                            return false
+                Ast::Expr.Binary(source_left, source_operator, source_right, _):
+                    match expected:
+                        Ast::Expr.Binary(expected_left, expected_operator, expected_right, _):
+                            return source_operator == expected_operator and proof_replay_summary_call_argument_equal(report, trace, source_left, expected_left) and proof_replay_summary_call_argument_equal(report, trace, source_right, expected_right)
+                        _:
+                            return false
+                Ast::Expr.Unary(source_operator, source_inner, _):
+                    match expected:
+                        Ast::Expr.Unary(expected_operator, expected_inner, _):
+                            return source_operator == expected_operator and proof_replay_summary_call_argument_equal(report, trace, source_inner, expected_inner)
+                        _:
+                            return false
+                Ast::Expr.Paren(source_inner, _):
+                    match expected:
+                        Ast::Expr.Paren(expected_inner, _):
+                            return proof_replay_summary_call_argument_equal(report, trace, source_inner, expected_inner)
+                        _:
+                            return false
+                _:
+                    return proof_replay_expr_equal(source, expected) or proof_replay_summary_call_global_constant_matches(report, trace, source, expected) or proof_replay_summary_call_rebind_argument_matches(report, trace, source, expected)
+
+        # A direct call can be lowered with a source literal in its summary binding even when
+        # the source spells that value through a qualified const. Match its exact source span,
+        # callee, and argument mapping here; the argument comparator independently requires a
+        # source-backed global-constant fact for each normalized constant.
+        def proof_replay_summary_call_same_source_span(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr) -> bool:
+            match source:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_summary_call_same_source_span(report, trace, inner, expected)
+                Ast::Expr.Call(source_callee, source_arguments, source_names, source_position):
+                    match expected:
+                        Ast::Expr.Call(expected_callee, expected_arguments, expected_names, expected_position):
+                            return false if source_position.line != expected_position.line or source_position.column != expected_position.column or source_position.offset != expected_position.offset or source_position.end_line != expected_position.end_line or source_position.end_column != expected_position.end_column or source_position.end_offset != expected_position.end_offset
+                            return false if not proof_replay_expr_equal(source_callee, expected_callee) or source_arguments.count != expected_arguments.count or source_names.count != expected_names.count
+                            for index in 0..<source_arguments.count |index, source_arguments, source_names, expected_arguments, expected_names, report, trace|:
+                                return false if source_names[index] != expected_names[index] or not proof_replay_summary_call_argument_equal(report, trace, source_arguments[index], expected_arguments[index])
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_summary_call_same_source_statement(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, expected: Ast::Expr, matches: mutable usize&) -> bool:
+            for statement in body |report, trace, expected, matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, position):
+                        return true if position.line > trace.line
+                        matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, initializer, expected)
+                    Ast::Stmt.Assign(_, TokenKind.Assign, value, position) | Ast::Stmt.Expr(value, position) | Ast::Stmt.Return(value, position):
+                        return true if position.line > trace.line
+                        matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, value, expected)
+                    Ast::Stmt.Contract(_, expression, position):
+                        return true if position.line > trace.line
+                        matches <- matches + 1 if proof_replay_summary_call_same_source_span(report, trace, expression, expected)
+                    Ast::Stmt.If(_, _, _, position) | Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Match(_, _, position) | Ast::Stmt.Block(_, _, _, _, position):
+                        return true if position.line > trace.line
+                        return false
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_summary_call_same_source_declarations(report: ProofReport&, trace: ProofFactTrace, expected: Ast::Expr, declarations: darray[Ast::Decl]&, owner_line: u32, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |report, trace, expected, owner_line, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == trace.name and (owner_line == 0 or position.line == owner_line):
+                            return false if not proof_replay_summary_call_same_source_statement(report, trace, body, expected, matches)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_call_same_source_declarations(report, trace, expected, nested, owner_line, matches, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_summary_call_same_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+            matches: mutable usize = 0
+            owner_line: mutable u32 = report.replay_owner_line
+            owner_line <- 0 if owner_line == 4294967295
+            return false if not proof_replay_summary_call_same_source_declarations(report, trace, call, report.source_declarations, owner_line, &matches, 0)
+            return matches == 1
+
         # A call summary's parameter values are part of the trusted substitution into its
         # postcondition. Reconstruct positional/named argument mapping from the source call;
         # defaults and ambiguous mappings remain unsupported until their source semantics are
@@ -33,7 +192,7 @@ extend ElisaProof:
                         slots[parameter_slot] <- true
                         binding_index: usize = trace.summary_bindings_start + parameter_slot
                         return false if binding_index >= report.traces.summary_values.count
-                        return false if not proof_replay_expr_equal(arguments[index], report.traces.summary_values[binding_index])
+                        return false if not proof_replay_summary_call_argument_equal(report, trace, arguments[index], report.traces.summary_values[binding_index])
                     for assigned in slots:
                         return false if not assigned
                     return true
@@ -114,7 +273,7 @@ extend ElisaProof:
             return owners == 1 and matches == 1
 
         def proof_replay_summary_direct_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
-            return proof_replay_deterministic_call_source_site(report, trace, call) or proof_replay_summary_requires_call_source_site(report, trace, call)
+            return proof_replay_deterministic_call_source_site(report, trace, call) or proof_replay_summary_call_same_source_site(report, trace, call) or proof_replay_summary_requires_call_source_site(report, trace, call)
 
         def proof_replay_summary_local_call_statement(body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
