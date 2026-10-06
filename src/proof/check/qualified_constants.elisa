@@ -67,25 +67,41 @@ extend ElisaProof:
                 return false if path[index] != scope[index]
             return path[scope.count] == name
 
-        def proof_qualified_constant_mentioned(expression: Ast::Expr, scope: darray[sview]&, name: sview, depth: usize) -> bool:
+        # Inside a parent module, a nested constant module is referred to by
+        # its remaining lexical path (for example `Filter::ALL` within
+        # `Studio`). Match that spelling only when the caller's module path is
+        # a prefix of the declared constant path.
+        def proof_qualified_constant_relative_is_term(expression: Ast::Expr, scope: darray[sview]&, function_scope: darray[sview]&, name: sview) -> bool:
+            return false if function_scope.count >= scope.count
+            for index in 0..<function_scope.count |index, scope, function_scope|:
+                return false if scope[index] != function_scope[index]
+            path: mutable darray[sview] = []
+            return false if not proof_qualified_constant_flatten(expression, &path, 0)
+            relative_count: usize = scope.count - function_scope.count
+            return false if path.count != relative_count + 1
+            for index in 0..<relative_count |index, path, scope, function_scope, relative_count|:
+                return false if path[index] != scope[function_scope.count + index]
+            path[relative_count] == name
+
+        def proof_qualified_constant_mentioned(expression: Ast::Expr, scope: darray[sview]&, function_scope: darray[sview]&, name: sview, depth: usize) -> bool:
             return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            return true if proof_qualified_constant_is_term(expression, scope, name)
+            return true if proof_qualified_constant_is_term(expression, scope, name) or proof_qualified_constant_relative_is_term(expression, scope, function_scope, name)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_qualified_constant_mentioned(inner, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(inner, scope, function_scope, name, depth + 1)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_qualified_constant_mentioned(operand, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(operand, scope, function_scope, name, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_qualified_constant_mentioned(left, scope, name, depth + 1) or proof_qualified_constant_mentioned(right, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(left, scope, function_scope, name, depth + 1) or proof_qualified_constant_mentioned(right, scope, function_scope, name, depth + 1)
                 Ast::Expr.If(condition, then_value, else_value, _):
-                    return proof_qualified_constant_mentioned(condition, scope, name, depth + 1) or proof_qualified_constant_mentioned(then_value, scope, name, depth + 1) or proof_qualified_constant_mentioned(else_value, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(condition, scope, function_scope, name, depth + 1) or proof_qualified_constant_mentioned(then_value, scope, function_scope, name, depth + 1) or proof_qualified_constant_mentioned(else_value, scope, function_scope, name, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_qualified_constant_mentioned(object, scope, name, depth + 1) or proof_qualified_constant_mentioned(index, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(object, scope, function_scope, name, depth + 1) or proof_qualified_constant_mentioned(index, scope, function_scope, name, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_qualified_constant_mentioned(object, scope, name, depth + 1)
+                    return proof_qualified_constant_mentioned(object, scope, function_scope, name, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    for argument in arguments |scope, name, depth|:
-                        return true if proof_qualified_constant_mentioned(argument, scope, name, depth + 1)
+                    for argument in arguments |scope, function_scope, name, depth|:
+                        return true if proof_qualified_constant_mentioned(argument, scope, function_scope, name, depth + 1)
                     return false
                 _:
                     return false
@@ -126,22 +142,22 @@ extend ElisaProof:
 
         # Replace an occurrence of a qualified constant by its value, so the arithmetic engines see a literal;
         # the traced equality fact records why the replacement is sound. Unlisted shapes are left as written.
-        def proof_qualified_constant_rewrite[@r](expression: Ast::Expr, storage_body: darray[Ast::Stmt]& @r, scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> Ast::Expr:
+        def proof_qualified_constant_rewrite[@r](expression: Ast::Expr, storage_body: darray[Ast::Stmt]& @r, scope: darray[sview]&, function_scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> Ast::Expr:
             return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            return value if proof_qualified_constant_is_term(expression, scope, name)
+            return value if proof_qualified_constant_is_term(expression, scope, name) or proof_qualified_constant_relative_is_term(expression, scope, function_scope, name)
             match expression:
                 Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_qualified_constant_rewrite(left, storage_body, scope, name, value, depth + 1), operator, proof_qualified_constant_rewrite(right, storage_body, scope, name, value, depth + 1), position)
+                    return Ast::Expr.Binary(proof_qualified_constant_rewrite(left, storage_body, scope, function_scope, name, value, depth + 1), operator, proof_qualified_constant_rewrite(right, storage_body, scope, function_scope, name, value, depth + 1), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_qualified_constant_rewrite(operand, storage_body, scope, name, value, depth + 1), position)
+                    return Ast::Expr.Unary(operator, proof_qualified_constant_rewrite(operand, storage_body, scope, function_scope, name, value, depth + 1), position)
                 Ast::Expr.If(condition, then_expr, else_expr, position):
-                    return Ast::Expr.If(proof_qualified_constant_rewrite(condition, storage_body, scope, name, value, depth + 1), proof_qualified_constant_rewrite(then_expr, storage_body, scope, name, value, depth + 1), proof_qualified_constant_rewrite(else_expr, storage_body, scope, name, value, depth + 1), position)
+                    return Ast::Expr.If(proof_qualified_constant_rewrite(condition, storage_body, scope, function_scope, name, value, depth + 1), proof_qualified_constant_rewrite(then_expr, storage_body, scope, function_scope, name, value, depth + 1), proof_qualified_constant_rewrite(else_expr, storage_body, scope, function_scope, name, value, depth + 1), position)
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_qualified_constant_rewrite(inner, storage_body, scope, name, value, depth + 1), position)
+                    return Ast::Expr.Paren(proof_qualified_constant_rewrite(inner, storage_body, scope, function_scope, name, value, depth + 1), position)
                 Ast::Expr.Call(callee, arguments, extra, position):
                     rewritten: mutable darray[Ast::Expr] @r = []
-                    for argument in arguments |rewritten, storage_body, scope, name, value, depth|:
-                        rewritten.push(proof_qualified_constant_rewrite(argument, storage_body, scope, name, value, depth + 1))
+                    for argument in arguments |rewritten, storage_body, scope, function_scope, name, value, depth|:
+                        rewritten.push(proof_qualified_constant_rewrite(argument, storage_body, scope, function_scope, name, value, depth + 1))
                     return Ast::Expr.Call(callee, rewritten, extra, position)
                 _:
                     return expression
@@ -149,31 +165,31 @@ extend ElisaProof:
         # Body statements that carry a qualified constant: returns, local initializers, `if`,
         # `while` and `for` headers and bodies, assigned values and expression statements (call
         # arguments). Other statements are left as written, so their mentions stay unimported.
-        def proof_qualified_body_mentioned(body: darray[Ast::Stmt]&, scope: darray[sview]&, name: sview, depth: usize) -> bool:
+        def proof_qualified_body_mentioned(body: darray[Ast::Stmt]&, scope: darray[sview]&, function_scope: darray[sview]&, name: sview, depth: usize) -> bool:
             return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            for statement in body |scope, name, depth|:
+            for statement in body |scope, function_scope, name, depth|:
                 match statement:
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            return true if proof_qualified_constant_mentioned(returned, scope, name, 0)
+                            return true if proof_qualified_constant_mentioned(returned, scope, function_scope, name, 0)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_qualified_constant_mentioned(initializer, scope, name, 0)
+                        return true if proof_qualified_constant_mentioned(initializer, scope, function_scope, name, 0)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_qualified_constant_mentioned(condition, scope, name, 0)
-                        return true if proof_qualified_body_mentioned(then_body, scope, name, depth + 1)
-                        return true if proof_qualified_body_mentioned(else_body, scope, name, depth + 1)
+                        return true if proof_qualified_constant_mentioned(condition, scope, function_scope, name, 0)
+                        return true if proof_qualified_body_mentioned(then_body, scope, function_scope, name, depth + 1)
+                        return true if proof_qualified_body_mentioned(else_body, scope, function_scope, name, depth + 1)
                     Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_qualified_constant_mentioned(condition, scope, name, 0)
-                        return true if proof_qualified_body_mentioned(while_body, scope, name, depth + 1)
+                        return true if proof_qualified_constant_mentioned(condition, scope, function_scope, name, 0)
+                        return true if proof_qualified_body_mentioned(while_body, scope, function_scope, name, depth + 1)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
-                        return true if proof_qualified_constant_mentioned(iterable, scope, name, 0)
-                        return true if proof_qualified_body_mentioned(for_body, scope, name, depth + 1)
+                        return true if proof_qualified_constant_mentioned(iterable, scope, function_scope, name, 0)
+                        return true if proof_qualified_body_mentioned(for_body, scope, function_scope, name, depth + 1)
                     Ast::Stmt.Assign(_, _, assigned, _):
-                        return true if proof_qualified_constant_mentioned(assigned, scope, name, 0)
+                        return true if proof_qualified_constant_mentioned(assigned, scope, function_scope, name, 0)
                     Ast::Stmt.Expr(expression, _):
-                        return true if proof_qualified_constant_mentioned(expression, scope, name, 0)
+                        return true if proof_qualified_constant_mentioned(expression, scope, function_scope, name, 0)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_qualified_constant_mentioned(expression, scope, name, 0)
+                        return true if proof_qualified_constant_mentioned(expression, scope, function_scope, name, 0)
                     _:
                         pass
             return false
@@ -196,45 +212,45 @@ extend ElisaProof:
                         pass
             return false
 
-        def proof_qualified_body_rewrite[@r](body: darray[Ast::Stmt]& @r, storage_body: darray[Ast::Stmt]& @r, scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> darray[Ast::Stmt] @r:
+        def proof_qualified_body_rewrite[@r](body: darray[Ast::Stmt]& @r, storage_body: darray[Ast::Stmt]& @r, scope: darray[sview]&, function_scope: darray[sview]&, name: sview, value: Ast::Expr, depth: usize) -> darray[Ast::Stmt] @r:
             rewritten: mutable darray[Ast::Stmt] @r = []
-            for statement in body |rewritten, storage_body, scope, name, value, depth|:
+            for statement in body |rewritten, storage_body, scope, function_scope, name, value, depth|:
                 match statement:
                     Ast::Stmt.Return(returned_value, position):
                         if returned_value is returned and depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.Return(proof_qualified_constant_rewrite(returned, storage_body, scope, name, value, 0), position))
+                            rewritten.push(Ast::Stmt.Return(proof_qualified_constant_rewrite(returned, storage_body, scope, function_scope, name, value, 0), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
-                        rewritten.push(Ast::Stmt.VarDecl(local_name, type_expression, proof_qualified_constant_rewrite(initializer, storage_body, scope, name, value, 0), position))
+                        rewritten.push(Ast::Stmt.VarDecl(local_name, type_expression, proof_qualified_constant_rewrite(initializer, storage_body, scope, function_scope, name, value, 0), position))
                     Ast::Stmt.If(condition, then_body, else_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.If(proof_qualified_constant_rewrite(condition, storage_body, scope, name, value, 0), proof_qualified_body_rewrite(then_body, storage_body, scope, name, value, depth + 1), proof_qualified_body_rewrite(else_body, storage_body, scope, name, value, depth + 1), position))
+                            rewritten.push(Ast::Stmt.If(proof_qualified_constant_rewrite(condition, storage_body, scope, function_scope, name, value, 0), proof_qualified_body_rewrite(then_body, storage_body, scope, function_scope, name, value, depth + 1), proof_qualified_body_rewrite(else_body, storage_body, scope, function_scope, name, value, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.While(condition, while_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.While(proof_qualified_constant_rewrite(condition, storage_body, scope, name, value, 0), proof_qualified_body_rewrite(while_body, storage_body, scope, name, value, depth + 1), position))
+                            rewritten.push(Ast::Stmt.While(proof_qualified_constant_rewrite(condition, storage_body, scope, function_scope, name, value, 0), proof_qualified_body_rewrite(while_body, storage_body, scope, function_scope, name, value, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.For(label, variables, iterable, for_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualified_constant_rewrite(iterable, storage_body, scope, name, value, 0), proof_qualified_body_rewrite(for_body, storage_body, scope, name, value, depth + 1), position))
+                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualified_constant_rewrite(iterable, storage_body, scope, function_scope, name, value, 0), proof_qualified_body_rewrite(for_body, storage_body, scope, function_scope, name, value, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.Assign(target, operator, assigned, position):
-                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualified_constant_rewrite(assigned, storage_body, scope, name, value, 0), position))
+                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualified_constant_rewrite(assigned, storage_body, scope, function_scope, name, value, 0), position))
                     Ast::Stmt.Expr(expression, position):
-                        rewritten.push(Ast::Stmt.Expr(proof_qualified_constant_rewrite(expression, storage_body, scope, name, value, 0), position))
+                        rewritten.push(Ast::Stmt.Expr(proof_qualified_constant_rewrite(expression, storage_body, scope, function_scope, name, value, 0), position))
                     Ast::Stmt.Contract(kind, expression, position):
-                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualified_constant_rewrite(expression, storage_body, scope, name, value, 0), position))
+                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualified_constant_rewrite(expression, storage_body, scope, function_scope, name, value, 0), position))
                     _:
                         rewritten.push(statement)
             return rewritten
 
-        def proof_qualified_constants_collect[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, contracts: mutable darray[Ast::Expr]& @r, function_body: mutable darray[Ast::Stmt]& @r, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, function_name: sview, nested_function: bool, depth: usize) -> void:
+        def proof_qualified_constants_collect[@r](file: Ast::File&, declarations: darray[Ast::Decl]&, current: darray[sview]&, function_scope: darray[sview]&, contracts: mutable darray[Ast::Expr]& @r, function_body: mutable darray[Ast::Stmt]& @r, parameters: darray[Ast::ParamDecl]&, facts: mutable darray[Ast::Expr]& @r, report: mutable ProofReport&, function_name: sview, nested_function: bool, depth: usize) -> void:
             return if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
-            for declaration in declarations |file, current, contracts, function_body, parameters, facts, report, function_name, nested_function, depth|:
+            for declaration in declarations |file, current, function_scope, contracts, function_body, parameters, facts, report, function_name, nested_function, depth|:
                 match declaration:
                     Ast::Decl.Const(constant_name, constant_type, initializer, constant_mutable, position):
                         if current.count > 0 and constant_mutable == false and (any parameter in parameters where parameter.name == current[0]) == false:
@@ -244,9 +260,17 @@ extend ElisaProof:
                             # whole declaration tree, for every constant of every function.
                             mentioned: mutable bool = false
                             if imported.known:
-                                for contract in contracts |current, constant_name, mentioned|:
-                                    mentioned <- true if proof_qualified_constant_mentioned(contract, current, constant_name, 0)
-                                mentioned <- true if proof_qualified_body_mentioned(function_body, current, constant_name, 0) and not proof_qualified_body_declares(function_body, current[0], 0)
+                                for contract in contracts |current, function_scope, constant_name, mentioned|:
+                                    mentioned <- true if proof_qualified_constant_mentioned(contract, current, function_scope, constant_name, 0)
+                                in_caller_scope: mutable bool = current.count > function_scope.count
+                                if in_caller_scope:
+                                    for scope_index in 0..<function_scope.count |scope_index, current, function_scope, in_caller_scope|:
+                                        in_caller_scope <- false if current[scope_index] != function_scope[scope_index]
+                                relative_shadowed: mutable bool = false
+                                if in_caller_scope:
+                                    relative_shadowed <- proof_qualified_body_declares(function_body, current[function_scope.count], 0) or (any parameter in parameters where parameter.name == current[function_scope.count])
+                                absolute_shadowed: bool = proof_qualified_body_declares(function_body, current[0], 0) or (any parameter in parameters where parameter.name == current[0])
+                                mentioned <- true if proof_qualified_body_mentioned(function_body, current, function_scope, constant_name, 0) and not relative_shadowed and not absolute_shadowed
                             declared_once: mutable bool = false
                             if imported.known and mentioned:
                                 counted_from: mutable darray[sview] = []
@@ -259,17 +283,17 @@ extend ElisaProof:
                                 proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(term, position), position.line, function_name)
                                 # A negative value is substituted as `-magnitude`, the shape the arithmetic tiers read.
                                 literal: Ast::Expr = Ast::Expr.IntLit(imported.value, position) if imported.value >= 0 else Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(0 - imported.value, position), position)
-                                rewritten_body: darray[Ast::Stmt] = proof_qualified_body_rewrite(function_body, function_body, current, constant_name, literal, 0)
+                                rewritten_body: darray[Ast::Stmt] = proof_qualified_body_rewrite(function_body, function_body, current, function_scope, constant_name, literal, 0)
                                 function_body.clear()
                                 for statement in rewritten_body |function_body|:
                                     function_body.push(statement)
-                                for contract_index in 0..<contracts.count |contract_index, contracts, current, constant_name, literal|:
-                                    contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], function_body, current, constant_name, literal, 0)
+                                for contract_index in 0..<contracts.count |contract_index, contracts, current, function_scope, constant_name, literal|:
+                                    contracts[contract_index] <- proof_qualified_constant_rewrite(contracts[contract_index], function_body, current, function_scope, constant_name, literal, 0)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope: mutable darray[sview] = proof_global_constant_scope_with_module(current, module_name)
-                        proof_qualified_constants_collect(file, body, &next_scope, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
+                        proof_qualified_constants_collect(file, body, &next_scope, function_scope, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_qualified_constants_collect(file, body, current, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
+                        proof_qualified_constants_collect(file, body, current, function_scope, contracts, function_body, parameters, facts, report, function_name, nested_function, depth + 1)
                     _:
                         pass
 
@@ -341,7 +365,7 @@ extend ElisaProof:
                 contracts.push(functions.all_requires[row_ranges.requires_start + row])
             for row in 0..<row_ranges.ensures_count |row, contracts, functions, row_ranges|:
                 contracts.push(functions.all_ensures[row_ranges.ensures_start + row])
-            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &contracts, function_body, parameters, facts, report, function_name, function_scope.count > 0, 0)
+            proof_qualified_constants_collect(file, file.top_decls, &root_scope, &function_scope, &contracts, function_body, parameters, facts, report, function_name, function_scope.count > 0, 0)
             report.trace_owner_line <- 0
             for row in 0..<row_ranges.requires_count |row, contracts, functions, row_ranges, rows_at|:
                 functions.all_requires[row_ranges.requires_start + row] <- contracts[rows_at + row]
