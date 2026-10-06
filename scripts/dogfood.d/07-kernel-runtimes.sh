@@ -2,6 +2,15 @@
 # Part 7 of scripts/dogfood.sh; sourced in order by it, never run alone.
 printf 'dogfood proposition_admission_runtime: abstract atoms, typed source terms, and tactic boundaries passed\n'
 
+"$COMPILER" -emit obj -O0 -o "$runtime_dir/literal-helpers-runtime.o" "$ROOT_DIR/examples/kernel_literal_comparison_helpers_runtime.elisa" >/dev/null 2>&1
+if [[ -n "$RUNTIME_OBJ" ]]; then
+    link_native "$runtime_dir/literal-helpers-runtime" "$runtime_dir/literal-helpers-runtime.o" "$RUNTIME_OBJ"
+else
+    link_native "$runtime_dir/literal-helpers-runtime" "$runtime_dir/literal-helpers-runtime.o" "$runtime_dir/runtime-support.o"
+fi
+"$runtime_dir/literal-helpers-runtime"
+printf 'dogfood literal_helpers_runtime: integer comparisons and bounded unary literal controls passed\n'
+
 "$COMPILER" -emit obj -O0 -o "$runtime_dir/comparison-runtime.o" "$ROOT_DIR/examples/kernel_comparison_runtime.elisa" >/dev/null 2>&1
 if [[ -n "$RUNTIME_OBJ" ]]; then
     link_native "$runtime_dir/comparison-runtime" "$runtime_dir/comparison-runtime.o" "$RUNTIME_OBJ"
@@ -71,7 +80,7 @@ if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
     # The raw runtime support object intentionally leaves the optional profiler
     # ABI unresolved.  Keep the stage0 bootstrap link honest by supplying the
     # same small hook implementation used by the compiler parity harness.
-    for bootstrap_example in kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
+    for bootstrap_example in kernel_literal_comparison_helpers_runtime kernel_comparison_runtime kernel_congruence_runtime kernel_projection_runtime kernel_effect_runtime kernel_resource_bootstrap_runtime kernel_arena_runtime kernel_proposition_admission_runtime; do
         if ! compile_bootstrap_object "$ROOT_DIR/examples/$bootstrap_example.elisa" "$runtime_dir/bootstrap-$bootstrap_example.o"; then
             exit 1
         fi

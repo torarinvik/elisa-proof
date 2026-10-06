@@ -6,6 +6,7 @@ import runpy
 import subprocess
 
 from portable_replay_support import *
+from portable_resource_controls import check_unresolved_shadow
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,6 +36,7 @@ POSITIVE = {
     "linear_disequality_refuted": {"goal", "resource-safety"},
     "closed_goal_width_uniform": {"goal", "resource-safety"},
     "conditional_result_branchwise_probe": {"goal", "resource-safety"},
+    "replay_qualified_constant_argument": {"resource-safety"},
 }
 packages = {}
 for example, rules in POSITIVE.items():
@@ -55,6 +57,8 @@ for example, rules in POSITIVE.items():
                                        capture_output=True, text=True, timeout=120).stdout)
     replayed_goals = [goal for goal in report["goals"] if goal["proven"] and goal.get("replay_status") == "replayed"]
     assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
+
+check_unresolved_shadow(packages, refused)
 
 # The positive-conjunction rule is useful on its source shape, but a re-sealed portable theorem
 # cannot replace the required conjunct with a merely related comparison.

@@ -239,6 +239,12 @@ python3 "$ROOT_DIR/scripts/tests/test_portable_package_theorem_budget.py"
 python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
 python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark_hardening.py"
 python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
+run_py_test test_resource_projection_e144_coverage.py
+run_py_test test_resource_projection_harness.py
+run_py_test test_inferred_tuple_summary.py
+run_py_test test_tuple_callee_shadow.py
+run_py_test test_alias_boundary_regression.py
+run_py_test test_conjunction_denial.py
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py

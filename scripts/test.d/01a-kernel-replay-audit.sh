@@ -5,6 +5,7 @@
 # (C-02/C-03), 1,219,217 KB after it; mocap-cleaner proof tiers and later kernel growth raise it.
 KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB="${ELISA_KERNEL_REPLAY_AUDIT_MEMORY_LIMIT_KB:-4000000}"
 python3 "$ROOT_DIR/scripts/test_kernel_coverage_targets.py" || exit 1
+python3 "$ROOT_DIR/scripts/test_kernel_audit_accounting.py" || exit 1
 kernel_replay_audit_dir="$standalone_probe_dir/kernel-replay-audit"
 kernel_replay_audit_summary="$standalone_probe_dir/kernel-replay-audit-summary.json"
 ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/examples/kernel_replay_standalone.elisa" \
@@ -38,5 +39,15 @@ fi
 if ! python3 "$ROOT_DIR/test/validate_kernel_replay_standalone.py" \
     <"$kernel_replay_audit_dir/proof-report.json"; then
     printf 'proof test matrix failed: standalone replay audit coverage or trust boundary regressed\n' >&2
+    exit 1
+fi
+if ! ELISA_PROOF_BIN="$ROOT_DIR/build/elisa-proof" \
+    python3 "$ROOT_DIR/scripts/test_typed_literal_summary_coverage.py"; then
+    printf 'proof test matrix failed: typed-literal admission summary coverage regressed\n' >&2
+    exit 1
+fi
+if ! ELISA_PROOF_BIN="$ROOT_DIR/build/elisa-proof" \
+    python3 "$ROOT_DIR/scripts/test_literal_helper_summary_coverage.py"; then
+    printf 'proof test matrix failed: literal helper summary coverage regressed\n' >&2
     exit 1
 fi

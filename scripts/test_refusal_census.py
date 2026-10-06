@@ -5,6 +5,10 @@ import hashlib
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
+
+if not __debug__:
+    raise SystemExit("refusal census checks must run without Python -O")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))

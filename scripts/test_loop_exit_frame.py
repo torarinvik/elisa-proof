@@ -27,9 +27,14 @@ def check(condition, message):
 def report(path):
     result = subprocess.run([str(BINARY), "--json", str(path)], capture_output=True, text=True)
     try:
-        return json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except json.JSONDecodeError:
+        check(False, f"{path.name}: malformed report (exit {result.returncode})")
         return None
+    expected = {"proved": 0, "failed": 1}.get(data.get("status"))
+    check(expected is not None and result.returncode == expected,
+          f"{path.name}: process/report mismatch (exit {result.returncode}, status {data.get('status')})")
+    return data
 
 
 def unproven_lines(data):
@@ -46,8 +51,16 @@ if positive:
 negative = report(ROOT / "examples/rejected_loop_exit_frame.elisa")
 check(negative is not None, "adversarial fixture produced no report")
 if negative:
-    # Line 6 is the overflow-guarded `a <- a + 1` iteration; 10, 22 and 36 are the returns.
-    check(unproven_lines(negative) == {6, 10, 22, 36}, f"adversarial unproven lines: {sorted(unproven_lines(negative))}")
+    # The two line-6 obligations establish/preserve k <= n, not a bound on mutable a.
+    # Both loop bounds replay, while all three stale post-loop claims remain unproven.
+    check(unproven_lines(negative) == {10, 22, 36}, f"adversarial unproven lines: {sorted(unproven_lines(negative))}")
+    bounds = [goal for goal in negative["goals"] if goal["name"] == "written_after_loop" and goal["line"] == 6]
+    check(len(bounds) == 2 and all(goal["proven"] and goal["replay_status"] == "replayed" for goal in bounds),
+          "loop bounds did not both prove and replay")
+    check(negative["status"] == "failed" and negative["summary"]["semantic_errors"] == 0,
+          "adversarial fixture must fail on proof obligations, not semantic errors")
+    check(negative["replay"]["certificates"] == negative["replay"]["replayed"] == negative["summary"]["proven"],
+          "adversarial certificate accounting mismatch")
     check(negative["replay"]["gaps"] == 0, f"adversarial fixture has replay gaps: {negative['replay']}")
 
 malformed = WORK / "malformed.elisa"

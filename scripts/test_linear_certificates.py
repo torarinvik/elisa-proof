@@ -15,6 +15,8 @@ import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from portable_replay_support import BINARY, REPLAY
+if not __debug__:
+    raise SystemExit("run without Python -O: certificate assertions are required")
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = Path(tempfile.mkdtemp(prefix="elisa-proof-linear-"))

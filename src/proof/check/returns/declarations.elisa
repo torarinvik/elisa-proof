@@ -2,6 +2,17 @@
 include "local_record_field_types.elisa"
 extend ElisaProof:
     private:
+        # A numeric cast of an indexed receiver is call-free only when this exact
+        # one-element read is independently witnessed as builtin scalar indexing.
+        def proof_numeric_copy_zero_index_is_builtin(receiver: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            match receiver:
+                Ast::Expr.Paren(inner, _):
+                    return proof_numeric_copy_zero_index_is_builtin(inner, facts)
+                Ast::Expr.Index(_, index, _):
+                    return proof_expr_is_zero(index) and proof_builtin_index_expression_witnessed(receiver, facts) and proof_scalar_term_witnessed(receiver, facts, 0)
+                _:
+                    return false
+
         # Primitive numeric casts are total reserved conversions. A user-defined call
         # may also be retained as the exact scalar written here, but only when its
         # verified executable summary proves it pure and scalar-valued. The statement
@@ -23,6 +34,13 @@ extend ElisaProof:
         def proof_scalar_reference_write_target(target: Ast::Expr, operator: TokenKind, initializer: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, functions: ProofFunctionTable&, declarations: darray[Ast::Decl]&, owner: sview) -> (known: bool, name: sview):
             return (false, "") if operator != TokenKind.LArrow or not proof_scalar_reference_write_value_supported(initializer, functions) or proof_expr_has_move(initializer) or not proof_expr_supported(initializer)
             match target:
+                Ast::Expr.Ident(root, _):
+                    return (false, "") if root == "" or not proof_current_parameter(names, frame_parameters, root) or not proof_mutable_reference_parameter(owner, root, functions)
+                    source_parameter: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations(declarations, owner, root, 0)
+                    return (false, "") if source_parameter.count != 1
+                    scalar_target: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(source_parameter.type_expression, declarations, 0)
+                    return (false, "") if not scalar_target.known
+                    return (true, root)
                 Ast::Expr.Index(object, index, _):
                     root: sview = proof_ident_name(object)
                     match index:
@@ -137,7 +155,8 @@ extend ElisaProof:
                             conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
                             # The effect scan deliberately treats reserved casts as call-free,
                             # so detect this direct conversion from its AST shape instead.
-                            conversion_only <- conversion.known and proof_conversion_receiver_is_place(conversion.receiver, 0)
+                            receiver_is_read_only_place: bool = proof_conversion_receiver_is_place(conversion.receiver, 0) or proof_numeric_copy_zero_index_is_builtin(conversion.receiver, facts)
+                            conversion_only <- conversion.known and receiver_is_read_only_place
                         _:
                             pass
                     # The generic operator audit does not classify method-shaped numeric casts;
@@ -286,10 +305,11 @@ extend ElisaProof:
                             Ast::Expr.Call(callee, arguments, _, _):
                                 resolved_callee: Ast::Expr = proof_substitute(callee, names, values)
                                 widened: (known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver(resolved_callee, arguments.count, facts, functions)
-                                receiver_name: sview = proof_ident_name(widened.receiver)
-                                if widened.known and proof_ident_name(type_expression) == widened.target and receiver_name != "" and receiver_name != local_name:
-                                    binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(local_name, position), TokenKind.EqEq, widened.receiver, position)
+                                local_symbol: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                                if widened.known and proof_ident_name(type_expression) == widened.target and not proof_expr_equal(widened.receiver, local_symbol) and not proof_expr_is_invalid(value) and not proof_expr_has_move(value):
+                                    binding: Ast::Expr = Ast::Expr.Binary(local_symbol, TokenKind.EqEq, widened.receiver, position)
                                     proof_add_traced_fact(facts, report, binding, "local-binding", position.line, name)
+                                    proof_transfer_numeric_snapshot_facts(widened.receiver, local_symbol, facts, report, name, position, annotations)
                             _:
                                 pass
                     local_witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
@@ -305,6 +325,15 @@ extend ElisaProof:
                     report.value_binding_names.push(local_name) if plain_value
                     report.reference_local_names.push(local_name) if proof_resource_is_reference_type(type_expression)
                 Ast::Stmt.Assign(target, operator, initializer, position):
+                    # A first `name = call(...)` binding has no explicit type node in
+                    # the parser's Assign form. Recover an unambiguous scalar tuple
+                    # return type and use the declaration transition, which still
+                    # checks executable summaries, purity, frames and label widths.
+                    inferred_name: sview = proof_ident_name(target)
+                    if operator == TokenKind.Assign and inferred_name != "" and not (any existing in names where existing == inferred_name):
+                        inferred_type: Ast::Expr = proof_source_inferred_tuple_type(initializer, report.source_declarations, names, 0)
+                        if proof_scalar_tuple_type(inferred_type, report.source_declarations, functions):
+                            return proof_check_return_declarations(Ast::Stmt.VarDecl(inferred_name, inferred_type, initializer, position), names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow)
                     initializer_has_unmodeled_operator: bool = proof_invalidate_for_unmodeled_operator(initializer, names, values, facts, frame_parameters, report, name, position)
                     target_name: sview = proof_ident_name(target)
                     if target_name != "":
@@ -357,13 +386,17 @@ extend ElisaProof:
                         # postcondition check. Parameter rebinding is different: it changes
                         # an externally visible root, so all facts must be discarded. Calls
                         # still clear facts when no checked summary was applied.
-                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name)
+                        proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_current_parameter(names, frame_parameters, target_name) and not proof_mutable_reference_parameter(name, target_name, functions)
                         proof_clear_facts_after_call(facts, names, frame_parameters, report, name) if (operator == TokenKind.LArrow or operator == TokenKind.Assign) and proof_expr_has_call(initializer) and not call_applied
                         # `r <- v` through a reference local stores into its referent, not into
                         # `r`'s symbolic slot. The referent is not tracked, so havoc everything.
                         if any reference_local in report.reference_local_names where reference_local == target_name:
                             proof_forget_values(names, values, position)
-                            proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
+                            scalar_write: (known: bool, name: sview) = proof_scalar_reference_write_target(target, operator, initializer, names, frame_parameters, functions, report.source_declarations, name)
+                            if scalar_write.known and scalar_write.name == target_name:
+                                proof_clear_scalar_reference_write_facts(facts, report, name, target_name)
+                            else:
+                                proof_clear_facts_keep_type_bounds(facts, names, frame_parameters, report, name)
                     else:
                         field_write_tracked: bool = proof_track_mutable_parameter_field_write(target, operator, initializer, names, values, facts, frame_parameters, changes, preserves, functions, report, name, annotations, position)
                         if not field_write_tracked:

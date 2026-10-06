@@ -116,11 +116,46 @@ def spell(index):
     return node["name"] if node["kind"] == "ident" else node["kind"]
 spelled = [spell(node["left"]) for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "remaining"]
 assert spelled == ["binary", "Limits::DEPTH", "QualifiedArgument::LOCAL_DEPTH", "absent::ROOT_DEPTH", "LOCAL_DEPTH", "QualifiedArgument::LOCAL_DEPTH"], spelled
+nested = [node for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "value" and node["left"] < len(nodes)]
+def contains_qualified_constant(root):
+    node = nodes[root]
+    if node["kind"] == "scope":
+        return spell(root) == "absent::SIGNED_DEPTH" or contains_qualified_constant(node["left"])
+    if node["kind"] == "unary" or node["kind"] == "paren":
+        return node["left"] < len(nodes) and contains_qualified_constant(node["left"])
+    if node["kind"] == "binary":
+        return node["left"] < len(nodes) and contains_qualified_constant(node["left"]) or node["right"] < len(nodes) and contains_qualified_constant(node["right"])
+    return False
+assert any(nodes[node["left"]]["kind"] == "unary" and contains_qualified_constant(node["left"]) for node in nested), nested
+def contains_bare_shadow(root):
+    node = nodes[root]
+    if node["kind"] == "ident":
+        return node["name"] == "SIGNED_DEPTH"
+    if node["kind"] == "unary" or node["kind"] == "paren":
+        return node["left"] < len(nodes) and contains_bare_shadow(node["left"])
+    if node["kind"] == "binary":
+        return node["left"] < len(nodes) and contains_bare_shadow(node["left"]) or node["right"] < len(nodes) and contains_bare_shadow(node["right"])
+    return False
+assert any(nodes[node["left"]]["kind"] == "unary" and contains_bare_shadow(node["left"]) for node in nested), nested
+region_shadow = [node for node in nested if nodes[node["left"]]["kind"] == "binary" and nodes[nodes[node["left"]]["left"]]["kind"] == "ident" and nodes[nodes[node["left"]]["left"]]["name"] == "REGION_DEPTH"]
+assert region_shadow, nested
 '
 qualified_constant_status=${PIPESTATUS[1]}
 set -e
 if [[ "$qualified_constant_status" -ne 0 ]]; then
     printf 'proof test matrix failed: static constant spelling in resource traces\n' >&2
+    exit 1
+fi
+
+# A region-derived scalar and a moved aggregate both shadow same-spelled root constants. The
+# former stays a bare local in a nested value expression; the latter remains a local field place
+# and is rejected after move, never rewritten as the static root constant.
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_moved_qualified_constant_shadow.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert ("resource-use-after-move", "moved_shadow_caller") in {(finding["kind"], finding["name"]) for finding in report["findings"]}; nodes = report["kernel"]["nodes"]; args = [node for node in nodes if node["kind"] == "resource-call-arg" and node["name"] == "value"]; assert any(nodes[node["left"]]["kind"] == "binary" and nodes[nodes[node["left"]]["left"]]["kind"] == "field" and nodes[nodes[nodes[node["left"]]["left"]]["left"]]["kind"] == "ident" and nodes[nodes[nodes[node["left"]]["left"]]["left"]]["name"] == "SIGNED_DEPTH" for node in args), args'
+moved_qualified_shadow_status=${PIPESTATUS[1]}
+set -e
+if [[ "$moved_qualified_shadow_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a moved local shadow was qualified as a static constant\n' >&2
     exit 1
 fi
 
