@@ -85,14 +85,10 @@ extend ElisaProof:
             return (false, "") if member.matches != 1 or member.const_matches != 1 or member.owner == ""
             aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, member.owner, 0)
             return (false, "") if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
-            top_level_owner: mutable bool = false
-            for declaration in declarations |member, top_level_owner|:
-                match declaration:
-                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
-                        top_level_owner <- true if enum_name == member.owner and is_const
-                    _:
-                        pass
-            return (false, "") if not top_level_owner
+            # Nested enum declarations are safe only after the whole declaration tree has
+            # established one owner type and one member spelling. The counts above reject
+            # same-named enums or variants in sibling scopes; do not infer ownership from the
+            # short name alone when the source is ambiguous.
             alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, member.owner, 0)
             return (false, "") if alias.count != 0
             return (true, member.owner)
@@ -113,6 +109,14 @@ extend ElisaProof:
                     for protocol in protocols |report, member|:
                         return false if proof_report_builtin_operator_impl_exists(report, member.owner, protocol)
                     return true
+                Ast::Expr.Field(enum_type, member_name, _):
+                    member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(member_name, report.source_declarations)
+                    return false if not member.known
+                    return false if proof_type_head_name(enum_type, report.source_declarations, 0) != member.owner
+                    protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                    for protocol in protocols |report, member|:
+                        return false if proof_report_builtin_operator_impl_exists(report, member.owner, protocol)
+                    return true
                 _:
                     return false
 
@@ -120,6 +124,26 @@ extend ElisaProof:
         # function has a value of that enum type. This lets congruence reason about comparisons
         # that contain `.Variant` without treating arbitrary shorthand or overloaded Eq as
         # primitive. If any value operator is implemented for the enum, no member is witnessed.
+        def proof_add_const_enum_member_scalar_witnesses_in(declarations: darray[Ast::Decl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, enum_name: sview, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |facts, report, enum_name, type_expression, line, owner, position, depth|:
+                match declaration:
+                    Ast::Decl.Enum(declared_name, variants, is_const, _, _):
+                        if declared_name == enum_name and is_const:
+                            for variant in variants |facts, report, enum_name, type_expression, line, owner, position|:
+                                member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(variant.name, report.source_declarations)
+                                if member.known and member.owner == enum_name:
+                                    member_expression: Ast::Expr = Ast::Expr.Field(type_expression, variant.name, position)
+                                    marker: Ast::Expr = proof_scalar_term_marker(member_expression, position)
+                                    proof_add_scalar_type_witness(facts, report, marker, line, owner)
+                                    shorthand: Ast::Expr = Ast::Expr.ShorthandMember([variant.name], position)
+                                    shorthand_marker: Ast::Expr = proof_scalar_term_marker(shorthand, position)
+                                    proof_add_scalar_type_witness(facts, report, shorthand_marker, line, owner)
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        proof_add_const_enum_member_scalar_witnesses_in(body, facts, report, enum_name, type_expression, line, owner, position, depth + 1)
+                    _:
+                        pass
+
         def proof_add_const_enum_member_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos) -> void:
             enum_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
             return if enum_name == ""
@@ -128,22 +152,7 @@ extend ElisaProof:
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
             for protocol in protocols |report, enum_name|:
                 return if proof_report_builtin_operator_impl_exists(report, enum_name, protocol)
-            markers: mutable darray[Ast::Expr] = []
-            for declaration in report.source_declarations |enum_name, report, position|:
-                match declaration:
-                    Ast::Decl.Enum(declared_name, variants, is_const, _, _):
-                        if declared_name == enum_name and is_const:
-                            for variant in variants |markers, enum_name, report, position|:
-                                member: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(variant.name, report.source_declarations)
-                                if member.known:
-                                    shorthand: Ast::Expr = Ast::Expr.ShorthandMember([variant.name], position)
-                                    marker: Ast::Expr = proof_scalar_term_marker(shorthand, position)
-                                    if member.owner == enum_name:
-                                        markers.push(marker)
-                    _:
-                        pass
-            for marker in markers |facts, report, line, owner|:
-                proof_add_scalar_type_witness(facts, report, marker, line, owner)
+            proof_add_const_enum_member_scalar_witnesses_in(report.source_declarations, facts, report, enum_name, type_expression, line, owner, position, 0)
 
         # Whether every payload field of the one payload enum named `name` is a plain value.
         # `visiting` already holds `name`, so a recursive mention is admitted coinductively.
