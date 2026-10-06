@@ -368,14 +368,37 @@ extend ElisaProof:
                 return true if proof_replay_deterministic_call_source_contains(expression, expected, depth + 1)
             return false
 
+        # Reject declaration lookup when a local binding shadows the callee or path root.
+        def proof_replay_deterministic_call_root_name(callee: Ast::Expr, depth: usize) -> (known: bool, name: sview):
+            return (false, "") if depth >= 96
+            match callee:
+                Ast::Expr.Ident(name, _):
+                    return (true, name)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_replay_deterministic_call_root_name(base, depth + 1)
+                _:
+                    return (false, "")
+
+        def proof_replay_deterministic_call_callee_unshadowed(expected: Ast::Expr, names: darray[sview]&) -> bool:
+            match expected:
+                Ast::Expr.Call(callee, _, _, _):
+                    root: (known: bool, name: sview) = proof_replay_deterministic_call_root_name(callee, 0)
+                    return false if not root.known or root.name == ""
+                    for bound in names |bound, root|:
+                        return false if bound == root.name
+                    return true
+                _:
+                    return false
+
         def proof_replay_deterministic_call_source_expression(expression: Ast::Expr, expected: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&) -> bool:
+            return false if not proof_replay_deterministic_call_callee_unshadowed(expected, names)
             resolved: Ast::Expr = proof_replay_substitute_many(expression, names, values)
             expected_resolved: Ast::Expr = proof_replay_substitute_many(expected, names, values)
             return proof_replay_deterministic_call_source_contains(expression, expected, 0) or proof_replay_deterministic_call_source_contains(resolved, expected, 0) or proof_replay_deterministic_call_source_contains(expression, expected_resolved, 0) or proof_replay_deterministic_call_source_contains(resolved, expected_resolved, 0)
 
         # Bind caller locals in statement order. This independent source walk reconstructs the
         # resolved actuals that the producer placed in the marker at the call's pre-state.
-        # Control-flow joins and unsupported writes fail closed in this first bounded slice.
+        # Reaching definitions stay path-local; unmodeled writes and joins fail closed.
         # Trace/statement lines are diagnostic locations, not call identities: a multiline
         # expression's inner call can start after its enclosing statement. Use the active
         # certificate line only as an execution boundary, and authenticate the occurrence by
@@ -416,19 +439,23 @@ extend ElisaProof:
                         names_mark: usize = names.count
                         values_mark: usize = values.count
                         yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(yes, expected, boundary_line, names, values, depth + 1)
+                        yes_changed: bool = names.count != names_mark or values.count != values_mark
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return (false, 0) if not yes_matches.known
                         no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(no, expected, boundary_line, names, values, depth + 1)
+                        no_changed: bool = names.count != names_mark or values.count != values_mark
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return (false, 0) if not no_matches.known
                         branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
                         return (true, branch_matches) if branch_matches > 0
+                        return (false, 0) if yes_changed or no_changed
                     Ast::Stmt.Match(value, arms, position):
                         return (true, 0) if position.line > boundary_line
                         value_match: usize = 1 if proof_replay_deterministic_call_source_expression(value, expected, names, values) else 0
                         arm_match_count: mutable usize = value_match
+                        joined_write: mutable bool = false
                         rebind_index: mutable usize = 0
                         for arm in arms |arm, expected, boundary_line, names, values, depth, arm_match_count, rebind_index|:
                             names_mark: usize = names.count
@@ -445,11 +472,13 @@ extend ElisaProof:
                                 rebind_index <- rebind_index + 1
                             guard_match: usize = 1 if proof_replay_deterministic_call_source_expression(arm.guard, expected, names, values) else 0
                             arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(arm.body, expected, boundary_line, names, values, depth + 1)
+                            joined_write <- joined_write or names.count != names_mark + pattern_names.count * 2 or values.count != values_mark + pattern_names.count * 2
                             names.resize(names_mark)
                             values.resize(values_mark)
                             return (false, 0) if not arm_matches.known
                             arm_match_count <- arm_match_count + guard_match + arm_matches.matches
                         return (true, arm_match_count) if arm_match_count > 0
+                        return (false, 0) if joined_write
                     Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Block(_, _, _, _, position):
                         return (true, 0) if position.line > boundary_line
                         return (false, 0)
@@ -459,7 +488,6 @@ extend ElisaProof:
                     _:
                         return (false, 0)
             return (true, 0)
-
         def proof_replay_deterministic_call_source_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, boundary_line: u32, matches: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
             for declaration in declarations |owner, owner_line, expected, boundary_line, matches, depth|:
@@ -484,7 +512,9 @@ extend ElisaProof:
             matches: mutable usize = 0
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
-            boundary_line: u32 = report.trace_owner_line if report.trace_owner_line != 0 else trace.line
+            # A body call may establish a postcondition declared earlier; bind by the call span.
+            boundary_line: u32 = Ast::expr_pos(call).line
+            return false if boundary_line == 0
             return false if not proof_replay_deterministic_call_source_declarations(report.source_declarations, trace.name, owner_line, call, boundary_line, &matches, 0)
             return matches == 1
 
