@@ -249,6 +249,7 @@ run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
 run_py_test test_indexed_write_frame.py
+run_py_test test_byref_frame_forwarding.py
 run_py_test test_collection_frames.py
 run_py_test test_loop_exit_frame.py
 run_py_test test_near_miss.py
