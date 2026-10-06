@@ -1,4 +1,4 @@
-"""A live source edit during snapshot preparation cannot relabel a built pair."""
+"""Build snapshots and toolchain identities remain stable through publication."""
 
 from __future__ import annotations
 
@@ -97,6 +97,13 @@ import hashlib, json, os, pathlib, sys
 args = sys.argv[1:]
 output = pathlib.Path(args[args.index('-o') + 1])
 source = pathlib.Path(args[-1])
+mutation_marker = os.environ.get('MOCK_COMPILER_MUTATION_MARKER')
+if os.environ.get('MOCK_MUTATE_COMPILER_DURING_COMPILE') and mutation_marker:
+    marker = pathlib.Path(mutation_marker)
+    if not marker.exists():
+        compiler_script = pathlib.Path(__file__)
+        compiler_script.write_text(compiler_script.read_text() + '\\n# changed during a compile\\n')
+        marker.touch()
 src_root = source.parent
 digest = hashlib.sha256()
 for directory, subdirectories, files in os.walk(src_root):
@@ -221,8 +228,44 @@ fi
             assert compiled[0]["sentinel"] != (proof / "src/shared.elisa").read_text()
 
         assert live_digest != manifests[0]["proof"]["source_tree_sha256"]
-        print("build source snapshot: mutation during preparation left both generated products "
-              "compiled from and manifested against the exact captured src bytes")
+
+        # A compiler executable replaced while it is compiling must not publish an
+        # object-cache entry, compatibility output, or a new authoritative pair.
+        current_generation = (proof / "build/elisa-proof-generations/CURRENT").read_text()
+        generations_before = {
+            path.name for path in (proof / "build/elisa-proof-generations").iterdir()
+            if path.is_dir()
+        }
+        race_outputs = proof / "build/toolchain-race"
+        object_cache = base / "object-cache"
+        mutation_marker = base / "compiler-mutated"
+        race_environment = dict(
+            environment,
+            ELISA_PROOF_OUTPUT=str(race_outputs / "elisa-proof"),
+            ELISA_PROOF_REPLAY_OUTPUT=str(race_outputs / "elisa-proof-replay"),
+            ELISA_PROOF_OBJECT_CACHE=str(object_cache),
+            ELISA_PROOF_BUILD_JOBS="1",
+            MOCK_MUTATE_COMPILER_DURING_COMPILE="1",
+            MOCK_COMPILER_MUTATION_MARKER=str(mutation_marker),
+        )
+        race = subprocess.run(
+            [str(proof / "scripts/build.sh")], cwd=proof, env=race_environment,
+            capture_output=True, text=True, timeout=90,
+        )
+        assert race.returncode == 2, (race.returncode, race.stdout, race.stderr)
+        assert "refusing to cache or publish mixed-provenance output" in race.stderr, race.stderr
+        assert mutation_marker.exists(), "mock compiler did not mutate during compilation"
+        assert not object_cache.exists() or not any(object_cache.iterdir()), list(object_cache.glob("**/*"))
+        assert not (race_outputs / "elisa-proof").exists()
+        assert not (race_outputs / "elisa-proof-replay").exists()
+        assert (proof / "build/elisa-proof-generations/CURRENT").read_text() == current_generation
+        generations_after = {
+            path.name for path in (proof / "build/elisa-proof-generations").iterdir()
+            if path.is_dir()
+        }
+        assert generations_after == generations_before, (generations_before, generations_after)
+        print("build provenance races: source mutation stayed snapshot-isolated; compiler mutation "
+              "failed closed before cache or generation publication")
 
 
 if __name__ == "__main__":

@@ -36,13 +36,13 @@ extend ElisaProofKernelReplay:
         # One ascending step out of a fact. With `from_lower` the fact must read
         # `anchor op middle`, otherwise `middle op anchor`. A `>`/`>=` fact is the same step
         # written backwards and is accepted mirrored.
-        def proof_kernel_replay_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, fact: usize, anchor: usize, from_lower: bool) -> (known: bool, middle: usize, operator: sview):
+        def proof_kernel_replay_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, fact: usize, anchor: usize, from_lower: bool, facts: darray[usize]) -> (known: bool, middle: usize, operator: sview):
             unknown: (known: bool, middle: usize, operator: sview) = (false, 0, "")
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
             return unknown if not located.known
             node: ElisaProofKernelCore::ProofKernelNode = located.node
             if node.kind == "unary" and node.operator == "not":
-                return proof_kernel_replay_negated_chain_step(nodes, children, node, anchor, from_lower)
+                return proof_kernel_replay_negated_chain_step(nodes, children, node, anchor, from_lower, facts)
             return unknown if node.kind != "binary"
             return unknown if not proof_kernel_replay_arena_shape_valid(node)
             # Mirror of the producer's equality step: `b == c` is `b <= c` and `c <= b`, so it
@@ -156,6 +156,8 @@ extend ElisaProofKernelReplay:
             return (false, 0, "", 0) if not proof_kernel_replay_negation_supported(inner.node.operator) or not proof_kernel_replay_is_order_operator(inner.node.operator)
             return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.left, 0)
             return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, inner.node.right, 0)
+            return (false, 0, "", 0) if not proof_kernel_replay_denial_integer_term(nodes, children, inner.node.left, facts, 0)
+            return (false, 0, "", 0) if not proof_kernel_replay_denial_integer_term(nodes, children, inner.node.right, facts, 0)
             return (true, inner.node.left, ">=", inner.node.right) if inner.node.operator == "<"
             return (true, inner.node.left, ">", inner.node.right) if inner.node.operator == "<="
             return (true, inner.node.left, "<=", inner.node.right) if inner.node.operator == ">"
@@ -177,6 +179,18 @@ extend ElisaProofKernelReplay:
                 if readable.operator == ">=" and proof_kernel_replay_expr_equal(nodes, children, readable.right, term, 0) and proof_kernel_replay_expr_equal(nodes, children, readable.left, bound, 0):
                     return true
             return false
+
+        # Exact order consequences are safe before unrelated arithmetic-premise guards: no
+        # arithmetic is normalized, and a negated comparison is readable only with integer
+        # witnesses because IEEE floating-point order is not total in the presence of NaN.
+        def proof_kernel_replay_order_goal_from_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal: usize) -> bool:
+            return false if goal >= nodes.count or not proof_kernel_replay_valid(nodes, goal)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[goal]
+            return false if node.kind != "binary" or not proof_kernel_replay_is_order_operator(node.operator)
+            return proof_kernel_replay_has_order_fact(nodes, children, node.left, node.right, true, facts) if node.operator == "<"
+            return proof_kernel_replay_has_order_fact(nodes, children, node.left, node.right, false, facts) if node.operator == "<="
+            return proof_kernel_replay_has_order_fact(nodes, children, node.right, node.left, true, facts) if node.operator == ">"
+            proof_kernel_replay_has_order_fact(nodes, children, node.right, node.left, false, facts)
 
         def proof_kernel_replay_sum_witness_for(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, first: usize, second: usize, facts: darray[usize]) -> (known: bool, bound: usize, strict: bool):
             conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
@@ -430,7 +444,7 @@ extend ElisaProofKernelReplay:
             lower_operators: mutable darray[sview] = []
             for fact in facts |nodes, children, lower, lower_middles, lower_operators|:
                 break if lower_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
-                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, lower, true)
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, lower, true, facts)
                 continue if not step.known
                 lower_middles.push(step.middle)
                 lower_operators.push(step.operator)
@@ -441,7 +455,7 @@ extend ElisaProofKernelReplay:
             upper_operators: mutable darray[sview] = ["<="]
             for fact in facts |nodes, children, upper, upper_middles, upper_operators|:
                 break if upper_middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
-                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, upper, false)
+                step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, upper, false, facts)
                 continue if not step.known
                 upper_middles.push(step.middle)
                 upper_operators.push(step.operator)
@@ -464,7 +478,7 @@ extend ElisaProofKernelReplay:
                 continue if not proof_kernel_replay_scalar_term_witnessed(nodes, children, facts, other.value, 0)
                 for fact in facts |nodes, children, other, from_lower, middles, operators|:
                     break if middles.count >= PROOF_KERNEL_REPLAY_CHAIN_CANDIDATE_BUDGET
-                    step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, other.value, from_lower)
+                    step: (known: bool, middle: usize, operator: sview) = proof_kernel_replay_chain_step(nodes, children, fact, other.value, from_lower, facts)
                     continue if not step.known
                     middles.push(step.middle)
                     operators.push(step.operator)
@@ -481,13 +495,14 @@ extend ElisaProofKernelReplay:
         # Mirror of the producer's negated step: over witnessed scalars the order is total, so
         # `not (a < b)` is `b <= a` and `not (a <= b)` is `b < a`. The caller witnesses the anchor
         # and the middle, as for any other step.
-        def proof_kernel_replay_negated_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, node: ElisaProofKernelCore::ProofKernelNode, anchor: usize, from_lower: bool) -> (known: bool, middle: usize, operator: sview):
+        def proof_kernel_replay_negated_chain_step(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, node: ElisaProofKernelCore::ProofKernelNode, anchor: usize, from_lower: bool, facts: darray[usize]) -> (known: bool, middle: usize, operator: sview):
             unknown: (known: bool, middle: usize, operator: sview) = (false, 0, "")
             return unknown if not proof_kernel_replay_arena_shape_valid(node)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
             return unknown if not located.known
             inner: ElisaProofKernelCore::ProofKernelNode = located.node
             return unknown if inner.kind != "binary" or not proof_kernel_replay_arena_shape_valid(inner)
+            return unknown if not proof_kernel_replay_denial_integer_term(nodes, children, inner.left, facts, 0) or not proof_kernel_replay_denial_integer_term(nodes, children, inner.right, facts, 0)
             low: mutable usize = inner.left
             high: mutable usize = inner.right
             strict: mutable bool = false

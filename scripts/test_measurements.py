@@ -12,7 +12,11 @@ BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 KEYS = (
     "declarations", "obligations", "goal_attempts", "certificates", "certificate_facts",
     "largest_certificate_facts", "repeated_certificate_fact_roots", "fact_traces",
-    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses", "kernel_nodes", "kernel_nodes_shared",
+    "control_flow_steps", "live_facts_peak", "goal_cache_hits", "goal_cache_misses",
+    "producer_disjunction_facts_scanned", "producer_disjunction_refutation_checks",
+    "replay_disjunction_facts_scanned", "replay_disjunction_refutation_checks",
+    "replay_arena_records_scanned", "replay_child_table_edges_scanned",
+    "kernel_nodes", "kernel_nodes_shared",
     "kernel_children", "report_bytes",
 )
 # Kinds whose left/right/auxiliary fields are node references, in that order. Mirrors
@@ -88,6 +92,26 @@ def main():
     assert verified["measurements"]["kernel_nodes_shared"] > 0
     assert verified["measurements"]["control_flow_steps"] > 0 and verified["measurements"]["live_facts_peak"] > 0
     assert verified["measurements"]["goal_cache_hits"] >= 0 and verified["measurements"]["goal_cache_misses"] > 0
+
+    # This single-function fixture has a tiny serialized arena: the structural replay
+    # admission pass must account for every arena record and every child-table edge exactly.
+    text, tiny = run(ROOT / "examples/replay_counter_tiny.elisa", 0)
+    check_measurements(text, tiny)
+    assert tiny["status"] == "proved" and tiny["replay"]["gaps"] == 0, tiny
+    assert tiny["measurements"]["replay_arena_records_scanned"] == len(tiny["kernel"]["nodes"]), tiny["measurements"]
+    assert tiny["measurements"]["replay_child_table_edges_scanned"] == len(tiny["kernel"]["children"]), tiny["measurements"]
+
+    # The paired under/over fixture confirms that the ordinary work cap still controls
+    # proof status; the counters observe replay admission work without changing that status.
+    budget_text, budget = run(ROOT / "examples/fact_growth_work_budget.elisa", 1)
+    check_measurements(budget_text, budget)
+    assert budget["status"] == "failed" and budget["verification_state"] == "unknown", budget
+    budget_goals = {(goal["name"], goal["rule"]): goal for goal in budget["goals"]}
+    assert budget_goals[("fact_growth_under_work_budget", "goal")]["proven"]
+    over_budget = budget_goals[("fact_growth_over_work_budget", "goal")]
+    assert not over_budget["proven"] and over_budget["refusal_gate"] == "budget", over_budget
+    assert budget["measurements"]["replay_arena_records_scanned"] > 0
+    assert budget["measurements"]["replay_child_table_edges_scanned"] > 0
 
     text, library = run(ROOT / "examples/adt_library.elisa", 0)
     check_measurements(text, library)

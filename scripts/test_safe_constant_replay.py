@@ -10,6 +10,11 @@ BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 if not __debug__:
     raise SystemExit("run without Python -O")
 
+REJECTED_U64_MAX_GOAL_ID = 7
+REJECTED_U64_MAX_GOAL_FINGERPRINT = 515359733
+REJECTED_U8_OVERFLOW_GOAL_ID = 13
+REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT = 1229197265
+
 
 def report(fixture, source, expected):
     run = subprocess.run(
@@ -29,9 +34,12 @@ assert tactic["kernel_trace_replayed"] is True, positive
 assert tactic["certificate_replayed"] is True, positive
 
 for fixture, goal, fingerprint in (
-    ("rejected_u64_max_decide", 7, 3959704679),
-    ("rejected_u8_overflow_decide", 13, 3492578551),
-    ("rejected_u8_overflow_simp", 13, 3492578551),
+    ("rejected_u64_max_decide", REJECTED_U64_MAX_GOAL_ID,
+     REJECTED_U64_MAX_GOAL_FINGERPRINT),
+    ("rejected_u8_overflow_decide", REJECTED_U8_OVERFLOW_GOAL_ID,
+     REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT),
+    ("rejected_u8_overflow_simp", REJECTED_U8_OVERFLOW_GOAL_ID,
+     REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT),
 ):
     negative = report("tactic_script_" + fixture + ".json",
                       "rejected_u64_max_conflict.elisa", 1)
@@ -42,6 +50,10 @@ for fixture, goal, fingerprint in (
     assert binding["goal_fingerprint"]["value"] == fingerprint, negative
     assert negative["tactic"]["valid"] is False, negative
     assert negative["tactic"]["solved"] is False, negative
-    assert negative["tactic"]["reason"] != "invalid source-bound proof script", negative
+    assert negative["tactic"]["action_count"] == 1, negative
+    assert negative["tactic"]["accepted_count"] == 0, negative
+    assert negative["tactic"]["reason"] == (
+        "tactic action outcome contradicted the script's expected acceptance"
+    ), negative
 
 print("constant replay: safe simplification replayed; three bound machine-invalid tactic claims refused after import")

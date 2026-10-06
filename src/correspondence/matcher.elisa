@@ -144,6 +144,8 @@ def corr_push_result(out: mutable darray[u8]&, package: ProofPackageVerdict, sou
     proof_push_json_i64(out, unmatched.i64())
     proof_push(out, ",\"unsupported\":")
     proof_push_json_i64(out, unsupported.i64())
+    proof_push(out, ",\"coverage\":")
+    proof_push_json_string(out, "complete" if exit_code == 0 else "partial" if checked > 0 else "not-established")
     proof_push(out, ",\"exit_code\":")
     proof_push_json_i64(out, exit_code)
     proof_push(out, "},\"trust\":{\"kernel_replay\":\"every theorem is re-derived by the proof kernel from the package arena\",\"correspondence\":\"a checked function's obligations are re-derived from the source by this checker's reference semantics for its sequential subset and each is concluded by a replayed theorem whose hypotheses are facts of that semantics\",\"trusted\":[\"the proof kernel\",\"the Elisa parser and type checker\",\"the correspondence checker's reference semantics\"],\"not_established\":[\"termination\",\"arithmetic overflow\",\"functions outside the subset\"]}}\n")
@@ -190,7 +192,14 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
     pool: mutable CorrPool = corr_pool_new()
     work: mutable CorrWork = corr_work_empty()
     arena: mutable Arena = zeroed
-    parsed: JsonParseResult[arena] = json_parse_checked(&arena, ElisaProofJson::bytes_range_ref(input, 0, input.count))
+    # Correspondence is a second package ingress; apply the portable reader's lexical bounds
+    # before either path asks the shared JSON parser to construct its DOM.
+    input_text: sview = ElisaProofJson::bytes_range_ref(input, 0, input.count)
+    preflight: ProofPackageVerdict = proof_package_input_preflight(input_text)
+    if sview_len(preflight.status) > 0:
+        corr_push_result(out, preflight, source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        return 1
+    parsed: JsonParseResult[arena] = json_parse_checked(&arena, input_text)
     if parsed.code != JsonErrorCode.OK:
         corr_push_result(out, proof_package_malformed("json"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
         return 1
@@ -219,7 +228,7 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
     node_count: usize = nodes.count
     child_count: usize = children.count
     if not ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&nodes, &children):
-        corr_push_result(out, proof_package_malformed("arena-inadmissible"), source_admissible, theorem_list.count, 0, &work, 0, 0, 0, 1)
+        corr_push_result(out, proof_package_malformed("arena-inadmissible"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
         return 1
     theorem_keys: darray[sview] = ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
     workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
@@ -271,6 +280,9 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
         checked_count <- checked_count + 1 if function.status == "checked"
         unmatched_count <- unmatched_count + 1 if function.status == "unmatched"
         unsupported_count <- unsupported_count + 1 if function.status == "unsupported"
-    exit_code: i64 = 0 if source_admissible and checked_count > 0 and unmatched_count == 0 else 1
+    # A successful exit means every encountered source function is within the supported subset
+    # and all its obligations matched. A mix of checked and unsupported functions is useful
+    # evidence, but must be visibly partial to automation through both the report and exit code.
+    exit_code: i64 = 0 if source_admissible and checked_count > 0 and unmatched_count == 0 and unsupported_count == 0 else 1
     corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, theorem_list.count, replayed, &work, checked_count, unmatched_count, unsupported_count, exit_code)
     return exit_code

@@ -68,17 +68,22 @@ run_py_test test_report_cache_nested_dependency_edit.py
 run_py_test test_report_cache_symlink_dependency.py
 run_py_test test_p01_baseline.py
 run_py_test test_bounded_model_work_budget.py
+run_py_test tests/test_perf_luna_corpus_manifest.py
+run_py_test test_r013_logical_work_stress.py
+run_py_test test_disjunction_call_domain_replay_gate.py
 run_py_test test_disjunction_search_bounds.py
 run_py_test test_p05_package_restart.py
 run_py_test test_conditional_ensure_replay_gap.py
 run_py_test test_declaration_artifact_identity.py
 run_py_test test_declaration_artifact_concurrency.py
 run_py_test test_p07_support_census.py
-run_py_test test_scalar_witness_name_index.py
+run_py_test tests/test_scalar_witness_name_index.py
 run_py_test remote/test_object_cache_key.py
 run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
+run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
+run_py_test test_cycle_arena_runtime_rejection.py
 
 # Buffer JSON probes so a valid-looking report cannot hide a crash or an exit/verdict mismatch.
 # The downstream assertions still check the report's expected shape; this adapter checks that the
@@ -151,6 +156,7 @@ run_json_report "$ROOT_DIR/examples/source_context_scope.elisa" | python3 -c 'im
 run_py_test test_overlap_diagnostics.py
 run_py_test test_certificate_reuse.py
 run_py_test test_measurements.py
+run_py_test tests/test_disjunction_work_accounting.py
 run_py_test test_source_admission_matrix.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
@@ -168,6 +174,7 @@ run_py_test test_match_refuted_arms.py
 run_py_test test_match_exhaustiveness.py
 run_py_test test_chained_pure_calls.py
 run_py_test test_pure_postcondition_calls.py
+run_py_test test_pure_contract_summary_replay.py
 run_py_test test_dispatcher_budget.py
 run_py_test test_qualified_constants.py
 run_py_test test_variant_exclusion.py
@@ -232,21 +239,28 @@ run_py_test test_negated_guard_orders.py
 run_py_test test_nested_early_return_guards.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_replay_generation_resolution.py"
 python3 "$ROOT_DIR/scripts/tests/test_dogfood_package_pair_resolution.py"
+run_py_test test_portable_source_metadata_trust.py
+python3 "$ROOT_DIR/scripts/tests/test_portable_trust_projection.py"
+run_py_test tests/test_package_mutation_campaign.py
 run_py_test test_portable_replay.py
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_byte_boundaries.py"
+python3 "$ROOT_DIR/scripts/tests/test_portable_package_json_scan_boundaries.py"
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_string_budget.py"
 python3 "$ROOT_DIR/scripts/tests/test_portable_package_theorem_budget.py"
 python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark.py"
+python3 "$ROOT_DIR/scripts/tests/test_perf_luna_benchmark_hardening.py"
 python3 "$ROOT_DIR/scripts/perf_luna_benchmark.py" --self-test
 run_py_test test_linear_certificates.py
 run_py_test test_smt_oracle.py
 run_py_test test_symbolic_quantifiers.py
 run_py_test test_indexed_write_frame.py
+run_py_test test_byref_frame_forwarding.py
 run_py_test test_collection_frames.py
 run_py_test test_loop_exit_frame.py
 run_py_test test_near_miss.py
 run_py_test test_pure_unfolding.py
 run_py_test test_struct_invariants.py
+run_py_test test_correspondence_partial_coverage.py
 run_py_test test_correspondence.py
 run_py_test test_tactic_branch_regions.py
 run_py_test test_vector_index_arithmetic.py
@@ -330,6 +344,12 @@ if [[ "$report_invariants_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: report invariant boundary harness did not compile\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/assert-by-branch-invariants.o" "$ROOT_DIR/examples/source_assert_by_branch_inventory_runtime.elisa" >/dev/null 2>&1
+assert_by_branch_compile_status=$?
+if [[ "$assert_by_branch_compile_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: assert-by branch identity harness did not compile\n' >&2
+    exit 1
+fi
 ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"
@@ -389,6 +409,14 @@ for ast_probe in field_equality_runtime marker_dispatch_runtime; do
         exit 1
     fi
 done
+if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
+    if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O2 -o "$standalone_probe_dir/conditional-signed-unit-shift-runtime.o" "$ROOT_DIR/examples/conditional_signed_unit_shift_runtime.elisa" >/dev/null 2>&1 ||
+        ! "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/conditional-signed-unit-shift-runtime" "$standalone_probe_dir/conditional-signed-unit-shift-runtime.o" "$ROOT_DIR/build/profile_hooks.o" "${field_runtime_inputs[@]}" ||
+        ! "$standalone_probe_dir/conditional-signed-unit-shift-runtime"; then
+        printf 'proof test matrix failed: Stage1 signed unit-shift runtime boundary control\n' >&2
+        exit 1
+    fi
+fi
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/examples/kernel_sview_lifetimes_runtime.elisa" >/dev/null 2>&1 &&
     "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/kernel-sview-lifetimes" "$standalone_probe_dir/kernel-sview-lifetimes.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" &&
     "$standalone_probe_dir/kernel-sview-lifetimes"

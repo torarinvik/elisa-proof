@@ -3,6 +3,8 @@
 import tempfile
 import json
 from pathlib import Path
+import subprocess
+import sys
 
 import p07_support_census as census
 
@@ -39,6 +41,21 @@ assert kind_ranking[0] == {
     "affected_inputs": ["a", "b"], "input_count": 2,
 }, kind_ranking
 assert all(item["kind"] != "fake-kind" for item in kind_ranking)
+
+original_killpg = census.os.killpg
+try:
+    census.os.killpg = lambda *_: (_ for _ in ()).throw(PermissionError("simulated exit race"))
+    exited = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+    exited.wait()
+    census.terminate_process_group(exited)
+
+    live = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(10)"], start_new_session=True
+    )
+    census.terminate_process_group(live)
+    assert live.wait() != 0, "EPERM fallback did not terminate the direct child"
+finally:
+    census.os.killpg = original_killpg
 
 with tempfile.TemporaryDirectory(prefix="elisa-p07-unit-") as directory:
     temp = Path(directory)

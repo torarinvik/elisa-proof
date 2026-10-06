@@ -14,7 +14,29 @@ elisa_compiler_is_stage0() {
 elisa_default_stage1() {
     local root_dir="$1"
     local compiler_root="${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-$root_dir/../Elisa-compiler}}"
+    local pinned_revision="${ELISA_COMPILER_REV:-}"
+    local installed_root="${HOME:-}/.elisac/stage1"
+    local installed_product="$installed_root/bin/elisac-stage1"
+    local installed_revision=""
     local wrapper
+    if [[ -z "$pinned_revision" && -f "$root_dir/ELISA_COMPILER_REV" ]]; then
+        pinned_revision="$(tr -d '[:space:]' < "$root_dir/ELISA_COMPILER_REV")"
+    fi
+    if [[ -f "$installed_root/SNAPSHOT" ]]; then
+        while IFS=' :' read -r snapshot_key snapshot_value _; do
+            if [[ "$snapshot_key" == "source_revision" ]]; then
+                installed_revision="$snapshot_value"
+                break
+            fi
+        done < "$installed_root/SNAPSHOT"
+    fi
+    # Prefer an installed compiler only when its immutable source snapshot matches the
+    # front end this project imports. This avoids silently building against an older live
+    # sibling checkout when a newer, pinned Stage1 product is already installed.
+    if [[ -z "${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-}}" && -x "$installed_product" && -n "$pinned_revision" && -n "$installed_revision" && "$installed_revision" == "$pinned_revision"* ]]; then
+        printf '%s\n' "$installed_product"
+        return 0
+    fi
     if [[ -x "$compiler_root/scripts/elisac_stage1.sh" ]]; then
         wrapper="$(cd "$compiler_root" && pwd -P)/scripts/elisac_stage1.sh"
         printf '%s\n' "$wrapper"

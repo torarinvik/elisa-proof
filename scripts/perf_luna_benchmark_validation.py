@@ -85,6 +85,13 @@ def semantic_workload_metrics(result: dict, report: dict, label: str) -> dict:
             raise ValueError("count field is missing or invalid")
         if declaration_count != len(declarations) or obligation_count != len(goals):
             raise ValueError("declaration/obligation arrays are incomplete")
+        if any(not isinstance(goal, dict) or type(goal.get("proven")) is not bool
+               for goal in goals):
+            raise ValueError("goal results are missing or invalid")
+        goal_proven = sum(goal["proven"] is True for goal in goals)
+        goal_unproven = sum(goal["proven"] is False for goal in goals)
+        if goal_proven != proven_count or goal_unproven != unproven_count:
+            raise ValueError("goal results disagree with proven/unproven summary totals")
         if certificate_count != len(certificates) or replayed_count != certificate_count or replay_gaps != 0:
             raise ValueError("certificate replay is incomplete")
         if proven_count + unproven_count != obligation_count:
@@ -144,19 +151,40 @@ def replay_result(result: dict, expected_status: str, expected_reason: str | Non
 
 
 def record_measurements(samples: list[dict]) -> dict:
+    if not samples:
+        raise RuntimeError("cannot summarize an empty or fully censored sample set")
     times = [sample["wall_seconds"] for sample in samples]
-    user_cpu = [sample["user_cpu_seconds"] for sample in samples]
-    system_cpu = [sample["system_cpu_seconds"] for sample in samples]
+    user_cpu = [sample["user_cpu_seconds"] for sample in samples
+                if sample.get("user_cpu_seconds") is not None]
+    system_cpu = [sample["system_cpu_seconds"] for sample in samples
+                  if sample.get("system_cpu_seconds") is not None]
     rss = [sample["peak_rss_kib"] for sample in samples]
     ordered_times = sorted(times)
+    ordered_user_cpu = sorted(user_cpu)
+    ordered_system_cpu = sorted(system_cpu)
     p95_index = max(0, math.ceil(0.95 * len(ordered_times)) - 1)
+    user_cpu_p95_index = max(0, math.ceil(0.95 * len(ordered_user_cpu)) - 1) if user_cpu else None
+    system_cpu_p95_index = max(0, math.ceil(0.95 * len(ordered_system_cpu)) - 1) if system_cpu else None
     return {
         "rounds": len(samples),
+        "user_cpu_samples": len(user_cpu),
+        "system_cpu_samples": len(system_cpu),
+        "rss_samples": sum(value is not None for value in rss),
+        "p50_wall_seconds": round(statistics.median(times), 6),
         "median_wall_seconds": round(statistics.median(times), 6),
         "p95_wall_seconds": round(ordered_times[p95_index], 6),
-        "median_user_cpu_seconds": round(statistics.median(user_cpu), 6),
-        "median_system_cpu_seconds": round(statistics.median(system_cpu), 6),
-        "peak_rss_kib": int(max(rss)),
+        "wall_spread_seconds": round(max(times) - min(times), 6),
+        "minimum_wall_seconds": round(min(times), 6),
+        "maximum_wall_seconds": round(max(times), 6),
+        "p50_user_cpu_seconds": round(statistics.median(user_cpu), 6) if user_cpu else None,
+        "p95_user_cpu_seconds": round(ordered_user_cpu[user_cpu_p95_index], 6)
+            if user_cpu_p95_index is not None else None,
+        "median_user_cpu_seconds": round(statistics.median(user_cpu), 6) if user_cpu else None,
+        "p50_system_cpu_seconds": round(statistics.median(system_cpu), 6) if system_cpu else None,
+        "p95_system_cpu_seconds": round(ordered_system_cpu[system_cpu_p95_index], 6)
+            if system_cpu_p95_index is not None else None,
+        "median_system_cpu_seconds": round(statistics.median(system_cpu), 6) if system_cpu else None,
+        "peak_rss_kib": int(max(rss)) if all(value is not None for value in rss) else None,
     }
 
 
@@ -169,6 +197,8 @@ def measurement_self_test() -> None:
     measured = record_measurements(samples)
     if (measured["rounds"] != 7 or measured["median_wall_seconds"] != 4.0
             or measured["p95_wall_seconds"] != 7.0
+            or measured["p50_wall_seconds"] != 4.0
+            or measured["wall_spread_seconds"] != 6.0
             or measured["median_user_cpu_seconds"] != 2.0
             or measured["median_system_cpu_seconds"] != 1.0):
         raise RuntimeError(f"measurement summary statistics are incorrect: {measured}")

@@ -9,6 +9,7 @@ only; nothing in the proof checker reads it.
 
 import argparse
 import hashlib
+import io
 import json
 import os
 import platform
@@ -16,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import uuid
 from compiler_environment import select_compiler_environment
 
@@ -100,6 +102,163 @@ def git(repository: str, *arguments: str) -> str:
     return result.stdout.strip()
 
 
+def committed_compiler_source_digest(repository: str, revision: str) -> str:
+    """Hash the compiler source/stdlib files exactly as Stage1 records them."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", repository, "archive", "--format=tar", revision,
+             "src", "elisacore_std"],
+            check=True,
+            capture_output=True,
+        )
+        digest = hashlib.sha256()
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            files = []
+            for member in archive.getmembers():
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise ValueError(
+                        f"unsupported non-file compiler source in pinned tree: {member.name}"
+                    )
+                name = member.name.rstrip("/")
+                if (name.startswith("/") or ".." in name.split("/")
+                        or not name.startswith(("src/", "elisacore_std/"))):
+                    raise ValueError(f"invalid compiler source path in pinned tree: {name}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError(f"cannot read compiler source in pinned tree: {name}")
+                files.append((name, stream.read()))
+        for name, contents in sorted(files):
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(contents)
+            digest.update(b"\0")
+        if not files:
+            raise ValueError("pinned compiler tree has no source files")
+        return digest.hexdigest()
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        raise ValueError(f"cannot inspect pinned compiler source tree: {error}") from error
+
+
+def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
+    """Hash the build recipes Stage1 records, directly from the pinned commit."""
+    recipe_paths = (
+        "scripts/elisac_stage1.sh",
+        "scripts/elisac_stage1_seed.sh",
+        "scripts/build_runtime_object.sh",
+        "scripts/write_profiler_hook_fallbacks.sh",
+    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", repository, "archive", "--format=tar", revision,
+             *recipe_paths],
+            check=True,
+            capture_output=True,
+        )
+        digest = hashlib.sha256()
+        files = []
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            for member in archive.getmembers():
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    raise ValueError(f"unsupported non-file compiler recipe: {member.name}")
+                name = member.name.rstrip("/")
+                if name not in recipe_paths:
+                    raise ValueError(f"unexpected compiler recipe path in pinned tree: {name}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise ValueError(f"cannot read compiler recipe in pinned tree: {name}")
+                files.append((name, stream.read()))
+        for name, contents in sorted(files):
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(contents)
+            digest.update(b"\0")
+        if len(files) != len(recipe_paths):
+            raise ValueError("pinned compiler commit is missing one or more Stage1 build recipes")
+        return digest.hexdigest()
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
+        raise ValueError(f"cannot inspect pinned compiler build recipes: {error}") from error
+
+
+def validated_stage1_provenance(product: str, compiler_root: str,
+                                frontend_repo: str, frontend_revision: str) -> dict:
+    """Validate and return Stage1 provenance against the exact imported frontend commit."""
+    if not all((product, frontend_repo, frontend_revision)):
+        raise ValueError("Stage1 provenance requires product and pinned frontend inputs")
+    provenance_path = f"{product}.provenance.json"
+    try:
+        with open(provenance_path, encoding="utf-8") as handle:
+            provenance = json.load(handle)
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Stage1 provenance unavailable at {provenance_path}: {error}") from error
+    if not isinstance(provenance, dict) or provenance.get("schema") != "elisa-stage1-provenance-v1":
+        raise ValueError("Stage1 provenance has an unknown or malformed schema")
+
+    source_revision = provenance.get("source_revision")
+    source_tree = provenance.get("source_tree_sha256")
+    build_recipe = provenance.get("build_recipe_sha256")
+    product_sha256 = provenance.get("product_sha256")
+    if not isinstance(source_revision, str) or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
+        raise ValueError("Stage1 provenance is missing an exact committed source revision")
+    if not isinstance(source_tree, str) or re.fullmatch(r"[0-9a-f]{64}", source_tree) is None:
+        raise ValueError("Stage1 provenance is missing a valid source-tree digest")
+    if not isinstance(build_recipe, str) or re.fullmatch(r"[0-9a-f]{64}", build_recipe) is None:
+        raise ValueError("Stage1 provenance is missing a valid build-recipe digest")
+    if not isinstance(product_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", product_sha256) is None:
+        raise ValueError("Stage1 provenance is missing a valid product digest")
+    actual_product = file_digest(product)["sha256"]
+    if product_sha256 != actual_product:
+        raise ValueError("Stage1 product is stale: product digest differs from its provenance")
+
+    pinned_revision = git(frontend_repo, "rev-parse", "--verify",
+                          f"{frontend_revision}^{{commit}}")
+    if not pinned_revision:
+        raise ValueError(f"cannot resolve pinned frontend commit {frontend_revision!r}")
+    if source_revision != pinned_revision:
+        raise ValueError(
+            f"stage1/frontend provenance mismatch: stage1={source_revision} "
+            f"frontend={pinned_revision}"
+        )
+    expected_tree = committed_compiler_source_digest(frontend_repo, pinned_revision)
+    if source_tree != expected_tree:
+        raise ValueError("stage1/frontend provenance mismatch: source-tree digest differs from pinned frontend")
+    expected_recipe = committed_compiler_recipe_digest(frontend_repo, pinned_revision)
+    if build_recipe != expected_recipe:
+        raise ValueError("stage1/frontend provenance mismatch: build-recipe digest differs from pinned frontend")
+
+    if compiler_root:
+        snapshot_path = os.path.join(compiler_root, "SNAPSHOT")
+        if os.path.isfile(snapshot_path):
+            snapshot_values = {}
+            with open(snapshot_path, encoding="utf-8") as handle:
+                for line in handle:
+                    key, separator, value = line.partition(":")
+                    if separator:
+                        snapshot_values[key.strip()] = value.strip()
+            snapshot_revision = (snapshot_values.get("source_revision")
+                                 or snapshot_values.get("revision"))
+            if not snapshot_revision or not pinned_revision.startswith(snapshot_revision):
+                raise ValueError("Stage1 snapshot revision does not match the imported frontend pin")
+            if source_revision != pinned_revision:
+                raise ValueError("Stage1 product provenance does not match its installed snapshot")
+        else:
+            checkout_revision = git(compiler_root, "rev-parse", "--verify", "HEAD^{commit}")
+            if not checkout_revision or source_revision != checkout_revision:
+                raise ValueError("Stage1 product provenance does not match its source-worktree commit")
+    return provenance
+
+
+def stage1_provenance_revision(product: str, compiler_root: str,
+                               frontend_repo: str, frontend_revision: str) -> str:
+    """Return Stage1's source revision only after validating its full provenance."""
+    return validated_stage1_provenance(
+        product, compiler_root, frontend_repo, frontend_revision,
+    )["source_revision"]
+
+
 def target_triple(clang: str = "clang") -> str:
     try:
         result = subprocess.run([clang, "-dumpmachine"], check=True, capture_output=True, text=True)
@@ -127,6 +286,7 @@ def main() -> int:
     parser.add_argument("--identity-output", default="")
     parser.add_argument("--pair-generation", default="")
     parser.add_argument("--new-pair-generation", action="store_true")
+    parser.add_argument("--resolve-stage1-provenance", action="store_true")
     parser.add_argument("--check-existing", action="store_true")
     parser.add_argument("--refresh-proof-provenance", action="store_true")
     parser.add_argument("--refresh-manifest", default="")
@@ -153,6 +313,18 @@ def main() -> int:
 
     if arguments.new_pair_generation:
         print(uuid.uuid4().hex)
+        return 0
+
+    if arguments.resolve_stage1_provenance:
+        try:
+            revision = stage1_provenance_revision(
+                arguments.compiler_product, arguments.compiler_root,
+                arguments.frontend_repo, arguments.frontend_revision,
+            )
+        except (OSError, ValueError) as error:
+            print(f"build manifest: {error}", file=sys.stderr)
+            return 2
+        print(revision)
         return 0
 
     if arguments.recipes_digest:
@@ -296,6 +468,30 @@ def main() -> int:
     proof_head = git(arguments.proof_root, "rev-parse", "HEAD")
     proof_status = git(arguments.proof_root, "status", "--porcelain", "--", "src")
     frontend_tree = git(arguments.frontend_repo, "rev-parse", f"{arguments.frontend_revision}^{{tree}}")
+    stage1_revision = None
+    stage1_provenance = None
+    if arguments.stage == "stage1":
+        try:
+            stage1_provenance = validated_stage1_provenance(
+                arguments.compiler_product, arguments.compiler_root,
+                arguments.frontend_repo, arguments.frontend_revision,
+            )
+        except (OSError, ValueError) as error:
+            print(f"build manifest: {error}", file=sys.stderr)
+            return 2
+        stage1_revision = stage1_provenance["source_revision"]
+        if arguments.stage1_revision and arguments.stage1_revision != stage1_revision:
+            print("build manifest: supplied Stage1 revision differs from product provenance",
+                  file=sys.stderr)
+            return 2
+    compiler_source_revision = stage1_revision
+    compiler_source_dirty = False if stage1_revision else None
+    if not stage1_revision and arguments.compiler_root:
+        compiler_source_revision = git(arguments.compiler_root, "rev-parse", "HEAD") or None
+        compiler_source_dirty = bool(git(
+            arguments.compiler_root, "status", "--porcelain", "--untracked-files=no",
+        ))
+
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "pair_generation": arguments.pair_generation or None,
@@ -311,12 +507,14 @@ def main() -> int:
         },
         "compiler": {
             "stage": arguments.stage,
-            "stage1_revision": arguments.stage1_revision or None,
+            "stage1_revision": stage1_revision,
             "executable": file_digest(arguments.compiler),
             # A stage1 driver is a wrapper script; the product it runs is what emits code.
             "product": file_digest(arguments.compiler_product),
-            "source_revision": git(arguments.compiler_root, "rev-parse", "HEAD") or None if arguments.compiler_root else None,
-            "source_dirty": bool(git(arguments.compiler_root, "status", "--porcelain", "--untracked-files=no")) if arguments.compiler_root else None,
+            "source_revision": compiler_source_revision,
+            "source_tree_sha256": stage1_provenance["source_tree_sha256"] if stage1_provenance else None,
+            "build_recipe_sha256": stage1_provenance["build_recipe_sha256"] if stage1_provenance else None,
+            "source_dirty": compiler_source_dirty,
         },
         "runtime": file_digest(arguments.runtime),
         "profile_hooks": file_digest(arguments.profile_hooks),

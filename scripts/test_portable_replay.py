@@ -74,6 +74,15 @@ forged_goal["conclusion"] = append_node(forged_conditional, "binary", "or",
 forged_conditional["theorems"] = [reseal(forged_conditional, forged_goal)]
 refused(forged_conditional, "conditional-fallback-without-conjunct", "rejected", "kernel-rejected")
 
+# Root 51's bounded signed unit-shift rule must survive package export and replay in a fresh,
+# standalone process; producer-side acceptance alone is not sufficient evidence.
+signed_unit_shift = export_repro("minimal_conditional_signed_unit_shift_replay.elisa")
+assert signed_unit_shift["source"]["admissible"] is True
+assert len(signed_unit_shift["theorems"]) == 2, signed_unit_shift["theorems"]
+code, result = replay(signed_unit_shift, "conditional-signed-unit-shift-root-51")
+assert code == 0 and result["status"] == "replayed", result
+assert result["summary"] == {"theorems": 2, "replayed": 2, "not_replayed": 0}, result
+
 # Replay scratch quantifier binders are never part of the exported package.
 quantified = packages["collection_quantifier"]
 last_root = max(max([t["conclusion"]] + t["hypotheses"]) for t in quantified["theorems"])
@@ -86,4 +95,5 @@ runpy.run_path(str(ROOT / "scripts/tests/portable_replay_kernel_forgeries.py"), 
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_package_validation.py"), init_globals=globals())
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_structure_fuzz.py"), init_globals=globals())
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_raw_bytes.py"), init_globals=globals())
+runpy.run_path(str(ROOT / "scripts/tests/portable_replay_package_atomicity.py"), init_globals=globals())
 print("portable replay: %d packages replay; semantic and package-reader attacks are refused" % len(packages))

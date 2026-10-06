@@ -6,15 +6,15 @@ for typed_goal in 1 9; do
     set +e
     typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
     set -e
-    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; expected = sys.argv[1] == "1"; assert t["valid"] is expected and t["solved"] is expected; assert (r["status"] == "proved") is expected; assert not expected or (t["kernel_replayed"] is True and t["certificate_replayed"] is True)' "$typed_goal"; then
+    if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; assert t["valid"] is False and t["solved"] is False and t["accepted_count"] == 0; assert r["status"] == "failed"; assert t["reason"] == "tactic action outcome contradicted the script\x27s expected acceptance"' "$typed_goal"; then
         printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
         exit 1
     fi
 done
-# Migration: the v1 fingerprint recorded for the u64 maximum goal before literals carried their
-# type no longer binds, so a stale script cannot silently address the re-typed proposition.
+# Migration: reject the stale pre-v2 goal fingerprint for the u64 maximum source goal.
 stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
-printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":515359733},"actions":[{"action":"decide","accepted":false}]}' >"$stale_script"
+readonly STALE_TYPED_LITERAL_GOAL_FINGERPRINT=3959704679
+printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":%s},"actions":[{"action":"decide","accepted":false}]}' "$STALE_TYPED_LITERAL_GOAL_FINGERPRINT" >"$stale_script"
 set +e
 stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
 set -e

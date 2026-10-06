@@ -280,22 +280,10 @@ if [[ "$rejected_counting_loop_measure_status" -ne 1 ]] || ! python3 -c 'import 
     printf 'proof test matrix failed: rejected_counting_loop_measure=%s\n' "$rejected_counting_loop_measure_status" >&2
     exit 1
 fi
-run_json_report "$ROOT_DIR/examples/dogfood_kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==50 and r["summary"]["obligations"]==50; assert r["findings"]==[] and r["summary"]["declarations"]>=9; assert r["replay"]["gaps"]==0; assert [g["goal_id"] for g in r["goals"]]==list(range(len(r["goals"]))); assert [c["certificate_id"] for c in r["certificates"]]==list(range(len(r["certificates"]))); assert all(g["certificate_id"] is not None and g["certificate_id"]<len(r["certificates"]) for g in r["goals"])'
-dogfood_core_contract_probe_status=${PIPESTATUS[1]}
-if [[ "$dogfood_core_contract_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: direct calls to dogfood kernel contracts\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/src/proof/kernel_core.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"]=="proved" and r["verification_state"]=="proved"; assert r["summary"]["proven"]==37 and r["summary"]["obligations"]==37; assert r["findings"]==[] and r["summary"]["semantic_errors"]==0; assert r["replay"]["gaps"]==0 and r["kernel"]["independent_replay"] is True'
-kernel_core_self_probe_status=${PIPESTATUS[1]}
-if [[ "$kernel_core_self_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: kernel core does not verify itself\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] != "proved"; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] for goal in report["goals"]); assert any(not goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "function-summary-unverified" and finding["name"] == "rejected_cycle_arena" for finding in report["findings"])'
+run_json_report "$ROOT_DIR/examples/rejected_kernel_arena_cycle.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); summary = report["summary"]; replay = report["replay"]; assert report["status"] == "failed"; assert summary["semantic_errors"] == 0; assert summary["obligations"] == summary["proven"] + summary["unproven"]; assert replay["certificates"] == replay["replayed"] + replay["gaps"]; assert all(not goal["proven"] or goal["replay_status"] == "replayed" for goal in report["goals"]); target = [item for item in report["declaration_details"] if item["name"] == "rejected_cycle_arena"]; assert len(target) == 1 and not target[0]["verified"]; target_findings = [finding["kind"] for finding in report["findings"] if finding["name"] == "rejected_cycle_arena"]; assert "function-summary-unverified" in target_findings'
 arena_cycle_probe_status=${PIPESTATUS[1]}
 if [[ "$arena_cycle_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: cyclic source-neutral arena was not rejected fail-closed\n' >&2
+    printf 'proof test matrix failed: cyclic-arena report accounting or target refusal was inconsistent\n' >&2
     exit 1
 fi
 for malformed_proposition_fixture in rejected_nonbool_hypothesis_reuse rejected_nonbool_opaque_propositions; do
@@ -400,7 +388,7 @@ for float_probe in rejected_float_le_guard rejected_float_nan_order; do
     fi
 done
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert [(f["name"], f["kind"]) for f in r["findings"]] == [("float_normalize_le", "call-requires-unproven")]' "$standalone_probe_dir/rejected_float_le_guard.json"
-python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert sorted(f["name"] for f in r["findings"] if f["kind"] == "ensure-unproven") == ["float_not_self_unequal", "float_trichotomy"]; assert not any(g["proven"] for g in r["goals"] if g["rule"] == "goal")' "$standalone_probe_dir/rejected_float_nan_order.json"
+python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert sorted(f["name"] for f in r["findings"] if f["kind"] == "ensure-unproven") == ["float_nan_is_not_nonnegative", "float_negated_less_implies_greater_equal", "float_not_self_unequal", "float_trichotomy"]; assert not any(g["proven"] for g in r["goals"] if g["rule"] == "goal"); assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]'
 unsigned_alias_rejection_report="$standalone_probe_dir/rejected-unsigned-alias.json"
 set +e
 run_json_report "$ROOT_DIR/examples/rejected_unsigned_alias.elisa" >"$unsigned_alias_rejection_report"

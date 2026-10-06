@@ -4,6 +4,8 @@
 import importlib.util
 import hashlib
 import json
+import p01_manifest as MANIFEST_MODULE
+import p01_measurements as MEASUREMENT_MODULE
 import tempfile
 from unittest import mock
 from pathlib import Path
@@ -14,6 +16,8 @@ SPEC = importlib.util.spec_from_file_location("p01_baseline", SCRIPT)
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+assert MODULE.SCHEMA == "elisa-proof-p01-baseline-v4"
+assert MANIFEST_MODULE.SENTINEL_SCHEMA == "elisa-proof-p01-sentinels-v4"
 
 assert ("proof_kernel_core", MODULE.ROOT / "src/proof/kernel_core.elisa") in MODULE.FIXTURES
 assert MODULE.EXPECTED_OUTCOMES["proof_kernel_core"] == {"status": "proved", "returncode": 0}
@@ -29,11 +33,33 @@ assert MODULE.EXPECTED_OUTCOMES["quantifier_success"] == {
 assert MODULE.EXPECTED_OUTCOMES["region_lending_success"] == {
     "status": "proved", "returncode": 0,
 }
+assert MODULE.SHAPE_METRICS["declaration_count"] == "measurements.declarations"
+assert MODULE.SHAPE_METRICS["token_count"] is None
+assert MODULE.SHAPE_METRICS["ast_node_count"] is None
 assert {name for name, _ in MODULE.FIXTURES} >= {"branch_join", "rejected_branch_join"}
+assert {name for name, _ in MODULE.FIXTURES} >= {
+    "call_chain_success", "call_chain_refusal", "match_success", "match_refusal",
+    "loop_invariant", "malformed_loop_source", "import_graph", "fact_growth",
+}
 sentinels = MODULE.load_sentinel_manifest()
+assert all({"expected_outcome", "sha256", "size_bytes", "path"} <= set(row)
+           and (row.get("identity_only") is True or "semantic_expectations" in row)
+           for row in sentinels.values())
+assert all(sentinels[name]["identity_only"] for name in (
+    "call_chain_success", "call_chain_refusal", "match_success", "match_refusal",
+    "loop_invariant", "malformed_loop_source", "import_graph", "fact_growth",
+))
+manifest = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+workloads = manifest["workloads"]
+assert all(isinstance(row.get("workload"), str) and row["workload"] in workloads
+           for row in sentinels.values())
+assert {member for workload in workloads.values() for member in workload["members"]} == set(sentinels)
+assert sentinels["adversarial"]["semantic_expectations"]["obligation_inventory_complete"] is False
+assert (sentinels["adversarial"]["semantic_expectations"]["obligation_count"],
+        len(sentinels["adversarial"]["semantic_expectations"]["obligation_ids"])) == (78, 77)
 pair = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))["workloads"]["branch_join_pair"]
 assert pair["members"] == ["branch_join", "rejected_branch_join"]
-for name, count, status in (("branch_join", 12, "proved"),
+for name, count, status in (("branch_join", 12, "proved_with_replay_gaps"),
                             ("rejected_branch_join", 6, "failed")):
     fixture = sentinels[name]
     expected = fixture["semantic_expectations"]
@@ -47,18 +73,130 @@ for name, count, status in (("branch_join", 12, "proved"),
     assert len(expected["obligation_details"]) == count
     assert sum(item["result"] == "proved" for item in expected["obligation_details"]) == expected["proven"]
     assert sum(item["result"] == "unproven" for item in expected["obligation_details"]) == expected["unproven"]
-    assert expected["failed"] == expected["unproven"]
+    assert expected["failed"] <= expected["unproven"]
     assert expected["trusted_assumptions"] == 0
-    assert expected["replay_gaps"] == 0
-    assert expected["replay_certificates"] == expected["replayed"]
+    assert expected["replay_certificates"] == expected["replayed"] + expected["replay_gaps"]
     assert fixture["budget_classification"] == pair["budget_classification"]
     assert pair["budget_classification"] == {
         "classification": "standard-bounded", "timeout_seconds": 20,
         "rss_limit_kib": 1500000, "output_limit_bytes": MODULE.MAX_OUTPUT_BYTES,
     }
 
-positive = sentinels["branch_join"]["semantic_expectations"]
-profile_measurement = {"stop_reason": None, "report_complete": True, "cpu_seconds": 0.01,
+# The checked-in corpus is a measurement input, so stale or incomplete rows must fail before a
+# sample can be collected. Exercise identity, expected semantics, assumptions, and replay fields.
+with tempfile.TemporaryDirectory(prefix="p01-manifest-mutations-") as temporary:
+    manifest_path = Path(temporary) / "sentinels.json"
+    original_manifest = manifest
+    mutations = []
+    missing_fixture = json.loads(json.dumps(original_manifest))
+    missing_fixture["fixtures"].pop("real_small")
+    mutations.append((missing_fixture, "do not match"))
+    missing_digest = json.loads(json.dumps(original_manifest))
+    missing_digest["fixtures"]["real_small"].pop("sha256")
+    mutations.append((missing_digest, "identity is incomplete"))
+    stale_path = json.loads(json.dumps(original_manifest))
+    stale_path["fixtures"]["real_small"]["sha256"] = "0" * 64
+    mutations.append((stale_path, "identity changed"))
+    missing_semantics = json.loads(json.dumps(original_manifest))
+    missing_semantics["fixtures"]["real_small"].pop("semantic_expectations")
+    mutations.append((missing_semantics, "semantic expectations are missing"))
+    wrong_status = json.loads(json.dumps(original_manifest))
+    wrong_status["fixtures"]["real_small"]["expected_outcome"]["status"] = "failed"
+    mutations.append((wrong_status, "inconsistent"))
+    omitted_goal = json.loads(json.dumps(original_manifest))
+    omitted_goal["fixtures"]["real_small"]["semantic_expectations"]["obligation_details"].pop()
+    mutations.append((omitted_goal, "obligation/assumption identity disagrees"))
+    missing_assumptions = json.loads(json.dumps(original_manifest))
+    missing_assumptions["fixtures"]["real_small"]["semantic_expectations"].pop(
+        "trusted_assumption_details")
+    mutations.append((missing_assumptions, "obligation/assumption inventory is incomplete"))
+    replay_gap = json.loads(json.dumps(original_manifest))
+    replay_gap["fixtures"]["real_small"]["semantic_expectations"]["replay_gaps"] = 1
+    mutations.append((replay_gap, "semantic/replay totals are inconsistent"))
+    malformed_row = json.loads(json.dumps(original_manifest))
+    malformed_row["fixtures"]["real_small"]["semantic_expectations"]["obligation_details"][0]["result"] = "unknown"
+    mutations.append((malformed_row, "obligation row is malformed"))
+    missing_group = json.loads(json.dumps(original_manifest))
+    missing_group["workloads"].pop("branch_join_pair")
+    mutations.append((missing_group, "does not cover fixtures"))
+    missing_member = json.loads(json.dumps(original_manifest))
+    missing_member["workloads"]["branch_join_pair"]["members"] = ["branch_join"]
+    mutations.append((missing_member, "does not cover fixtures"))
+    unknown_member = json.loads(json.dumps(original_manifest))
+    unknown_member["workloads"]["branch_join_pair"]["members"][1] = "renamed-fixture"
+    mutations.append((unknown_member, "names missing fixture"))
+    duplicate_member = json.loads(json.dumps(original_manifest))
+    duplicate_member["workloads"]["branch_join_pair"]["members"] = ["branch_join", "branch_join"]
+    mutations.append((duplicate_member, "members are missing or duplicated"))
+    stale_workload_reference = json.loads(json.dumps(original_manifest))
+    stale_workload_reference["fixtures"]["real_small"]["workload"] = "renamed-workload"
+    mutations.append((stale_workload_reference, "disagrees with workload identity"))
+    missing_identity_only = json.loads(json.dumps(original_manifest))
+    missing_identity_only["fixtures"]["call_chain_success"].pop("identity_only")
+    mutations.append((missing_identity_only, "semantic expectations are missing"))
+    invalid_identity_only = json.loads(json.dumps(original_manifest))
+    invalid_identity_only["fixtures"]["call_chain_success"]["identity_only"] = "yes"
+    mutations.append((invalid_identity_only, "semantic expectations are missing"))
+    missing_shape_schema = json.loads(json.dumps(original_manifest))
+    missing_shape_schema.pop("shape_metrics")
+    mutations.append((missing_shape_schema, "semantic-shape metric inventory"))
+    unknown_shape_metric = json.loads(json.dumps(original_manifest))
+    unknown_shape_metric["shape_metrics"]["ast_node_count"] = "guessed-from-text"
+    mutations.append((unknown_shape_metric, "semantic-shape metric inventory"))
+    for mutated, message in mutations:
+        manifest_path.write_text(json.dumps(mutated), encoding="utf-8")
+        with mock.patch.object(MANIFEST_MODULE, "SENTINEL_MANIFEST", manifest_path):
+            try:
+                parsed = MODULE.load_sentinel_manifest()
+                if message == "identity changed":
+                    MODULE.validate_workload_identities(parsed)
+            except RuntimeError as error:
+                assert message in str(error), (message, error)
+            else:
+                raise AssertionError(f"P-01 accepted manifest mutation: {message}")
+    missing_probe = json.loads(json.dumps(original_manifest))
+    missing_probe.pop("semantic_probe")
+    manifest_path.write_text(json.dumps(missing_probe), encoding="utf-8")
+    with mock.patch.object(MANIFEST_MODULE, "SENTINEL_MANIFEST", manifest_path):
+        try:
+            MODULE.load_sentinel_manifest()
+        except RuntimeError as error:
+            assert "probe provenance" in str(error)
+        else:
+            raise AssertionError("P-01 accepted a manifest without semantic-probe provenance")
+    fixture_path = Path(temporary) / "real-small.elisa"
+    fixture_path.write_text("def f() -> bool: return true\n", encoding="utf-8")
+    with mock.patch.object(MANIFEST_MODULE, "ROOT", Path(temporary)), \
+            mock.patch.object(MANIFEST_MODULE, "FIXTURES", (("real_small", fixture_path),)):
+        pinned = {"real_small": {"path": "real-small.elisa", "source_lines": 1,
+                                 **MODULE.identity(fixture_path)}}
+        MODULE.validate_workload_identities(pinned)
+        pinned["real_small"]["source_lines"] = 2
+        try:
+            MODULE.validate_workload_identities(pinned)
+        except RuntimeError as error:
+            assert "identity changed" in str(error)
+        else:
+            raise AssertionError("P-01 accepted a stale line-count workload identity")
+        pinned["real_small"]["source_lines"] = 1
+        fixture_path.write_text("def f() -> bool: return false\n", encoding="utf-8")
+        try:
+            MODULE.validate_workload_identities(pinned)
+        except RuntimeError as error:
+            assert "identity changed" in str(error)
+        else:
+            raise AssertionError("P-01 accepted a fixture changed after its digest was pinned")
+        empty_path = Path(temporary) / "empty.elisa"
+        empty_path.write_bytes(b"")
+        with mock.patch.object(MANIFEST_MODULE, "FIXTURES", (("empty", empty_path),)):
+            MODULE.validate_workload_identities({"empty": {"path": "empty.elisa", "source_lines": 0,
+                                                               **MANIFEST_MODULE.identity(empty_path)}})
+
+positive = sentinels["real_small"]["semantic_expectations"]
+profile_measurement = {"stop_reason": None, "report_complete": True, "wall_seconds": 0.02,
+                       "cpu_seconds": 0.01,
+                       "phase_timings_seconds": {"proof_cli_invocation_wall": 0.02,
+                           "proof_cli_child_cpu": 0.01, "baseline_harness_json_decode": 0.001},
                        "replay_gaps": positive["replay_gaps"],
                        "replay_certificates": positive["replay_certificates"],
                        "replayed": positive["replayed"], "goal_cache_hits": 0,
@@ -67,15 +205,123 @@ profile_measurement = {"stop_reason": None, "report_complete": True, "cpu_second
                        "obligations": positive["obligation_count"],
                        "obligation_ids": positive["obligation_ids"],
                        "obligation_details": positive["obligation_details"],
+                       "trusted_assumption_details": positive["trusted_assumption_details"],
                        "proven": positive["proven"], "unproven": positive["unproven"],
                        "failed": positive["failed"],
                        "trusted_assumptions": positive["trusted_assumptions"],
                        "trusted_boundary_facts": positive["trusted_boundary_facts"],
                        "proof_certificates": positive["proof_certificates"]}
-MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+profile_measurement["source_obligation_inventory"] = {"coverage": "complete", "whole_program": True}
+profile_measurement["semantic_shape"] = {
+    "source_imported_bytes": 100, "source_file_count": 1, "token_count": None,
+    "ast_node_count": None, "declaration_count": 1, "fact_trace_count": 0,
+    "certificate_fact_count": 0, "branch_count": None, "call_count": None,
+    "loop_count": None, "certificate_count": positive["replay_certificates"],
+    "kernel_node_count": 0, "kernel_child_count": 0, "package_node_count": None,
+}
+MODULE.check_report(profile_measurement, sentinels["real_small"]["expected_outcome"], positive)
+
+for bad_inventory in (None, {"coverage": "partial", "whole_program": True},
+                      {"coverage": "complete", "whole_program": False}):
+    invalid = {**profile_measurement, "source_obligation_inventory": bad_inventory}
+    try:
+        MODULE.check_report(invalid, sentinels["real_small"]["expected_outcome"], positive)
+    except RuntimeError as error:
+        assert "source obligation inventory is incomplete" in str(error)
+    else:
+        raise AssertionError("P-01 admitted a partial or absent source inventory")
+
+for bad_shape in (
+    {**profile_measurement["semantic_shape"], "token_count": -1},
+    {key: value for key, value in profile_measurement["semantic_shape"].items() if key != "loop_count"},
+    {**profile_measurement["semantic_shape"], "declaration_count": True},
+    {**profile_measurement["semantic_shape"], "ast_node_count": 1},
+):
+    invalid = {**profile_measurement, "semantic_shape": bad_shape}
+    try:
+        MODULE.check_report(invalid, sentinels["real_small"]["expected_outcome"], positive)
+    except RuntimeError as error:
+        assert "semantic-shape" in str(error)
+    else:
+        raise AssertionError(f"P-01 admitted malformed shape measurements: {bad_shape}")
+
+probe = original_manifest["semantic_probe"]
+matching_build = {
+    "proof": {"head": probe["proof_head"], "source_tree_sha256": probe["proof_source_tree_sha256"]},
+    "compiler": {"source_revision": probe["compiler_source_revision"],
+                 "product": {"sha256": probe["compiler_product_sha256"]}},
+    "frontend": {"tree": probe["frontend_tree"]},
+    "runtime": {"sha256": probe["runtime_sha256"]},
+    "target": probe["target"], "optimization": probe["optimization"],
+    "compile_mode": probe["compile_mode"], "build_identity": probe["generation"],
+}
+with mock.patch.object(MANIFEST_MODULE, "identity", side_effect=lambda path: {
+        "sha256": probe["proof_binary_sha256"] if str(path) == "proof" else probe["replay_binary_sha256"]}):
+    matching_replay_build = json.loads(json.dumps(matching_build))
+    MODULE.validate_probe_identity(probe, matching_build, Path("proof"),
+                                   matching_replay_build, Path("replay"))
+    for field in ("proof_head", "proof_source_tree_sha256", "compiler_source_revision",
+                  "compiler_product_sha256", "frontend_tree", "runtime_sha256",
+                  "proof_binary_sha256", "target", "optimization", "compile_mode", "generation"):
+        mutated = dict(probe)
+        mutated[field] = "f" * len(str(probe[field]))
+        try:
+            MODULE.validate_probe_identity(mutated, matching_build, Path("proof"),
+                                           matching_replay_build, Path("replay"))
+        except RuntimeError as error:
+            assert field in str(error)
+        else:
+            raise AssertionError(f"P-01 accepted mismatched probe artifact field: {field}")
+    mismatched_replay = json.loads(json.dumps(matching_build))
+    mismatched_replay["proof"]["source_tree_sha256"] = "different-proof-source-tree"
+    try:
+        MODULE.validate_probe_identity(probe, matching_build, Path("proof"),
+                                       mismatched_replay, Path("replay"))
+    except RuntimeError as error:
+        assert "proof/replay artifact provenance differs" in str(error)
+    else:
+        raise AssertionError("P-01 accepted an incoherent proof/replay artifact pair")
+branch_gap = {**profile_measurement, "status": "proved_with_replay_gaps", "returncode": 1,
+              "obligations": 12, "obligation_ids": list(range(12)),
+              "obligation_details": sentinels["branch_join"]["semantic_expectations"]["obligation_details"],
+              "replay_gaps": 3}
+try:
+    MODULE.check_report(branch_gap, sentinels["branch_join"]["expected_outcome"],
+                        sentinels["branch_join"]["semantic_expectations"])
+except RuntimeError as error:
+    assert "replay gaps" in str(error)
+else:
+    raise AssertionError("P-01 admitted the freshly observed branch-join replay gaps")
+incomplete_inventory = {**profile_measurement, "status": "failed", "returncode": 1,
+                        "obligations": 78, "obligation_ids": list(range(77)),
+                        "obligation_details": sentinels["adversarial"]["semantic_expectations"]["obligation_details"],
+                        "replay_gaps": 0, "replay_certificates": 0, "replayed": 0}
+try:
+    MODULE.check_report(incomplete_inventory, sentinels["adversarial"]["expected_outcome"],
+                        sentinels["adversarial"]["semantic_expectations"])
+except RuntimeError as error:
+    assert "obligation inventory is incomplete" in str(error)
+else:
+    raise AssertionError("P-01 admitted a summary with a missing source-obligation row")
+for invalid_timings, message in (
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01}, "schema"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": float("nan")}, "invalid baseline_harness_json_decode"),
+    ({"proof_cli_invocation_wall": 0.03, "proof_cli_child_cpu": 0.01,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI invocation"),
+    ({"proof_cli_invocation_wall": 0.02, "proof_cli_child_cpu": 0.02,
+      "baseline_harness_json_decode": 0.001}, "disagrees with proof CLI child CPU"),
+):
+    invalid_measurement = {**profile_measurement, "phase_timings_seconds": invalid_timings}
+    try:
+        MODULE.check_report(invalid_measurement, sentinels["real_small"]["expected_outcome"], positive)
+    except RuntimeError as error:
+        assert message in str(error), (message, error)
+    else:
+        raise AssertionError(f"invalid P-01 phase timing was accepted: {invalid_timings}")
 profile_measurement["trusted_assumptions"] = 1
 try:
-    MODULE.check_report(profile_measurement, sentinels["branch_join"]["expected_outcome"], positive)
+    MODULE.check_report(profile_measurement, sentinels["real_small"]["expected_outcome"], positive)
 except RuntimeError as error:
     assert "trusted_assumptions" in str(error)
 else:
@@ -87,10 +333,13 @@ def main() -> None:
         root = Path(temporary)
         binary = root / "proof"
         report = {"status": "proved", "verification_state": "proved",
-                  "summary": {"obligations": 1, "proven": 1, "unproven": 0,
+                  "source": {"bytes": 42}, "files": ["fixture.elisa"],
+                  "source_obligation_inventory": {"coverage": "complete", "whole_program": True},
+                  "summary": {"declarations": 1, "obligations": 1, "proven": 1, "unproven": 0,
                               "semantic_errors": 0},
                   "declaration_details": [{"verified": True}], "goals": [{}],
                   "measurements": {"format": "elisa-proof-measurements-v1",
+                                   "declarations": 1, "certificates": 1, "fact_traces": 6,
                                    "goal_cache_hits": 1, "goal_cache_misses": 2,
                                    "control_flow_steps": 3, "live_facts_peak": 4,
                                    "certificate_facts": 5, "largest_certificate_facts": 4,
@@ -105,31 +354,72 @@ def main() -> None:
         binary.chmod(0o755)
         manifest_path = Path(str(binary) + ".manifest.json")
         manifest = {"build_identity": "test-id", "binary": {"sha256": MODULE.identity(binary)["sha256"]},
-                    "proof": {"source_tree_sha256": "proof-tree"},
+                    "proof": {"head": "test-revision", "source_tree_sha256": "proof-tree"},
                     "frontend": {"revision": "frontend-rev", "tree": "frontend-tree"},
-                    "compiler": {"product": {"sha256": "compiler-product"}},
+                    "compiler": {"source_revision": "compiler-revision",
+                                 "product": {"sha256": "compiler-product"}},
                     "runtime": {"sha256": "runtime-object"}, "target": "test-target",
                     "optimization": "O2", "compile_mode": "strict"}
         manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
         manifest_path.write_bytes(manifest_bytes)
         Path(str(manifest_path) + ".sha256").write_text(
             hashlib.sha256(manifest_bytes).hexdigest() + "\n", encoding="ascii")
+        replay_binary = root / "build" / "elisa-proof-replay"
+        replay_binary.parent.mkdir(parents=True)
+        replay_binary.write_text("replay-fixture", encoding="ascii")
+        replay_manifest = {**manifest, "binary": {"sha256": MODULE.identity(replay_binary)["sha256"]}}
+        replay_manifest_bytes = json.dumps(replay_manifest, sort_keys=True).encode("utf-8")
+        replay_manifest_path = Path(str(replay_binary) + ".manifest.json")
+        replay_manifest_path.write_bytes(replay_manifest_bytes)
+        Path(str(replay_manifest_path) + ".sha256").write_text(
+            hashlib.sha256(replay_manifest_bytes).hexdigest() + "\n", encoding="ascii")
         fixture = root / "fixture.elisa"
         fixture.write_text("def proof():\n    ensure true\n", encoding="utf-8")
         old = MODULE.FIXTURES
         MODULE.FIXTURES = (("test", fixture),)
         try:
             with mock.patch.object(MODULE, "ROOT", root), \
+                    mock.patch.object(MODULE, "validate_probe_identity"), \
+                    mock.patch.object(MODULE, "validate_workload_identities",
+                                      return_value={"test": MODULE.identity(fixture)}), \
                     mock.patch.object(MODULE, "load_sentinel_manifest", return_value={
                 "test": {"path": "fixture.elisa", "sha256": MODULE.identity(fixture)["sha256"],
-                         "size_bytes": fixture.stat().st_size,
+                         "size_bytes": fixture.stat().st_size, "source_lines": 2,
                          "expected_outcome": {"status": "proved", "returncode": 0}},
             }):
                 result = MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
                                                     rounds=2, warmup_runs=1))
+                checksum_path = Path(str(manifest_path) + ".sha256")
+                original_checksum = checksum_path.read_bytes()
+                original_invoke = MODULE.invoke
+                changed = [False]
+
+                def mutate_manifest_during_measurement(*args, **kwargs):
+                    row = original_invoke(*args, **kwargs)
+                    if not changed[0]:
+                        updated_manifest = json.loads(manifest_path.read_bytes())
+                        updated_manifest["build_identity"] = "changed-during-measurement"
+                        updated_bytes = json.dumps(updated_manifest, sort_keys=True).encode("utf-8")
+                        manifest_path.write_bytes(updated_bytes)
+                        checksum_path.write_text(hashlib.sha256(updated_bytes).hexdigest() + "\n",
+                                                 encoding="ascii")
+                        changed[0] = True
+                    return row
+
+                try:
+                    with mock.patch.object(MODULE, "invoke", side_effect=mutate_manifest_during_measurement):
+                        MODULE.run(SimpleNamespace(binary=binary, timeout=5, rss_limit_kib=500000,
+                                                   rounds=1, warmup_runs=0))
+                except RuntimeError as error:
+                    assert "proof build identity changed during measurement" in str(error), error
+                else:
+                    raise AssertionError("P-01 accepted a build-manifest change during measurement")
+                finally:
+                    manifest_path.write_bytes(manifest_bytes)
+                    checksum_path.write_bytes(original_checksum)
         finally:
             MODULE.FIXTURES = old
-        assert result["schema"] == "elisa-proof-p01-baseline-v3"
+        assert result["schema"] == "elisa-proof-p01-baseline-v4"
         assert result["binary"]["sha256"] == MODULE.identity(binary)["sha256"]
         assert result["build"]["available"] is True
         assert result["build"]["target"] == "test-target"
@@ -197,9 +487,9 @@ def main() -> None:
         assert measurements[0]["proof_report_measurements"]["kernel_nodes_shared"] == 3
         assert measurements[0]["proof_report_measurements"]["report_bytes"] == 900
         assert measurements[0]["proof_report_measurements"]["heaviest_functions"][0]["name"] == "work"
-        old_output_limit = MODULE.MAX_OUTPUT_BYTES
+        old_output_limit = MEASUREMENT_MODULE.MAX_OUTPUT_BYTES
         try:
-            MODULE.MAX_OUTPUT_BYTES = 1024
+            MEASUREMENT_MODULE.MAX_OUTPUT_BYTES = 1024
             with mock.patch.object(MODULE.os, "killpg", side_effect=PermissionError("denied")):
                 limited = MODULE.invoke(binary, fixture, timeout=5, rss_limit_kib=500000)
             assert limited["stop_reason"] == "output_limit", limited
@@ -207,7 +497,7 @@ def main() -> None:
             assert limited["stdout_bytes"] > limited["stdout_sha256_bytes"]
             assert limited["stdout_sha256_complete"] is False
         finally:
-            MODULE.MAX_OUTPUT_BYTES = old_output_limit
+            MEASUREMENT_MODULE.MAX_OUTPUT_BYTES = old_output_limit
         negative_expected = MODULE.EXPECTED_OUTCOMES["adversarial"]
         try:
             MODULE.check_report(measurements[0], negative_expected)

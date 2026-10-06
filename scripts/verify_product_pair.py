@@ -55,13 +55,16 @@ def read_manifest(binary: Path, generation: str) -> dict:
             raise ValueError(f"generation artifact is not a regular file: {artifact}")
     raw = manifest_path.read_bytes()
     manifest = json.loads(raw)
+    if not isinstance(manifest, dict):
+        raise ValueError(f"manifest root is not an object: {manifest_path}")
     recorded_manifest_digest = checksum_path.read_text(encoding="ascii").strip()
     if recorded_manifest_digest != hashlib.sha256(raw).hexdigest():
         raise ValueError(f"manifest checksum mismatch: {manifest_path}")
     if manifest.get("pair_generation") != generation:
         raise ValueError(f"generation mismatch in {manifest_path}")
     actual_binary_digest = sha256(binary)
-    if manifest.get("binary", {}).get("sha256") != actual_binary_digest:
+    binary_identity = manifest.get("binary")
+    if not isinstance(binary_identity, dict) or binary_identity.get("sha256") != actual_binary_digest:
         raise ValueError(f"binary checksum mismatch: {binary}")
     return manifest
 
@@ -102,9 +105,14 @@ def shared_build_identity(manifest: dict) -> dict:
         "stage": stage,
         "stage1_revision": compiler.get("stage1_revision"),
         "source_revision": compiler.get("source_revision"),
+        "source_tree_sha256": compiler.get("source_tree_sha256"),
+        "build_recipe_sha256": compiler.get("build_recipe_sha256"),
         "source_dirty": compiler.get("source_dirty"),
     }
-    if any(field not in compiler for field in ("stage1_revision", "source_revision", "source_dirty")):
+    if any(field not in compiler for field in (
+        "stage1_revision", "source_revision", "source_tree_sha256",
+        "build_recipe_sha256", "source_dirty",
+    )):
         raise ValueError("build manifest is missing compiler source provenance")
     if compiler_identity["stage1_revision"] is not None and not isinstance(compiler_identity["stage1_revision"], str):
         raise ValueError("build manifest has malformed Stage1 revision")
@@ -112,6 +120,18 @@ def shared_build_identity(manifest: dict) -> dict:
         raise ValueError("build manifest has malformed compiler source revision")
     if compiler_identity["source_dirty"] is not None and not isinstance(compiler_identity["source_dirty"], bool):
         raise ValueError("build manifest has malformed compiler dirty-source flag")
+    if stage == "stage1":
+        revision = compiler_identity["stage1_revision"]
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            raise ValueError("Stage1 build manifest is missing an exact source revision")
+        if compiler_identity["source_revision"] != revision:
+            raise ValueError("Stage1 source revision differs from product provenance")
+        if revision != frontend_revision:
+            raise ValueError("Stage1 source revision differs from imported frontend revision")
+        for field in ("source_tree_sha256", "build_recipe_sha256"):
+            if (not isinstance(compiler_identity[field], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", compiler_identity[field]) is None):
+                raise ValueError(f"Stage1 build manifest has no valid {field} provenance")
     for role in ("executable", "product"):
         artifact = compiler.get(role)
         if not isinstance(artifact, dict):
@@ -259,6 +279,59 @@ def resolve(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def read_compatibility_manifest(binary: Path, manifest_path: Path, checksum_path: Path) -> dict:
+    for artifact in (binary, manifest_path, checksum_path):
+        if artifact.is_symlink() or not artifact.is_file():
+            raise ValueError(f"expected build artifact is not a regular file: {artifact}")
+    raw = manifest_path.read_bytes()
+    manifest = json.loads(raw)
+    if not isinstance(manifest, dict):
+        raise ValueError(f"expected manifest root is not an object: {manifest_path}")
+    if checksum_path.read_text(encoding="ascii").strip() != hashlib.sha256(raw).hexdigest():
+        raise ValueError(f"expected manifest checksum mismatch: {manifest_path}")
+    binary_identity = manifest.get("binary")
+    if not isinstance(binary_identity, dict) or binary_identity.get("sha256") != sha256(binary):
+        raise ValueError(f"expected binary checksum mismatch: {binary}")
+    return manifest
+
+
+def check_current(arguments: argparse.Namespace) -> int:
+    """Return success only when CURRENT is the exact pair represented by build outputs."""
+    expected = [
+        read_compatibility_manifest(Path(arguments.proof_binary),
+                                    Path(arguments.proof_manifest),
+                                    Path(arguments.proof_manifest_sha256)),
+        read_compatibility_manifest(Path(arguments.replay_binary),
+                                    Path(arguments.replay_manifest),
+                                    Path(arguments.replay_manifest_sha256)),
+    ]
+    if expected[0].get("proof") != expected[1].get("proof"):
+        raise ValueError("expected proof and replay outputs have different source provenance")
+    require_matching_build_identity(expected[0], expected[1])
+
+    try:
+        root = Path(arguments.generation_root).resolve()
+        generation = (root / "CURRENT").read_text(encoding="ascii").strip()
+        if not generation or any(character not in "0123456789abcdef" for character in generation):
+            raise ValueError("CURRENT does not contain a valid generation identity")
+        directory = root / generation
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"current generation is missing or not a regular directory: {directory}")
+        current = [read_manifest(directory / name, generation) for name in PRODUCTS]
+        if current[0].get("proof") != expected[0].get("proof"):
+            raise ValueError("current pair names a different proof source snapshot")
+        require_matching_build_identity(current[0], current[1])
+        for product, actual, wanted in zip(PRODUCTS, current, expected):
+            if actual.get("build_identity") != wanted.get("build_identity"):
+                raise ValueError(f"current {product} has a different build identity")
+            if actual.get("binary", {}).get("sha256") != wanted.get("binary", {}).get("sha256"):
+                raise ValueError(f"current {product} has a different executable")
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        print(f"product pair: current generation requires refresh: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -271,9 +344,21 @@ def main() -> int:
     publish_parser.add_argument("--replay-manifest", required=True)
     resolve_parser = commands.add_parser("resolve")
     resolve_parser.add_argument("--generation-root", required=True)
+    current_parser = commands.add_parser("check-current")
+    current_parser.add_argument("--generation-root", required=True)
+    current_parser.add_argument("--proof-binary", required=True)
+    current_parser.add_argument("--proof-manifest", required=True)
+    current_parser.add_argument("--proof-manifest-sha256", required=True)
+    current_parser.add_argument("--replay-binary", required=True)
+    current_parser.add_argument("--replay-manifest", required=True)
+    current_parser.add_argument("--replay-manifest-sha256", required=True)
     arguments = parser.parse_args()
     try:
-        return publish(arguments) if arguments.command == "publish" else resolve(arguments)
+        if arguments.command == "publish":
+            return publish(arguments)
+        if arguments.command == "resolve":
+            return resolve(arguments)
+        return check_current(arguments)
     except (OSError, ValueError, json.JSONDecodeError, RuntimeError) as error:
         print(f"product pair: {error}", file=sys.stderr)
         return 2

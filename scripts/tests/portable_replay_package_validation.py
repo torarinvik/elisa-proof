@@ -9,6 +9,46 @@ import subprocess
 
 from portable_replay_support import *
 
+
+def refused_without_theorem_publication(package, name, status, reason):
+    path = WORK / (name + ".json")
+    path.write_text(json.dumps(package, separators=(",", ":")), encoding="utf-8")
+    checked = subprocess.run([str(REPLAY), str(path)], capture_output=True, timeout=120)
+    assert len(checked.stdout) <= 4096 and len(checked.stderr) <= 4096, (name, "unbounded refusal")
+    result = json.loads(checked.stdout)
+    assert checked.returncode == 1 and result.get("status") == status \
+        and result.get("reason") == reason, (name, checked.returncode, result)
+    assert result.get("theorems") == [], (name, result)
+    assert result.get("summary") == {"theorems": 0, "replayed": 0, "not_replayed": 0}, (name, result)
+    return result
+
+
+def duplicate_object_member(serialized, object_marker, key_token):
+    """Append a repeated member to a selected emitted object without normalizing its JSON."""
+    marker = serialized.index(object_marker)
+    opening = serialized.index("{", marker + len(object_marker) - 1)
+    depth = 0
+    in_string = False
+    escaped = False
+    for offset in range(opening, len(serialized)):
+        char = serialized[offset]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return serialized[:offset] + "," + key_token + ":null" + serialized[offset:]
+    raise AssertionError(("unterminated object", object_marker))
+
 # Header, trust and schema: nothing is inferred, over-claimed or accepted twice.
 text = json.dumps(with_theorem(base, assumption))
 valid_header = with_theorem(base, assumption)
@@ -26,6 +66,40 @@ assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, r
 assert result["theorems"] == [], result
 refused(text.replace('{"format": ', '{"format": "elisa-proof-package-v1", "format": ', 1),
         "duplicate-key", "malformed", "package-schema")
+
+# The package parser preserves repeated JSON members. Every object that can affect admission,
+# resource bounds, theorem roots, or replay identity must therefore reject a duplicate before
+# field lookup can inherit first-wins/last-wins behavior. Include an escaped spelling of the same
+# top-level key: key decoding must not let a duplicate bypass the exact-member-count check.
+serialized = json.dumps(valid_header, separators=(",", ":"))
+duplicate_key_cases = (
+    ("duplicate-format-escaped", "{", "\"\\u0066ormat\"", "package-schema"),
+    ("duplicate-source-authenticated", "\"source\":{", "\"authenticated\"", "source-schema"),
+    ("duplicate-fingerprint-value", "\"fingerprint\":{", "\"value\"", "source-schema"),
+    ("duplicate-trust-hypotheses", "\"trust\":{", "\"hypotheses\"", "trust-schema"),
+    ("duplicate-kernel-nodes", "\"kernel\":{", "\"nodes\"", "kernel-schema"),
+    ("duplicate-kernel-children", "\"kernel\":{", "\"children\"", "kernel-schema"),
+    ("duplicate-node-left", "\"nodes\":[", "\"left\"", "node-schema"),
+    ("duplicate-theorem-hypotheses", "\"theorems\":[", "\"hypotheses\"", "theorem-schema"),
+    ("duplicate-theorem-conclusion", "\"theorems\":[", "\"conclusion\"", "theorem-schema"),
+    ("duplicate-theorem-identity", "\"theorems\":[", "\"statement\"", "theorem-schema"),
+    ("duplicate-theorem-fingerprint", "\"theorems\":[", "\"goal_fingerprint\"", "theorem-schema"),
+)
+for label, object_marker, key_token, reason in duplicate_key_cases:
+    duplicated = duplicate_object_member(serialized, object_marker, key_token)
+    result = refused(duplicated, label, "malformed", reason)
+    assert result["summary"]["replayed"] == 0 and all(
+        theorem["status"] != "replayed" for theorem in result["theorems"]
+    ), (label, result)
+
+# Origin records are opaque presentation metadata: replay validates only that one slot exists per
+# hypothesis, then ignores the record's object members. A duplicate there cannot select a root,
+# alter trust, affect a budget, or change the canonical sequent identity.
+origin_duplicate = duplicate_object_member(
+    serialized, "\"hypothesis_origins\":[{", "\"kind\"",
+)
+origin_code, origin_result = replay_text(origin_duplicate, "duplicate-ignored-origin-metadata")
+assert origin_code == 0 and origin_result["status"] == "replayed", origin_result
 # Boolean fields accept only JSON booleans. Similar-looking values must fail as a structured
 # source-schema error before any kernel package is admitted.
 for malformed_boolean in (0, 1, None, "false", [], {}):
@@ -121,10 +195,12 @@ for bad in ("-1", "2", "9223372036854775807"):
     theorem["conclusion"] = boolean_root
     claim["theorems"] = [reseal(claim, theorem)]
     refused(claim, "bool-payload-range-" + bad, "malformed", "arena-inadmissible")
-for bad in (1.5, -1, 2**53, "3", True):
+for bad, reason in ((1.5, "number-format"), (-1, "number-format"),
+                    (2**53, "theorem-schema"), ("3", "theorem-schema"),
+                    (True, "theorem-schema")):
     claim = with_theorem(base, assumption)
     claim["theorems"][0]["conclusion"] = bad
-    refused(claim, "index-%r" % (bad,), "malformed", "theorem-schema")
+    refused(claim, "index-%r" % (bad,), "malformed", reason)
 claim = with_theorem(base, assumption)
 claim["theorems"][0]["hypothesis_origins"] = []
 refused(claim, "origins", "malformed", "theorem-schema")
@@ -149,18 +225,41 @@ refused(extreme, "extreme-value-off-by-one", "rejected", "statement-mismatch")
 
 # Budgets are checked before the work they bound.
 huge = with_theorem(base, assumption)
+huge["kernel"]["nodes"] = [{}] * 1000000
+exact_node_result = refused_without_theorem_publication(
+    huge, "node-budget-exact-shape-shadow", "malformed", "node-schema")
+# A fully valid million-node package cannot reach kernel admission because the package-wide
+# copied-string limit is smaller; these deliberately malformed entries prove the count check
+# admits the exact count (then refuses the node schema) rather than treating it as one-over.
+huge = with_theorem(base, assumption)
 huge["kernel"]["nodes"] = [{}] * 1000001
-refused(huge, "node-budget", "over-budget", "node-budget")
+refused_without_theorem_publication(huge, "node-budget", "over-budget", "node-budget")
+exact_children = with_theorem(base, assumption)
+exact_child_limit = 4000000
+exact_child_start = len(exact_children["kernel"]["children"])
+exact_children["kernel"]["children"].extend([0] * (exact_child_limit - exact_child_start))
+# The admitted arena requires the flat child vector to be covered by valid aggregate spans.
+# Add a disconnected, well-formed array node over the entire exact-limit suffix instead of
+# making the valid fixture fail later for unowned child entries.
+exact_children["kernel"]["nodes"].append({
+    "kind": "array", "operator": "", "left": 0, "right": 0, "auxiliary": 0,
+    "children_start": exact_child_start, "children_count": exact_child_limit - exact_child_start,
+    "value": "0", "name": "", "secondary_name": "",
+})
+code, exact_result = replay(exact_children, "child-budget-exact")
+assert code == 0 and exact_result["status"] == "replayed", exact_result
+assert exact_result["summary"]["replayed"] == len(exact_children["theorems"]), exact_result
+del exact_children
 huge = with_theorem(base, assumption)
 huge["kernel"]["children"] = [0] * 4000001
-refused(huge, "child-budget", "over-budget", "child-budget")
+refused_without_theorem_publication(huge, "child-budget", "over-budget", "child-budget")
 many = copy.deepcopy(assumption)
 many["hypotheses"] = [0] * 4097
 many["hypothesis_origins"] = [{}] * 4097
 refused(with_theorem(base, many), "hypothesis-budget", "over-budget", "hypothesis-budget")
 flood = with_theorem(base, assumption)
 flood["theorems"] = [{}] * 65537
-refused(flood, "theorem-budget", "over-budget", "theorem-budget")
+refused_without_theorem_publication(flood, "theorem-budget", "over-budget", "theorem-budget")
 
 # One bad theorem among good ones fails the package and is named; the rest still replay.
 mixed = copy.deepcopy(packages["global_constant_module"])

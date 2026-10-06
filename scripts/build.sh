@@ -181,29 +181,29 @@ cd "$ROOT_DIR"
 # Compile against the pinned compiler export, never the live sibling checkout.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
+COMPILER_PRODUCT="$COMPILER"
 if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     stage1_root=""
-    # A bare stage1 binary (scripts/linux_toolchain.sh) names the checkout it was built from, so
-    # the manifest can record that checkout's revision instead of none.
     if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
         stage1_root="$ELISA_STAGE1_ROOT"
     elif [[ -n "${driver:-}" ]]; then
         stage1_root="${driver%/scripts/elisac_stage1.sh}"
+    elif [[ -n "${ELISA_STAGE1_BIN:-}" ]]; then
+        stage1_root="$(cd "$(dirname -- "$ELISA_STAGE1_BIN")/.." && pwd -P)"
+    elif [[ "$(basename -- "$COMPILER")" == "elisac-stage1" ]]; then
+        stage1_root="$(cd "$(dirname -- "$COMPILER")/.." && pwd -P)"
     elif [[ -f "${HOME}/.elisac/stage1/SNAPSHOT" ]]; then
         stage1_root="${HOME}/.elisac/stage1"
     fi
-    stage1_revision=""
-    if [[ -n "$stage1_root" && -f "$stage1_root/SNAPSHOT" ]]; then
-        stage1_revision="$(awk '$1 == "revision:" { print $2; exit }' "$stage1_root/SNAPSHOT")"
+    if [[ -n "${ELISA_STAGE1_BIN:-}" ]]; then
+        COMPILER_PRODUCT="$ELISA_STAGE1_BIN"
+    elif [[ -n "$stage1_root" && -x "$stage1_root/bin/elisac-stage1" ]]; then
+        COMPILER_PRODUCT="$stage1_root/bin/elisac-stage1"
     fi
-    if [[ -n "$stage1_revision" && "$ELISA_COMPILER_PINNED_REV" != "$stage1_revision"* ]]; then
-        printf 'stage1/frontend provenance mismatch: stage1=%s frontend=%s\n' "$stage1_revision" "$ELISA_COMPILER_PINNED_REV" >&2
-        exit 2
-    fi
-fi
-COMPILER_PRODUCT="$COMPILER"
-if [[ -n "${stage1_root:-}" && -x "${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}" ]]; then
-    COMPILER_PRODUCT="${ELISA_STAGE1_BIN:-$stage1_root/bin/elisac-stage1}"
+    stage1_revision="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --resolve-stage1-provenance --compiler-product "$COMPILER_PRODUCT" \
+        --compiler-root "$stage1_root" --frontend-repo "$COMPILER_SRC" \
+        --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
@@ -228,10 +228,14 @@ fi
 # only the compile; linking, signing and the manifest below run as usual.
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
-compiler_digest=""
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
-    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py" \
-    "$ROOT_DIR/scripts/verify_product_pair.py")
+    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py")
+# The pair publisher participates only in the all-products workflow. Keeping it
+# out of a single-product identity avoids recompiling and relinking that product
+# for changes to orchestration code it never executes.
+if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
+    BUILD_RECIPES+=("$ROOT_DIR/scripts/verify_product_pair.py")
+fi
 recipe_digest_args=()
 for recipe in "${BUILD_RECIPES[@]}"; do
     recipe_digest_args+=(--recipe-path "$recipe")
@@ -241,16 +245,18 @@ compiler_files=()
 for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac-stage1}}" "$COMPILER"; do
     [[ -n "$compiler_file" && -f "$compiler_file" ]] && compiler_files+=("$compiler_file")
 done
-if [[ ${#compiler_files[@]} -gt 0 ]]; then
-    compiler_digest="$(shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n')"
-fi
+compiler_digest_of() {
+    [[ ${#compiler_files[@]} -gt 0 ]] || return 0
+    shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n'
+}
 compiler_environment_digest="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --effective-env-digest)"
 compiler_target_triple="$("$CLANG_TOOL" -dumpmachine)"
 object_key_of() {
-    local main="$1" dependencies
-    [[ -n "$compiler_digest" ]] || return 0
+    local main="$1" dependencies current_compiler_digest
+    current_compiler_digest="$(compiler_digest_of)"
+    [[ -n "$current_compiler_digest" ]] || return 0
     dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
-    { printf '%s\n' "$RESOLVED_REV" "$compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
+    { printf '%s\n' "$RESOLVED_REV" "$current_compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
         printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
 }
 build_identity_of() {
@@ -284,6 +290,27 @@ build_identity_of() {
         --identity-compiler-product "$COMPILER_PRODUCT" --identity-clang "$CLANG_TOOL" \
         "${identity_args[@]}" \
         --identity-link-flags="$flags" --identity-output "${PRODUCT_OUTPUTS[$index]}"
+}
+assert_stage1_fresh() {
+    local freshness_check
+    [[ "$COMPILER_IS_STAGE1" -eq 1 && -n "${stage1_root:-}" ]] || return 0
+    freshness_check="$stage1_root/scripts/assert_stage1_fresh.sh"
+    [[ -x "$freshness_check" ]] || return 0
+    bash "$freshness_check" "$COMPILER_PRODUCT"
+}
+assert_build_inputs_unchanged() {
+    local boundary="$1" index current_object_key current_identity
+    assert_stage1_fresh || return $?
+    for index in "${!PRODUCT_MAINS[@]}"; do
+        current_object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")" || return $?
+        current_identity="$(build_identity_of "$index" "$current_object_key")" || return $?
+        if [[ "$current_object_key" != "${OBJECT_KEYS[$index]}" || \
+              "$current_identity" != "${BUILD_IDENTITIES[$index]}" ]]; then
+            printf 'build: compiler, source, recipe, or link inputs changed during %s; refusing to cache or publish mixed-provenance output\n' \
+                "$boundary" >&2
+            return 2
+        fi
+    done
 }
 compile_object() {
     local main="$1" object="$2"
@@ -340,6 +367,26 @@ if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
     for index in "${!SKIP_PRODUCTS[@]}"; do
         [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] || any_rebuild=1
     done
+    if [[ "$any_rebuild" == 0 ]]; then
+        pair_status=0
+        python3 "$ROOT_DIR/scripts/verify_product_pair.py" check-current \
+            --generation-root "$PAIR_GENERATION_ROOT" \
+            --proof-binary "${PRODUCT_OUTPUTS[0]}" \
+            --proof-manifest "${PRODUCT_OUTPUTS[0]}.manifest.json" \
+            --proof-manifest-sha256 "${PRODUCT_OUTPUTS[0]}.manifest.json.sha256" \
+            --replay-binary "${PRODUCT_OUTPUTS[1]}" \
+            --replay-manifest "${PRODUCT_OUTPUTS[1]}.manifest.json" \
+            --replay-manifest-sha256 "${PRODUCT_OUTPUTS[1]}.manifest.json.sha256" || pair_status=$?
+        if [[ "$pair_status" -eq 1 ]]; then
+            # Both product binaries still match their closure-specific identities, but the
+            # immutable pair can name an older whole-source snapshot or build tuple. Publish
+            # fresh manifests and reuse the exact checked binaries; do not compile or link.
+            printf 'build: refreshing immutable pair provenance without recompiling products\n' >&2
+            any_rebuild=1
+        elif [[ "$pair_status" -ne 0 ]]; then
+            exit "$pair_status"
+        fi
+    fi
     if [[ "$any_rebuild" == 1 ]]; then
         PAIR_NEEDS_PUBLISH=1
         for index in "${!SKIP_PRODUCTS[@]}"; do
@@ -379,16 +426,23 @@ else
     done
 fi
 [[ "$compile_status" -eq 0 ]] || exit "$compile_status"
-for index in "${COMPILE_INDICES[@]}"; do
-    object_key="${OBJECT_KEYS[$index]}"
-    if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" ]]; then
-        mkdir -p "$OBJECT_CACHE"
-        cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
-        mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
-        shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
-        mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
-    fi
-done
+fi
+# A compiler/runtime/recipe replacement during a compile must not be recorded under the
+# identity captured before compilation. Validate before publishing any object-cache entry.
+if ! assert_build_inputs_unchanged "compilation"; then
+    exit 2
+fi
+if [[ "$compile_count" -gt 0 ]]; then
+    for index in "${COMPILE_INDICES[@]}"; do
+        object_key="${OBJECT_KEYS[$index]}"
+        if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" ]]; then
+            mkdir -p "$OBJECT_CACHE"
+            cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
+            mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
+            shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
+            mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
+        fi
+    done
 fi
 for index in "${!PRODUCT_MAINS[@]}"; do
     [[ "${SKIP_PRODUCTS[$index]}" == 1 ]] && continue
@@ -432,6 +486,11 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --output "$MANIFEST_TEMP"
     shasum -a 256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
 done
+# Linking and manifest generation also take time. Revalidate at the publication boundary so
+# a moved toolchain cannot make a stale intermediate manifest or generation authoritative.
+if ! assert_build_inputs_unchanged "linking and manifest generation"; then
+    exit 2
+fi
 # The immutable generation is authoritative for paired consumers. Its directory rename and
 # CURRENT pointer replacement occur inside one filesystem; compatibility paths below are still
 # replaced separately and therefore are explicitly not a transactional pair.
@@ -459,7 +518,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     PROOF_BINARY="$(proof_binary_of "$index")"
     product_label="proof"
     [[ "$index" != 1 ]] || product_label="replay"
-    if [[ -f "$PROOF_BINARY" ]]; then
+    if [[ -f "$PROOF_BINARY" && "${BINARY_REUSED[$index]}" != 1 ]]; then
         publish_compatibility_file "legacy-$product_label-binary" "$PROOF_BINARY" "$PROOF_OUTPUT"
     fi
     publish_compatibility_file "legacy-$product_label-manifest" "$(manifest_temp_of "$index")" "$PROOF_OUTPUT.manifest.json"

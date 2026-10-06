@@ -65,6 +65,7 @@ for example, expected in POSITIVE.items():
     for entry in report["functions"]:
         assert entry["obligations"] == entry["matched"] > 0 and entry["unmatched"] == [], entry
     assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
+    assert report["summary"]["coverage"] == "complete", report
     assert set(report["trust"]) == {"kernel_replay", "correspondence", "trusted", "not_established"}, report
 
 # Mutations. Each package below replays in full; each source asks for something it does not prove.
@@ -326,6 +327,7 @@ for name, (text, reason) in UNSUPPORTED.items():
     found = [entry for entry in report["functions"] if entry["status"] == "unsupported"]
     assert found and found[-1]["reason"] == reason, (name, report["functions"])
     assert found[-1]["obligations"] == 0 and found[-1]["unmatched"] == [], (name, report["functions"])
+    assert report["summary"]["coverage"] == "not-established", report
 
 # A duplicate function name, one of them inside a module, resolves to neither.
 duplicate = write("duplicate", """module Inner:

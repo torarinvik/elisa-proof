@@ -1,0 +1,368 @@
+# Replay local facts from unique, immutable scalar declarations. This module admits only
+# source-exact initializers and the separately checked value-preserving widening-cast equation.
+extend ElisaProof:
+    private:
+        def proof_replay_local_binding_immutable_integer_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, parameter_name, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches: mutable usize = 0
+                            valid: mutable bool = false
+                            for parameter in parameters |parameter_name, matches, valid|:
+                                if parameter.name == parameter_name:
+                                    matches <- matches + 1
+                                    valid <- proof_replay_local_binding_integer_type(parameter.type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(parameter.type_expression)
+                            return matches == 1 and valid
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_local_binding_immutable_integer_parameter(nested, owner, owner_line, parameter_name, depth + 1)
+                    _:
+                        pass
+            return false
+
+        # Bare names in an initializer are not stable merely because a parameter or module
+        # constant with the same spelling exists somewhere in the source tree. Require one
+        # unique owner and reject every direct local declaration of that spelling; the global
+        # constant path stays closed until its resolved module identity is carried in traces.
+        def proof_replay_local_binding_parameter_source_unshadowed(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview) -> bool:
+            return false if owner == "" or owner_line == 0 or name == ""
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(declarations, owner, owner_line, &body, &owner_matches, 0)
+            return false if owner_matches != 1
+            for statement in body |name|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, _, _):
+                        return false if local_name == name
+                    _:
+                        pass
+            return true
+
+        def proof_replay_local_binding_stable_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview) -> bool:
+            return false if name == "" or name == target
+            return false if not proof_replay_local_binding_parameter_source_unshadowed(declarations, owner, owner_line, name)
+            return false if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
+            return proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+
+        # Replay has no resolved cast-dispatch witness in local-binding traces. If any ordinary
+        # or extern `__cast__` could occur in the imported unit, keep method-shaped numeric calls
+        # opaque here; selector spelling alone cannot establish builtin conversion semantics.
+        def proof_replay_local_binding_cast_hook_present(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return true if name == "__cast__"
+                    Ast::Decl.Extern(name, _, arity, _, callable, _, _, _):
+                        return true if name == "__cast__" and arity == 1 and callable
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_local_binding_cast_hook_present(nested, depth + 1)
+                    _:
+                        pass
+            return false
+
+        # Retain only source-pure integer initializers over immutable inputs. Numeric conversions
+        # are Elisa special forms; an exact equation to the conversion expression is valid even
+        # when that conversion narrows its input.
+        def proof_replay_local_binding_stable_initializer(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, name, target)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.Unary(TokenKind.Minus, inner, _):
+                    return proof_replay_local_binding_stable_initializer(inner, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
+                    return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), method, _), arguments, _, _):
+                    return false if arguments.count != 0
+                    return false if method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize"
+                    return false if proof_replay_local_binding_cast_hook_present(declarations, 0)
+                    return proof_replay_local_binding_stable_name(declarations, owner, owner_line, receiver, target)
+                _:
+                    return false
+
+        def proof_replay_local_binding_integer_type_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+                    return ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_binding_integer_type_name(inner, depth + 1)
+                _:
+                    return ""
+
+        def proof_replay_local_binding_integer_parameter_type_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, parameter_name, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches: mutable usize = 0
+                            type_name: mutable sview = ""
+                            for parameter in parameters |parameter_name, matches, type_name|:
+                                if parameter.name == parameter_name:
+                                    matches <- matches + 1
+                                    type_name <- proof_replay_local_binding_integer_type_name(parameter.type_expression, 0) if not proof_replay_local_binding_mutable_integer_type(parameter.type_expression)
+                            return "" if matches != 1
+                            return type_name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        nested_type: sview = proof_replay_local_binding_integer_parameter_type_name(nested, owner, owner_line, parameter_name, depth + 1)
+                        return nested_type if nested_type != ""
+                    _:
+                        pass
+            return ""
+
+        def proof_replay_local_binding_payload_names(pattern: Ast::Pattern, names: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match pattern:
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields |names, depth|:
+                        match field:
+                            Ast::Pattern.Binding(name):
+                                return false if name == "" or any existing in names where existing == name
+                                names.push(name)
+                            Ast::Pattern.Wildcard:
+                                pass
+                            _:
+                                return false
+                    return true
+                _:
+                    return false
+
+        def proof_replay_local_binding_variant_enum_name(pattern: Ast::Pattern) -> sview:
+            match pattern:
+                Ast::Pattern.Variant(path, _):
+                    split: mutable usize = 0
+                    dots: mutable usize = 0
+                    for offset in 0..<sview_len(path) |offset, path, split, dots|:
+                        if sview_at(path, offset) == PROOF_ASCII_DECIMAL_POINT:
+                            split <- offset
+                            dots <- dots + 1
+                    return "" if dots != 1 or split == 0
+                    return string_view_slice(path, 0, split.i64())
+                _:
+                    return ""
+
+        def proof_replay_local_binding_enum_parameter_type_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, parameter_name, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches: mutable usize = 0
+                            type_name: mutable sview = ""
+                            for parameter in parameters |parameter_name, matches, type_name|:
+                                if parameter.name == parameter_name:
+                                    matches <- matches + 1
+                                    match parameter.type_expression:
+                                        Ast::Expr.Ident(found, _):
+                                            type_name <- found if not proof_replay_local_binding_mutable_integer_type(parameter.type_expression)
+                                        _:
+                                            type_name <- ""
+                            return "" if matches != 1
+                            return type_name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        nested_type: sview = proof_replay_local_binding_enum_parameter_type_name(nested, owner, owner_line, parameter_name, depth + 1)
+                        return nested_type if nested_type != ""
+                    _:
+                        pass
+            return ""
+
+        def proof_replay_local_binding_arm_prefix_safe(arm: Ast::MatchArm) -> bool:
+            match arm.guard:
+                Ast::Expr.Absent:
+                    pass
+                _:
+                    return false
+            for statement in arm.body:
+                match statement:
+                    Ast::Stmt.Return(Ast::Expr.IntLit(_, _), _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        # The widening-cast binder slice permits the checked local initializer, unrelated local
+        # declarations that do not shadow its payload, and the consuming return. Other statements
+        # could rebind the payload or change the path between pattern introduction and use.
+        def proof_replay_local_binding_widening_arm_shape(arm: Ast::MatchArm, target: sview, source_name: sview, target_line: u32, consumer_line: u32) -> bool:
+            return false if target == "" or source_name == "" or target_line == 0 or consumer_line == 0
+            target_count: mutable usize = 0
+            target_seen: mutable bool = false
+            return_seen: mutable bool = false
+            for statement in arm.body |target, target_line, consumer_line, target_count, target_seen, return_seen|:
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, _, position):
+                        return false if return_seen or name == source_name
+                        if name == target:
+                            return false if target_seen or position.line != target_line
+                            target_count <- target_count + 1
+                            target_seen <- true
+                    Ast::Stmt.Return(_, position):
+                        return false if not target_seen or return_seen or position.line != consumer_line
+                        return_seen <- true
+                    _:
+                        return false
+            return target_count == 1 and return_seen
+
+        # Positional enum binders are source-backed only when the exact unique match arm has a
+        # simple payload pattern, the scrutinee is an immutable enum parameter, and every earlier
+        # source path is unable to allocate a fresh witness.
+        def proof_replay_local_binding_match_widening_cast_source(report: ProofReport&, trace: ProofFactTrace, target: sview, receiver: sview) -> bool:
+            return false if trace.name == "" or target == "" or receiver == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0
+            function_body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
+            return false if owner_matches != 1
+            return false if proof_replay_local_binding_cast_hook_present(report.source_declarations, 0)
+            candidate_matches: mutable usize = 0
+            valid: mutable bool = false
+            for statement_index in 0..<function_body.count |statement_index, function_body, target, receiver, trace, report, candidate_matches, valid|:
+                match function_body[statement_index]:
+                    Ast::Stmt.Match(subject, arms, _):
+                        for arm_index in 0..<arms.count |arm_index, subject, arms, statement_index, function_body, target, receiver, trace, report, candidate_matches, valid|:
+                            arm: Ast::MatchArm = arms[arm_index]
+                            target_count: mutable usize = 0
+                            target_type_expression: mutable Ast::Expr = Ast::Expr.Invalid
+                            target_initializer: mutable Ast::Expr = Ast::Expr.Invalid
+                            consumer_return: mutable bool = false
+                            for arm_statement in arm.body |arm, target, trace, report, target_count, target_type_expression, target_initializer, consumer_return|:
+                                match arm_statement:
+                                    Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                                        if name == target and position.line == trace.line:
+                                            return false if position.line > report.trace_owner_line
+                                            target_count <- target_count + 1
+                                            target_type_expression <- type_expression
+                                            target_initializer <- initializer
+                                    Ast::Stmt.Return(_, position):
+                                        consumer_return <- true if position.line == report.trace_owner_line
+                                    _:
+                                        pass
+                            continue if target_count == 0
+                            candidate_matches <- candidate_matches + target_count
+                            continue if target_count != 1
+                            subject_name: sview = proof_ident_name(subject)
+                            pattern_enum: sview = proof_replay_local_binding_variant_enum_name(arm.pattern)
+                            return false if pattern_enum == "" or not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, subject_name)
+                            return false if proof_replay_local_binding_enum_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, subject_name, 0) != pattern_enum
+                            return false if not proof_replay_local_binding_first_rebind_is_unambiguous(function_body, statement_index, 0)
+                            names: mutable darray[sview] = []
+                            types: mutable darray[Ast::Expr] = []
+                            return false if not proof_replay_local_binding_payload_names(arm.pattern, &names, 0)
+                            return false if not proof_payload_binder_types(arm.pattern, report.source_declarations, report.source_annotations, &types)
+                            return false if names.count == 0 or names.count != types.count or not consumer_return
+                            target_source_name: mutable sview = ""
+                            binder_ordinal: mutable usize = 0
+                            for binder_index in 0..<names.count |binder_index, names, receiver, target_source_name, binder_ordinal|:
+                                target_source_name <- names[binder_index] if names[binder_index] == proof_replay_local_binding_cast_receiver_name(target_initializer)
+                                binder_ordinal <- binder_index if names[binder_index] == proof_replay_local_binding_cast_receiver_name(target_initializer)
+                            return false if target_source_name == ""
+                            return false if not proof_replay_local_binding_widening_arm_shape(arm, target, target_source_name, trace.line, report.trace_owner_line)
+                            prior_fresh_symbols: mutable usize = 0
+                            for prior_arm_index in 0..<arm_index |prior_arm_index, arms, report, prior_fresh_symbols|:
+                                prior_arm: Ast::MatchArm = arms[prior_arm_index]
+                                prior_names: mutable darray[sview] = []
+                                prior_types: mutable darray[Ast::Expr] = []
+                                return false if not proof_replay_local_binding_payload_names(prior_arm.pattern, &prior_names, 0)
+                                return false if not proof_payload_binder_types(prior_arm.pattern, report.source_declarations, report.source_annotations, &prior_types)
+                                return false if prior_names.count != prior_types.count or not proof_replay_local_binding_arm_prefix_safe(prior_arm)
+                                prior_fresh_symbols <- prior_fresh_symbols + prior_names.count
+                            fresh_index: usize = prior_fresh_symbols + binder_ordinal
+                            return false if fresh_index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT or receiver != proof_internal_rebind_name(fresh_index)
+                            source_type: Ast::Expr = types[binder_ordinal]
+                            source_type_name: sview = proof_replay_local_binding_integer_type_name(source_type, 0)
+                            target_type_name: sview = proof_replay_local_binding_integer_type_name(target_type_expression, 0)
+                            return false if source_type_name == "" or target_type_name == "" or proof_replay_local_binding_mutable_integer_type(target_type_expression)
+                            target_unsigned: i64 = proof_unsigned_type_width(target_type_expression, report.source_declarations, 0)
+                            target_signed: i64 = proof_signed_type_width(target_type_expression, report.source_declarations, 0)
+                            source_unsigned: i64 = proof_unsigned_type_width(source_type, report.source_declarations, 0)
+                            source_signed: i64 = proof_signed_type_width(source_type, report.source_declarations, 0)
+                            widening: bool = (source_unsigned > 0 and ((target_unsigned > 0 and target_unsigned >= source_unsigned) or (target_signed > 0 and target_signed > source_unsigned))) or (source_signed > 0 and target_signed > 0 and target_signed >= source_signed)
+                            match target_initializer:
+                                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(source_name, _), method, _), arguments, _, _):
+                                    valid <- arguments.count == 0 and source_name == target_source_name and method == target_type_name and widening
+                                _:
+                                    valid <- false
+                    _:
+                        pass
+            return candidate_matches == 1 and valid
+
+        def proof_replay_local_binding_cast_receiver_name(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), _, _), arguments, _, _):
+                    if arguments.count == 0:
+                        return receiver
+                    return ""
+                _:
+                    return ""
+
+        # A derived equality is admitted only for a source-declared widening cast: its receiver
+        # must be an immutable integer parameter, and the target must preserve the whole range.
+        def proof_replay_local_binding_widening_cast_declaration_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0 or trace.line == 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, _), TokenKind.EqEq, Ast::Expr.Ident(receiver, _), _):
+                    return false if target == "" or receiver == "" or target == receiver or proof_internal_name_is_rebind(target) or proof_internal_name_is_rebind(receiver)
+                    function_body: mutable darray[Ast::Stmt] = []
+                    owner_matches: mutable usize = 0
+                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
+                    return false if owner_matches != 1
+                    return false if proof_replay_local_binding_cast_hook_present(report.source_declarations, 0)
+                    declarations: mutable usize = 0
+                    valid: mutable bool = false
+                    for statement in function_body |target, receiver, trace, report, declarations, valid|:
+                        match statement:
+                            Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                                if name == target:
+                                    declarations <- declarations + 1
+                                    target_type: sview = proof_replay_local_binding_integer_type_name(type_expression, 0)
+                                    match initializer:
+                                        Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(source_name, _), method, _), arguments, _, _):
+                                            source_type: sview = proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name, 0)
+                                            source_expression: Ast::Expr = Ast::Expr.Ident(source_type, position)
+                                            target_unsigned: i64 = proof_unsigned_type_width(type_expression, report.source_declarations, 0)
+                                            target_signed: i64 = proof_signed_type_width(type_expression, report.source_declarations, 0)
+                                            source_unsigned: i64 = proof_unsigned_type_width(source_expression, report.source_declarations, 0)
+                                            source_signed: i64 = proof_signed_type_width(source_expression, report.source_declarations, 0)
+                                            widening: bool = (source_unsigned > 0 and ((target_unsigned > 0 and target_unsigned >= source_unsigned) or (target_signed > 0 and target_signed > source_unsigned))) or (source_signed > 0 and target_signed > 0 and target_signed >= source_signed)
+                                            valid <- position.line == trace.line and position.line <= report.trace_owner_line and not proof_replay_local_binding_mutable_integer_type(type_expression) and proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, source_name) and arguments.count == 0 and receiver == source_name and method == target_type and target_type != "" and source_type != "" and widening
+                                        _:
+                                            pass
+                            _:
+                                pass
+                    return declarations == 1 and valid or proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver)
+                _:
+                    return false
+
+        # Built-in arithmetic in the kernel is not evidence about overloaded Elisa operators.
+        # Reject a local equation whenever its initializer contains any source-overloaded
+        # primitive operation; the source operator mask is computed from the imported unit.
+        def proof_replay_local_binding_immutable_declaration_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0 or trace.line == 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    return false if target == "" or proof_internal_name_is_rebind(target)
+                    function_body: mutable darray[Ast::Stmt] = []
+                    owner_matches: mutable usize = 0
+                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
+                    return false if owner_matches != 1
+                    declarations: mutable usize = 0
+                    valid: mutable bool = false
+                    for statement in function_body |target, source_value, trace, report, declarations, valid|:
+                        match statement:
+                            Ast::Stmt.VarDecl(name, type_expression, initializer, position):
+                                if name == target:
+                                    declarations <- declarations + 1
+                                    valid <- position.line == trace.line and position.line <= report.trace_owner_line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression) and proof_replay_expr_equal(initializer, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0) and proof_replay_local_binding_stable_initializer(initializer, target, report.source_declarations, trace.name, report.replay_owner_line, 0)
+                            _:
+                                pass
+                    return declarations == 1 and valid
+                _:
+                    return false

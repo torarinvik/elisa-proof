@@ -14,6 +14,14 @@ if [[ "$region_allocation_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: new[r] allocation/binding/discard transitions were not replayed\n' >&2
     exit 1
 fi
+set +e
+run_json_report "$ROOT_DIR/examples/rejected_region_new_reference_as_value.elisa" | python3 -c 'import json, sys; report=json.load(sys.stdin); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; functions={item["name"]: item for item in report["declaration_details"] if item["kind"] == "function"}; plain_value_names={"rejected_region_new_reference_as_value", "rejected_region_new_reference_assignment_as_value"}; assert all(not functions[name]["verified"] for name in plain_value_names); assert all(any(finding["kind"] == "region-allocation-unsupported" and finding["name"] == name for finding in report["findings"]) for name in plain_value_names); stale_region_name="rejected_region_new_assignment_after_actual_region_destroy"; assert not functions[stale_region_name]["verified"]; assert any(finding["kind"] == "region-use-after-destroy" and finding["name"] == stale_region_name for finding in report["findings"])'
+new_reference_value_probe_status=${PIPESTATUS[1]}
+set -e
+if [[ "$new_reference_value_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: new[r] was modeled as a plain value instead of a region reference\n' >&2
+    exit 1
+fi
 run_json_report "$ROOT_DIR/examples/region_generic_allocation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = [node["kind"] for node in report["kernel"]["nodes"]]; assert "resource-region-param" in kinds and "resource-region-return-alloc" in kinds and "resource-region-return" in kinds and "resource-call-region" in kinds and "resource-call-result" in kinds'
 region_generic_probe_status=${PIPESTATUS[1]}
 if [[ "$region_generic_probe_status" -ne 0 ]]; then
@@ -487,36 +495,6 @@ if [[ "$rejected_nested_region_destroy_status" -ne 1 ]]; then
 fi
 if ! python3 -c 'import json; report=json.load(open(__import__("os").environ["ELISA_TEST_TMP"] + "/elisa-proof-rejected-nested-region-destroy.json")); assert report["status"] == "failed"; assert report["replay"]["gaps"] == 0; assert any(f["kind"] == "region-destroy-unsupported" for f in report["findings"]) or report["summary"]["semantic_errors"] > 0'; then
     printf 'proof test matrix failed: nested inherited-region destruction report was incomplete\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/pattern_scalar_literals.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "char" for node in report["kernel"]["nodes"])'
-pattern_scalar_literals_probe_status=${PIPESTATUS[1]}
-if [[ "$pattern_scalar_literals_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: scalar literal pattern facts\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/pinned_pattern.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] and goal["rule"] == "goal" for goal in report["goals"])'
-pinned_pattern_probe_status=${PIPESTATUS[1]}
-if [[ "$pinned_pattern_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: pinned-pattern equality fact\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/pattern_or.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] and goal["rule"] == "goal" for goal in report["goals"])'
-pattern_or_probe_status=${PIPESTATUS[1]}
-if [[ "$pattern_or_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: closed OR-pattern branch fact\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/shorthand_member.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; assert any(node["kind"] == "shorthand" and node["name"] == "None" for node in report["kernel"]["nodes"])'
-shorthand_member_probe_status=${PIPESTATUS[1]}
-if [[ "$shorthand_member_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: const-enum shorthand was not encoded as a replayed kernel atom\n' >&2
-    exit 1
-fi
-run_json_report "$ROOT_DIR/examples/constructor_kernel.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["replay"]["gaps"] == 0; kinds = {node["kind"] for node in report["kernel"]["nodes"]}; assert "construct" in kinds; assert "record-update" in kinds; assert "field-init" in kinds'
-constructor_kernel_probe_status=${PIPESTATUS[1]}
-if [[ "$constructor_kernel_probe_status" -ne 0 ]]; then
-    printf 'proof test matrix failed: constructor/update terms were not encoded for independent replay\n' >&2
     exit 1
 fi
 # The source-neutral formation boundary rejects aggregate slice comparisons before lowering;

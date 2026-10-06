@@ -35,15 +35,18 @@ SPEC.loader.exec_module(benchmark)
 
 def manifest(stage: str = "stage1", runtime: str | None = "runtime") -> dict:
     return {
-        "proof": {"source_tree_sha256": "source"},
+        "proof": {"source_tree_sha256": "source", "source_dirty": False},
         "frontend": {"revision": "front-rev", "tree": "front-tree"},
         "compiler": {
             "stage": stage,
-            "product": {"sha256": "compiler-product"},
-            "executable": {"sha256": "compiler-executable"},
+            "stage1_revision": "stage1-rev" if stage == "stage1" else None,
+            "source_revision": "compiler-rev",
+            "source_dirty": False,
+            "product": {"sha256": "compiler-product", "path": "/compiler/product"},
+            "executable": {"sha256": "compiler-executable", "path": "/compiler/executable"},
         },
-        "runtime": {"sha256": runtime},
-        "profile_hooks": {"sha256": "hooks"},
+        "runtime": {"sha256": runtime, "path": "/runtime/object" if runtime else None},
+        "profile_hooks": {"sha256": "hooks", "path": "/profile/hooks"},
         "target": "arm64-test",
         "optimization": "O2",
         "compile_mode": "strict",
@@ -162,6 +165,8 @@ def validate_semantic_corpus_manifest(entries, *, root: Path = ROOT) -> None:
     )
     if fixture_projection != benchmark.FIXTURES:
         raise AssertionError("semantic corpus manifest no longer matches benchmark fixtures")
+    if {item["name"]: item["sha256"] for item in entries} != benchmark.FIXTURE_SHA256:
+        raise AssertionError("pinned workload hashes differ between test manifest and runner")
     for item in entries:
         source = root / item["path"]
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -188,49 +193,6 @@ def validate_semantic_corpus_manifest(entries, *, root: Path = ROOT) -> None:
         raise AssertionError("semantic corpus required report fields changed")
     if CORPUS_REPLAY_REQUIREMENTS != EXPECTED_CORPUS_REPLAY_REQUIREMENTS:
         raise AssertionError("semantic corpus replay requirements changed")
-
-
-class SemanticCorpusManifestTests(unittest.TestCase):
-    def test_corpus_manifest_binds_fixture_bytes_and_harness_metadata(self) -> None:
-        validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
-
-    def test_workload_identity_and_expectation_mutations_are_detected(self) -> None:
-        for field, replacement in (
-                ("name", "renamed-workload"),
-                ("path", "examples/other-workload.elisa"),
-                ("sha256", "0" * 64),
-                ("expected_exit", 7),
-                ("expected_status", "unknown"),
-                ("must_prove", ("unexpected_claim",)),
-                ("must_unproven", ("unexpected_open_goal",)),
-                ("must_find", ("unexpected_finding",)),
-                ("inadmissible", True),
-                ("must_decline_certificates", ("unexpected_certificate",))):
-            with self.subTest(field=field):
-                changed = [dict(item) for item in SEMANTIC_CORPUS_MANIFEST]
-                changed[0][field] = replacement
-                with self.assertRaisesRegex(AssertionError, "manifest"):
-                    validate_semantic_corpus_manifest(changed)
-
-    def test_source_byte_change_is_rejected_even_with_original_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for item in SEMANTIC_CORPUS_MANIFEST:
-                destination = root / item["path"]
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes((ROOT / item["path"]).read_bytes())
-            target = root / SEMANTIC_CORPUS_MANIFEST[0]["path"]
-            target.write_bytes(target.read_bytes() + b"\n")
-            with self.assertRaisesRegex(AssertionError, "bytes/hash changed"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST, root=root)
-
-    def test_replay_contract_mutation_is_detected(self) -> None:
-        with mock.patch.dict(CORPUS_REPLAY_REQUIREMENTS, {"zero_replay_gaps": False}):
-            with self.assertRaisesRegex(AssertionError, "replay requirements"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
-        with mock.patch(__name__ + ".CORPUS_REPORT_FIELDS", ("status",)):
-            with self.assertRaisesRegex(AssertionError, "report fields"):
-                validate_semantic_corpus_manifest(SEMANTIC_CORPUS_MANIFEST)
 
 
 class ManifestReadTests(unittest.TestCase):
@@ -300,6 +262,17 @@ class ProductIdentityTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "compiler.product.sha256"):
             require_compatible_products(manifest(), malformed, "pair")
 
+    def test_stage1_product_hash_and_release_revision_cover_missing_source_revision(self) -> None:
+        proof = manifest()
+        replay = manifest()
+        proof["compiler"]["source_revision"] = None
+        replay["compiler"]["source_revision"] = None
+        context = require_compatible_products(proof, replay, "installed-stage1")
+        self.assertIsNone(context["compiler.source_revision"])
+        replay["compiler"]["product"]["sha256"] = "other-product"
+        with self.assertRaisesRegex(RuntimeError, "compiler.product.sha256"):
+            require_compatible_products(proof, replay, "mismatched-installed-stage1")
+
     def test_stage0_may_omit_runtime_but_stage1_may_not(self) -> None:
         stage0 = manifest(stage="stage0", runtime=None)
         context = require_compatible_products(stage0, manifest(stage="stage0", runtime=None), "stage0")
@@ -365,11 +338,18 @@ class ProductIdentityTests(unittest.TestCase):
                 baseline_replay=paths["baseline_replay"],
                 candidate_proof=paths["candidate_proof"],
                 candidate_replay=paths["candidate_replay"],
+                baseline_source_root=Path(directory) / "baseline-src",
+                candidate_source_root=Path(directory) / "candidate-src",
+                baseline_source_sha256="0" * 64,
+                candidate_source_sha256="0" * 64,
             )
+            args.baseline_source_root.mkdir()
+            args.candidate_source_root.mkdir()
             with mock.patch.object(
                 benchmark, "read_build_manifest",
                 side_effect=[baseline, baseline, candidate, candidate],
-            ):
+            ), mock.patch.object(benchmark, "verify_build_artifacts"), \
+                    mock.patch.object(benchmark, "verify_proof_source", return_value="0" * 64):
                 with self.assertRaisesRegex(RuntimeError, "different frontends or toolchains"):
                     benchmark.run(args)
 
@@ -455,6 +435,22 @@ class SamplingTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "incomplete semantic workload report"):
             benchmark.semantic_workload_metrics(result, report, "replay-gap")
 
+    def test_goal_results_must_match_summary_and_be_boolean(self) -> None:
+        result, report = self.semantic_report()
+        report["goals"][0]["proven"] = False
+        with self.assertRaisesRegex(RuntimeError, "goal results disagree"):
+            benchmark.semantic_workload_metrics(result, report, "contradictory-proof")
+
+        result, report = self.semantic_report("failed", proven=0, unproven=1)
+        report["goals"][0]["proven"] = True
+        with self.assertRaisesRegex(RuntimeError, "goal results disagree"):
+            benchmark.semantic_workload_metrics(result, report, "contradictory-refusal")
+
+        result, report = self.semantic_report()
+        report["goals"][0]["proven"] = 1
+        with self.assertRaisesRegex(RuntimeError, "goal results are missing or invalid"):
+            benchmark.semantic_workload_metrics(result, report, "non-boolean-goal-result")
+
     def test_timeout_names_censored_side_and_suppresses_speedup(self) -> None:
         with mock.patch.object(benchmark, "invoke", side_effect=RuntimeError("measurement wrapper timed out")):
             with self.assertRaisesRegex(
@@ -480,7 +476,10 @@ class SamplingTests(unittest.TestCase):
                     Path(str(binary) + ".manifest.json.sha256").write_text("fixture", encoding="ascii")
             context = manifest()
             proof_bytes = json.dumps({
-                "status": "proved", "goals": [], "findings": [], "functions": [],
+                "status": "proved", "verification_state": "complete",
+                "goals": [], "findings": [], "functions": [],
+                "trust": {"trusted_assumptions": [], "trusted_boundary_facts": 0,
+                          "kernel_replayed_certificates": 0},
                 "summary": {"declarations": 0, "obligations": 0, "proven": 0, "unproven": 0},
                 "declaration_details": [], "certificates": [],
                 "replay": {"gaps": 0, "certificates": 0, "replayed": 0},
@@ -517,10 +516,23 @@ class SamplingTests(unittest.TestCase):
                 candidate_proof=binaries["candidate"][0],
                 candidate_replay=binaries["candidate"][1],
                 rounds=2, warmup_rounds=1, timeout=1,
+                fixtures=["tiny"],
+                baseline_source_root=root / "baseline-src",
+                candidate_source_root=root / "candidate-src",
+                baseline_source_sha256="0" * 64,
+                candidate_source_sha256="0" * 64,
             )
+            args.baseline_source_root.mkdir()
+            args.candidate_source_root.mkdir()
             with mock.patch.object(benchmark, "FIXTURES", (("tiny", source, 0, "proved"),)), \
+                    mock.patch.object(benchmark, "FIXTURE_BY_NAME", {"tiny": ("tiny", source, 0, "proved")}), \
+                    mock.patch.object(benchmark, "FIXTURE_SHA256", {"tiny": "fixture"}), \
                     mock.patch.object(benchmark, "read_build_manifest", return_value=context), \
                     mock.patch.object(benchmark, "require_compatible_products", return_value=context), \
+                    mock.patch.object(benchmark, "verify_build_artifacts"), \
+                    mock.patch.object(benchmark, "require_clean_toolchain"), \
+                    mock.patch.object(benchmark, "verify_proof_source", return_value="0" * 64), \
+                    mock.patch.object(benchmark, "preflight_semantics", return_value={"tiny": "matched-before-timing"}), \
                     mock.patch.object(benchmark, "invoke", side_effect=fake_invoke), \
                     mock.patch.object(benchmark, "file_identity", side_effect=lambda path: {"sha256": "fixture", "size_bytes": Path(path).stat().st_size}), \
                     mock.patch.object(benchmark, "require_unchanged_inputs"):

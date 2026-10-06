@@ -9,28 +9,31 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import platform
-import resource
-import subprocess
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 from perf_build_provenance import (
     file_identity,
     manifest_self_test,
     read_build_manifest,
+    require_clean_toolchain,
     require_compatible_products,
     shared_product_context,
+    verify_build_artifacts,
+    verify_proof_source,
 )
 from perf_luna_benchmark_process import (
+    measured_child,
     require_unchanged_inputs,
     run_wrapper,
     self_test_process_group_cleanup,
 )
+from perf_luna_benchmark_evidence import semantic_outcome_projection
 from perf_luna_benchmark_validation import (
     check_exit,
     measurement_self_test,
@@ -42,7 +45,7 @@ from perf_luna_benchmark_validation import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "elisa-proof-perf-luna-v3"
+SCHEMA = "elisa-proof-perf-luna-v4"
 FIXTURES = (
     ("accept", ROOT / "examples" / "perf_luna_accept.elisa", 0, "proved"),
     ("refusal", ROOT / "examples" / "perf_luna_refusal.elisa", 1, "failed"),
@@ -51,6 +54,16 @@ FIXTURES = (
     ("congruence", ROOT / "examples" / "congruence.elisa", 0, "proved"),
     ("rejected_congruence", ROOT / "examples" / "rejected_congruence.elisa", 1, "failed"),
 )
+FIXTURE_SHA256 = {
+    "accept": "b98bc4c879e7ca4279515ade0c248d125f9323a1f3e01f9bed389fc9a818354b",
+    "refusal": "5bb1c84d7baf95c9853e448062184a3427b298d80b205ed7cd9ac8032a7cd454",
+    "symbolic_quantifier": "eb8ea811bdf07e0796eeecc929a0b007bb44813724214e8bbc952a65325e0e9e",
+    "rejected_symbolic_quantifier": "5c1990bafd783178ad4bc66916fa35c16b8670a7dc30d8443f077b161cd3b352",
+    "congruence": "99b0a7a7712de6c427ed84eedfb4853e5639c83fb35c224a6d14c9c08bdaebca",
+    "rejected_congruence": "8cd9f33f34c9fa124aa9bad5740a3619000a71dcab706274f9d1c7f9f1e6e534",
+}
+FIXTURE_BY_NAME = {name: (name, source, exit_code, status)
+                   for name, source, exit_code, status in FIXTURES}
 MUST_REMAIN_UNPROVEN = {
     "refusal": ("perf_luna_must_remain_open",),
     "rejected_symbolic_quantifier": (
@@ -100,36 +113,141 @@ def verify_build_snapshot(binaries: dict, manifests: dict, identities: dict[Path
             current = read_build_manifest(binary, f"{label}/{role}")
             if current != manifests[label][role]:
                 raise RuntimeError(f"{label}/{role} build manifest changed while creating benchmark snapshot")
+            verify_build_artifacts(current, f"{label}/{role}")
     require_unchanged_inputs(identities)
 
 
-def measured_child(command: list[str]) -> int:
-    """Run one tool and emit its exact streams plus per-child process metrics.
+def semantic_projection(report: dict) -> dict:
+    """Fields that describe proof meaning/trust, excluding runtime measurements."""
+    required = ("status", "verification_state", "summary", "declaration_details",
+                "functions", "goals", "findings", "certificates", "replay", "trust")
+    missing = [field for field in required if field not in report]
+    if missing:
+        raise RuntimeError(f"proof report lacks semantic/trust fields: {missing}")
+    return {field: report[field] for field in required}
 
-    The outer watchdog owns the process group and its deadline, so this layer deliberately
-    has no independent timeout that could orphan descendants.
-    """
-    started = time.perf_counter()
-    cpu_before = resource.getrusage(resource.RUSAGE_CHILDREN)
-    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            check=False)
-    stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
-    elapsed = time.perf_counter() - started
-    cpu_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    peak = cpu_after.ru_maxrss
-    # macOS reports bytes; Linux and the supported Vast Linux hosts report KiB.
-    peak_kib = peak / 1024 if sys.platform == "darwin" else peak
-    payload = {
-        "returncode": returncode,
-        "wall_seconds": elapsed,
-        "user_cpu_seconds": max(0.0, cpu_after.ru_utime - cpu_before.ru_utime),
-        "system_cpu_seconds": max(0.0, cpu_after.ru_stime - cpu_before.ru_stime),
-        "peak_rss_kib": peak_kib,
-        "stdout": base64.b64encode(stdout).decode("ascii"),
-        "stderr": base64.b64encode(stderr).decode("ascii"),
+
+def canonical_json(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True,
+                      separators=(",", ":")).encode("utf-8")
+
+
+def package_projection(package: dict) -> dict:
+    required = ("format", "source", "theorems")
+    if any(field not in package for field in required):
+        raise RuntimeError("package export lacks source or theorem inventory")
+    return {field: package[field] for field in required}
+
+
+def output_projection(phase: str, output: bytes) -> bytes:
+    try:
+        decoded = json.loads(output)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{phase} emitted invalid JSON during measurement") from error
+    if not isinstance(decoded, dict):
+        raise RuntimeError(f"{phase} emitted a non-object JSON result")
+    if phase == "proof":
+        return canonical_json(semantic_projection(decoded))
+    if phase == "export":
+        return canonical_json(package_projection(decoded))
+    if phase == "replay":
+        return canonical_json(decoded)
+    raise RuntimeError(f"unknown benchmark phase: {phase}")
+
+
+def preflight_semantics(binaries: dict, fixtures: tuple, timeout: int) -> dict:
+    """Run untimed paired checks; no measurement starts until semantics and trust match."""
+    results = {}
+    with tempfile.TemporaryDirectory(prefix="elisa-proof-perf-preflight-") as temporary:
+        scratch = Path(temporary)
+        for fixture, source, expected_exit, expected_status in fixtures:
+            per_variant = {}
+            for variant in ("baseline", "candidate"):
+                proof_binary, replay_binary = binaries[variant]
+                proof = invoke_for_side(proof_binary, ["--json", str(source)], timeout,
+                                        variant, fixture, "preflight-proof")
+                check_exit(proof, expected_exit, f"{variant}/{fixture}/preflight-proof")
+                report = proof_report(proof, expected_status,
+                                      f"{variant}/{fixture}/preflight-proof",
+                                      MUST_REMAIN_UNPROVEN.get(fixture, ()),
+                                      MUST_PROVE.get(fixture, ()),
+                                      MUST_HAVE_FINDINGS.get(fixture, ()))
+                proof_semantics = semantic_projection(report)
+                semantic_workload_metrics(proof, report, f"{variant}/{fixture}/preflight-proof")
+
+                export = invoke_for_side(proof_binary, ["--package", str(source)], timeout,
+                                         variant, fixture, "preflight-export")
+                try:
+                    package = json.loads(export["stdout"])
+                except (ValueError, KeyError) as error:
+                    raise RuntimeError(f"{variant}/{fixture}: invalid preflight package") from error
+                if not isinstance(package, dict):
+                    raise RuntimeError(f"{variant}/{fixture}: package export is not an object")
+                projected_package = package_projection(package)
+                source_info = package.get("source", {})
+                admissible = source_info.get("admissible") if isinstance(source_info, dict) else None
+                if type(admissible) is not bool:
+                    raise RuntimeError(f"{variant}/{fixture}: package admissibility is missing")
+                if export["returncode"] != (0 if admissible else 1):
+                    raise RuntimeError(f"{variant}/{fixture}: export exit disagrees with admissibility")
+                package_path = scratch / f"{variant}-{fixture}.json"
+                package_path.write_bytes(export["stdout"])
+                theorem_count = package.get("theorems")
+                if not isinstance(theorem_count, list):
+                    raise RuntimeError(f"{variant}/{fixture}: theorem inventory is not an array")
+                if fixture in MUST_BE_INADMISSIBLE and admissible:
+                    raise RuntimeError(f"{variant}/{fixture}: source should be inadmissible")
+                if not admissible and theorem_count:
+                    raise RuntimeError(f"{variant}/{fixture}: inadmissible source exported theorems")
+                replay_exit = 0 if theorem_count else 1
+                replay = invoke_for_side(replay_binary, [str(package_path)], timeout,
+                                         variant, fixture, "preflight-replay")
+                check_exit(replay, replay_exit, f"{variant}/{fixture}/preflight-replay")
+                replay_data = replay_result(
+                    replay, "replayed" if theorem_count else "rejected",
+                    None if theorem_count else ("source-inadmissible" if not admissible
+                                                 else "no-theorems"),
+                    f"{variant}/{fixture}/preflight-replay")
+                per_variant[variant] = {
+                    "proof": proof_semantics,
+                    "obligations": proof_semantics["goals"],
+                    "trust_roots": proof_semantics["trust"],
+                    "package": projected_package,
+                    "replay": replay_data,
+                }
+            if canonical_json(per_variant["baseline"]) != canonical_json(per_variant["candidate"]):
+                raise RuntimeError(
+                    f"{fixture}: proof semantics, obligation inventory, trust roots, "
+                    "package or replay differ; timing refused"
+                )
+            results[fixture] = "matched-before-timing"
+    return results
+
+
+def censored_failure_report(error: RuntimeError, args: argparse.Namespace | None = None) -> dict | None:
+    message = str(error)
+    if "censored=true" not in message:
+        return None
+    report = {
+        "schema": SCHEMA,
+        "status": "censored",
+        "timing_valid": False,
+        "speedup": "not-reported",
+        "censored_failures": [{"message": message, "censored": True}],
+        "note": "No performance conclusion is available for an incomplete paired run.",
     }
-    sys.stdout.write(json.dumps(payload, separators=(",", ":")))
-    return 0
+    if args is not None:
+        report["requested_comparison"] = {
+            label: {
+                "proof": str(getattr(args, f"{label}_proof")),
+                "replay": str(getattr(args, f"{label}_replay")),
+                "source_tree_sha256": getattr(args, f"{label}_source_sha256"),
+            }
+            for label in ("baseline", "candidate")
+        }
+        report["rounds_requested"] = args.rounds
+        report["timeout_seconds"] = args.timeout
+    return report
 
 
 def invoke(binary: Path, arguments: list[str], timeout: int) -> dict:
@@ -163,6 +281,10 @@ def invoke_for_side(binary: Path, arguments: list[str], timeout: int,
 
 
 def run(args: argparse.Namespace) -> dict:
+    requested_fixtures = getattr(args, "fixtures", None) or list(FIXTURE_BY_NAME)
+    fixtures = tuple(FIXTURE_BY_NAME[name] for name in requested_fixtures)
+    if not fixtures:
+        raise RuntimeError("at least one benchmark fixture must be selected")
     binaries = {
         "baseline": (args.baseline_proof.resolve(), args.baseline_replay.resolve()),
         "candidate": (args.candidate_proof.resolve(), args.candidate_replay.resolve()),
@@ -174,13 +296,26 @@ def run(args: argparse.Namespace) -> dict:
 
     product_contexts = {}
     product_manifests = {}
+    source_snapshots = {}
     for label, (proof_binary, replay_binary) in binaries.items():
         proof_manifest = read_build_manifest(proof_binary, f"{label}/proof")
         replay_manifest = read_build_manifest(replay_binary, f"{label}/replay")
         product_manifests[label] = {"proof": proof_manifest, "replay": replay_manifest}
+        verify_build_artifacts(proof_manifest, f"{label}/proof")
+        verify_build_artifacts(replay_manifest, f"{label}/replay")
         product_contexts[label] = require_compatible_products(
             proof_manifest, replay_manifest, label
         )
+        require_clean_toolchain(product_manifests[label], label)
+        source_root = getattr(args, f"{label}_source_root", None)
+        source_hash = getattr(args, f"{label}_source_sha256", None)
+        if source_root is None or source_hash is None:
+            raise RuntimeError(
+                f"{label} requires --{label}-source-root and --{label}-source-sha256; "
+                "the source tree must be independently verified"
+            )
+        verify_proof_source(product_manifests[label], source_root, source_hash, label)
+        source_snapshots[label] = (source_root, source_hash)
     toolchain_keys = tuple(key for key in product_contexts["baseline"]
                            if not key.startswith("proof."))
     toolchain_differences = [key for key in toolchain_keys
@@ -197,13 +332,22 @@ def run(args: argparse.Namespace) -> dict:
                       for suffix in (".manifest.json", ".manifest.json.sha256")]
     identities = {path: file_identity(path) for pair in binaries.values() for path in pair}
     identities.update({path: file_identity(path) for path in manifest_paths})
-    identities.update({source: file_identity(source) for _, source, _, _ in FIXTURES})
+    identities.update({source: file_identity(source) for _, source, _, _ in fixtures})
+    for name, source, _, _ in fixtures:
+        expected_hash = FIXTURE_SHA256.get(name)
+        if expected_hash is None or identities[source]["sha256"] != expected_hash:
+            raise RuntimeError(f"{name}: workload source hash differs from its reviewed corpus identity")
     verify_build_snapshot(binaries, product_manifests, identities)
+
+    preflight = preflight_semantics(binaries, fixtures, args.timeout)
+    verify_build_snapshot(binaries, product_manifests, identities)
+    for label, (source_root, source_hash) in source_snapshots.items():
+        verify_proof_source(product_manifests[label], source_root, source_hash, label)
 
     entries = []
     with tempfile.TemporaryDirectory(prefix="elisa-proof-perf-luna-") as temporary:
         scratch = Path(temporary)
-        for fixture, source, proof_exit, proof_status in FIXTURES:
+        for fixture, source, proof_exit, proof_status in fixtures:
             run_outputs = {variant: {"proof": [], "export": [], "replay": []}
                            for variant in binaries}
             semantic_metrics = {}
@@ -282,14 +426,47 @@ def run(args: argparse.Namespace) -> dict:
             baseline = run_outputs["baseline"]
             candidate = run_outputs["candidate"]
             for phase in ("proof", "export", "replay"):
-                reference = (baseline[phase][0]["returncode"], baseline[phase][0]["stdout"],
-                             baseline[phase][0]["stderr"])
-                if any((item["returncode"], item["stdout"], item["stderr"]) != reference
+                reference = (baseline[phase][0]["returncode"],
+                             output_projection(phase, baseline[phase][0]["stdout"]))
+                if any((item["returncode"], output_projection(phase, item["stdout"])) != reference
                        for item in baseline[phase] + candidate[phase]):
-                    raise RuntimeError(f"{fixture}/{phase}: outputs differ between rounds or binaries")
+                    raise RuntimeError(
+                        f"{fixture}/{phase}: semantic output differs between rounds or binaries"
+                    )
+
+            semantic_digests = {}
+            for variant, phases in run_outputs.items():
+                semantic_digests[variant] = {}
+                for phase in ("proof", "export", "replay"):
+                    projection = output_projection(phase, phases[phase][0]["stdout"])
+                    semantic_digests[variant][phase] = hashlib.sha256(projection).hexdigest()
+
+            paired_samples = {
+                phase: {
+                    variant: [
+                        {"pair_index": index + 1,
+                         **{metric: sample.get(metric) for metric in (
+                             "wall_seconds", "user_cpu_seconds", "system_cpu_seconds",
+                             "peak_rss_kib")}}
+                        for index, sample in enumerate(run_outputs[variant][phase])
+                    ]
+                    for variant in ("baseline", "candidate")
+                }
+                for phase in ("proof", "export", "replay")
+            }
+            semantic_outcomes = {
+                variant: semantic_outcome_projection(
+                    run_outputs[variant]["proof"][0]["stdout"],
+                    run_outputs[variant]["export"][0]["stdout"],
+                    run_outputs[variant]["replay"][0]["stdout"],
+                )
+                for variant in ("baseline", "candidate")
+            }
 
             entries.append({
                 "fixture": fixture,
+                "expected_status": proof_status,
+                "expected_exit": proof_exit,
                 "source": {"path": str(source), **identities[source]},
                 "proof": {variant: record_measurements(data["proof"])
                           for variant, data in run_outputs.items()},
@@ -298,13 +475,26 @@ def run(args: argparse.Namespace) -> dict:
                 "standalone_replay": {variant: record_measurements(data["replay"])
                                       for variant, data in run_outputs.items()},
                 "semantic_workload": semantic_metrics,
-                "outputs_identical": True,
+                "semantic_outcomes": semantic_outcomes,
+                "semantic_output_sha256": semantic_digests,
+                "paired_samples": paired_samples,
+                "semantic_outputs_identical": True,
             })
 
     require_unchanged_inputs(identities)
+    for label, (source_root, source_hash) in source_snapshots.items():
+        verify_proof_source(product_manifests[label], source_root, source_hash, label)
     return {
         "schema": SCHEMA,
-        "comparison": "exact-stdout-bytes",
+        "comparison": "semantic-json-projection-with-trust-and-replay",
+        "interpretation": (
+            "same-product reproducibility benchmark; no baseline/candidate optimization "
+            "difference and no speedup claim"
+            if all(identities[binaries["baseline"][index]]
+                   == identities[binaries["candidate"][index]] for index in (0, 1))
+            else "paired product comparison; performance interpretation requires multiple samples"
+        ),
+        "selected_fixtures": [name for name, _, _, _ in fixtures],
         "measurement_order": "alternating-baseline-candidate",
         "wall_percentile_method": "nearest-rank",
         "rounds": args.rounds,
@@ -320,7 +510,18 @@ def run(args: argparse.Namespace) -> dict:
                              "replay_manifest_identity": identities[Path(
                                  str(pair[1]) + ".manifest.json")]}
                      for label, pair in binaries.items()},
+        "build_manifests": {
+            label: {
+                role: Path(str(binary) + ".manifest.json").read_text(encoding="utf-8")
+                for role, binary in zip(("proof", "replay"), binaries[label])
+            }
+            for label in binaries
+        },
         "build_context": product_contexts,
+        "source_tree_sha256": {
+            label: getattr(args, f"{label}_source_sha256") for label in binaries
+        },
+        "semantic_preflight": preflight,
         "fixtures": entries,
     }
 
@@ -355,8 +556,17 @@ def main() -> int:
     parser.add_argument("--rounds", type=int, default=7)
     parser.add_argument("--warmup-rounds", type=int, default=1)
     parser.add_argument("--timeout", type=int, default=120)
+    parser.add_argument("--fixture", dest="fixtures", action="append",
+                        choices=tuple(FIXTURE_BY_NAME),
+                        help="select one or more pinned fixtures (repeatable; default: all)")
+    for label in ("baseline", "candidate"):
+        parser.add_argument(f"--{label}-source-root", type=Path, required=True,
+                            help=f"exact src snapshot used to build {label} products")
+        parser.add_argument(f"--{label}-source-sha256", required=True,
+                            help=f"independently computed SHA-256 of {label} source root")
     parser.add_argument("--output", type=Path, help="write the JSON report here; stdout by default")
     args = parser.parse_args()
+    args.fixtures = args.fixtures or list(FIXTURE_BY_NAME)
     if not 1 <= args.rounds <= MAX_ROUNDS:
         parser.error(f"--rounds must be between 1 and {MAX_ROUNDS}")
     if not 1 <= args.timeout <= MAX_TIMEOUT:
@@ -366,6 +576,14 @@ def main() -> int:
     try:
         report = run(args)
     except (OSError, RuntimeError) as error:
+        censored = censored_failure_report(error, args) if isinstance(error, RuntimeError) else None
+        if censored is not None:
+            rendered = json.dumps(censored, indent=2, sort_keys=True) + "\n"
+            if args.output:
+                args.output.write_text(rendered, encoding="utf-8")
+            else:
+                sys.stdout.write(rendered)
+            return 1
         print(f"perf_luna_benchmark: {error}", file=sys.stderr)
         return 1
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
