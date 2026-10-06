@@ -129,26 +129,6 @@ assert not any(
     for theorem in false_package["theorems"]
 ), false_package["theorems"]
 
-# Preserve this multiline positive assertion unchanged. It is the currently failing replay-gap
-# regression; the controls above must pass before this line exposes the expected baseline failure.
-multiline_contract = """\
-def identity(value: bool) -> bool:
-    ensure result == value
-    return value
-
-def multiline_contract(accepted: bool) -> bool:
-    requires (
-        identity(accepted) or false
-    )
-    ensure (
-        identity(accepted)
-    )
-    return accepted
-"""
-print("disjunction controls passed: positive portable replay, malformed index rejection, false-claim refusal")
-code, multiline = run(multiline_contract)
-assert code == 0 and multiline["status"] == "proved", multiline["findings"]
-
 # These premises each have a goal-matching alternative, but their other side
 # remains open, so eight/nine of them genuinely fail the entailment check.
 def relevant_failures(count, late_success=False):
@@ -182,6 +162,30 @@ assert any(
     for finding in nine_failures["findings"]
 ), nine_failures["findings"]
 
+# The repeated-call source reaches a live local-binding trace that the source boundary does not
+# yet authenticate. The producer must refuse that claim rather than leave a replay gap or certify
+# a fact with unproven reaching-definition provenance.
+domain = subprocess.run(
+    [
+        BINARY,
+        "--function-json",
+        "repeated_pure_call_domain",
+        str(ROOT / "examples/open_disjunction_call_domain_probe.elisa"),
+    ],
+    capture_output=True,
+    text=True,
+    timeout=180,
+)
+domain_report = json.loads(domain.stdout)
+assert domain.returncode == 1 and domain_report["status"] == "failed", domain_report["findings"]
+assert domain_report["summary"]["semantic_errors"] == 0, domain_report["summary"]
+assert domain_report["verification_state"] == "unknown", domain_report["verification_state"]
+assert domain_report["replay"]["gaps"] == 0, domain_report["replay"]
+assert domain_report["replay"]["certificates"] == domain_report["replay"]["replayed"]
+assert not domain_report["trust"]["trusted_assumptions"]
+assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown"
+           for f in domain_report["findings"]), domain_report["findings"]
+
 # A later refuted alternative can still be established by the independent
 # disjunctive-syllogism rule after the bounded entailment scan stops.
 code, late_success = run(relevant_failures(9, late_success=True))
@@ -203,24 +207,23 @@ def contradiction(value: bool, q: bool, r: bool) -> bool:
 code, contradictory = run(contradiction)
 assert code == 0 and contradictory["status"] == "proved", contradictory["findings"]
 
-# The high-fact pure-call domain case regressed under a raw fact-count guard.
-# Keep it in this focused boundary suite so producer and replay retain coverage.
-domain = subprocess.run(
-    [
-        BINARY,
-        "--function-json",
-        "repeated_pure_call_domain",
-        str(ROOT / "examples/open_disjunction_call_domain_probe.elisa"),
-    ],
-    capture_output=True,
-    text=True,
-    timeout=180,
-)
-domain_report = json.loads(domain.stdout)
-assert domain.returncode == 0 and domain_report["status"] == "proved", domain_report["findings"]
-assert domain_report["summary"]["semantic_errors"] == 0, domain_report["summary"]
-assert domain_report["replay"]["gaps"] == 0, domain_report["replay"]
-assert domain_report["replay"]["certificates"] == domain_report["replay"]["replayed"]
-assert not domain_report["trust"]["trusted_assumptions"]
+print("disjunction search: late premises replay, and unauthenticated local-alias claims fail closed without replay gaps")
 
-print("disjunction search: late relevant facts survive irrelevant candidates and high-fact domains replay")
+# Preserve this unrelated multiline positive assertion unchanged and run it after the high-fact
+# controls, so its known source/replay mismatch cannot mask the later bounded-search regressions.
+multiline_contract = """\
+def identity(value: bool) -> bool:
+    ensure result == value
+    return value
+
+def multiline_contract(accepted: bool) -> bool:
+    requires (
+        identity(accepted) or false
+    )
+    ensure (
+        identity(accepted)
+    )
+    return accepted
+"""
+code, multiline = run(multiline_contract)
+assert code == 0 and multiline["status"] == "proved", multiline["findings"]

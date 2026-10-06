@@ -27,18 +27,33 @@ for fixture, expected in (("disjunction_domain_probe", 0),
 open_run = subprocess.run([str(BINARY), "--function-json", "open_pure_call_domain",
     str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
     capture_output=True, text=True, timeout=120)
-assert open_run.returncode == 0, (open_run.returncode, open_run.stdout, open_run.stderr)
+assert open_run.returncode == 1, (open_run.returncode, open_run.stdout, open_run.stderr)
 opened = json.loads(open_run.stdout)
 assert opened["summary"]["semantic_errors"] == 0 and opened["replay"]["gaps"] == 0
-assert opened["findings"] == [] and opened["status"] == "proved"
+assert opened["status"] == "failed" and opened["verification_state"] == "unknown"
 assert opened["replay"]["replayed"] == opened["summary"]["proven"]
+assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown"
+           for f in opened["findings"]), opened["findings"]
+
+direct_run = subprocess.run([str(BINARY), "--function-json", "direct_pure_call_domain",
+    str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
+    capture_output=True, text=True, timeout=120)
+assert direct_run.returncode == 0, (direct_run.returncode, direct_run.stdout, direct_run.stderr)
+direct = json.loads(direct_run.stdout)
+assert direct["summary"]["semantic_errors"] == 0 and direct["replay"]["gaps"] == 0
+assert direct["findings"] == [] and direct["status"] == "proved"
+assert direct["replay"]["replayed"] == direct["summary"]["proven"]
+
 repeated_run = subprocess.run([str(BINARY), "--function-json", "repeated_pure_call_domain",
     str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
     capture_output=True, text=True, timeout=120)
-assert repeated_run.returncode == 0, (repeated_run.returncode, repeated_run.stdout, repeated_run.stderr)
+assert repeated_run.returncode == 1, (repeated_run.returncode, repeated_run.stdout, repeated_run.stderr)
 repeated = json.loads(repeated_run.stdout)
 assert repeated["summary"]["semantic_errors"] == 0 and repeated["replay"]["gaps"] == 0
-assert repeated["status"] == "proved" and repeated["findings"] == []
+assert repeated["status"] == "failed" and repeated["verification_state"] == "unknown"
+assert repeated["replay"]["replayed"] == repeated["replay"]["certificates"]
+assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown"
+           for f in repeated["findings"]), repeated["findings"]
 float_run = subprocess.run([str(BINARY), "--json",
     str(ROOT / "examples/rejected_float_call_integer_domain.elisa")],
     capture_output=True, text=True, timeout=120)
