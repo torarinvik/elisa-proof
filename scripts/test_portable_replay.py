@@ -86,4 +86,5 @@ runpy.run_path(str(ROOT / "scripts/tests/portable_replay_kernel_forgeries.py"), 
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_package_validation.py"), init_globals=globals())
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_structure_fuzz.py"), init_globals=globals())
 runpy.run_path(str(ROOT / "scripts/tests/portable_replay_raw_bytes.py"), init_globals=globals())
+runpy.run_path(str(ROOT / "scripts/tests/portable_replay_package_atomicity.py"), init_globals=globals())
 print("portable replay: %d packages replay; semantic and package-reader attacks are refused" % len(packages))
