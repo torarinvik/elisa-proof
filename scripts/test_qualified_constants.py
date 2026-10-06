@@ -28,16 +28,17 @@ code, data = run("rejected_qualified_shadow.elisa")
 assert code == 1 and data["status"] == "failed" and data["replay"]["gaps"] == 0, data["findings"]
 assert [f["name"] for f in data["findings"]] == ["shadowed"], data["findings"]
 
-code, data = run("qualified_constants_body.elisa")
-assert code == 0 and data["status"] == "proved" and data["findings"] == [], data["findings"]
-assert data["summary"]["proven"] == 4 and data["replay"]["gaps"] == 0
-
-# Keep the exact minimal shape that crashed the retained historical proof binary.
+# Keep the exact minimal shape that crashed the retained historical proof binary ahead of
+# broader body controls, so an unrelated replay gap cannot prevent this crash regression running.
 code, data = run("qualified_constant_return_crash_repro.elisa")
 assert code == 0 and data["status"] == "proved" and data["findings"] == [], data
 assert data["summary"]["obligations"] == data["summary"]["proven"] == 1
 assert data["replay"]["certificates"] == data["replay"]["replayed"] == 1
 assert data["replay"]["gaps"] == 0
+
+code, data = run("qualified_constants_body.elisa")
+assert code == 0 and data["status"] == "proved" and data["findings"] == [], data["findings"]
+assert data["summary"]["proven"] == 4 and data["replay"]["gaps"] == 0
 
 for name, function in (("rejected_qualified_constants_body.elisa", "too_small"),
                        ("rejected_qualified_body_shadow.elisa", "shadowed")):

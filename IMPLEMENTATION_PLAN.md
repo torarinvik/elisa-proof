@@ -6251,6 +6251,16 @@ result. Keep the failure reason stable and machine-readable.
     binding, obligation inventory, replay, casts, loops, collections, package input, result lattice,
     and crash controls on every commit. Promote only cases whose exact identity and output are saved.
 
+**Q0.11 — Current-pair qualified-constant crash triage (2026-10-06): historical crash not reproduced.**
+The exact minimized return repro passed on fresh Stage1 O2 pair generation
+`16b967120e5e46498ce5dbfa7ff4709f` (one obligation/certificate, zero replay gaps). The pair is
+identity-checked, but its Stage1 checkout is marked dirty; see
+[`docs/evidence/2026-10-06-q011-qualified-crash-current-pair.md`](docs/evidence/2026-10-06-q011-qualified-crash-current-pair.md).
+The historical binary and exact dirty source state remain unavailable, so P-00's cause/fix gate stays
+open. The broader qualified-constant test script stopped before the minimized case at a distinct
+body replay gap (4 obligations, 3 replayed, 1 gap); the minimized case was run directly. No crash was
+available for debugger/LLDB inspection and no speculative source change was made.
+
 **P0 exit gate:** no observed case can gain a theorem from stale or foreign source facts; every
 supported source obligation is inventoried; all admitted certificates replay with zero gaps; partial
 and invalid reports remain non-proved; all current failures have a minimized cause, a retained test,
