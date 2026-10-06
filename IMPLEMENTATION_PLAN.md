@@ -6054,12 +6054,17 @@ if it prevents a false proof. Commit each independently validated item or tightl
   forms remain uncovered. The full matrix has reported loop binding/guard, collection-reach,
   ADT/pattern-fact, proof CLI status/exit-code, and incomplete-report failures. Classify each at its
   failing assertion; do not assume every failure is a semantic bug.
-- **Unsigned arithmetic soundness alarm from the exact `f2d37570` matrix:** the log reports the
-  adversarial tactic controls `rejected_u64_max_decide`, `rejected_u8_overflow_decide`, and
-  `rejected_u8_overflow_simp` as accepted, despite tests requiring refusal. These are potential
-  kernel false proofs, not ordinary coverage gaps. Preserve the exact tactic JSON, source-goal ID and
-  fingerprint, report, and exit code; independently replay each in a fresh process before and after
-  the fix. Do not infer the root cause from the separate unsigned-marker gap counts.
+- **Unsigned tactic test-integrity correction:** the exact `f2d37570` matrix printed
+  `unsound unsigned tactic proof was accepted` for three controls, but replaying the same sources
+  with `--goal` showed the test scripts' pinned fingerprints (`3959704679`, `3492578551`) no longer
+  matched the actual imported goals (`515359733`, `1229197265`). Thus the matrix rejected the
+  scripts at source-goal binding before `decide`/`simp`; those log lines were false-alarm test
+  diagnostics, not evidence that a tactic theorem was accepted. After updating the fixtures and
+  checks, the matched strict Stage1 O2 proof product binds each script and refuses the actual
+  arithmetic action, with zero accepted actions; `scripts/test_safe_constant_replay.py` passes.
+  Keep the test bound to the exact goal (and assert the specific action-refusal reason), rather than
+  weakening it to accept stale/malformed scripts. Broader fixed-width arithmetic semantics and the
+  rest of R-042 remain open. Evidence: `docs/evidence/2026-10-06-p0-unsigned-tactic-binding.md`.
 - **Separate cast-dispatch soundness alarm:** a clean-product audit reported that a source-defined
   `__cast__(u8) -> i64` returning `-1` allowed the false postcondition `result >= 0` to be reported
   `proved` with all three certificates replayed. That report was gathered on a separate proof
@@ -6117,6 +6122,11 @@ result. Keep the failure reason stable and machine-readable.
     high-bit `u64`, positive reflexivity/small-range arithmetic controls, forged/mutated script
     controls, and portable/fresh replay checks. Producer and replay must enforce the same justified
     semantics, with no theorem row or `proved` status for any refused tactic.
+    **Current narrow-slice evidence:** the earlier alarm came from stale source-bound fingerprints,
+    not an accepted tactic. The exact three scripts now bind to their live `u64`/`u8` goals and the
+    strict Stage1 O2 product refuses each action for its arithmetic outcome. This closes only these
+    three negative controls; width-complete unsigned arithmetic and portable-package replay parity
+    remain open.
 3c. **P0.3c — Make numeric-cast proof facts dispatch-aware.** Minimize and reproduce the reported
     false `result >= 0` proof where `__cast__(u8) -> i64` returns `-1`. Remove context-free
     cast-as-identity/type assumptions; either reconstruct and independently validate the compiler's

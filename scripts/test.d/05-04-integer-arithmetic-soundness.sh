@@ -40,9 +40,9 @@ fi
 # simp tactic replay against their false claims; either accepting one would be a kernel soundness
 # failure even if ordinary source analysis correctly reports the goal as unknown.
 readonly REJECTED_U64_MAX_GOAL_ID=7
-readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=3959704679
+readonly REJECTED_U64_MAX_GOAL_FINGERPRINT=515359733
 readonly REJECTED_U8_OVERFLOW_GOAL_ID=13
-readonly REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT=3492578551
+readonly REJECTED_U8_OVERFLOW_GOAL_FINGERPRINT=1229197265
 for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide rejected_u8_overflow_simp; do
     case "$tactic_fixture" in
         rejected_u64_max_decide)
