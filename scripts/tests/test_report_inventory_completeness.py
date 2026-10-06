@@ -111,6 +111,27 @@ def main() -> None:
     assert literal_goal["rule"] == "goal" and literal_goal["proven"]
     assert literal_goal["replay_status"] == "replayed"
     assert literal_goal["goal"]["right"]["line"] == 8
+    positive_postconditions = [
+        goal for goal in source_control["goals"]
+        if goal["name"] in ("source_inventory_positive", "source_inventory_literal_postcondition")
+        and goal["rule"] == "goal"
+    ]
+    assert len(positive_postconditions) == 2
+    assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in positive_postconditions)
+
+    # Nested module functions are traversed by the proof checker. Until source identities
+    # include namespace paths, their postconditions must be recorded as unsupported by the
+    # independent inventory rather than disappearing and allowing a proved whole-file result.
+    code, nested_literal = run_report(ROOT / "examples/source_obligation_inventory_nested_scope.elisa")
+    assert code == 1
+    check_emitted_inventory(nested_literal, proved=False)
+    nested_inventory_findings = [
+        finding for finding in nested_literal["findings"]
+        if finding["kind"] == "source-obligation-inventory"
+    ]
+    assert nested_inventory_findings
+    assert nested_inventory_findings[0]["status"] == "unsupported"
+    assert nested_literal["verification_state"] == "unsupported"
 
     # `ensures` is the plural spelling of the same source construct and must receive an
     # independently inventoried, replayed source obligation as well.
