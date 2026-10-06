@@ -37,5 +37,6 @@ run_py_test test_qualified_constant_call_domain.py
 run_py_test test_qualified_constant_pins.py
 run_py_test test_strict_order_disequality.py
 run_py_test test_compact_mutating_call_summary.py
+run_py_test test_call_result_order_transport_gap.py
 run_py_test test_effect_loop_control.py
 run_py_test test_string_literal_comparison.py
