@@ -264,6 +264,14 @@ def main():
         assert_no_publication(directory, "late-global-schema-error-no-partial-theorems",
                               late_global_error, "node-schema")
 
+        # A malformed theorem record late in the list must not publish results for the valid
+        # prefix. Package schema admission is all-or-nothing even though theorem replay itself
+        # is performed sequentially; a rejected package has no theorem/cache publication.
+        late_theorem_schema_error = copy.deepcopy(duplicate_ids)
+        del late_theorem_schema_error["theorems"][1]["statement"]
+        assert_no_publication(directory, "late-theorem-schema-error-no-partial-theorems",
+                              late_theorem_schema_error, "theorem-schema")
+
         schema_cases = [
             ("missing-source-authenticated", ("source", "authenticated")),
             ("missing-fingerprint-value", ("source", "fingerprint", "value")),
