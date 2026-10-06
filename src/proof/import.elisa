@@ -14,6 +14,9 @@ extend ElisaProof:
         const PROOF_IMPORT_BYTE_CARRIAGE_RETURN: u8 = 13
         const PROOF_IMPORT_BYTE_SPACE: u8 = 32
         const PROOF_IMPORT_BYTE_HASH: u8 = 35
+        const PROOF_IMPORT_BYTE_DOLLAR: u8 = 36
+        const PROOF_IMPORT_BYTE_OPEN_BRACE: u8 = 123
+        const PROOF_IMPORT_BYTE_CLOSE_BRACE: u8 = 125
         const PROOF_IMPORT_BYTE_SINGLE_QUOTE: u8 = 39
         const PROOF_IMPORT_BYTE_DOUBLE_QUOTE: u8 = 34
         const PROOF_IMPORT_BYTE_DOT: u8 = 46
@@ -299,6 +302,113 @@ extend ElisaProof:
                 captured.push(line[offset])
             return (true, captured)
 
+        # The self-hosted compiler driver's include recognizer (`include_brace_directive_path`
+        # and `include_directive_path_span` in Elisa-compiler src/driver/elisac_includes.elisa),
+        # byte for byte. It differs from the reference recognizer above: only space and tab
+        # separate tokens, `include<TAB>"p"` is a directive, text after the closing quote of a
+        # plain directive is ignored, and the path ends at the FIRST closing quote. A line the two
+        # compilers read differently builds two different programs, so the importer refuses it
+        # instead of certifying one of them (see `proof_include_agreement`).
+        def proof_import_blank(byte: u8) -> bool:
+            return byte == PROOF_IMPORT_BYTE_SPACE or byte == PROOF_IMPORT_BYTE_TAB
+
+        def proof_include_brace_path_stage1(line: darray[u8]&) -> darray[u8]:
+            empty: mutable darray[u8] = []
+            begin: mutable usize = 0
+            while begin < line.count |begin, line|:
+                break if not proof_import_blank(line[begin])
+                begin <- begin + 1
+            finish: mutable usize = line.count
+            while finish > begin |finish, line|:
+                break if not proof_import_blank(line[finish - 1]) and line[finish - 1] != PROOF_IMPORT_BYTE_CARRIAGE_RETURN
+                finish <- finish - 1
+            return empty if finish < begin + 4
+            return empty if line[begin] != PROOF_IMPORT_BYTE_OPEN_BRACE or line[begin + 1] != PROOF_IMPORT_BYTE_DOLLAR or line[finish - 1] != PROOF_IMPORT_BYTE_CLOSE_BRACE
+            body_start: mutable usize = begin + 2
+            body_stop: usize = finish - 1
+            while body_start < body_stop |body_start, line|:
+                break if not proof_import_blank(line[body_start])
+                body_start <- body_start + 1
+            keyword_stop: mutable usize = body_start
+            while keyword_stop < body_stop |keyword_stop, line|:
+                break if proof_import_blank(line[keyword_stop])
+                keyword_stop <- keyword_stop + 1
+            keyword_length: usize = keyword_stop - body_start
+            return empty if keyword_length != 1 and keyword_length != PROOF_IMPORT_INCLUDE_KEYWORD_LENGTH
+            include_keyword: sview = "include"
+            for offset in 0..<keyword_length |empty, line, body_start, include_keyword|:
+                original: u8 = line[body_start + offset]
+                lowered: u8 = original + PROOF_IMPORT_ASCII_CASE_DELTA if original >= PROOF_IMPORT_BYTE_UPPERCASE_A and original <= PROOF_IMPORT_BYTE_UPPERCASE_Z else original
+                return empty if lowered != sview_at(include_keyword, offset)
+            argument_start: mutable usize = keyword_stop
+            while argument_start < body_stop |argument_start, line|:
+                break if not proof_import_blank(line[argument_start])
+                argument_start <- argument_start + 1
+            argument_stop: mutable usize = body_stop
+            while argument_stop > argument_start |argument_stop, line|:
+                break if not proof_import_blank(line[argument_stop - 1])
+                argument_stop <- argument_stop - 1
+            return empty if argument_stop <= argument_start
+            opening: u8 = line[argument_start]
+            closing: u8 = line[argument_stop - 1]
+            quoted: bool = argument_stop - argument_start >= 2 and ((opening == PROOF_IMPORT_BYTE_SINGLE_QUOTE and closing == PROOF_IMPORT_BYTE_SINGLE_QUOTE) or (opening == PROOF_IMPORT_BYTE_DOUBLE_QUOTE and closing == PROOF_IMPORT_BYTE_DOUBLE_QUOTE))
+            inner_start: usize = argument_start + 1 if quoted else argument_start
+            inner_stop: usize = argument_stop - 1 if quoted else argument_stop
+            return empty if inner_stop <= inner_start
+            if not quoted:
+                for offset in inner_start..<inner_stop |empty, line|:
+                    return empty if proof_import_blank(line[offset])
+            captured: mutable darray[u8] = []
+            for offset in inner_start..<inner_stop |captured, line|:
+                captured.push(line[offset])
+            return captured
+
+        # An empty result means "not a directive": the driver keeps such a line as source.
+        def proof_include_path_stage1(line: darray[u8]&) -> darray[u8]:
+            braced: darray[u8] = proof_include_brace_path_stage1(line)
+            return braced if braced.count > 0
+            empty: mutable darray[u8] = []
+            cursor: mutable usize = 0
+            while cursor < line.count |cursor, line|:
+                break if not proof_import_blank(line[cursor])
+                cursor <- cursor + 1
+            cursor <- cursor + 1 if cursor < line.count and line[cursor] == PROOF_IMPORT_BYTE_HASH
+            while cursor < line.count |cursor, line|:
+                break if not proof_import_blank(line[cursor])
+                cursor <- cursor + 1
+            return empty if cursor + PROOF_IMPORT_INCLUDE_KEYWORD_LENGTH > line.count
+            keyword: sview = "include"
+            for keyword_index in 0..<PROOF_IMPORT_INCLUDE_KEYWORD_LENGTH |empty, line, cursor, keyword|:
+                return empty if line[cursor + keyword_index] != sview_at(keyword, keyword_index)
+            cursor <- cursor + PROOF_IMPORT_INCLUDE_KEYWORD_LENGTH
+            return empty if cursor >= line.count or not proof_import_blank(line[cursor])
+            while cursor < line.count |cursor, line|:
+                break if not proof_import_blank(line[cursor])
+                cursor <- cursor + 1
+            return empty if cursor >= line.count or line[cursor] != PROOF_IMPORT_BYTE_DOUBLE_QUOTE
+            cursor <- cursor + 1
+            captured: mutable darray[u8] = []
+            while cursor < line.count |cursor, line, captured|:
+                break if line[cursor] == PROOF_IMPORT_BYTE_DOUBLE_QUOTE
+                captured.push(line[cursor])
+                cursor <- cursor + 1
+            return empty if cursor >= line.count
+            return captured
+
+        # Whether both compilers agree on what this line is. They must both keep it as source, or
+        # both splice the same path from a directive at column 0: the reference compiler
+        # re-indents the spliced text by the directive's indentation, the self-hosted driver and
+        # this importer do not, so an indented directive also builds two different programs.
+        def proof_include_agreement(line: darray[u8]&, reference: (recognized: bool, path: darray[u8])) -> bool:
+            driver_path: darray[u8] = proof_include_path_stage1(line)
+            reference_splices: bool = reference.recognized and reference.path.count > 0
+            return false if reference.recognized and not reference_splices
+            return driver_path.count == 0 if not reference_splices
+            return false if driver_path.count != reference.path.count
+            for offset in 0..<driver_path.count |driver_path, reference|:
+                return false if driver_path[offset] != reference.path[offset]
+            return line.count > 0 and not proof_import_blank(line[0])
+
         # `line_files[k]` and `line_numbers[k]` give the file (its position in `seen`, which
         # lists files in first-visit order) and the 1-based line there of expanded line k + 1.
         # Include directives are dropped from the expansion, so without the map a line number
@@ -340,7 +450,9 @@ extend ElisaProof:
                 if byte == PROOF_IMPORT_BYTE_LINE_FEED:
                     source_line <- source_line + 1
                     included: (recognized: bool, path: darray[u8]) = proof_include_path(line)
-                    if included.recognized:
+                    if not proof_include_agreement(line, included):
+                        failed <- true
+                    elif included.recognized:
                         if proof_import_path_has_nul(included.path):
                             failed <- true
                         else:
