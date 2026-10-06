@@ -70,10 +70,11 @@ require(all(position >= 0 for position in positions) and positions == sorted(pos
 require('if sview_len(checked.verdict.status) == 0:\n            proof_push(&results, "\\\"replayed\\\",\\\"reason\\\":null}")' in replay,
         "portable theorem result no longer derives replayed status from the checker verdict")
 
-# The whole package is successful only after admission of the complete arena and all theorem
-# checks; empty packages and any theorem failure exit through the failure branch.
+# A bounded theorem-envelope preflight intentionally runs before arena admission. The actual
+# theorem replay loop must follow admission of the complete arena; empty packages and any theorem
+# failure exit through the failure branch.
 arena_gate = replay.find("proof_kernel_replay_arena_all_report")
-theorem_loop = replay.find("for index in 0..<theorem_list.count")
+theorem_loop = replay.find("for index in 0..<theorem_list.count", arena_gate)
 failure_return = replay.find("if sview_len(verdict.status) > 0:")
 success_return = replay.find("proof_package_push_result(out, final_verdict")
 require(arena_gate >= 0 and theorem_loop > arena_gate,
