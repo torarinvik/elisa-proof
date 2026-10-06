@@ -45,7 +45,46 @@ include "../src/proof/replay.elisa"
 using Ast
 using ElisaProof
 
+extend ElisaProof:
+    public:
+        def proof_test_local_binding_source_gate(report: mutable ProofReport&, certificate_index: usize, trace_index: usize) -> i64:
+            return TEST_LOCAL_BINDING_GATE_INVALID_INDEX if certificate_index >= report.certificates.count or trace_index >= report.fact_traces.count
+            certificate: ProofGoalCertificate = report.certificates[certificate_index]
+            trace: ProofFactTrace = report.fact_traces[trace_index]
+            owner_line: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, certificate.name, certificate.line, &owner_line, 0)
+            return TEST_LOCAL_BINDING_GATE_MISSING_OWNER if owner_line == 0
+            report.replay_owner_line <- owner_line
+            report.trace_owner_line <- certificate.line
+            report.trace_consumer_certificate_index <- certificate_index + 1
+            immutable_source: bool = proof_replay_local_binding_immutable_declaration_source(report, trace)
+            widening_source: bool = proof_replay_local_binding_widening_cast_declaration_source(report, trace)
+            return TEST_LOCAL_BINDING_GATE_MISSING_SOURCE if not immutable_source and not widening_source
+            return TEST_LOCAL_BINDING_GATE_SOURCE_REJECTED if not proof_replay_local_binding_source_valid(report, trace)
+            return TEST_LOCAL_BINDING_GATE_FACT_NOT_LIVE if not proof_replay_local_binding_fact_live(report, trace)
+            return TEST_LOCAL_BINDING_GATE_ACCEPTED
+
 const BASELINE_SOURCE: sview = __BASELINE_SOURCE__
+const WIDENING_SOURCE: sview = __WIDENING_SOURCE__
+const SHADOWED_LOCAL_SOURCE: sview = __SHADOWED_LOCAL_SOURCE__
+const CUSTOM_CAST_SOURCE: sview = __CUSTOM_CAST_SOURCE__
+const OVERLOADED_OPERATOR_SOURCE: sview = __OVERLOADED_OPERATOR_SOURCE__
+const TEST_CAST_GATE_ERROR_BASE: i64 = 119
+const TEST_CAST_GATE_COUNT_ERROR: i64 = 118
+const TEST_SHADOW_GATE_ERROR: i64 = 122
+const TEST_SHADOW_GATE_COUNT_ERROR: i64 = 123
+const TEST_CUSTOM_CAST_GATE_ERROR: i64 = 124
+const TEST_CUSTOM_CAST_GATE_COUNT_ERROR: i64 = 125
+const TEST_OVERLOADED_OPERATOR_GATE_ERROR: i64 = 126
+const TEST_OVERLOADED_OPERATOR_GATE_COUNT_ERROR: i64 = 127
+const TEST_LOCAL_BINDING_GATE_INVALID_INDEX: i64 = 1
+const TEST_LOCAL_BINDING_GATE_MISSING_OWNER: i64 = 2
+const TEST_LOCAL_BINDING_GATE_MISSING_SOURCE: i64 = 3
+const TEST_LOCAL_BINDING_GATE_SOURCE_REJECTED: i64 = 4
+const TEST_LOCAL_BINDING_GATE_FACT_NOT_LIVE: i64 = 5
+const TEST_LOCAL_BINDING_GATE_ACCEPTED: i64 = 0
+const TEST_WIDENING_CAST_GATE_COUNT: usize = 2
+const TEST_SINGLE_SOURCE_GATE_COUNT: usize = 1
 const FALSE_INVARIANT_SOURCE: sview = __FALSE_INVARIANT_SOURCE__
 const OVERRUN_SOURCE: sview = __OVERRUN_SOURCE__
 const STALE_INITIALIZER_SOURCE: sview = __STALE_INITIALIZER_SOURCE__
@@ -195,7 +234,99 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     proof_test_parse_and_replay(BASELINE_SOURCE, &fresh_bytes, &fresh_report)
     fresh = proof_test_loop_goals(fresh_report, "bounded_counter", 9)
     return 113 if fresh.count != 2 or not fresh.all_replayed
-    return 0
+
+    widening_bytes: mutable darray[u8] = []
+    widening_report: mutable ProofReport = proof_empty_report()
+    proof_test_parse_and_replay(WIDENING_SOURCE, &widening_bytes, &widening_report)
+    cast_gate_checks: mutable usize = 0
+    for certificate_index in 0..<widening_report.certificates.count |certificate_index, widening_report, cast_gate_checks|:
+        certificate: ProofGoalCertificate = widening_report.certificates[certificate_index]
+        continue if certificate.name != "bound_first"
+        continue if certificate.facts_start > widening_report.fact_origin_trace_indices.count or certificate.facts_count > widening_report.fact_origin_trace_indices.count - certificate.facts_start
+        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, widening_report, cast_gate_checks|:
+            trace_index: usize = widening_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= widening_report.fact_traces.count
+            trace: ProofFactTrace = widening_report.fact_traces[trace_index]
+            continue if trace.kind != "local-binding"
+            match trace.expression:
+                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&widening_report, certificate_index, trace_index)
+                    return TEST_CAST_GATE_ERROR_BASE + gate if gate != TEST_LOCAL_BINDING_GATE_ACCEPTED
+                    cast_gate_checks <- cast_gate_checks + 1
+                _:
+                    pass
+        break if cast_gate_checks == TEST_WIDENING_CAST_GATE_COUNT
+    return TEST_CAST_GATE_COUNT_ERROR if cast_gate_checks != TEST_WIDENING_CAST_GATE_COUNT
+
+    shadowed_bytes: mutable darray[u8] = []
+    shadowed_report: mutable ProofReport = proof_empty_report()
+    proof_test_parse_and_replay(SHADOWED_LOCAL_SOURCE, &shadowed_bytes, &shadowed_report)
+    shadowed_gate_checks: mutable usize = 0
+    for certificate_index in 0..<shadowed_report.certificates.count |certificate_index, shadowed_report, shadowed_gate_checks|:
+        certificate: ProofGoalCertificate = shadowed_report.certificates[certificate_index]
+        continue if certificate.name != "shadowed_local"
+        continue if certificate.facts_start > shadowed_report.fact_origin_trace_indices.count or certificate.facts_count > shadowed_report.fact_origin_trace_indices.count - certificate.facts_start
+        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, shadowed_report, shadowed_gate_checks|:
+            trace_index: usize = shadowed_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= shadowed_report.fact_traces.count
+            trace: ProofFactTrace = shadowed_report.fact_traces[trace_index]
+            continue if trace.kind != "local-binding"
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident("copy", _), TokenKind.EqEq, Ast::Expr.Ident("shadow", _), _):
+                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&shadowed_report, certificate_index, trace_index)
+                    return TEST_SHADOW_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
+                    shadowed_gate_checks <- shadowed_gate_checks + 1
+                _:
+                    pass
+        break if shadowed_gate_checks > 0
+    return TEST_SHADOW_GATE_COUNT_ERROR if shadowed_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
+
+    custom_cast_bytes: mutable darray[u8] = []
+    custom_cast_report: mutable ProofReport = proof_empty_report()
+    proof_test_parse_and_replay(CUSTOM_CAST_SOURCE, &custom_cast_bytes, &custom_cast_report)
+    custom_cast_gate_checks: mutable usize = 0
+    for certificate_index in 0..<custom_cast_report.certificates.count |certificate_index, custom_cast_report, custom_cast_gate_checks|:
+        certificate: ProofGoalCertificate = custom_cast_report.certificates[certificate_index]
+        continue if certificate.name != "custom_cast_does_not_keep_source_bound"
+        continue if certificate.facts_start > custom_cast_report.fact_origin_trace_indices.count or certificate.facts_count > custom_cast_report.fact_origin_trace_indices.count - certificate.facts_start
+        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, custom_cast_report, custom_cast_gate_checks|:
+            trace_index: usize = custom_cast_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= custom_cast_report.fact_traces.count
+            trace: ProofFactTrace = custom_cast_report.fact_traces[trace_index]
+            continue if trace.kind != "local-binding"
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident("converted", _), TokenKind.EqEq, _, _):
+                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&custom_cast_report, certificate_index, trace_index)
+                    return TEST_CUSTOM_CAST_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
+                    custom_cast_gate_checks <- custom_cast_gate_checks + 1
+                _:
+                    pass
+        break if custom_cast_gate_checks > 0
+    return TEST_CUSTOM_CAST_GATE_COUNT_ERROR if custom_cast_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
+
+    overloaded_operator_bytes: mutable darray[u8] = []
+    overloaded_operator_report: mutable ProofReport = proof_empty_report()
+    proof_test_parse_and_replay(OVERLOADED_OPERATOR_SOURCE, &overloaded_operator_bytes, &overloaded_operator_report)
+    overloaded_operator_gate_checks: mutable usize = 0
+    for certificate_index in 0..<overloaded_operator_report.certificates.count |certificate_index, overloaded_operator_report, overloaded_operator_gate_checks|:
+        certificate: ProofGoalCertificate = overloaded_operator_report.certificates[certificate_index]
+        continue if certificate.name != "overloaded_add_does_not_keep_source_bound"
+        continue if certificate.facts_start > overloaded_operator_report.fact_origin_trace_indices.count or certificate.facts_count > overloaded_operator_report.fact_origin_trace_indices.count - certificate.facts_start
+        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, overloaded_operator_report, overloaded_operator_gate_checks|:
+            trace_index: usize = overloaded_operator_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= overloaded_operator_report.fact_traces.count
+            trace: ProofFactTrace = overloaded_operator_report.fact_traces[trace_index]
+            continue if trace.kind != "local-binding"
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident("converted", _), TokenKind.EqEq, _, _):
+                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&overloaded_operator_report, certificate_index, trace_index)
+                    return TEST_OVERLOADED_OPERATOR_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
+                    overloaded_operator_gate_checks <- overloaded_operator_gate_checks + 1
+                _:
+                    pass
+        break if overloaded_operator_gate_checks > 0
+    return TEST_OVERLOADED_OPERATOR_GATE_COUNT_ERROR if overloaded_operator_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
+    return TEST_LOCAL_BINDING_GATE_ACCEPTED
 '''
 
 
@@ -277,6 +408,10 @@ def run_source_binding_replay_harness():
     baseline_source = FIXTURE.read_text()
     sources = {
         "__BASELINE_SOURCE__": baseline_source,
+        "__WIDENING_SOURCE__": (ROOT / "examples/widening_cast.elisa").read_text(encoding="utf-8"),
+        "__SHADOWED_LOCAL_SOURCE__": (ROOT / "test/repro/audit_local_binding_global_shadow.elisa").read_text(encoding="utf-8"),
+        "__CUSTOM_CAST_SOURCE__": (ROOT / "test/repro/audit_local_binding_custom_cast.elisa").read_text(encoding="utf-8"),
+        "__OVERLOADED_OPERATOR_SOURCE__": (ROOT / "test/repro/audit_local_binding_overloaded_operator.elisa").read_text(encoding="utf-8"),
         "__FALSE_INVARIANT_SOURCE__": baseline_source.replace("invariant rounds <= limit", "invariant rounds < limit", 1),
         "__OVERRUN_SOURCE__": baseline_source.replace("rounds <- rounds + 1", "rounds <- rounds + 2", 1),
         "__STALE_INITIALIZER_SOURCE__": baseline_source.replace(
@@ -321,6 +456,12 @@ def run_source_binding_replay_harness():
 
 
 provenance = run_source_binding_replay_harness()
+shadow_status, shadow_report = prove(ROOT / "test/repro/audit_local_binding_global_shadow.elisa")
+assert shadow_report["status"] != "proved", shadow_report
+custom_cast_status, custom_cast_proof_report = prove(ROOT / "test/repro/audit_local_binding_custom_cast.elisa")
+assert custom_cast_proof_report["status"] != "proved", custom_cast_proof_report
+operator_status, operator_proof_report = prove(ROOT / "test/repro/audit_local_binding_overloaded_operator.elisa")
+assert operator_proof_report["status"] != "proved", operator_proof_report
 print(
     f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
     f"({fixture_replay['gaps']} unrelated replay gaps); {provenance}; pinned frontend {PINNED_FRONTEND_REV}"
