@@ -63,6 +63,32 @@ report labels this as a same-product reproducibility benchmark and does not asse
 candidate-vs-baseline speedup claim still requires genuinely different immutable products and
 paired samples; semantic parity alone does not imply a performance improvement.
 
+## Reviewed workload corpus
+
+[`scripts/perf_luna_corpus.v1.json`](../scripts/perf_luna_corpus.v1.json) is the versioned
+workload inventory. It pins the committed source revision and SHA-256 identities for each primary
+input, its checked-in include dependencies, and the regression source that establishes the expected
+outcome, with a semantic category for every case.
+The six `timed_fixture` entries are the current paired-harness fixtures. `project_workload` entries
+add the real kernel-core self-check and dogfood controls, plus representative budget, loop
+invariant, branch-join, effect-containment, and borrow-summary workloads. These make the workload
+set less fixture-only without silently changing the measured six-case protocol.
+
+Validate the inventory and its exact Git-pinned source bytes with:
+
+```sh
+python3 scripts/perf_luna_corpus.py
+python3 scripts/tests/test_perf_luna_corpus_manifest.py
+```
+
+The regression requires every reviewed workload identity, checks that source bytes still match the
+pinned commit and working checkout, and rejects missing/duplicate cases and stale hashes. Its
+result gate separately rejects timeouts/censoring, truncation, incomplete sample sets, semantic
+outcome drift, or replay gaps. A timeout that is an expected *proof outcome* in the work-budget
+fixture is distinct from an execution timeout that censors a benchmark sample. This corpus
+inventory does not execute the project workloads, establish a current full baseline, or claim a
+speedup; those require a separately qualified immutable proof/replay product pair.
+
 ## Protocol and report
 
 Before timing, each binary pair must have valid manifest checksums and executable identities;

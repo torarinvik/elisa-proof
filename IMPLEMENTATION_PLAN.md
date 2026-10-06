@@ -7344,6 +7344,16 @@ expected obligations, supported/unsupported constructs, assumptions, theorem out
 expectations. Separate cold filesystem/build, warm build, warm proof, and no-op requests.
     **Gate:** corpus identity is immutable and every fixture has an expected semantic projection;
     censored/crashing/partial rows cannot be quietly dropped.
+    **Bounded Q1.1 inventory milestone:** `scripts/perf_luna_corpus.v1.json` now pins 15 source
+    workloads (the six existing paired fixtures plus nine project workloads) to committed source
+    revision `1624f794b0846ed2fa7ea1b2e840d32fc52f26bb`, including the shared kernel-core include
+    bytes for its self/dogfood controls; each expected category is tied to a pinned regression
+    source as well. `scripts/perf_luna_corpus.py` and its regression reject missing cases, stale
+    committed or working-tree hashes, semantic-category drift, censored or
+    partial samples, truncated output and replay gaps. The real-project entries are inventory
+    additions, not yet measured paired fixtures; they have not all been executed in this milestone.
+    This does not close Q1.1's remaining scale/large-import/package-replay coverage, establish a
+    current full baseline, or claim a speedup.
 13. **Q1.2 — Build an exact-current baseline generation.** Pin proof tree, imported compiler frontend,
     Stage1 product, Stage0 product for parity tests, runtime, profiler hooks, target, optimization,
     linker, and harness versions. Preserve manifests and raw paired samples under versioned evidence.
