@@ -111,17 +111,73 @@ extend ElisaProof:
             return false if proven_attempts != report.proven.usize()
             return expected_certificate == report.certificates.count
 
+        def proof_report_body_postcondition_count(body: darray[Ast::Stmt]&) -> usize:
+            count: mutable usize = 0
+            for statement in body |count|:
+                match statement:
+                    Ast::Stmt.Contract(kind, _, _):
+                        count <- count + 1 if kind == "ensure" or kind == "ensures"
+                    _:
+                        pass
+            return count
+
+        def proof_report_source_postcondition_owner_count(declarations: darray[Ast::Decl]&, name: sview, line: u32, source_index: usize) -> usize:
+            count: mutable usize = 0
+            for declaration in declarations |name, line, source_index, count|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, body, _, _, position):
+                        count <- count + 1 if candidate == name and position.line == line and source_index < proof_report_body_postcondition_count(body)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        count <- count + proof_report_source_postcondition_owner_count(nested, name, line, source_index)
+                    _:
+                        pass
+            return count
+
+        def proof_report_source_function_is_scheduled(report: ProofReport&, name: sview, line: u32) -> bool:
+            return true if report.focused_function == ""
+            for summary in report.declaration_details |name, line, report|:
+                return summary.verification_reason != "not-requested" if summary.name == name and summary.line == line
+            return false
+
+        def proof_report_source_postconditions_have_events(declarations: darray[Ast::Decl]&, report: ProofReport&) -> bool:
+            for declaration in declarations |report|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        expected: usize = proof_report_body_postcondition_count(body)
+                        if proof_report_source_function_is_scheduled(report, name, position.line):
+                            for source_index in 0..<expected |source_index, report, name, position|:
+                                found: mutable bool = false
+                                for obligation in report.obligation_inventory |source_index, name, position, found|:
+                                    found <- true if obligation.source_kind == "postcondition" and obligation.source_name == name and obligation.source_line == position.line and obligation.source_obligation_index == source_index
+                                return false if not found
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_report_source_postconditions_have_events(nested, report)
+                    _:
+                        pass
+            return true
+
+        # Bounded Q0.8 coverage: body-level ensures are recounted from the retained AST and
+        # each distinct source index must have at least one accounting event. Multiple return
+        # paths may legitimately emit multiple events for the same index. Signature-only
+        # contracts and other obligation families are deliberately outside this invariant.
+        def proof_report_source_postcondition_inventory_consistent(report: ProofReport&) -> bool:
+            for obligation in report.obligation_inventory:
+                if obligation.source_kind == "postcondition":
+                    return false if proof_report_source_postcondition_owner_count(report.source_declarations, obligation.source_name, obligation.source_line, obligation.source_obligation_index) != 1
+                else:
+                    return false if obligation.source_kind != ""
+                    return false if obligation.source_line != 0 or obligation.source_name != "" or obligation.source_obligation_index != 0
+            return proof_report_source_postconditions_have_events(report.source_declarations, report)
+
         # Focused source queries may return one checked goal while another declaration was
         # absent from the report. Their admission still depends on a structurally complete
         # source inventory and a consistent finding ledger, even when other goals remain open.
         def proof_report_source_admission_invariants_consistent(report: ProofReport&) -> bool:
-            # This is report-internal consistency, not evidence that every source-required
-            # obligation was scheduled. The current event ledger has no source identity, so
-            # source-obligation completeness must not be inferred from these aggregate checks.
             return false if not proof_report_failure_count_consistent(report)
             return false if not proof_report_declaration_inventory_consistent(report)
             return false if not proof_report_obligation_inventory_consistent(report)
             return false if not proof_report_goal_attempts_bounded_by_obligations(report)
+            return false if not proof_report_source_postcondition_inventory_consistent(report)
             return proof_report_proven_attempts_consistent(report)
 
         # Independent source inventory slice (R-004): unique top-level functions with exactly

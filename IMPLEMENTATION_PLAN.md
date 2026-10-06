@@ -7311,6 +7311,15 @@ cannot execute on a coherent product pair.
    proof success: complete inventory plus open goals means incomplete, not proved.
    **Gate:** mutation tests that drop, duplicate, relocate, or forge an obligation cannot publish a
    proved module or partial theorem summary.
+   **Bounded Q0.8 milestone (body postconditions):** the report gate re-counts direct `ensure`/
+   `ensures` statements from retained source AST for every scheduled function and binds each distinct
+   source index to one or more accounting events. An explicit function-focused request keeps the
+   existing requested/transitive-callee scope; unrelated `not-requested` functions do not become
+   obligations. Return-path duplicates are permitted, but a missing index, invalid owner, wrong
+   source line, or out-of-range index refuses admission. Signature-only contracts, requires,
+   assertions outside the already-covered assert-by subset, loop/resource/effect obligations, and
+   exhaustive path-by-path event multiplicity remain uncovered; this milestone does not complete
+   Q0.8's whole-source inventory.
 9. **Q0.9 — Finish package admission and decoder adversarial coverage.** Extend the shared preflight
    across every trust-bearing nested schema: exact keys, duplicate keys after escaping, field types,
    numeric lexemes/ranges, string lengths, nesting, DAG references, IDs, hypotheses, rule tags,
