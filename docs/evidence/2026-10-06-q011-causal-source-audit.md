@@ -65,6 +65,45 @@ identified as `proof_qualified_body_rewrite +384`. At the stop, `x19` was
 It does not name the source-level value intended for `x24` or prove where the bad register state
 originated.
 
+### Register-level reconstruction
+
+The retained LLDB capture `minimal-lldb-detail2.txt` contains a second run with enough state to
+reconstruct the failed address exactly. At its stop, `x19 = 0x104fef0a0`, `x24 = 0x16fdfa010`,
+and the reported invalid address is `0x6c47d70e0`. The instruction scales `x24` by four, so
+`x19 + (x24 << 2) = 0x6c47d70e0`, exactly the reported fault address. The neighboring loop
+registers are `x26 = 0` and `x27 = 1`: it is processing the first and only source-body element.
+`w23 = 0x2f` is the source statement handle being written. The destination base `x19` points at
+zeroed arena storage, consistent with the newly built output buffer; the invalid offset comes from
+the index operand, not from a bad effective-address calculation by the CPU.
+
+Reading eight words at `x24` in that same stopped process produced:
+
+```text
+0x16fdfa010: 0x0000000104fed850 0x0000000000000001
+0x16fdfa020: 0x0000000000000008 0x0000000000000000
+```
+
+The first three words have the shape of a dynamic-array descriptor (`data` pointer, count 1,
+capacity 8), while the store consumes `x24` as a numeric element index. This is stronger than
+merely calling the index stack-shaped: the invalid index is an address to memory that looks like a
+live one-element array header. It is consistent with a descriptor/reference being used where an
+append index should be, but the stripped historical product and unavailable dirty source prevent
+mapping that descriptor to a particular Elisa local or hidden argument. The trace therefore
+narrows the machine-level failure to an index-value/representation mismatch in the generated
+rewrite/append path; it does not establish whether the mismatch came from the rewrite's historical
+source/closure shape, Stage1 lowering or calling convention, or a runtime/ABI interaction. The
+`ctx_aos_store_record` call is part of the path, but the available capture does not show the value
+before and after that call, so it cannot be ruled in or out as a contributor. No source-level
+minimized failure has been reproduced on a pinned compiler, and no fix is justified.
+
+A direct LLDB rerun during this audit rehashed the executable to the same SHA and stopped at the
+same instruction with different ASLR-dependent addresses: `x19 = 0x104f8b0a0`,
+`x24 = 0x16fdfa1a0`, `x23 = 0x2f`, `x26 = 0`, and `x27 = 1`; LLDB reported
+`0x6c4773720`. The four words at `x24` again began with a data pointer followed by `1` and `8`,
+and `x19 + (x24 << 2)` again equals the reported fault address. This repeated shape argues against
+an accidental transcription or one-off stack value, while remaining insufficient to identify the
+producer of the mismatched value.
+
 ## Source/history inspection and causal boundary
 
 The current implementation is `src/proof/check/qualified_constants.elisa`, especially
@@ -85,6 +124,11 @@ was possible, and no code change was made.
 The sibling `elisa-debugger` support matrix says native postmortem/core inspection is not wired.
 LLDB was therefore used on the live historical fault and current no-fault controls. No claim is made
 that the custom debugger diagnosed this native issue.
+
+The exact register dump and address arithmetic are retained in
+`/private/tmp/p00-qualified-constant-min-20261005/minimal-lldb-detail2.txt`; the surrounding
+instruction sequence is in `body-rewrite.asm`. These are bounded observations of the retained
+executable, not source-correlated debug information.
 
 ## Commands
 
@@ -116,6 +160,18 @@ shasum -a 256 build/audit-20261005/elisa-proof-warm
 lldb --batch -o run -k 'register read x19 x21 x24 x26 x27 pc' \
   -k 'disassemble -f -c 6' -- build/audit-20261005/elisa-proof-warm --json \
   /private/tmp/p00-qualified-constant-min-20261005/short_no_final_newline.elisa
+```
+
+The independent register/address check used during this follow-up was:
+
+```sh
+shasum -a 256 '/Users/torarinvikbjarko/Documents/Coding Projects/Elisa Projects/elisa-proof/build/audit-20261005/elisa-proof-warm'
+lldb --batch -o run \
+  -k 'register read x19 x23 x24 x26 x27 pc' \
+  -k 'memory read --format x --size 8 --count 4 $x24' \
+  -k 'disassemble --start-address 0x10046b64c --end-address 0x10046b660' \
+  -- '/Users/torarinvikbjarko/Documents/Coding Projects/Elisa Projects/elisa-proof/build/audit-20261005/elisa-proof-warm' \
+  --json /private/tmp/p00-qualified-constant-min-20261005/short_no_final_newline.elisa
 ```
 
 **Next causal step:** recover the exact historical compiler/proof source and build recipe, or
