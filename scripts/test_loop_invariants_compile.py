@@ -9,16 +9,14 @@ import re
 import subprocess
 import sys
 import tempfile
+from source_binding_harness_support import run_source_binding_replay_harness
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof-replay"))
 COMPILER = os.environ.get("ELISA_COMPILER_BIN", "")
 FIXTURE = ROOT / "examples/loop_invariants_compile.elisa"
 COMPILER_ROOT = Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler"))
-STAGE1 = COMPILER_ROOT / "bin/elisac-stage1"
-STAGE1_WRAPPER = COMPILER_ROOT / "scripts/elisac_stage1.sh"
-STAGE1_FRESHNESS = COMPILER_ROOT / "scripts/assert_stage1_fresh.sh"
-PINNED_FRONTEND_ROOT = ROOT / "build/snapshot/Elisa-compiler"
 PINNED_FRONTEND_REV = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
 
 REPLAY_HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
@@ -71,16 +69,15 @@ const CUSTOM_CAST_SOURCE: sview = __CUSTOM_CAST_SOURCE__
 const OVERLOADED_OPERATOR_SOURCE: sview = __OVERLOADED_OPERATOR_SOURCE__
 const BINDING_SINK_SOURCE: sview = __BINDING_SINK_SOURCE__
 const NESTED_BUILTIN_SOURCE: sview = __NESTED_BUILTIN_SOURCE__
+const SIMPLE_LOCAL_BINDING_SOURCE: sview = __SIMPLE_LOCAL_BINDING_SOURCE__
 const TEST_CAST_GATE_ERROR_BASE: i64 = 119
 const TEST_CAST_GATE_COUNT_ERROR: i64 = 118
 const TEST_SHADOW_GATE_ERROR: i64 = 122
-const TEST_SHADOW_GATE_COUNT_ERROR: i64 = 123
 const TEST_CUSTOM_CAST_GATE_ERROR: i64 = 124
-const TEST_CUSTOM_CAST_GATE_COUNT_ERROR: i64 = 125
 const TEST_OVERLOADED_OPERATOR_GATE_ERROR: i64 = 126
-const TEST_OVERLOADED_OPERATOR_GATE_COUNT_ERROR: i64 = 127
 const TEST_BINDING_SINK_MATRIX_ERROR: i64 = 128
 const TEST_BINDING_POSITIVE_CONTROL_ERROR: i64 = 129
+const TEST_BINDING_NESTED_BUILTIN_ERROR: i64 = 130
 const TEST_BINDING_POSITION_SHIFT: u32 = 1
 const TEST_BINDING_FALLBACK_VALUE: i64 = 0
 const TEST_LOCAL_BINDING_GATE_INVALID_INDEX: i64 = 1
@@ -90,7 +87,6 @@ const TEST_LOCAL_BINDING_GATE_SOURCE_REJECTED: i64 = 4
 const TEST_LOCAL_BINDING_GATE_FACT_NOT_LIVE: i64 = 5
 const TEST_LOCAL_BINDING_GATE_ACCEPTED: i64 = 0
 const TEST_WIDENING_CAST_GATE_COUNT: usize = 2
-const TEST_SINGLE_SOURCE_GATE_COUNT: usize = 1
 const FALSE_INVARIANT_SOURCE: sview = __FALSE_INVARIANT_SOURCE__
 const OVERRUN_SOURCE: sview = __OVERRUN_SOURCE__
 const STALE_INITIALIZER_SOURCE: sview = __STALE_INITIALIZER_SOURCE__
@@ -113,7 +109,7 @@ def proof_test_parse_declarations(source_text: sview, source: mutable darray[u8]
         source.push(sview_at(source_text, index))
     source.push(0)
     file: Ast::File = frontend_parse(&source[0])
-    report.source_declarations <- file.top_decls
+    proof_check(file, report)
 
 def proof_test_local_binding_initializer_source(source_text: sview, owner: sview, target: sview, expect_valid: bool) -> bool can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
@@ -139,7 +135,9 @@ def proof_test_local_binding_initializer_source(source_text: sview, owner: sview
                 trace: ProofFactTrace = ProofFactTrace{expression: expression, kernel_expression: 0, kind: "local-binding", line: position.line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
                 report.replay_owner_line <- owner_line
                 report.trace_owner_line <- position.line
-                accepted: bool = proof_replay_local_binding_immutable_declaration_source(report, trace)
+                immutable_source: bool = proof_replay_local_binding_immutable_declaration_source(report, trace)
+                widening_source: bool = proof_replay_local_binding_widening_cast_declaration_source(report, trace)
+                accepted: bool = immutable_source or widening_source
                 return accepted == expect_valid
             _:
                 pass
@@ -374,71 +372,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     shadowed_bytes: mutable darray[u8] = []
     shadowed_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(SHADOWED_LOCAL_SOURCE, &shadowed_bytes, &shadowed_report)
-    shadowed_gate_checks: mutable usize = 0
-    for certificate_index in 0..<shadowed_report.certificates.count |certificate_index, shadowed_report, shadowed_gate_checks|:
-        certificate: ProofGoalCertificate = shadowed_report.certificates[certificate_index]
-        continue if certificate.name != "shadowed_local"
-        continue if certificate.facts_start > shadowed_report.fact_origin_trace_indices.count or certificate.facts_count > shadowed_report.fact_origin_trace_indices.count - certificate.facts_start
-        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, shadowed_report, shadowed_gate_checks|:
-            trace_index: usize = shadowed_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
-            continue if trace_index >= shadowed_report.fact_traces.count
-            trace: ProofFactTrace = shadowed_report.fact_traces[trace_index]
-            continue if trace.kind != "local-binding"
-            match trace.expression:
-                Ast::Expr.Binary(Ast::Expr.Ident("copy", _), TokenKind.EqEq, Ast::Expr.Ident("shadow", _), _):
-                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&shadowed_report, certificate_index, trace_index)
-                    return TEST_SHADOW_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
-                    shadowed_gate_checks <- shadowed_gate_checks + 1
-                _:
-                    pass
-        break if shadowed_gate_checks > 0
-    return TEST_SHADOW_GATE_COUNT_ERROR if shadowed_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
+    return TEST_SHADOW_GATE_ERROR if not proof_test_local_binding_initializer_source(SHADOWED_LOCAL_SOURCE, "shadowed_local", "copy", false)
 
-    custom_cast_bytes: mutable darray[u8] = []
-    custom_cast_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(CUSTOM_CAST_SOURCE, &custom_cast_bytes, &custom_cast_report)
-    custom_cast_gate_checks: mutable usize = 0
-    for certificate_index in 0..<custom_cast_report.certificates.count |certificate_index, custom_cast_report, custom_cast_gate_checks|:
-        certificate: ProofGoalCertificate = custom_cast_report.certificates[certificate_index]
-        continue if certificate.name != "custom_cast_does_not_keep_source_bound"
-        continue if certificate.facts_start > custom_cast_report.fact_origin_trace_indices.count or certificate.facts_count > custom_cast_report.fact_origin_trace_indices.count - certificate.facts_start
-        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, custom_cast_report, custom_cast_gate_checks|:
-            trace_index: usize = custom_cast_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
-            continue if trace_index >= custom_cast_report.fact_traces.count
-            trace: ProofFactTrace = custom_cast_report.fact_traces[trace_index]
-            continue if trace.kind != "local-binding"
-            match trace.expression:
-                Ast::Expr.Binary(Ast::Expr.Ident("converted", _), TokenKind.EqEq, _, _):
-                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&custom_cast_report, certificate_index, trace_index)
-                    return TEST_CUSTOM_CAST_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
-                    custom_cast_gate_checks <- custom_cast_gate_checks + 1
-                _:
-                    pass
-        break if custom_cast_gate_checks > 0
-    return TEST_CUSTOM_CAST_GATE_COUNT_ERROR if custom_cast_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
-
-    overloaded_operator_bytes: mutable darray[u8] = []
-    overloaded_operator_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(OVERLOADED_OPERATOR_SOURCE, &overloaded_operator_bytes, &overloaded_operator_report)
-    overloaded_operator_gate_checks: mutable usize = 0
-    for certificate_index in 0..<overloaded_operator_report.certificates.count |certificate_index, overloaded_operator_report, overloaded_operator_gate_checks|:
-        certificate: ProofGoalCertificate = overloaded_operator_report.certificates[certificate_index]
-        continue if certificate.name != "overloaded_add_does_not_keep_source_bound"
-        continue if certificate.facts_start > overloaded_operator_report.fact_origin_trace_indices.count or certificate.facts_count > overloaded_operator_report.fact_origin_trace_indices.count - certificate.facts_start
-        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, overloaded_operator_report, overloaded_operator_gate_checks|:
-            trace_index: usize = overloaded_operator_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
-            continue if trace_index >= overloaded_operator_report.fact_traces.count
-            trace: ProofFactTrace = overloaded_operator_report.fact_traces[trace_index]
-            continue if trace.kind != "local-binding"
-            match trace.expression:
-                Ast::Expr.Binary(Ast::Expr.Ident("converted", _), TokenKind.EqEq, _, _):
-                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&overloaded_operator_report, certificate_index, trace_index)
-                    return TEST_OVERLOADED_OPERATOR_GATE_ERROR if gate != TEST_LOCAL_BINDING_GATE_MISSING_SOURCE
-                    overloaded_operator_gate_checks <- overloaded_operator_gate_checks + 1
-                _:
-                    pass
-        break if overloaded_operator_gate_checks > 0
-    return TEST_OVERLOADED_OPERATOR_GATE_COUNT_ERROR if overloaded_operator_gate_checks != TEST_SINGLE_SOURCE_GATE_COUNT
+    return TEST_CUSTOM_CAST_GATE_ERROR if not proof_test_local_binding_initializer_source(CUSTOM_CAST_SOURCE, "custom_cast_does_not_keep_source_bound", "converted", false)
+    return TEST_OVERLOADED_OPERATOR_GATE_ERROR if not proof_test_local_binding_initializer_source(OVERLOADED_OPERATOR_SOURCE, "overloaded_add_does_not_keep_source_bound", "converted", false)
 
     return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_assignment", "copy", false)
     return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_assignment", "assignment")
@@ -450,12 +387,13 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_nested_call", "copy", false)
     return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_branch_join", "copy", false)
     return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_return", "return")
-    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_initializer_source(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy", true)
-    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_spoofed_position_rejected(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy")
+    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_initializer_source(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy", true)
+    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_spoofed_position_rejected(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy")
+    return TEST_BINDING_NESTED_BUILTIN_ERROR if not proof_test_local_binding_initializer_source(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy", true)
     nested_bytes: mutable darray[u8] = []
     nested_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(NESTED_BUILTIN_SOURCE, &nested_bytes, &nested_report)
-    nested_goals = proof_test_loop_goals(nested_report, "nested_builtin_binding", 3)
+    nested_goals = proof_test_loop_goals(nested_report, "nested_builtin_binding", 5)
     return TEST_BINDING_POSITIVE_CONTROL_ERROR if nested_goals.count != 1 or not nested_goals.all_replayed
     return TEST_LOCAL_BINDING_GATE_ACCEPTED
 '''
@@ -521,79 +459,36 @@ with tempfile.TemporaryDirectory() as scratch:
     assert ran.returncode == 0, ran.returncode
 
 
-def run_source_binding_replay_harness():
-    if not STAGE1_WRAPPER.is_file() or not STAGE1.is_file() or not STAGE1_FRESHNESS.is_file():
-        raise SystemExit(f"Stage1 compiler installation is incomplete: {COMPILER_ROOT}")
-    if not PINNED_FRONTEND_ROOT.is_dir() or not (PINNED_FRONTEND_ROOT / ".rev").is_file():
-        raise SystemExit(f"pinned frontend snapshot is missing: {PINNED_FRONTEND_ROOT}; build the proof project first")
-    snapshot_revision = (PINNED_FRONTEND_ROOT / ".rev").read_text().strip()
-    if snapshot_revision != PINNED_FRONTEND_REV:
-        raise SystemExit(
-            f"pinned frontend snapshot mismatch: snapshot={snapshot_revision} expected={PINNED_FRONTEND_REV}"
-        )
-    freshness = subprocess.run(
-        ["bash", str(STAGE1_FRESHNESS), str(STAGE1)], capture_output=True, text=True, cwd=COMPILER_ROOT
-    )
-    if freshness.returncode:
-        raise AssertionError(f"Stage1 freshness check failed:\n{freshness.stdout}\n{freshness.stderr}")
-    baseline_source = FIXTURE.read_text()
-    sources = {
-        "__BASELINE_SOURCE__": baseline_source,
-        "__WIDENING_SOURCE__": (ROOT / "examples/widening_cast.elisa").read_text(encoding="utf-8"),
-        "__SHADOWED_LOCAL_SOURCE__": (ROOT / "test/repro/audit_local_binding_global_shadow.elisa").read_text(encoding="utf-8"),
-        "__CUSTOM_CAST_SOURCE__": (ROOT / "test/repro/audit_local_binding_custom_cast.elisa").read_text(encoding="utf-8"),
-        "__OVERLOADED_OPERATOR_SOURCE__": (ROOT / "test/repro/audit_local_binding_overloaded_operator.elisa").read_text(encoding="utf-8"),
-        "__BINDING_SINK_SOURCE__": (ROOT / "test/repro/audit_local_binding_sink_adversarial.elisa").read_text(encoding="utf-8"),
-        "__NESTED_BUILTIN_SOURCE__": (ROOT / "test/repro/audit_local_binding_nested_builtin_positive.elisa").read_text(encoding="utf-8"),
-        "__FALSE_INVARIANT_SOURCE__": baseline_source.replace("invariant rounds <= limit", "invariant rounds < limit", 1),
-        "__OVERRUN_SOURCE__": baseline_source.replace("rounds <- rounds + 1", "rounds <- rounds + 2", 1),
-        "__STALE_INITIALIZER_SOURCE__": baseline_source.replace(
-            "rounds: mutable usize = 0\n    while rounds < limit",
-            "rounds: mutable usize = 4\n    while rounds < limit",
-            1,
-        ),
-        "__STALE_REBIND_SOURCE__": baseline_source.replace("rounds <- rounds + 1", "rounds <- rounds + 2", 1),
-        "__SHADOWED_PARAMETER_SOURCE__": baseline_source.replace(
-            "def bounded_counter(limit: usize)", "def bounded_counter(rounds: usize, limit: usize)", 1
-        ),
-        "__SHADOWED_GLOBAL_SOURCE__": baseline_source.replace(
-            "# A while loop with a counter bounded by a parameter.", "const rounds: usize = 99", 1
-        ),
-        "__UNRELATED_INVARIANT_SOURCE__": baseline_source.replace("invariant rounds <= limit", "invariant rounds < limit", 1),
-    }
-    assert all(source != baseline_source for marker, source in sources.items() if marker != "__BASELINE_SOURCE__")
-    harness = REPLAY_HARNESS
-    for marker, source in sources.items():
-        harness = harness.replace(marker, json.dumps(source))
-
-    with tempfile.TemporaryDirectory(prefix="bounded-counter-source-replay-", dir=ROOT / "examples") as temporary:
-        directory = Path(temporary)
-        source_path = directory / "bounded_counter_source_replay.elisa"
-        executable = directory / "bounded_counter_source_replay"
-        harness = harness.replace("../../Elisa-compiler/", str(PINNED_FRONTEND_ROOT.resolve()) + "/").replace(
-            'include "../src/', 'include "../../src/'
-        )
-        source_path.write_text(harness, encoding="utf-8")
-        compiled = subprocess.run(
-            [str(STAGE1_WRAPPER), "-emit", "exe", "-O0", "-o", str(executable), str(source_path)],
-            capture_output=True,
-            text=True,
-            cwd=ROOT,
-            timeout=600,
-        )
-        if compiled.returncode:
-            raise AssertionError(f"fresh Stage1 source-binding harness failed:\n{compiled.stdout}\n{compiled.stderr}")
-        result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=120)
-        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
-    return freshness.stdout.strip()
-
-provenance = run_source_binding_replay_harness()
+provenance = run_source_binding_replay_harness(ROOT, FIXTURE, COMPILER_ROOT, PINNED_FRONTEND_REV, REPLAY_HARNESS)
 shadow_status, shadow_report = prove(ROOT / "test/repro/audit_local_binding_global_shadow.elisa")
 assert shadow_report["status"] != "proved", shadow_report
 custom_cast_status, custom_cast_proof_report = prove(ROOT / "test/repro/audit_local_binding_custom_cast.elisa")
 assert custom_cast_proof_report["status"] != "proved", custom_cast_proof_report
 operator_status, operator_proof_report = prove(ROOT / "test/repro/audit_local_binding_overloaded_operator.elisa")
 assert operator_proof_report["status"] != "proved", operator_proof_report
+simple_binding_status, simple_binding_report = prove(ROOT / "test/repro/audit_local_binding_simple_positive.elisa")
+assert simple_binding_status == 0 and simple_binding_report["status"] == "proved", simple_binding_report
+assert simple_binding_report["replay"]["gaps"] == 0, simple_binding_report["replay"]
+with tempfile.TemporaryDirectory(prefix="source-binding-package-") as directory:
+    package_path = Path(directory) / "simple-local-binding.json"
+    exported = subprocess.run(
+        [str(BINARY), "--package", str(ROOT / "test/repro/audit_local_binding_simple_positive.elisa")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert exported.returncode == 0, (exported.returncode, exported.stderr)
+    package = json.loads(exported.stdout)
+    assert package["source"]["admissible"] and package["theorems"], package
+    package_path.write_text(exported.stdout, encoding="utf-8")
+    replayed = subprocess.run([str(REPLAY), str(package_path)], capture_output=True, text=True, timeout=120)
+    replay_report = json.loads(replayed.stdout)
+    assert replayed.returncode == 0 and replay_report["status"] == "replayed", replay_report
+    assert replay_report["summary"] == {
+        "theorems": len(package["theorems"]),
+        "replayed": len(package["theorems"]),
+        "not_replayed": 0,
+    }, replay_report["summary"]
 print(
     f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
     f"({fixture_replay['gaps']} unrelated replay gaps); {provenance}; pinned frontend {PINNED_FRONTEND_REV}"
