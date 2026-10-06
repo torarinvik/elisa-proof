@@ -37,3 +37,45 @@ extend ElisaProof:
                     marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
                     proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bound_owner)
             proof_add_const_enum_member_scalar_witnesses(facts, report, type_expression, position.line, report.type_bound_owner, position)
+            proof_add_const_enum_value_exclusions(facts, report, root, type_expression, position)
+
+        # Distinct explicit tags of one const enum imply disjoint value equalities. Implicit
+        # tags and arbitrary expressions are left opaque: the independent replay rule admits
+        # only literal values and verifies their owner and inequality from source declarations.
+        def proof_add_const_enum_value_exclusions(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
+            enum_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            return if enum_name == "" or proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+            aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_name, 0)
+            return if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
+            proof_add_const_enum_value_exclusions_in(facts, report, root, type_expression, enum_name, position, report.source_declarations, 0)
+
+        def proof_add_const_enum_value_exclusions_in(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, enum_name: sview, position: Ast::Pos, declarations: darray[Ast::Decl]&, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |facts, report, root, type_expression, enum_name, position, depth|:
+                match declaration:
+                    Ast::Decl.Enum(declared_name, variants, is_const, _, _):
+                        if declared_name == enum_name and is_const and variants.count <= 16:
+                            for first_index in 0..<variants.count |first_index, variants, facts, report, root, type_expression, enum_name, position|:
+                                first: Ast::EnumVariant = variants[first_index]
+                                first_value: (known: bool, value: i64) = match first.value_expr:
+                                    Ast::Expr.IntLit(value, _): (true, value)
+                                    _: (false, 0)
+                                continue if not first_value.known
+                                first_owner: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(first.name, report.source_declarations)
+                                continue if not first_owner.known or first_owner.owner != enum_name
+                                for second_index in first_index + 1..<variants.count |second_index, variants, facts, report, root, type_expression, enum_name, position, first, first_value, first_owner|:
+                                    second: Ast::EnumVariant = variants[second_index]
+                                    second_value: (known: bool, value: i64) = match second.value_expr:
+                                        Ast::Expr.IntLit(value, _): (true, value)
+                                        _: (false, 0)
+                                    continue if not second_value.known or second_value.value == first_value.value
+                                    second_owner: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(second.name, report.source_declarations)
+                                    continue if not second_owner.known or second_owner.owner != enum_name
+                                    first_test: Ast::Expr = Ast::Expr.Binary(root, TokenKind.EqEq, Ast::Expr.Field(type_expression, first.name, position), position)
+                                    second_test: Ast::Expr = Ast::Expr.Binary(root, TokenKind.EqEq, Ast::Expr.Field(type_expression, second.name, position), position)
+                                    exclusion: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, first_test, position), TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, second_test, position), position)
+                                    proof_add_traced_fact(facts, report, exclusion, "const-enum-exclusion", position.line, report.type_bound_owner) if not (any existing in facts where proof_expr_equal(existing, exclusion))
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        proof_add_const_enum_value_exclusions_in(facts, report, root, type_expression, enum_name, position, body, depth + 1)
+                    _:
+                        pass

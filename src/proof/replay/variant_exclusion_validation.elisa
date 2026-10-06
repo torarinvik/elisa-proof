@@ -128,3 +128,73 @@ extend ElisaProof:
                     return enums == 1 and firsts == 1 and seconds == 1
                 _:
                     return false
+
+        # Pairwise exclusion for const-enum value comparisons is admitted only when both
+        # members have explicit, distinct integer tags in the one uniquely owned enum. Variant
+        # names alone are insufficient because const enums may intentionally alias a value.
+        def proof_replay_const_enum_negated_equality(expression: Ast::Expr) -> (known: bool, subject: Ast::Expr, enum_type: Ast::Expr, variant: sview):
+            no_expression: Ast::Expr = Ast::Expr.Invalid
+            match expression:
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(subject, TokenKind.EqEq, Ast::Expr.Field(enum_type, variant, _), _):
+                            return (true, subject, enum_type, variant)
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, no_expression, no_expression, "")
+
+        def proof_replay_const_enum_member_value(declarations: darray[Ast::Decl]&, enum_name: sview, member_name: sview, depth: usize) -> (enums: usize, const_enums: usize, members: usize, known: bool, value: i64):
+            return (2, 2, 2, false, 0) if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            enums: mutable usize = 0
+            const_enums: mutable usize = 0
+            members: mutable usize = 0
+            known: mutable bool = false
+            value: mutable i64 = 0
+            for declaration in declarations |enum_name, member_name, depth, enums, const_enums, members, known, value|:
+                match declaration:
+                    Ast::Decl.Enum(name, variants, is_const, _, _):
+                        if name == enum_name:
+                            enums <- enums + 1
+                            const_enums <- const_enums + 1 if is_const
+                            for variant in variants |member_name, is_const, members, known, value|:
+                                if variant.name == member_name:
+                                    members <- members + 1
+                                    if is_const:
+                                        match variant.value_expr:
+                                            Ast::Expr.IntLit(tag, _):
+                                                known <- true
+                                                value <- tag
+                                            _:
+                                                pass
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value(body, enum_name, member_name, depth + 1)
+                        enums <- enums + nested.enums
+                        const_enums <- const_enums + nested.const_enums
+                        members <- members + nested.members
+                        if nested.known:
+                            known <- true
+                            value <- nested.value
+                    _:
+                        pass
+            return (enums, const_enums, members, known, value)
+
+        def proof_replay_const_enum_exclusion_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    first: (known: bool, subject: Ast::Expr, enum_type: Ast::Expr, variant: sview) = proof_replay_const_enum_negated_equality(left)
+                    second: (known: bool, subject: Ast::Expr, enum_type: Ast::Expr, variant: sview) = proof_replay_const_enum_negated_equality(right)
+                    return false if not first.known or not second.known
+                    return false if first.variant == second.variant or not proof_expr_equal(first.subject, second.subject) or not proof_expr_equal(first.enum_type, second.enum_type)
+                    enum_name: sview = proof_type_head_name(first.enum_type, report.source_declarations, 0)
+                    return false if enum_name == "" or proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+                    aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_name, 0)
+                    return false if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
+                    first_value: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value(report.source_declarations, enum_name, first.variant, 0)
+                    second_value: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value(report.source_declarations, enum_name, second.variant, 0)
+                    return false if first_value.enums != 1 or first_value.const_enums != 1 or first_value.members != 1 or not first_value.known
+                    return false if second_value.enums != 1 or second_value.const_enums != 1 or second_value.members != 1 or not second_value.known
+                    return first_value.value != second_value.value
+                _:
+                    return false
