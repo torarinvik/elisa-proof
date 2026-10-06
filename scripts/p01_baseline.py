@@ -132,7 +132,42 @@ def load_sentinel_manifest() -> dict:
                 or any(not isinstance(item, dict) or item.get("result") not in {"proved", "unproven"}
                        for item in details)):
             raise RuntimeError(f"P-01 obligation results disagree with totals for {name}")
+    validate_workload_membership(payload, fixtures)
     return fixtures
+
+
+def validate_workload_membership(manifest: dict, fixtures: dict) -> None:
+    """Require a closed, one-to-one identity map from fixture rows to workload records."""
+    workloads = manifest.get("workloads")
+    if not isinstance(workloads, dict) or not workloads:
+        raise RuntimeError("P-01 workload identity inventory is missing")
+
+    members_seen: dict[str, str] = {}
+    for workload_name, workload in workloads.items():
+        if not isinstance(workload_name, str) or not workload_name or not isinstance(workload, dict):
+            raise RuntimeError("P-01 workload identity record is malformed")
+        members = workload.get("members")
+        if (not isinstance(members, list) or not members
+                or any(not isinstance(member, str) or not member for member in members)
+                or len(set(members)) != len(members)):
+            raise RuntimeError(f"P-01 workload identity members are missing or duplicated for {workload_name}")
+        if not isinstance(workload.get("shape"), str) or not workload["shape"]:
+            raise RuntimeError(f"P-01 workload shape identity is missing for {workload_name}")
+        if not isinstance(workload.get("source_relation"), str) or not workload["source_relation"]:
+            raise RuntimeError(f"P-01 workload source identity is missing for {workload_name}")
+        for member in members:
+            if member not in fixtures:
+                raise RuntimeError(f"P-01 workload {workload_name} names missing fixture {member}")
+            if member in members_seen:
+                raise RuntimeError(f"P-01 fixture {member} belongs to multiple workload identities")
+            if fixtures[member].get("workload") != workload_name:
+                raise RuntimeError(f"P-01 fixture {member} disagrees with workload identity {workload_name}")
+            members_seen[member] = workload_name
+
+    if set(members_seen) != set(fixtures):
+        missing = sorted(set(fixtures) - set(members_seen))
+        extra = sorted(set(members_seen) - set(fixtures))
+        raise RuntimeError(f"P-01 workload identity inventory does not cover fixtures; missing={missing}, extra={extra}")
 
 
 EXPECTED_OUTCOMES = {name: row["expected_outcome"]

@@ -33,6 +33,11 @@ assert {name for name, _ in MODULE.FIXTURES} >= {"branch_join", "rejected_branch
 sentinels = MODULE.load_sentinel_manifest()
 assert all({"semantic_expectations", "expected_outcome", "sha256", "size_bytes", "path"}
            <= set(row) for row in sentinels.values())
+manifest = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+workloads = manifest["workloads"]
+assert all(isinstance(row.get("workload"), str) and row["workload"] in workloads
+           for row in sentinels.values())
+assert {member for workload in workloads.values() for member in workload["members"]} == set(sentinels)
 assert sentinels["adversarial"]["semantic_expectations"]["obligation_inventory_complete"] is False
 assert (sentinels["adversarial"]["semantic_expectations"]["obligation_count"],
         len(sentinels["adversarial"]["semantic_expectations"]["obligation_ids"])) == (78, 77)
@@ -65,7 +70,7 @@ for name, count, status in (("branch_join", 12, "proved_with_replay_gaps"),
 # sample can be collected. Exercise identity, expected semantics, assumptions, and replay fields.
 with tempfile.TemporaryDirectory(prefix="p01-manifest-mutations-") as temporary:
     manifest_path = Path(temporary) / "sentinels.json"
-    original_manifest = json.loads(MODULE.SENTINEL_MANIFEST.read_text(encoding="utf-8"))
+    original_manifest = manifest
     mutations = []
     missing_fixture = json.loads(json.dumps(original_manifest))
     missing_fixture["fixtures"].pop("real_small")
@@ -95,6 +100,21 @@ with tempfile.TemporaryDirectory(prefix="p01-manifest-mutations-") as temporary:
     malformed_row = json.loads(json.dumps(original_manifest))
     malformed_row["fixtures"]["real_small"]["semantic_expectations"]["obligation_details"][0]["result"] = "unknown"
     mutations.append((malformed_row, "obligation row is malformed"))
+    missing_group = json.loads(json.dumps(original_manifest))
+    missing_group["workloads"].pop("branch_join_pair")
+    mutations.append((missing_group, "does not cover fixtures"))
+    missing_member = json.loads(json.dumps(original_manifest))
+    missing_member["workloads"]["branch_join_pair"]["members"] = ["branch_join"]
+    mutations.append((missing_member, "does not cover fixtures"))
+    unknown_member = json.loads(json.dumps(original_manifest))
+    unknown_member["workloads"]["branch_join_pair"]["members"][1] = "renamed-fixture"
+    mutations.append((unknown_member, "names missing fixture"))
+    duplicate_member = json.loads(json.dumps(original_manifest))
+    duplicate_member["workloads"]["branch_join_pair"]["members"] = ["branch_join", "branch_join"]
+    mutations.append((duplicate_member, "members are missing or duplicated"))
+    stale_workload_reference = json.loads(json.dumps(original_manifest))
+    stale_workload_reference["fixtures"]["real_small"]["workload"] = "renamed-workload"
+    mutations.append((stale_workload_reference, "disagrees with workload identity"))
     for mutated, message in mutations:
         manifest_path.write_text(json.dumps(mutated), encoding="utf-8")
         with mock.patch.object(MODULE, "SENTINEL_MANIFEST", manifest_path):

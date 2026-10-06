@@ -5644,11 +5644,14 @@ benchmark validation is infrastructure only until actual measurements pass this 
 **Current gate status (2026-10-06): partial, not a qualifying baseline.** The versioned P-01 cohort
 now records fixture path/bytes/lines/digest, report status, obligation rows, assumptions, replay
 totals, and the exact semantic-probe product identity. Mutation tests exercise stale/missing
-identity and semantic rows. A fresh Stage1 probe still has replay gaps in four fixtures and reports
+identity and semantic rows. Each current fixture now also has exactly one declared workload identity;
+the manifest rejects omitted workload records, unknown or duplicate members, and disagreement between
+fixture and workload names. A fresh Stage1 probe still has replay gaps in four fixtures and reports
 78 reported obligations but only 77 rows for the adversarial fixture; those workloads are rejected
 for measurement. The corpus and size bands remain incomplete, as do AST-level provenance, internal
 phase timings, deterministic work coverage, and memory-stage measurements. See
-[`docs/evidence/2026-10-06-p01-canonical-inventory-gate.md`](docs/evidence/2026-10-06-p01-canonical-inventory-gate.md).
+[`docs/evidence/2026-10-06-p01-canonical-inventory-gate.md`](docs/evidence/2026-10-06-p01-canonical-inventory-gate.md)
+and [`docs/evidence/2026-10-06-p01-workload-matrix-gate.md`](docs/evidence/2026-10-06-p01-workload-matrix-gate.md).
 
 29. **P1.1 — Build the canonical workload corpus.** Include tiny success, false claim, malformed
     input, unsupported syntax, medium contract proof, call-heavy module, branch/match-heavy module,
