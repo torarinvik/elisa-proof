@@ -6742,11 +6742,15 @@ false-proof mechanism, stop lower-priority work and promote it here.
     namespace ownership. For every extraction, preserve behavior and source identity; do not make
     numbered fragments or split solely by line count. Run the repository-wide line and include
     checks after each extraction.
-21. **A21 — Classify the completed 138-step failure census.** Re-run each failing assertion from the
-    immutable historical log only after mapping it to current code, then label source expectation,
-    compiler, producer, replay, report, harness, stale fingerprint, unsupported feature or resource
-    limit. Save minimized fixture, exact report and first divergent field. Fix the causes, not the
-    headline; update expected outcomes only after independent semantic review.
+21. **A21 — Classify the completed 138-step failure census.** **Classification complete for the
+    immutable `f2d37570` snapshot only.** The durable evidence report and exact per-marker ledger are
+    [docs/evidence/2026-10-06-a21-failure-classification.md](docs/evidence/2026-10-06-a21-failure-classification.md)
+    and [docs/evidence/2026-10-06-a21-failure-events.tsv](docs/evidence/2026-10-06-a21-failure-events.tsv).
+    They identify the completed log, proof/replay products, Stage1 compiler/runtime, harness revision,
+    exact failed assertions, and common-cause totals; the validator checks their census and can verify
+    the preserved log by SHA-256. This milestone is attribution, not repair: do not infer current-HEAD
+    status from it. Reproduce and fix individual causes in a separately pinned follow-up, preserving
+    negative-test intent and changing expectations only after semantic review.
 22. **A22 — Preserve negative-test integrity.** Every false-claim test must prove that the intended
     source-goal binding and target reasoning path were exercised. Assert specific refusal/counterexample
     reason, zero accepted actions where relevant, exact replay counts, and no vacuous precondition.
