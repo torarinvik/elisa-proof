@@ -22,6 +22,20 @@ if [[ "$const_enum_overloaded_equality_status" -ne 0 ]]; then
     exit 1
 fi
 
+# An owner-neutral shorthand `.Shared` that names a variant of more than one const enum anywhere
+# in the source tree, including in a sibling module, gets no scalar witness: its owner is not
+# determined by the term alone, so the comparison must stay unproven.
+for shorthand_probe in rejected_ambiguous_const_enum_shorthand rejected_module_crossscope_const_enum_shorthand; do
+    set +e
+    run_json_report "$ROOT_DIR/examples/$shorthand_probe.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] in ("failed", "unsupported"); assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["rule"] == "goal" and goal["proven"] for goal in report["goals"]); assert any(goal["rule"] == "goal" and not goal["proven"] for goal in report["goals"])'
+    shorthand_probe_status=${PIPESTATUS[1]}
+    set -e
+    if [[ "$shorthand_probe_status" -ne 0 ]]; then
+        printf 'proof test matrix failed: ambiguous const-enum shorthand was witnessed: %s\n' "$shorthand_probe" >&2
+        exit 1
+    fi
+done
+
 # A scalar-field witness for a record element is exact to the selected field; it cannot
 # justify congruence for a different field of the same indexed record.
 set +e
