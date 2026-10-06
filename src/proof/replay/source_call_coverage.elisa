@@ -327,15 +327,17 @@ extend ElisaProof:
             resolved: Ast::Expr = proof_replay_substitute_many(expression, names, values)
             return proof_replay_deterministic_call_source_contains(resolved, expected, 0)
 
-        # A conditional branch is safe to cross when neither arm changes the local
-        # substitutions used to reconstruct call arguments. This lets replay locate a call
-        # inside an arm or after an early-return guard without guessing a joined binding state.
+        # A conditional branch is safe to cross when neither arm reassigns an outer local.
+        # Declarations stay scoped to their arm; assignments are rejected because their joined
+        # value would otherwise require path-sensitive state reconstruction.
         def proof_replay_deterministic_branch_bindings_stable(body: darray[Ast::Stmt]&, depth: usize) -> bool:
             return false if depth >= 96
             for statement in body |depth|:
                 match statement:
                     Ast::Stmt.If(_, then_body, else_body, _):
                         return false if not proof_replay_deterministic_branch_bindings_stable(then_body, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(else_body, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, _, _):
+                        pass
                     Ast::Stmt.Return(_, _) | Ast::Stmt.Expr(_, _) | Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
@@ -344,7 +346,8 @@ extend ElisaProof:
 
         # Bind caller locals in statement order. This independent source walk reconstructs the
         # resolved actuals that the producer placed in the marker at the call's pre-state.
-        # Control-flow joins and unsupported writes fail closed in this first bounded slice.
+        # Calls in branches use cloned local bindings. Calls after a join are accepted only when
+        # both arms preserve every outer binding used by the source walk.
         def proof_replay_deterministic_call_source_statements(body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> (known: bool, matches: usize):
             return (false, 0) if depth >= 96
             for statement in body |expected, line, names, values, depth|:
@@ -375,12 +378,21 @@ extend ElisaProof:
                     Ast::Stmt.If(condition, then_body, else_body, position):
                         return (true, 0) if position.line > line
                         return (true, 1) if position.line == line and proof_replay_deterministic_call_source_expression(condition, expected, names, values)
-                        return (false, 0) if not proof_replay_deterministic_branch_bindings_stable(then_body, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(else_body, depth + 1)
-                        then_source: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(then_body, expected, line, names, values, depth + 1)
-                        else_source: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(else_body, expected, line, names, values, depth + 1)
+                        stable_bindings: bool = proof_replay_deterministic_branch_bindings_stable(then_body, depth + 1) and proof_replay_deterministic_branch_bindings_stable(else_body, depth + 1)
+                        then_names: mutable darray[sview] = []
+                        then_names.extend(names)
+                        then_values: mutable darray[Ast::Expr] = []
+                        then_values.extend(values)
+                        else_names: mutable darray[sview] = []
+                        else_names.extend(names)
+                        else_values: mutable darray[Ast::Expr] = []
+                        else_values.extend(values)
+                        then_source: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(then_body, expected, line, &then_names, &then_values, depth + 1)
+                        else_source: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(else_body, expected, line, &else_names, &else_values, depth + 1)
                         return (false, 0) if not then_source.known or not else_source.known
                         branch_matches: usize = then_source.matches + else_source.matches
                         return (true, branch_matches) if branch_matches > 0
+                        return (false, 0) if not stable_bindings
                     Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Match(_, _, position) | Ast::Stmt.Block(_, _, _, _, position):
                         return (true, 0) if position.line > line
                         return (false, 0)
