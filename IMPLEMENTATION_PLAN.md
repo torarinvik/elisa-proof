@@ -6030,9 +6030,10 @@ if it prevents a false proof. Commit each independently validated item or tightl
   build time. Its full matrix is still running and has already reported failures; record final exit,
   all output, skips, and artifact digests before calling the run complete.
 - **Stage0:** pinned candidate revision `370110bc2913831f59fc190f266491efcf3ccabe` is known.
-  It rejects direct optional-to-non-optional calls in proof sources. The minimized differential below
-  confirms Stage1 has a hierarchical match-binder hole; the other proof diagnostics still need
-  individual classification and the source must explicitly handle optional values.
+  Its embedded revision and clean-source provenance both pass this repository's Stage0 guard.
+  It rejects direct optional-to-non-optional calls in proof sources. The minimized differential
+  below confirms Stage1 has a hierarchical match-binder hole; the other proof diagnostics still
+  need individual classification and the source must explicitly handle optional values.
 - **Confirmed compiler soundness defect:** the minimized
   `/private/tmp/elisa-stage-divergence-1d899e8a/hierarchical_optional_stage_probe.elisa` compiles
   with Stage1 `6b475d89` (`-emit obj -O0`, exit 0) but Stage0 `370110bc` rejects line 18 with
@@ -6050,6 +6051,19 @@ if it prevents a false proof. Commit each independently validated item or tightl
   forms remain uncovered. The full matrix has reported loop binding/guard, collection-reach,
   ADT/pattern-fact, proof CLI status/exit-code, and incomplete-report failures. Classify each at its
   failing assertion; do not assume every failure is a semantic bug.
+- **Unsigned arithmetic soundness alarm from the exact `f2d37570` matrix:** the log reports the
+  adversarial tactic controls `rejected_u64_max_decide`, `rejected_u8_overflow_decide`, and
+  `rejected_u8_overflow_simp` as accepted, despite tests requiring refusal. These are potential
+  kernel false proofs, not ordinary coverage gaps. Preserve the exact tactic JSON, source-goal ID and
+  fingerprint, report, and exit code; independently replay each in a fresh process before and after
+  the fix. Do not infer the root cause from the separate unsigned-marker gap counts.
+- **Separate cast-dispatch soundness alarm:** a clean-product audit reported that a source-defined
+  `__cast__(u8) -> i64` returning `-1` allowed the false postcondition `result >= 0` to be reported
+  `proved` with all three certificates replayed. That report was gathered on a separate proof
+  snapshot, so reproduce it against the current immutable proof/compiler pair and retain its exact
+  source/report before treating the branch fix as verified. Producer and portable/kernel replay
+  must independently reject ordinary, extern, module, impl, imported, and ambiguous hook dispatch;
+  no-hook builtin conversions need a separate positive control.
 - **In-flight only:** the dirty-tree unsigned-marker audit reached 173 obligations, 141 replayed,
   32 index-bound replay gaps after a function-specific bounded-state experiment. This is not part of
   committed `f2d37570`; retain direct upper/lower bounds and fix the missing provenance/replay rule,
@@ -6091,6 +6105,24 @@ result. Keep the failure reason stable and machine-readable.
     `Ast.Expr?`-to-`Ast.Expr` call flagged by Stage0, add an explicit presence check and extraction or
     change the helper signature to accept the optional type and handle absence. Re-run all proof
     source under both stages; do not preserve invalid calls merely to maintain Stage1 compatibility.
+3b. **P0.3b — Close fixed-width unsigned tactic false proofs.** Reproduce the three reported
+    `decide`/`simp` cases using their exact source-bound scripts and goal fingerprints. Trace the
+    signed AST bit pattern through typed-literal decoding, producer normalization, tactic action
+    admission, kernel term construction, and independent replay. A fixed-width operation may not be
+    treated as unbounded signed arithmetic; when the kernel lacks the required bit-vector semantics,
+    refuse the action and leave the goal open/unknown. Add negative controls at `u8` overflow and
+    high-bit `u64`, positive reflexivity/small-range arithmetic controls, forged/mutated script
+    controls, and portable/fresh replay checks. Producer and replay must enforce the same justified
+    semantics, with no theorem row or `proved` status for any refused tactic.
+3c. **P0.3c — Make numeric-cast proof facts dispatch-aware.** Minimize and reproduce the reported
+    false `result >= 0` proof where `__cast__(u8) -> i64` returns `-1`. Remove context-free
+    cast-as-identity/type assumptions; either reconstruct and independently validate the compiler's
+    exact source/target overload resolution or fail closed whenever a visible or unresolved import
+    could supply `__cast__`. Cover ordinary, extern, module, impl/`Scoped`, imported, shadowed, and
+    ambiguous declarations, as well as no-hook builtin conversions. Test postconditions, assignment
+    and return boundaries, forged type-width traces, package export/replay, and ensure every claimed
+    proof has complete source provenance and zero replay gaps. A precision loss is acceptable until
+    the source type and dispatch derivation are replayable; a false proof is not.
 4. **P0.4 — Produce one exact proof/replay pair from committed HEAD.** Record compiler source/tree,
     Stage0 and Stage1 binary identities, frontend export, runtime/profiler objects, linker and flags,
     target ABI, proof source closure, and generated product digests. Reject dirty/untracked inputs for
