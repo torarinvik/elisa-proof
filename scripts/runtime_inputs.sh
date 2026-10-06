@@ -24,6 +24,18 @@ elisa_resolve_runtime_obj() {
             ELISA_RESOLVED_STAGE1_ROOT="${driver%/scripts/elisac_stage1.sh}"
         elif [[ "$COMPILER_IS_STAGE1" -eq 1 && -n "$compiler_root" ]]; then
             ELISA_RESOLVED_STAGE1_ROOT="$compiler_root"
+        elif [[ "$COMPILER_IS_STAGE1" -eq 1 && "$(basename "$compiler")" == "elisac-stage1" ]]; then
+            # An explicitly selected Stage1 executable carries enough location
+            # context to find its source checkout. Only accept this inference when
+            # that checkout has the provenance metadata used by stage1 builds.
+            local inferred_root
+            inferred_root="$(cd "$(dirname "$compiler")/.." 2>/dev/null && pwd -P || true)"
+            if [[ -n "$inferred_root" \
+                  && -f "$inferred_root/scripts/stage1_provenance.py" \
+                  && -f "$inferred_root/bin/elisac-stage1.provenance.json" \
+                  && -f "$inferred_root/build/runtime/elisacore_runtime.o" ]]; then
+                ELISA_RESOLVED_STAGE1_ROOT="$inferred_root"
+            fi
         fi
     fi
 
@@ -51,13 +63,13 @@ elisa_resolve_runtime_obj() {
     fi
 
     if [[ "$(basename "$compiler")" == "elisac-stage1" ]]; then
-        if [[ -n "$compiler_root" ]]; then
-            candidate="$compiler_root/build/runtime/elisacore_runtime.o"
+        if [[ -n "$ELISA_RESOLVED_STAGE1_ROOT" ]]; then
+            candidate="$ELISA_RESOLVED_STAGE1_ROOT/build/runtime/elisacore_runtime.o"
             if [[ -f "$candidate" ]]; then
                 RUNTIME_OBJ="$candidate"
                 return 0
             fi
-            printf 'Stage1 source runtime object not found: %s\n' "$candidate" >&2
+            printf 'Stage1 selected-source runtime object not found: %s\n' "$candidate" >&2
             return 2
         fi
         # Preserve installed Stage1 behavior only when no matching source checkout is known.
