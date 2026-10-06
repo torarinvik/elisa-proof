@@ -152,6 +152,13 @@ if [ "$1" = "-smr" ]; then printf 'Linux fixture 1\\n'; else printf 'Linux\\n'; 
         raise AssertionError(f"mock Stage1 build failed:\n{result.stdout}\n{result.stderr}")
     manifest = json.loads((proof / "build/elisa-proof.manifest.json").read_text())
     assert manifest["compiler"]["stage1_revision"] == revision
+    assert manifest["compiler"]["source_revision"] == revision
+    assert manifest["compiler"]["source_tree_sha256"] == build_manifest.committed_compiler_source_digest(
+        str(compiler), revision,
+    )
+    assert manifest["compiler"]["build_recipe_sha256"] == build_manifest.committed_compiler_recipe_digest(
+        str(compiler), revision,
+    )
     assert manifest["frontend"]["revision"] == revision
     return manifest
 

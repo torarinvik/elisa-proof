@@ -183,9 +183,9 @@ def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
         raise ValueError(f"cannot inspect pinned compiler build recipes: {error}") from error
 
 
-def stage1_provenance_revision(product: str, compiler_root: str,
-                               frontend_repo: str, frontend_revision: str) -> str:
-    """Validate Stage1's product provenance against the exact imported frontend commit."""
+def validated_stage1_provenance(product: str, compiler_root: str,
+                                frontend_repo: str, frontend_revision: str) -> dict:
+    """Validate and return Stage1 provenance against the exact imported frontend commit."""
     if not all((product, frontend_repo, frontend_revision)):
         raise ValueError("Stage1 provenance requires product and pinned frontend inputs")
     provenance_path = f"{product}.provenance.json"
@@ -248,7 +248,15 @@ def stage1_provenance_revision(product: str, compiler_root: str,
             checkout_revision = git(compiler_root, "rev-parse", "--verify", "HEAD^{commit}")
             if not checkout_revision or source_revision != checkout_revision:
                 raise ValueError("Stage1 product provenance does not match its source-worktree commit")
-    return source_revision
+    return provenance
+
+
+def stage1_provenance_revision(product: str, compiler_root: str,
+                               frontend_repo: str, frontend_revision: str) -> str:
+    """Return Stage1's source revision only after validating its full provenance."""
+    return validated_stage1_provenance(
+        product, compiler_root, frontend_repo, frontend_revision,
+    )["source_revision"]
 
 
 def target_triple(clang: str = "clang") -> str:
@@ -461,19 +469,29 @@ def main() -> int:
     proof_status = git(arguments.proof_root, "status", "--porcelain", "--", "src")
     frontend_tree = git(arguments.frontend_repo, "rev-parse", f"{arguments.frontend_revision}^{{tree}}")
     stage1_revision = None
+    stage1_provenance = None
     if arguments.stage == "stage1":
         try:
-            stage1_revision = stage1_provenance_revision(
+            stage1_provenance = validated_stage1_provenance(
                 arguments.compiler_product, arguments.compiler_root,
                 arguments.frontend_repo, arguments.frontend_revision,
             )
         except (OSError, ValueError) as error:
             print(f"build manifest: {error}", file=sys.stderr)
             return 2
+        stage1_revision = stage1_provenance["source_revision"]
         if arguments.stage1_revision and arguments.stage1_revision != stage1_revision:
             print("build manifest: supplied Stage1 revision differs from product provenance",
                   file=sys.stderr)
             return 2
+    compiler_source_revision = stage1_revision
+    compiler_source_dirty = False if stage1_revision else None
+    if not stage1_revision and arguments.compiler_root:
+        compiler_source_revision = git(arguments.compiler_root, "rev-parse", "HEAD") or None
+        compiler_source_dirty = bool(git(
+            arguments.compiler_root, "status", "--porcelain", "--untracked-files=no",
+        ))
+
     manifest = {
         "schema": MANIFEST_SCHEMA,
         "pair_generation": arguments.pair_generation or None,
@@ -493,10 +511,10 @@ def main() -> int:
             "executable": file_digest(arguments.compiler),
             # A stage1 driver is a wrapper script; the product it runs is what emits code.
             "product": file_digest(arguments.compiler_product),
-            "source_revision": stage1_revision or (git(arguments.compiler_root, "rev-parse", "HEAD") or None if arguments.compiler_root else None),
-            "source_tree_sha256": None,
-            "build_recipe_sha256": None,
-            "source_dirty": False if stage1_revision else (bool(git(arguments.compiler_root, "status", "--porcelain", "--untracked-files=no")) if arguments.compiler_root else None),
+            "source_revision": compiler_source_revision,
+            "source_tree_sha256": stage1_provenance["source_tree_sha256"] if stage1_provenance else None,
+            "build_recipe_sha256": stage1_provenance["build_recipe_sha256"] if stage1_provenance else None,
+            "source_dirty": compiler_source_dirty,
         },
         "runtime": file_digest(arguments.runtime),
         "profile_hooks": file_digest(arguments.profile_hooks),
@@ -506,11 +524,6 @@ def main() -> int:
         "compiler_flags": [flag for flag in (arguments.contract_flag, "-emit", "obj", f"-{arguments.opt_level}") if flag],
         "binary": file_digest(arguments.binary),
     }
-    if stage1_revision:
-        with open(f"{arguments.compiler_product}.provenance.json", encoding="utf-8") as handle:
-            stage1_provenance = json.load(handle)
-        manifest["compiler"]["source_tree_sha256"] = stage1_provenance["source_tree_sha256"]
-        manifest["compiler"]["build_recipe_sha256"] = stage1_provenance["build_recipe_sha256"]
     if arguments.installed_as:
         manifest["binary"]["path"] = os.path.realpath(arguments.installed_as)
     with open(arguments.output, "w") as handle:
