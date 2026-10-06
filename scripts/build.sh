@@ -229,8 +229,13 @@ fi
 # ELISA_PROOF_OBJECT_CACHE=0 disables it.
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
-    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py" \
-    "$ROOT_DIR/scripts/verify_product_pair.py")
+    "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/compiler_environment.py")
+# The pair publisher participates only in the all-products workflow. Keeping it
+# out of a single-product identity avoids recompiling and relinking that product
+# for changes to orchestration code it never executes.
+if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
+    BUILD_RECIPES+=("$ROOT_DIR/scripts/verify_product_pair.py")
+fi
 recipe_digest_args=()
 for recipe in "${BUILD_RECIPES[@]}"; do
     recipe_digest_args+=(--recipe-path "$recipe")

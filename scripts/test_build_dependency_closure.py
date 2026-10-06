@@ -276,6 +276,48 @@ fi
     refreshed = main_checksum.read_text(encoding="ascii").strip()
     assert refreshed == hashlib.sha256(products[0].with_name(products[0].name + ".manifest.json").read_bytes()).hexdigest()
 
+    # A missing manifest is not a cache hit: only the affected replay product
+    # must be rebuilt while the proof product remains byte- and timestamp-stable.
+    replay_manifest = products[1].with_name(products[1].name + ".manifest.json")
+    replay_manifest.unlink()
+    before_missing_manifest = compiler_log.read_text().splitlines()
+    before_missing_link = clang_log.read_text().splitlines()
+    proof_before_missing_manifest = (products[0].read_bytes(), products[0].stat().st_mtime_ns)
+    missing_manifest_build = subprocess.run([str(build)], cwd=proof, env=environment,
+                                            capture_output=True, text=True)
+    assert missing_manifest_build.returncode == 0, (missing_manifest_build.stdout,
+                                                     missing_manifest_build.stderr)
+    assert compiler_log.read_text().splitlines() == before_missing_manifest + ["replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == before_missing_link + ["link"]
+    assert (products[0].read_bytes(), products[0].stat().st_mtime_ns) == proof_before_missing_manifest
+
+    # The products have independent source closures: editing a transitive proof
+    # include rebuilds only the proof binary, and editing replay_main rebuilds
+    # only replay. This verifies orchestration decisions, not just digest values.
+    before_proof_closure_edit = compiler_log.read_text().splitlines()
+    before_proof_closure_link = clang_log.read_text().splitlines()
+    replay_before_proof_closure = (products[1].read_bytes(), products[1].stat().st_mtime_ns)
+    (proof / "src/shared.elisa").write_text("shared changed inside proof closure\n")
+    proof_closure_build = subprocess.run([str(build)], cwd=proof, env=environment,
+                                         capture_output=True, text=True)
+    assert proof_closure_build.returncode == 0, (proof_closure_build.stdout,
+                                                  proof_closure_build.stderr)
+    assert compiler_log.read_text().splitlines() == before_proof_closure_edit + ["main.elisa"]
+    assert clang_log.read_text().splitlines() == before_proof_closure_link + ["link"]
+    assert (products[1].read_bytes(), products[1].stat().st_mtime_ns) == replay_before_proof_closure
+
+    before_replay_closure_edit = compiler_log.read_text().splitlines()
+    before_replay_closure_link = clang_log.read_text().splitlines()
+    proof_before_replay_closure = (products[0].read_bytes(), products[0].stat().st_mtime_ns)
+    (proof / "src/replay_main.elisa").write_text("replay closure edit\n")
+    replay_closure_build = subprocess.run([str(build)], cwd=proof, env=environment,
+                                          capture_output=True, text=True)
+    assert replay_closure_build.returncode == 0, (replay_closure_build.stdout,
+                                                   replay_closure_build.stderr)
+    assert compiler_log.read_text().splitlines() == before_replay_closure_edit + ["replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == before_replay_closure_link + ["link"]
+    assert (products[0].read_bytes(), products[0].stat().st_mtime_ns) == proof_before_replay_closure
+
     # Hold a first build in its compile phase. A second build against the same
     # output tree must fail at the lock before either can publish products.
     (proof / "src/main.elisa").write_text('include "./shared.elisa"\nmain changed\n')
@@ -502,6 +544,35 @@ os.execv('/bin/mv', ['mv', *args])
     single_manifest = json.loads(single_manifest_path.read_text())
     assert single_manifest["pair_generation"] is None, single_manifest
 
+    # The single-product path does not invoke the pair publisher. Changing that
+    # unrelated implementation must therefore preserve a true product no-op.
+    # This catches recipe over-invalidation, not merely object-cache reuse: both
+    # compiler and linker logs, binary bytes and product timestamp stay fixed.
+    pair_publisher = proof / "scripts/verify_product_pair.py"
+    pair_publisher.write_text(pair_publisher.read_text() + "\n# irrelevant to single-product builds\n")
+    single_compile_before = compiler_log.read_text().splitlines()
+    single_link_before = clang_log.read_text().splitlines()
+    single_binary_before = (single_output.read_bytes(), single_output.stat().st_mtime_ns)
+    single_noop = subprocess.run([str(build)], cwd=proof, env=single_environment,
+                                 capture_output=True, text=True)
+    assert single_noop.returncode == 0, (single_noop.stdout, single_noop.stderr)
+    assert "product src/main.elisa is unchanged" in single_noop.stderr, single_noop.stderr
+    assert compiler_log.read_text().splitlines() == single_compile_before
+    assert clang_log.read_text().splitlines() == single_link_before
+    assert (single_output.read_bytes(), single_output.stat().st_mtime_ns) == single_binary_before
+
+    # The same recipe is relevant in pair mode, where the publisher is invoked.
+    # Ensure the single-mode optimization did not erase that dependency.
+    all_compile_before = compiler_log.read_text().splitlines()
+    all_link_before = clang_log.read_text().splitlines()
+    all_rebuild = subprocess.run([str(build)], cwd=proof, env=environment,
+                                 capture_output=True, text=True)
+    assert all_rebuild.returncode == 0, (all_rebuild.stdout, all_rebuild.stderr)
+    all_compile_after = compiler_log.read_text().splitlines()
+    assert all_compile_after[:len(all_compile_before)] == all_compile_before
+    assert sorted(all_compile_after[len(all_compile_before):]) == ["main.elisa", "replay_main.elisa"]
+    assert clang_log.read_text().splitlines() == all_link_before + ["link", "link"]
+
 
 with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
     base = Path(directory)
@@ -541,7 +612,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         main_output.write_bytes(b"binary")
         main_identity = identity(proof, "src/main.elisa", fake_compiler,
                                  clang, linked, main_output, recipe=recipe)
-        proof_identity = identity(proof, "src/replay_main.elisa", fake_compiler,
+        replay_identity = identity(proof, "src/replay_main.elisa", fake_compiler,
                                   clang, linked, output, recipe=recipe)
         (proof / "src/unrelated.elisa").write_text("another unrelated edit\n")
         assert digest(proof, "src/main.elisa") == main_current
@@ -549,19 +620,19 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         assert identity(proof, "src/main.elisa", fake_compiler,
                         clang, linked, main_output, recipe=recipe) == main_identity
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, recipe=recipe) == proof_identity
+                        clang, linked, output, recipe=recipe) == replay_identity
         build_jobs_env = dict(os.environ, ELISA_PROOF_BUILD_JOBS="9")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, build_jobs_env, recipe) == proof_identity
+                        clang, linked, output, build_jobs_env, recipe) == replay_identity
         unrelated_env = dict(os.environ, CODEX_THREAD_ID="different-session", TERM="vt100")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, unrelated_env, recipe) == proof_identity
+                        clang, linked, output, unrelated_env, recipe) == replay_identity
         relevant_env = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="12.0")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, relevant_env, recipe) != proof_identity
+                        clang, linked, output, relevant_env, recipe) != replay_identity
         target_env = dict(os.environ, ELISA_TARGET_TRIPLE="aarch64-unknown-test")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, target_env, recipe) != proof_identity
+                        clang, linked, output, target_env, recipe) != replay_identity
         path_env = dict(os.environ, PATH="/p03-other-tools:" + os.environ.get("PATH", ""))
         sdk_env = dict(os.environ, SDKROOT="")
         assert env_digest(build_jobs_env) == env_digest(unrelated_env)
@@ -571,22 +642,50 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         assert env_digest(unrelated_env) != env_digest(sdk_env)
         linked.write_bytes(b"changed hooks")
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, recipe=recipe) != proof_identity
+                        clang, linked, output, recipe=recipe) != replay_identity
         recipe.write_text("build recipe v2\n")
         assert recipes_digest(recipe) != first_recipe_digest
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
-                        clang, linked, output, recipe=recipe) != proof_identity
+                        clang, linked, output, recipe=recipe) != replay_identity
 
         manifest = base / "proof-bin.manifest.json"
-        manifest.write_text(json.dumps({"build_identity": proof_identity,
+        manifest.write_text(json.dumps({"build_identity": replay_identity,
                                         "binary": {"sha256": hashlib.sha256(output.read_bytes()).hexdigest()}}))
         manifest_hash = base / "proof-bin.manifest.json.sha256"
         manifest_hash.write_text(hashlib.sha256(manifest.read_bytes()).hexdigest())
         check = ["python3", str(MANIFEST), "--check-existing", "--recorded-build-identity",
-                 proof_identity, "--existing-binary", str(output), "--existing-manifest", str(manifest),
+                 replay_identity, "--existing-binary", str(output), "--existing-manifest", str(manifest),
                  "--existing-manifest-sha256", str(manifest_hash)]
         assert subprocess.run(check).returncode == 0
         output.write_bytes(b"tampered binary")
         assert subprocess.run(check).returncode == 1
+
+    # A missing transitive include fails closed, then its creation and later
+    # edits each change the closure digest. Symlink retargeting is part of the
+    # resolved closure identity even when both targets initially share bytes.
+    shared_source = proof / "src/shared.elisa"
+    shared_source.write_text('include "../../Elisa-compiler/src/front.elisa"\n'
+                             'include "./nested.elisa"\nshared\n')
+    missing_nested = subprocess.run(
+        ["python3", str(MANIFEST), "--dependency-root", str(proof),
+         "--dependency-main", "src/main.elisa"], capture_output=True, text=True)
+    assert missing_nested.returncode == 2 and "missing include dependency" in missing_nested.stderr
+    nested = proof / "src/nested.elisa"
+    nested.write_text("created transitive dependency\n")
+    created_digest = digest(proof, "src/main.elisa")
+    nested.write_text("edited transitive dependency\n")
+    edited_digest = digest(proof, "src/main.elisa")
+    assert created_digest != edited_digest
+    alias = proof / "src/alias.elisa"
+    (proof / "src/alias_a.elisa").write_text("same bytes\n")
+    (proof / "src/alias_b.elisa").write_text("same bytes\n")
+    alias.symlink_to("alias_a.elisa")
+    shared_source.write_text(shared_source.read_text() + 'include "./alias.elisa"\n')
+    before_retarget = digest(proof, "src/main.elisa")
+    alias.unlink()
+    alias.symlink_to("alias_b.elisa")
+    after_retarget = digest(proof, "src/main.elisa")
+    assert before_retarget != after_retarget
     run_outside_closure_build_control(base / "orchestration")
-print("build dependency closure: unrelated edits preserve both end-to-end products; transitive includes invalidate")
+print("build dependency closure: no-op and outside-closure reuse; per-product invalidation; missing/corrupt "
+      "manifest rebuild; transitive include creation/edit and symlink retarget invalidation")
