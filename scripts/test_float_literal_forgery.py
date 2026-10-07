@@ -57,6 +57,22 @@ forge("float-signed-zero",
 # Ordering is not total: not (x < 0.0) does not give x >= 0.0, nor trichotomy.
 forge("float-negated-order",
       lambda p: ([neg(p, cmp(p, "<", deadzone, lit(p, "0.0")))], cmp(p, ">=", deadzone, lit(p, "0.0"))))
+# Every ordered complement is invalid for NaN, including nested projections.
+for source_op, target_op in (("<", ">="), (">", "<="), ("<=", ">"), (">=", "<")):
+    def negated_order(p, source_op=source_op, target_op=target_op):
+        denied = neg(p, cmp(p, source_op, deadzone, lit(p, "0.0")))
+        wrapped = neg(p, neg(p, denied))
+        premise = append_node(p, "binary", "and", append_node(p, "bool", value="1"), wrapped)
+        return [premise], cmp(p, target_op, deadzone, lit(p, "0.0"))
+    forge("float-negated-order-" + source_op, negated_order)
+    forge("float-direct-negated-order-" + source_op,
+          lambda p, source_op=source_op, target_op=target_op:
+          ([neg(p, cmp(p, source_op, deadzone, lit(p, "0.0")))],
+           cmp(p, target_op, deadzone, lit(p, "0.0"))))
+# Exact propositional use of a negated float atom remains valid.
+forge("float-negated-atom-control",
+      lambda p: ([neg(p, cmp(p, "<", deadzone, lit(p, "0.0")))],
+                 neg(p, cmp(p, "<", deadzone, lit(p, "0.0")))), accepted=True)
 forge("float-trichotomy",
       lambda p: ([], either(p, cmp(p, "<", deadzone, lit(p, "0.0")),
                             either(p, cmp(p, "==", deadzone, lit(p, "0.0")),
