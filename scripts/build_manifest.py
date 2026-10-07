@@ -147,8 +147,11 @@ def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
     recipe_paths = (
         "scripts/elisac_stage1.sh",
         "scripts/elisac_stage1_seed.sh",
+        "scripts/assert_stage0_fresh.sh",
+        "scripts/process_rss.sh",
         "scripts/build_runtime_object.sh",
         "scripts/write_profiler_hook_fallbacks.sh",
+        "scripts/stage1_provenance.py",
     )
     try:
         result = subprocess.run(
