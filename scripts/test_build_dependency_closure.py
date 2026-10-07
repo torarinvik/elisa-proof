@@ -76,7 +76,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-build-closure-") as directory:
         assert identity(proof, "src/replay_main.elisa", fake_compiler,
                         clang, linked, output, target_env, recipe) != replay_identity
         path_env = dict(os.environ, PATH="/p03-other-tools:" + os.environ.get("PATH", ""))
-        sdk_env = dict(os.environ, SDKROOT="")
+        sdk_env = dict(os.environ, SDKROOT=os.environ.get("SDKROOT", "") + "-fixture-sdk-change")
         assert env_digest(build_jobs_env) == env_digest(unrelated_env)
         assert env_digest(unrelated_env) != env_digest(relevant_env)
         assert env_digest(unrelated_env) != env_digest(target_env)

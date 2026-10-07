@@ -27,6 +27,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-compiler-selection-") as director
         checkouts.append(checkout)
     environment = {key: value for key, value in os.environ.items()
                    if key not in ("ELISA_COMPILER_ROOT", "ELISA_COMPILER_SRC", "ELISA_COMPILER_BIN")}
+    environment["HOME"] = str(scratch / "isolated-home")
     environment["PATH"] = str(path_bin)
     def select(overrides):
         return subprocess.run(
