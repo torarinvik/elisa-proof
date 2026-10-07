@@ -78,3 +78,39 @@ diagnostics and kernel inventory pass. Artifacts: engine build/validation/
 frame_inventory_bridge-O0/-O2, report_invariants-frame-bridge and
 prover-frame-inventory-bridge-build.log. Producer event attachment and CLI source
 replay integration remain the next work; broad implementation scope is unchanged.
+
+## Production producer and CLI integration
+
+`proof_check_with_source_context` performs ordinary semantic preparation, then
+bounded source frame lowering and per-event replay into a producer workspace.
+No original bytes or compiler symbol table are retained. Supported owners are
+prepared only when the whole direct inventory is known and nonempty. Workspace
+rows and declaration traversal share explicit 4096 limits; exhaustion clears
+all prepared owner mappings. Unknown mappings retain the existing checker.
+Report reset clears the workspace between runs.
+
+At the existing function frame phase, prepared events emit one attempt and
+source-tagged obligation each, and one certificate per successful predicate.
+Their original body/header/direct checks are replaced together, preventing
+duplicate accounting. Active owner state is reset at function entry/exit; direct
+write checks skip only the completely prepared owner. The CLI now uses this
+source-context checker and independently source-bound certificate replay.
+AST-only public checker/replay compatibility routes remain conservative.
+
+The three CLI repros now have consistent admission accounting: allowed is proved
+(3/3 obligations and certificates), outside is rejected (3 events/2 certificates,
+frame-write-outside), and preservation is rejected (5 events/4 certificates,
+frame-preserve-write). Failed events have goal-linked findings and no certificate.
+`scripts/test_frame_source_cli.py` asserts full and summary JSON routes and runs
+in the Python matrix. Composed producer/runtime controls pass at O0/O2; admission
+mutation matrix, invariant diagnostics and 193-entry kernel inventory pass.
+All-products strict O2 build passes, generation
+fc86464d1b494b06b1b5e824f4701d47. Engine sweep remains 66/73 with the same seven
+failures. Logs: engine build/validation/prover-frame-cli-build.log and
+proof-frame-cli-sweep.log; artifacts frame_cli_runtime-O0/-O2.
+
+Contract-placement and condition-call fixtures remain at goal-attempt-coverage:
+their broader branches/calls/conditions are not yet a complete source inventory.
+Nested, aliased, dynamic and callee-mapped effects, expression-bodied headers,
+qualified owners, portable source-context replay, the full compatibility matrix,
+compiler qualification and the broader engine implementation plan remain open.

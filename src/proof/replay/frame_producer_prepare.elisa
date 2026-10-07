@@ -1,0 +1,45 @@
+extend ElisaProof:
+    private:
+        def proof_prepare_frame_producer_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64
+            for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_prepare_frame_producer_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, work)
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        inventory = ElisaProofFrameSource::direct_events(all_declarations, name, position.line, tokens, source, source_length)
+                        if inventory.known and inventory.events.count > 0:
+                            return false if report.frame_producer.rows.count > 4096 or inventory.events.count > 4096 - report.frame_producer.rows.count
+                            lowered = ElisaProofFrameSource::lower_direct_events(all_declarations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET)
+                            if lowered.known:
+                                decisions = ElisaProofFrameSource::direct_event_decisions(all_declarations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, &lowered.roots)
+                                if decisions.known:
+                                    report.frame_producer.names.push(name)
+                                    report.frame_producer.lines.push(position.line)
+                                    report.frame_producer.starts.push(report.frame_producer.rows.count)
+                                    report.frame_producer.counts.push(decisions.decisions.count)
+                                    for index in 0..<decisions.decisions.count |index, decisions, report|:
+                                        decision = decisions.decisions[index]
+                                        report.frame_producer.rows.push(ProofFrameProducerRow{kind: decision.event.kind, position: decision.event.position, source_index: index, root: decision.kernel_root, proven: decision.proven})
+                    _:
+                        pass
+            return true
+
+    public:
+        # No source bytes or compiler semantic table escape this preparation phase.
+        # Unsupported source mappings retain the existing checker and its obligations.
+        def proof_check_with_source_context(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, focus_function: sview) -> void can[Memory.Allocate, Abort.Panic]:
+            ready: bool = proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics)
+            return if not ready
+            work: mutable usize = 0
+            complete: bool = proof_prepare_frame_producer_declarations(report, &file.top_decls, &file.top_decls, tokens, source, source_length, 0, &work)
+            if not complete:
+                report.frame_producer.names.clear()
+                report.frame_producer.lines.clear()
+                report.frame_producer.starts.clear()
+                report.frame_producer.counts.clear()
+                report.frame_producer.rows.clear()
+            proof_check_core(file, report, focus_function)
+            report.frame_producer.active_name <- ""

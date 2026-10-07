@@ -88,6 +88,7 @@ run_py_test test_conditional_scaled_sum.py
 run_py_test test_guarded_call_result.py
 run_py_test test_range_binder_resources.py
 run_py_test test_admission_invariant_diagnostics.py
+run_py_test test_frame_source_cli.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
 run_py_test test_cycle_arena_runtime_rejection.py
