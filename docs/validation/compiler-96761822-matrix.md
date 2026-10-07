@@ -72,3 +72,11 @@ and retains false-shadow and genuine borrow-contract refusals. The kernel
 inventory gate passes. Build log: engine
 `build/validation/prover-range-binder-build.log`. This isolated correction is
 not included in the still-running b8ff7592 matrix.
+
+Additional isolated qualification retains complete replay for lexical borrow
+(1/1), disjoint-field borrow (1/1) and scalar capture (7/7) fixtures. Invalid
+scalar capture and moved-borrow fixtures remain refused with zero replay gaps.
+The fresh engine sweep runs all 73 proofs uncached and passes 66, with the same
+seven remaining rows: both ActionInput rows, audio animation events, triggers,
+virtual audio, motion overlay policy and sound-event assets. Log:
+`build/validation/proof-range-binder-full-sweep.log`.
