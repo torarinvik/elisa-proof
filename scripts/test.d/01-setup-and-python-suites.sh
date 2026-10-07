@@ -102,6 +102,7 @@ run_py_test test_qualified_block_ranges.py
 run_py_test test_float_integer_bounds.py
 run_py_test test_scalar_field_priority.py
 run_py_test test_float_scalar_resources.py
+run_py_test test_float_call_result_shape.py
 run_py_test test_fixed_index_admission.py
 run_py_test test_operator_witness_snapshot_budget.py
 run_py_test test_local_record_fixed_index.py
