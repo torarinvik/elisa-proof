@@ -159,6 +159,8 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 COMPILER_PRODUCT="$COMPILER"
 if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
+    # Preserve the compiler's per-source path check; never enable the legacy blanket trust flag.
+    unset ELISA_STAGE1_RUNTIME_STD
     stage1_root=""
     if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
         stage1_root="$ELISA_STAGE1_ROOT"
