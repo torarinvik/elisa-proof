@@ -31,6 +31,13 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
             # source remains private, and the test-only visibility change is never linked into
             # either product binary.
             generated = scratch / private_helpers[original]
+            # Relocation must preserve the directory used to resolve each include.
+            source = re.sub(
+                r'^include "([^"\n]+)"$',
+                lambda match: f'include "{(original.parent / match.group(1)).resolve().as_posix()}"',
+                source,
+                flags=re.MULTILINE,
+            )
             generated.write_text(source.replace(private_label, "    public:", 1), encoding="utf-8")
             original = generated
             copied_helpers.add(original.name)
