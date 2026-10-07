@@ -29,11 +29,12 @@ def check_emitted_inventory(report: dict, *, proved: bool, expect_loops: bool = 
     inventory = report["source_obligation_inventory"]
     assert inventory["coverage"] == "partial"
     assert inventory["whole_program"] is False
+    assert "source-wide-unique literal ensure/return cases" in inventory["supported_subset"]
     assert "Boolean-literal assert-by" in inventory["supported_subset"]
     assert "direct if/match branches" in inventory["supported_subset"]
     if expect_loops:
         assert "direct while/for loop bodies" in inventory["supported_subset"]
-        assert "nested loop/branch paths and scoped bodies are unsupported" in inventory["supported_subset"]
+        assert "nested loop/branch paths and scoped assert-by/proof steps are unsupported" in inventory["supported_subset"]
     summary = report["summary"]
     declarations = report["declaration_details"]
     goals = report["goals"]
@@ -133,19 +134,27 @@ def main() -> None:
     assert len(positive_postconditions) == 2
     assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in positive_postconditions)
 
-    # Nested module functions are traversed by the proof checker. Until source identities
-    # include namespace paths, their postconditions must be recorded as unsupported by the
-    # independent inventory rather than disappearing and allowing a proved whole-file result.
+    # Nested module functions with a source-wide unique bare name can be matched to exactly one
+    # proof attempt. Duplicate names still make the source inventory unsupported.
     code, nested_literal = run_report(ROOT / "examples/source_obligation_inventory_nested_scope.elisa")
+    assert code == 0
+    check_emitted_inventory(nested_literal, proved=True)
+    nested_goal = next(
+        goal for goal in nested_literal["goals"]
+        if goal["name"] == "nested_literal_postcondition" and goal["rule"] == "goal"
+    )
+    assert nested_goal["proven"] and nested_goal["replay_status"] == "replayed"
+
+    code, duplicate_nested_literal = run_report(ROOT / "examples/source_obligation_inventory_duplicate_scope.elisa")
     assert code == 1
-    check_emitted_inventory(nested_literal, proved=False)
+    check_emitted_inventory(duplicate_nested_literal, proved=False)
     nested_inventory_findings = [
-        finding for finding in nested_literal["findings"]
+        finding for finding in duplicate_nested_literal["findings"]
         if finding["kind"] == "source-obligation-inventory"
     ]
     assert nested_inventory_findings
     assert nested_inventory_findings[0]["status"] == "unsupported"
-    assert nested_literal["verification_state"] == "unsupported"
+    assert duplicate_nested_literal["verification_state"] == "unsupported"
 
     # `ensures` is the plural spelling of the same source construct and must receive an
     # independently inventoried, replayed source obligation as well.
