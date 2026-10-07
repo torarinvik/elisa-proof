@@ -3,6 +3,7 @@
 import hashlib
 from pathlib import Path
 import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -46,8 +47,24 @@ def compiler_source_revision() -> str:
     return revision
 
 
-def run(*command: str, cwd: Path = ROOT) -> None:
-    subprocess.run(command, cwd=cwd, check=True)
+def run(*command: str, cwd: Path = ROOT, env: dict | None = None) -> None:
+    subprocess.run(command, cwd=cwd, check=True, env=env)
+
+
+def stage1_host_environment() -> dict:
+    """Stage1 reads its host from these flags, which its wrapper normally exports; without
+    them a raw Stage1 call on Linux compiles the macOS mmap flags and the product aborts."""
+    env = dict(os.environ)
+    if platform.system() == "Linux":
+        env.setdefault("ELISA_HOST_LINUX", "1")
+        if platform.machine() in ("x86_64", "AMD64"):
+            env.setdefault("ELISA_HOST_X86_64", "1")
+    return env
+
+
+# Apple ld spells dead stripping -dead_strip; GNU ld needs the flags scripts/link_flags.sh uses.
+DEAD_STRIP_LINK = (["-Wl,-dead_strip"] if platform.system() == "Darwin"
+                   else ["-no-pie", "-Wl,--gc-sections", "-Wl,--no-as-needed", "-lm"])
 
 
 def materialize_fixture(destination: Path) -> None:
@@ -178,9 +195,11 @@ def main() -> None:
         object_file = scratch / "scalar-witness-index.o"
         hooks_object = scratch / "profile-hooks.o"
         executable = scratch / "scalar-witness-index"
-        run(str(STAGE1), "-permissive", "-emit", "obj", "-O0", "-o", str(object_file), str(fixture))
+        run(str(STAGE1), "-permissive", "-emit", "obj", "-O0", "-o", str(object_file), str(fixture),
+            env=stage1_host_environment())
         run(clang, "-c", str(hooks_source), "-o", str(hooks_object))
-        run(clang, "-Wl,-dead_strip", "-o", str(executable), str(object_file), str(hooks_object), str(runtime))
+        run(clang, *DEAD_STRIP_LINK, "-o", str(executable), str(object_file), str(hooks_object),
+            str(runtime))
         run(str(executable))
 
     source_revision = compiler_source_revision()
