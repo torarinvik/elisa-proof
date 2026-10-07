@@ -491,3 +491,23 @@ and proof-frame-preserve-clause-sweep.log. Artifacts: frame_source_admission_run
 Per-event producer attempts, source-context dispatch and full inventory/report
 attachment remain next; broader source/effect mappings and the full implementation
 plan remain unfinished.
+
+### Inventory-derived event replay dispatch
+
+`frame_source_event_replay.elisa` derives event kind, clause identity and source
+position from the independent original inventory before selecting spec, allowance
+or individual-preserve replay. Certificate metadata cannot substitute a weaker
+predicate for the expected source event. Batch replay requires the exact event
+count and reuses one reconstructed inventory, while retaining each root's full
+source and kernel checks. This does not yet attach report attempts/certificates
+or extend the inventory's explicitly limited statement/effect subset.
+
+The composed runtime passes 38 controls at O0/O2 with 96761822, adding all four
+event routes, wrong predicate/index, complete batch acceptance, duplicate spec
+root, swapped allowance/preservation roots and omitted-event refusal. All-products
+strict O2 build succeeds, generation `6b0ef5c063a1414b80f0ef0c9f2ad6af`; admission
+matrix/invariant diagnostics and kernel inventory pass. Fresh engine sweep remains
+66/73 with the same seven failures. Logs: engine build/validation/
+prover-frame-event-dispatch-build.log and proof-frame-event-dispatch-sweep.log.
+Artifacts: frame_source_admission_runtime-O0/-O2. Per-event producer recording,
+source-context report replay and complete inventory/report attachment remain next.
