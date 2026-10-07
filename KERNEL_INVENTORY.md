@@ -169,12 +169,11 @@ summary trace cannot be relabelled as one.
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
 | `global-constant-qualified` | `check/global_constants.elisa` | a module constant reached through a qualified name (re-validated by `replay/global_constant_validation.elisa`) |
-| `deterministic-call` | `check/function_contracts_and_frames.elisa` | scalar witness marker for a source-site pure call (reconstructed from declarations at replay) |
+| `deterministic-call` | `check/function_contracts_and_frames.elisa` | scalar witness marker for a source-site pure call: a verified, effect-free, acyclic by-value call; replay reconstructs it from declarations and validates the call chain |
 | `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
 | `match-exhaustiveness` | `check/returns/matches.elisa` | complete finite match over a uniquely declared enum's variants (re-validated against source declarations and proposition typing) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
-| `deterministic-call` | `check/function_contracts_and_frames.elisa` | a scalar witness for a verified, effect-free, acyclic by-value call; replay reconstructs and validates the call chain |
 | `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |
 | `runtime-guard` | `check/returns/matches.elisa` | an early-return guard's negation |
 | `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |
