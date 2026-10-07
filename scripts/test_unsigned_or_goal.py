@@ -16,7 +16,9 @@ assert data["replay"]["certificates"] == data["replay"]["replayed"] > 0, data
 functions = {d["name"]: d for d in data["declaration_details"] if d.get("kind") == "function"}
 for name in ("u32_true_literal", "u8_true_disjunction", "u32_true_disjunction",
              "u64_true_disjunction", "u32_reflexive_disjunction", "u32_complemented_guard"):
-    assert functions[name]["verified"], (name, functions[name])
+    # The file carries one deliberate source error, so no declaration is claimed verified
+    # (2f7004cf gates claims on clean source); every goal of these functions must still prove.
+    assert functions[name]["verified"] or functions[name]["verification_reason"] == "source-error", (name, functions[name])
     assert not any(g["name"] == name and not g["proven"] for g in data["goals"]), name
 negative = functions["u32_false_disjunction_control"]
 assert not negative["verified"], negative

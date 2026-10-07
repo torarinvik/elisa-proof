@@ -124,6 +124,7 @@ const TEST_BINDING_POSITIVE_CONTROL_ERROR: i64 = 129
 const TEST_BINDING_NESTED_BUILTIN_ERROR: i64 = 130
 const TEST_TYPED_RETURN_GATE_ERROR: i64 = 131
 const TEST_TYPED_RETURN_FORGERY_ERROR: i64 = 132
+const TEST_CONSUMER_CERTIFICATE_ERROR: i64 = 133
 const TEST_BINDING_POSITION_SHIFT: u32 = 1
 const TEST_BINDING_FALLBACK_VALUE: i64 = 0
 const TEST_LOCAL_BINDING_GATE_INVALID_INDEX: i64 = 1
@@ -276,6 +277,17 @@ def proof_test_loop_goals(report: ProofReport&, function_name: sview, source_lin
             all_replayed <- false if not certificate.replayed
     return (count, all_replayed)
 
+# Liveness is judged against a consuming certificate, so a direct trace check must name one:
+# the index (plus one) of the first `owner` certificate at `line` that carries the trace, or 0.
+def proof_test_trace_consumer(report: ProofReport&, owner: sview, line: u32, trace_index: usize) -> usize:
+    for certificate_index in 0..<report.certificates.count |certificate_index, report, owner, line, trace_index|:
+        certificate: ProofGoalCertificate = report.certificates[certificate_index]
+        continue if certificate.name != owner or certificate.line != line
+        continue if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
+        for offset in 0..<certificate.facts_count |offset, certificate, certificate_index, report, trace_index|:
+            return certificate_index + 1 if report.traces.origin_indices[certificate.facts_start + offset] == trace_index
+    return 0
+
 def proof_test_has_loop_refusal(report: ProofReport&, function_name: sview, source_line: u32) -> bool:
     for finding in report.findings |function_name, source_line|:
         if finding.name == function_name and finding.line == source_line:
@@ -305,8 +317,14 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 103 if init_index >= baseline.traces.records.count or rebind_index >= baseline.traces.records.count
     baseline.replay_owner_line <- 6
     baseline.trace_owner_line <- 9
+    init_consumer: usize = proof_test_trace_consumer(baseline, "bounded_counter", 9, init_index)
+    rebind_consumer: usize = proof_test_trace_consumer(baseline, "bounded_counter", 9, rebind_index)
+    return TEST_CONSUMER_CERTIFICATE_ERROR if init_consumer == 0 or rebind_consumer == 0
+    baseline.trace_consumer_certificate_index <- init_consumer
     return 104 if not proof_replay_fact_trace_entry(&baseline, init_index)
+    baseline.trace_consumer_certificate_index <- rebind_consumer
     return 105 if not proof_replay_fact_trace_entry(&baseline, rebind_index)
+    baseline.trace_consumer_certificate_index <- init_consumer
 
     # Altering only the trace site cannot preserve source provenance.
     init_original: ProofFactTrace = baseline.traces.records[init_index]
@@ -330,6 +348,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 115 if not encoded_rebind.known
     forged_rebind_trace: ProofFactTrace = ProofFactTrace{expression: forged_rebind_expression, kernel_expression: encoded_rebind.root, kind: rebind_original.kind, line: rebind_original.line, name: rebind_original.name, dependency: rebind_original.dependency, premises_start: rebind_original.premises_start, premises_count: rebind_original.premises_count, kernel_premises_start: rebind_original.kernel_premises_start, kernel_premises_count: rebind_original.kernel_premises_count, summary_bindings_start: rebind_original.summary_bindings_start, summary_bindings_count: rebind_original.summary_bindings_count, summary_requires_start: rebind_original.summary_requires_start, summary_requires_count: rebind_original.summary_requires_count, summary_ensure_index: rebind_original.summary_ensure_index, owner_line: rebind_original.owner_line}
     baseline.traces.records.push(forged_rebind_trace)
+    baseline.trace_consumer_certificate_index <- rebind_consumer
     return 116 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
 
     # The old RHS witness is invalid once the actual source assignment changes.
@@ -345,12 +364,18 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     shadowed_parameter_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_declarations(SHADOWED_PARAMETER_SOURCE, &shadowed_parameter_bytes, &shadowed_parameter_report)
     baseline.source_declarations <- shadowed_parameter_report.source_declarations
-    return 118 if proof_replay_fact_trace_entry(&baseline, init_index) or proof_replay_fact_trace_entry(&baseline, rebind_index)
+    baseline.trace_consumer_certificate_index <- init_consumer
+    return 118 if proof_replay_fact_trace_entry(&baseline, init_index)
+    baseline.trace_consumer_certificate_index <- rebind_consumer
+    return 118 if proof_replay_fact_trace_entry(&baseline, rebind_index)
     shadowed_global_bytes: mutable darray[u8] = []
     shadowed_global_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_declarations(SHADOWED_GLOBAL_SOURCE, &shadowed_global_bytes, &shadowed_global_report)
     baseline.source_declarations <- shadowed_global_report.source_declarations
-    return 119 if proof_replay_fact_trace_entry(&baseline, init_index) or proof_replay_fact_trace_entry(&baseline, rebind_index)
+    baseline.trace_consumer_certificate_index <- init_consumer
+    return 119 if proof_replay_fact_trace_entry(&baseline, init_index)
+    baseline.trace_consumer_certificate_index <- rebind_consumer
+    return 119 if proof_replay_fact_trace_entry(&baseline, rebind_index)
 
     # A forged equality at the right line is not the source initializer.
     forged_position: Ast::Pos = Ast::expr_pos(init_original.expression)
@@ -359,6 +384,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 107 if not encoded.known
     forged_trace: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: encoded.root, kind: init_original.kind, line: init_original.line, name: init_original.name, dependency: init_original.dependency, premises_start: init_original.premises_start, premises_count: init_original.premises_count, kernel_premises_start: init_original.kernel_premises_start, kernel_premises_count: init_original.kernel_premises_count, summary_bindings_start: init_original.summary_bindings_start, summary_bindings_count: init_original.summary_bindings_count, summary_requires_start: init_original.summary_requires_start, summary_requires_count: init_original.summary_requires_count, summary_ensure_index: init_original.summary_ensure_index, owner_line: init_original.owner_line}
     baseline.traces.records.push(forged_trace)
+    baseline.trace_consumer_certificate_index <- init_consumer
     return 108 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
 
     # Old initializer evidence must not transfer to changed source at the same binding site.

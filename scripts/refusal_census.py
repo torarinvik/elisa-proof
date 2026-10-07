@@ -15,12 +15,14 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from report_cache import effective_cpus
 from report_exit_status import expected_exit as report_expected_exit
 
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof")).resolve()
 DOGFOOD_SOURCES = ("src/proof/kernel_core.elisa",)
-DEFAULT_WORKERS = max(1, min(os.cpu_count() or 4, 4))
+# One proof run per core; ELISA_PROOF_CENSUS_JOBS overrides (e.g. to share a busy host).
+DEFAULT_WORKERS = int(os.environ.get("ELISA_PROOF_CENSUS_JOBS", "0")) or effective_cpus()
 
 
 def input_key(path):
@@ -67,6 +69,15 @@ def run(path, timeout):
 
 def data_key(path):
     return input_key(path)
+
+
+def previous_seconds(path):
+    """Per-input seconds from an earlier measurements sidecar, or {} when there is none."""
+    try:
+        files = json.loads(Path(path).read_text()).get("files", {})
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return {name: entry.get("seconds", 0) for name, entry in files.items() if isinstance(entry, dict)}
 
 
 def tree_sha256(root):
@@ -280,8 +291,12 @@ def main():
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
 
+    # Longest inputs first (by the committed timing sidecar) so the slow tail starts immediately;
+    # census_diff writes to a scratch dir, so always read the committed sidecar.
+    previous = previous_seconds(ROOT / "docs/census/measurements.json")
+    ordered = sorted(paths, key=lambda path: -previous.get(data_key(path), 0))
     with ThreadPoolExecutor(max_workers=arguments.workers) as pool:
-        attempts = list(pool.map(lambda path: run(path, arguments.timeout_seconds), paths))
+        attempts = list(pool.map(lambda path: run(path, arguments.timeout_seconds), ordered))
     results = {
         name: {"report": data, "seconds": seconds, "error": error}
         for name, data, seconds, error in attempts
@@ -289,8 +304,10 @@ def main():
 
     if arguments.retry_unreadable:
         retry_paths = {data_key(path): path for path in paths if results[data_key(path)]["report"] is None}
-        for name in sorted(retry_paths):
-            _, data, seconds, error = run(retry_paths[name], arguments.retry_timeout_seconds)
+        with ThreadPoolExecutor(max_workers=arguments.workers) as pool:
+            retried = list(pool.map(lambda name: run(retry_paths[name], arguments.retry_timeout_seconds),
+                                    sorted(retry_paths)))
+        for name, data, seconds, error in retried:
             results[name]["report"] = data
             results[name]["seconds"] += seconds
             results[name]["error"] = error

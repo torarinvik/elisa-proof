@@ -28,6 +28,9 @@ assert replay["certificates"] == replay["replayed"] == summary["proven"]
 rows = {row["name"]: row for row in data["declaration_details"]
         if row["kind"] == "function"}
 assert rows["shadowed_tuple_callee"]["verified"] is False
-assert rows["tuple_summary_source"]["verified"] is True
+# The file's deliberate source error withholds every verified claim (2f7004cf); the summary
+# source still proves and replays all of its goals.
+assert rows["tuple_summary_source"]["verified"] is True or rows["tuple_summary_source"]["verification_reason"] == "source-error"
+assert all(goal["proven"] and goal["replay_status"] == "replayed" for goal in data["goals"] if goal["name"] == "tuple_summary_source")
 assert data["trust"]["trusted_assumptions"] == []
 print("tuple callee shadow: invalid local call cannot inherit global verified summary")

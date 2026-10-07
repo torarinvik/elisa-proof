@@ -113,7 +113,7 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | `field` | a field of an owner type | owner and owner type identity set |
 | `enum-member` | an enum member value | owner is the enum; identities agree |
 | `enum-tag` | an enum tag used in `is` tests | owner is the enum; identities agree |
-| `enum-scope-segment` | one qualified enum path segment | enum type identity and bounded path ordinal/count agree |
+| `enum-scope-segment` | one module/type segment of a qualified enum path | owner type identity set; `parameter_index` < `parameter_count` == path length; name is that segment |
 <!-- /inventory:typing-kinds -->
 
 ## Certificate rules
@@ -177,11 +177,11 @@ establish independent source correspondence for every boundary fact.
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
 | `global-constant-qualified` | `check/global_constants.elisa` | a module constant reached through a qualified name (re-validated by `replay/global_constant_validation.elisa`) |
+| `deterministic-call` | `check/function_contracts_and_frames.elisa` | scalar witness marker for a source-site pure call: a verified, effect-free, acyclic by-value call; replay reconstructs it from declarations and validates the call chain |
 | `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
 | `match-exhaustiveness` | `check/returns/matches.elisa` | complete finite match over a uniquely declared enum's variants (re-validated against source declarations and proposition typing) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
 | `type-bound` | `check/bounds_and_facts.elisa` | the range of a parameter's machine-integer type |
-| `deterministic-call` | `check/function_contracts_and_frames.elisa` | a scalar witness for a verified, effect-free, acyclic by-value call; replay reconstructs and validates the call chain |
 | `runtime-assert` | `check/returns/contracts.elisa` | a statement after an aborting `assert` |
 | `runtime-guard` | `check/returns/matches.elisa` | an early-return guard's negation |
 | `branch-condition` | `check/statement_checks.elisa`, `check/bounds_and_facts.elisa`, `check/returns/matches.elisa` | the condition of the taken branch |
@@ -194,8 +194,8 @@ establish independent source correspondence for every boundary fact.
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 | `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
-| `const-enum-exclusion` | `check/operator_impl_chain.elisa` | distinct const-enum variant exclusion; replay validates source enum identity and values |
-| `const-enum-member-value` | `check/enum_value_types.elisa`, `check/operator_impl_chain.elisa` | const-enum member scalar comparison; replay validates source member value |
+| `const-enum-exclusion` | `check/operator_impl_chain.elisa` | a const-enum value differs from another explicit variant's value (distinct explicit discriminants) |
+| `const-enum-member-value` | `check/enum_value_types.elisa`, `check/operator_impl_chain.elisa` | a qualified const-enum member equals its declared constant value |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step
@@ -335,6 +335,7 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; module/type head lookup, not callable contract resolution |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
@@ -349,7 +350,6 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; signed machine width |
 | `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
-| `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; resolved type head |
 | `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
 | `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
 | `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
@@ -391,5 +391,5 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_push` | `app/portable_io.elisa` | output |
 | `proof_push_json_i64` | `app/portable_io.elisa` | output |
 | `proof_push_json_string` | `app/portable_io.elisa` | output |
-| `proof_package_input_preflight` | `portable/package_reader.elisa` | bounded package input preflight |
+| `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
 <!-- /inventory:correspondence-external-calls -->

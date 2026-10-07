@@ -1,0 +1,231 @@
+# Independent source scans for one local spelling. Replay asks two questions of a function body:
+# does any construct anywhere in it introduce this name (a declaration, `=` definition, loop
+# variable, pattern binder, block binding, lambda parameter or comprehension variable), and may
+# any construct change the value the name denotes (those, plus assignments, explicit lends,
+# moves, receiver calls and implicit lends to reference parameters)? Every unsupported or
+# too-deep form answers yes, so a caller that trusts a "no" never trusts an unread construct.
+const module ProofReplaySourceLocal:
+    DEPTH_LIMIT: usize = 96
+
+extend ElisaProof:
+    private:
+        def proof_replay_source_pattern_binds(pattern: Ast::Pattern, name: sview, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            bindings: mutable darray[sview] = []
+            return true if not proof_replay_call_pattern_bindings(pattern, &bindings, 0)
+            return any bound in bindings where bound == name
+
+        # The local a place expression reads or writes through, or "" when it has none.
+        def proof_replay_source_place_root(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Index(object, _, _) | Ast::Expr.Paren(object, _) | Ast::Expr.Move(object, _):
+                    return proof_replay_source_place_root(object, depth + 1)
+                Ast::Expr.Slice(object, _, _, _) | Ast::Expr.IndexN(object, _, _):
+                    return proof_replay_source_place_root(object, depth + 1)
+                Ast::Expr.Unary(_, inner, _):
+                    return proof_replay_source_place_root(inner, depth + 1)
+                _:
+                    return ""
+
+        def proof_replay_source_callee_name(callee: Ast::Expr) -> sview:
+            match callee:
+                Ast::Expr.Ident(name, _) | Ast::Expr.Scope(_, name, _):
+                    return name
+                _:
+                    return ""
+
+        # A place passed to a function parameter declared by value is copied. Any other callee
+        # (unknown, extern, overloaded with a reference slot, or a named argument that resolves
+        # to no parameter) may take the argument by implicit lend and write through it.
+        def proof_replay_source_call_slot_by_value(declarations: darray[Ast::Decl]&, callee_name: sview, slot: usize, argument_name: sview, found: mutable usize&, depth: usize) -> bool:
+            return false if depth >= ProofReplaySourceLocal::DEPTH_LIMIT or callee_name == ""
+            for declaration in declarations |callee_name, slot, argument_name, found, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        if name == callee_name:
+                            found <- found + 1
+                            parameter_index: mutable usize = parameters.count
+                            if argument_name == "":
+                                parameter_index <- slot
+                            else:
+                                for index in 0..<parameters.count |index, parameters, argument_name, parameter_index|:
+                                    parameter_index <- index if parameters[index].name == argument_name
+                            return false if parameter_index >= parameters.count
+                            return false if proof_replay_deterministic_parameter_type(parameters[parameter_index].type_expression, 0)
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if name == callee_name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_source_call_slot_by_value(nested, callee_name, slot, argument_name, found, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_source_numeric_selector(method: sview) -> bool:
+            return method == "i8" or method == "i16" or method == "i32" or method == "i64" or method == "isize" or method == "u8" or method == "u16" or method == "u32" or method == "u64" or method == "usize"
+
+        def proof_replay_source_call_touches(declarations: darray[Ast::Decl]&, callee: Ast::Expr, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, name: sview, writes: bool, depth: usize) -> bool:
+            if writes:
+                match callee:
+                    Ast::Expr.Field(receiver, method, _):
+                        cast: bool = arguments.count == 0 and proof_replay_source_numeric_selector(method)
+                        return true if not cast and proof_replay_source_place_root(receiver, depth + 1) == name
+                    _:
+                        pass
+                for index in 0..<arguments.count |index, arguments, argument_names, declarations, callee, name, depth|:
+                    continue if proof_replay_source_place_root(arguments[index], depth + 1) != name
+                    argument_name: sview = argument_names[index] if index < argument_names.count else ""
+                    found: mutable usize = 0
+                    by_value: bool = proof_replay_source_call_slot_by_value(declarations, proof_replay_source_callee_name(callee), index, argument_name, &found, 0)
+                    return true if not by_value or found == 0
+            return true if proof_replay_source_expr_touches(declarations, callee, name, writes, depth + 1)
+            for argument in arguments |declarations, name, writes, depth|:
+                return true if proof_replay_source_expr_touches(declarations, argument, name, writes, depth + 1)
+            return false
+
+        def proof_replay_source_arms_touch(declarations: darray[Ast::Decl]&, arms: darray[Ast::MatchArm]&, name: sview, writes: bool, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            for arm in arms |declarations, name, writes, depth|:
+                return true if proof_replay_source_pattern_binds(arm.pattern, name, depth + 1)
+                return true if proof_replay_source_expr_touches(declarations, arm.guard, name, writes, depth + 1)
+                return true if proof_replay_source_body_touches(declarations, arm.body, name, writes, depth + 1)
+            return false
+
+        def proof_replay_source_exprs_touch(declarations: darray[Ast::Decl]&, expressions: darray[Ast::Expr]&, name: sview, writes: bool, depth: usize) -> bool:
+            for expression in expressions |declarations, name, writes, depth|:
+                return true if proof_replay_source_expr_touches(declarations, expression, name, writes, depth + 1)
+            return false
+
+        def proof_replay_source_fields_touch(declarations: darray[Ast::Decl]&, fields: darray[Ast::FieldInit]&, name: sview, writes: bool, depth: usize) -> bool:
+            for field in fields |declarations, name, writes, depth|:
+                return true if proof_replay_source_expr_touches(declarations, field.value, name, writes, depth + 1)
+            return false
+
+        # `writes == false` asks only whether the expression introduces `name`; `writes == true`
+        # also asks whether evaluating it may change the value `name` denotes.
+        def proof_replay_source_expr_touches(declarations: darray[Ast::Decl]&, expression: Ast::Expr, name: sview, writes: bool, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            match expression:
+                # The parser fills an absent loop-header yield with `Invalid`; neither leaf
+                # carries a payload, so neither can introduce or change a name.
+                Ast::Expr.Absent | Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Unary(operator, inner, _):
+                    lend: bool = operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    return true if writes and lend and proof_replay_source_place_root(inner, depth + 1) == name
+                    return proof_replay_source_expr_touches(declarations, inner, name, writes, depth + 1)
+                Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return true if writes and proof_replay_source_place_root(inner, depth + 1) == name
+                    return proof_replay_source_expr_touches(declarations, inner, name, writes, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return proof_replay_source_call_touches(declarations, callee, arguments, argument_names, name, writes, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    return true if writes
+                    return proof_replay_source_exprs_touch(declarations, arguments, name, writes, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _):
+                    return proof_replay_source_expr_touches(declarations, object, name, writes, depth + 1)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _) | Ast::Expr.Refinement(object, index, _):
+                    return proof_replay_source_expr_touches(declarations, object, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, index, name, writes, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_replay_source_expr_touches(declarations, object, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, low, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, high, name, writes, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return proof_replay_source_expr_touches(declarations, object, name, writes, depth + 1) or proof_replay_source_exprs_touch(declarations, arguments, name, writes, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    return proof_replay_source_exprs_touch(declarations, elements, name, writes, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |declarations, name, writes, depth|:
+                        return true if proof_replay_source_expr_touches(declarations, entry.key, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, entry.value, name, writes, depth + 1)
+                    return false
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return proof_replay_source_expr_touches(declarations, base, name, writes, depth + 1) or proof_replay_source_fields_touch(declarations, fields, name, writes, depth + 1)
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    return proof_replay_source_expr_touches(declarations, subject, name, writes, depth + 1) or proof_replay_source_arms_touch(declarations, arms, name, writes, depth + 1)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                    return true if variable == name
+                    return proof_replay_source_expr_touches(declarations, iterable, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, condition, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, body, name, writes, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_replay_source_expr_touches(declarations, guarded, name, writes, depth + 1) or proof_replay_source_body_touches(declarations, recovery, name, writes, depth + 1)
+                Ast::Expr.Lambda(parameters, body, _):
+                    return true if any parameter in parameters where parameter == name
+                    return proof_replay_source_body_touches(declarations, body, name, writes, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_replay_source_body_touches(declarations, statements, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, value, name, writes, depth + 1)
+                _:
+                    return true
+
+        def proof_replay_source_statement_touches(declarations: darray[Ast::Decl]&, statement: Ast::Stmt, name: sview, writes: bool, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            match statement:
+                Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                    return local_name == name or proof_replay_source_expr_touches(declarations, initializer, name, writes, depth + 1)
+                Ast::Stmt.Assign(target, operator, value, _):
+                    root: sview = proof_replay_source_place_root(target, 0)
+                    # `=` defines a local; `<-` and compound forms write an existing place.
+                    defines: bool = operator == TokenKind.Assign and proof_replay_ident_name(target) == name
+                    return true if defines or (writes and (root == name or root == ""))
+                    return proof_replay_source_expr_touches(declarations, target, name, writes, depth + 1) or proof_replay_source_expr_touches(declarations, value, name, writes, depth + 1)
+                Ast::Stmt.Expr(expression, _):
+                    return proof_replay_source_expr_touches(declarations, expression, name, writes, depth + 1)
+                Ast::Stmt.Return(value, _):
+                    if value is returned:
+                        return proof_replay_source_expr_touches(declarations, returned, name, writes, depth + 1)
+                    return false
+                Ast::Stmt.If(condition, yes, no, _):
+                    return proof_replay_source_expr_touches(declarations, condition, name, writes, depth + 1) or proof_replay_source_body_touches(declarations, yes, name, writes, depth + 1) or proof_replay_source_body_touches(declarations, no, name, writes, depth + 1)
+                Ast::Stmt.While(condition, body, _):
+                    return proof_replay_source_expr_touches(declarations, condition, name, writes, depth + 1) or proof_replay_source_body_touches(declarations, body, name, writes, depth + 1)
+                Ast::Stmt.For(_, variables, iterable, body, _):
+                    return true if any variable in variables where variable == name
+                    return proof_replay_source_expr_touches(declarations, iterable, name, writes, depth + 1) or proof_replay_source_body_touches(declarations, body, name, writes, depth + 1)
+                Ast::Stmt.Match(subject, arms, _):
+                    return proof_replay_source_expr_touches(declarations, subject, name, writes, depth + 1) or proof_replay_source_arms_touch(declarations, arms, name, writes, depth + 1)
+                Ast::Stmt.Block(_, clause, binding, body, _):
+                    return true if binding == name or (any word in clause where word == name)
+                    return proof_replay_source_body_touches(declarations, body, name, writes, depth + 1)
+                Ast::Stmt.Contract(_, expression, _):
+                    return proof_replay_source_expr_touches(declarations, expression, name, writes, depth + 1)
+                Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                    return false
+                _:
+                    return true
+
+        def proof_replay_source_body_touches(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview, writes: bool, depth: usize) -> bool:
+            return true if depth >= ProofReplaySourceLocal::DEPTH_LIMIT
+            for statement in body |declarations, name, writes, depth|:
+                return true if proof_replay_source_statement_touches(declarations, statement, name, writes, depth + 1)
+            return false
+
+        # Whether a function body introduces `name` anywhere, at any nesting depth.
+        def proof_replay_source_body_declares(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview) -> bool:
+            return true if name == ""
+            return proof_replay_source_body_touches(declarations, body, name, false, 0)
+
+        # Whether `name` is declared exactly once in a function body: by one top-level
+        # declaration, with nothing else anywhere (including that declaration's initializer)
+        # introducing the same spelling.
+        def proof_replay_source_single_declaration(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview) -> bool:
+            return false if name == ""
+            count: mutable usize = 0
+            for statement in body |declarations, name, count|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                        if local_name == name:
+                            count <- count + 1
+                            return false if proof_replay_source_expr_touches(declarations, initializer, name, false, 0)
+                        else:
+                            return false if proof_replay_source_statement_touches(declarations, statement, name, false, 0)
+                    _:
+                        return false if proof_replay_source_statement_touches(declarations, statement, name, false, 0)
+            return count == 1
+
+        # The unique function body declared for `owner` at `owner_line`; `known` is false when the
+        # owner is unidentified or ambiguous.
+        def proof_replay_source_owner_body(report: ProofReport&, owner: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&) -> bool:
+            return false if owner == "" or owner_line == 0 or owner_line == 4294967295
+            matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, body, &matches, 0)
+            return matches == 1

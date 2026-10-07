@@ -23,28 +23,73 @@ extend ElisaProof:
 
         # Bare names in an initializer are not stable merely because a parameter or module
         # constant with the same spelling exists somewhere in the source tree. Require one
-        # unique owner and reject every direct local declaration of that spelling; the global
-        # constant path stays closed until its resolved module identity is carried in traces.
+        # unique owner and reject every local introduction of that spelling at any nesting
+        # depth (declaration, `=` definition, loop variable, pattern binder, block binding);
+        # the global constant path stays closed until its resolved module identity is carried
+        # in traces.
         def proof_replay_local_binding_parameter_source_unshadowed(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview) -> bool:
             return false if owner == "" or owner_line == 0 or name == ""
             body: mutable darray[Ast::Stmt] = []
             owner_matches: mutable usize = 0
             proof_replay_local_binding_find_owner(declarations, owner, owner_line, &body, &owner_matches, 0)
             return false if owner_matches != 1
-            for statement in body |name|:
-                match statement:
-                    Ast::Stmt.VarDecl(local_name, _, _, _):
-                        return false if local_name == name
-                    _:
-                        pass
-            return true
+            return not proof_replay_source_body_declares(declarations, body, name)
 
         def proof_replay_local_binding_stable_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview) -> bool:
             return false if name == "" or name == target
             if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0):
                 return proof_replay_local_binding_prior_immutable_local(declarations, owner, owner_line, name, target)
             return false if not proof_replay_local_binding_parameter_source_unshadowed(declarations, owner, owner_line, name)
-            return proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+            return false if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
+            return true if proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+            return proof_replay_local_binding_unwritten_integer_parameter(declarations, owner, owner_line, name)
+
+        # A mutable or by-reference integer parameter is as stable as an immutable one when the
+        # body never writes it: no assignment, lend, move or receiver call reaches its place
+        # (numeric conversions read only). Another `mutable` reference cannot alias it, since
+        # exclusive borrows are a language guarantee the producer also relies on.
+        def proof_replay_local_binding_unwritten_integer_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview) -> bool:
+            return false if owner == "" or owner_line == 0 or name == ""
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(declarations, owner, owner_line, &body, &owner_matches, 0)
+            return false if owner_matches != 1
+            matches: mutable usize = 0
+            type_name: mutable sview = ""
+            proof_replay_local_binding_parameter_integer_layers(declarations, owner, owner_line, name, &matches, &type_name, 0)
+            return matches == 1 and type_name != "" and not proof_replay_source_body_touches(declarations, body, name, true, 0)
+
+        # The integer type under an unwritten mutable or by-reference parameter, or "".
+        def proof_replay_local_binding_unwritten_parameter_type_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview) -> sview:
+            return "" if not proof_replay_local_binding_unwritten_integer_parameter(declarations, owner, owner_line, name)
+            matches: mutable usize = 0
+            type_name: mutable sview = ""
+            proof_replay_local_binding_parameter_integer_layers(declarations, owner, owner_line, name, &matches, &type_name, 0)
+            return type_name if matches == 1 else ""
+
+        def proof_replay_local_binding_parameter_integer_layers(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, matches: mutable usize&, type_name: mutable sview&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, name, matches, type_name, depth|:
+                match declaration:
+                    Ast::Decl.Func(function_name, parameters, _, _, _, _, position):
+                        if function_name == owner and position.line == owner_line:
+                            for parameter in parameters |name, matches, type_name|:
+                                if parameter.name == name:
+                                    matches <- matches + 1
+                                    type_name <- proof_replay_local_binding_reference_integer_name(parameter.type_expression, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_local_binding_parameter_integer_layers(nested, owner, owner_line, name, matches, type_name, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_reference_integer_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return "" if operator != TokenKind.Mutable and operator != TokenKind.Ampersand and operator != TokenKind.Lmut
+                    return proof_replay_local_binding_reference_integer_name(inner, depth + 1)
+                _:
+                    return proof_replay_local_binding_integer_type_name(expression, 0)
 
         # Reading a prior immutable scalar reads its captured value, regardless
         # of how it was computed. This does not substitute its initializer or
@@ -386,7 +431,8 @@ extend ElisaProof:
                                     target_type: sview = proof_replay_local_binding_integer_type_name(type_expression, 0)
                                     match initializer:
                                         Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(source_name, _), method, _), arguments, _, _):
-                                            source_type: sview = proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name, 0)
+                                            source_type: mutable sview = proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name, 0)
+                                            source_type <- proof_replay_local_binding_unwritten_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name) if source_type == ""
                                             source_expression: Ast::Expr = Ast::Expr.Ident(source_type, position)
                                             target_unsigned: i64 = proof_unsigned_type_width(type_expression, report.source_declarations, 0)
                                             target_signed: i64 = proof_signed_type_width(type_expression, report.source_declarations, 0)
@@ -398,7 +444,10 @@ extend ElisaProof:
                                             pass
                             _:
                                 pass
-                    return declarations == 1 and valid or proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver)
+                    # The top-level declaration must be the only introduction of the target
+                    # anywhere in the body; a nested redeclaration would make the fact name it.
+                    return true if declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target)
+                    return proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver)
                 _:
                     return false
 
@@ -426,6 +475,6 @@ extend ElisaProof:
                                     valid <- position.line == trace.line and position.line <= report.trace_owner_line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression) and proof_replay_expr_equal(normalized, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0) and stable
                             _:
                                 pass
-                    return declarations == 1 and valid
+                    return declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target)
                 _:
                     return false
