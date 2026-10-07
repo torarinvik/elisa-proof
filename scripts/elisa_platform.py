@@ -40,7 +40,10 @@ def _env(name: str, default) -> str:
 
 
 LD_DEAD_STRIP = _env("ELISA_LD_DEAD_STRIP", "-Wl,-dead_strip" if DARWIN else "-Wl,--gc-sections").split()
-LINK_EXE_FLAGS = _env("ELISA_LINK_EXE_FLAGS", "" if DARWIN else "-no-pie -Wl,--unresolved-symbols=ignore-all").split()
+# Strict on every host: never carry an unresolved-symbol allowance into an executable link,
+# even when an outer driver exported one (platform.sh documents why none is needed).
+LINK_EXE_FLAGS = [flag for flag in _env("ELISA_LINK_EXE_FLAGS", "" if DARWIN else "-no-pie").split()
+                  if not flag.startswith("-Wl,--unresolved-symbols")]
 LLVM_LIBDIR = _env("ELISA_LLVM_LIBDIR", lambda: _query("--libdir", "/opt/homebrew/opt/llvm/lib"))
 LLVM_BIN_DIR = _env("ELISA_LLVM_BIN_DIR", lambda: _query("--bindir", "/opt/homebrew/opt/llvm/bin"))
 # platform.sh's static-archive fallback is not repeated here: a harness that needs it runs
