@@ -47,6 +47,7 @@ struct CorrWork:
     module_owner_segments: mutable darray[sview]
     active_owner_start: mutable usize
     active_owner_count: mutable usize
+    active_returns_void: mutable bool
     seen: mutable darray[sview]
     parameters: mutable darray[sview]
     ensures: mutable darray[Ast::Expr]
@@ -57,7 +58,7 @@ struct CorrWork:
     next_epoch: mutable usize
 
 def corr_work_empty() -> CorrWork:
-    return CorrWork{obligations: [], obligation_facts: [], functions: [], owner_segments: [], module_owner_starts: [], module_owner_counts: [], module_owner_segments: [], active_owner_start: 0, active_owner_count: 0, seen: [], parameters: [], ensures: [], taken: [], lemmas: [], next_epoch: 0}
+    return CorrWork{obligations: [], obligation_facts: [], functions: [], owner_segments: [], module_owner_starts: [], module_owner_counts: [], module_owner_segments: [], active_owner_start: 0, active_owner_count: 0, active_returns_void: false, seen: [], parameters: [], ensures: [], taken: [], lemmas: [], next_epoch: 0}
 
 def corr_reserved_name(name: sview) -> bool:
     return true if sview_len(name) >= 2 and sview_at(name, 0) == '_' and sview_at(name, 1) == '_'
@@ -257,7 +258,13 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                 return ("argument", 0) if actual == 0
                 actuals.push(actual)
             match work.functions[target].declaration:
-                Ast::Decl.Func(_, params, _, body, _, _, _):
+                Ast::Decl.Func(_, params, return_type, body, _, _, _):
+                    if return_type is declared_return_type:
+                        match declared_return_type:
+                            Ast::Expr.Ident("void", _):
+                                return ("callee-return-type", 0)
+                            _:
+                                pass
                     return ("arity", 0) if params.count != actuals.count
                     formals: mutable darray[sview] = []
                     for param in params |formals|:
@@ -314,6 +321,33 @@ def corr_value(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: d
             return ("expression", 0) if computed == 0
             return ("", computed)
 
+def corr_assertion_value(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, state: mutable CorrState&, line: u32, depth: usize) -> (reason: sview, value: usize):
+    return ("nesting", 0) if depth > CorrLimit::TERM_DEPTH
+    match expression:
+        Ast::Expr.Call(_, _, _, _):
+            return corr_apply_call(pool, work, declarations, expression, state, line)
+        Ast::Expr.Paren(inner, _):
+            return corr_assertion_value(pool, work, declarations, inner, state, line, depth + 1)
+        Ast::Expr.Unary(operator, operand, _):
+            return ("assertion-expression", 0) if operator != TokenKind.Not
+            evaluated: (reason: sview, value: usize) = corr_assertion_value(pool, work, declarations, operand, state, line, depth + 1)
+            return (evaluated.reason, 0) if sview_len(evaluated.reason) > 0
+            return ("assertion-expression", 0) if evaluated.value == 0
+            return ("", corr_unary(pool, "not", evaluated.value))
+        Ast::Expr.Binary(left, operator, right, _):
+            spelled: sview = corr_binary_operator(operator)
+            return ("assertion-expression", 0) if sview_len(spelled) == 0
+            first: (reason: sview, value: usize) = corr_assertion_value(pool, work, declarations, left, state, line, depth + 1)
+            return (first.reason, 0) if sview_len(first.reason) > 0
+            second: (reason: sview, value: usize) = corr_assertion_value(pool, work, declarations, right, state, line, depth + 1)
+            return (second.reason, 0) if sview_len(second.reason) > 0
+            return ("assertion-expression", 0) if first.value == 0 or second.value == 0
+            return ("", corr_binary(pool, spelled, first.value, second.value))
+        _:
+            computed: usize = corr_eval(pool, expression, &state.names, &state.values, depth)
+            return ("assertion-expression", 0) if computed == 0
+            return ("", computed)
+
 def corr_return(pool: mutable CorrPool&, work: mutable CorrWork&, returned: usize, state: mutable CorrState&, line: u32) -> sview:
     names: mutable darray[sview] = []
     values: mutable darray[usize] = []
@@ -329,6 +363,16 @@ def corr_return(pool: mutable CorrPool&, work: mutable CorrWork&, returned: usiz
         ensures.push(ensure)
     for ensure in ensures |pool, work, state, line, names, values|:
         goal: usize = corr_eval(pool, ensure, &names, &values, 0)
+        return "contract" if not corr_record(pool, work, goal, state, line, "return-ensure")
+    state.live <- false
+    return ""
+
+def corr_return_void(pool: mutable CorrPool&, work: mutable CorrWork&, state: mutable CorrState&, line: u32) -> sview:
+    ensures: mutable darray[Ast::Expr] = []
+    for ensure in work.ensures |ensures|:
+        ensures.push(ensure)
+    for ensure in ensures |pool, work, state, line|:
+        goal: usize = corr_eval(pool, ensure, &state.names, &state.values, 0)
         return "contract" if not corr_record(pool, work, goal, state, line, "return-ensure")
     state.live <- false
     return ""
@@ -364,6 +408,13 @@ def corr_walk_statement(pool: mutable CorrPool&, work: mutable CorrWork&, declar
             return ""
         Ast::Stmt.Expr(expression, position):
             match expression:
+                Ast::Expr.Call(Ast::Expr.Ident("assert", _), arguments, argument_names, _):
+                    return "assert-arity" if arguments.count != 1 or argument_names.count != 0
+                    asserted: (reason: sview, value: usize) = corr_assertion_value(pool, work, declarations, arguments[0], state, position.line, 0)
+                    return asserted.reason if sview_len(asserted.reason) > 0
+                    return "assertion" if not corr_record(pool, work, asserted.value, state, position.line, "assert")
+                    return "budget" if not corr_assume(pool, state, asserted.value, true, 0)
+                    return ""
                 Ast::Expr.Call(_, _, _, _):
                     computed: (reason: sview, value: usize) = corr_apply_call(pool, work, declarations, expression, state, position.line)
                     return computed.reason
@@ -372,10 +423,18 @@ def corr_walk_statement(pool: mutable CorrPool&, work: mutable CorrWork&, declar
         Ast::Stmt.Return(value, position):
             return "return-in-loop" if in_loop
             if value is returned:
+                return corr_return_void(pool, work, state, position.line) if work.active_returns_void
                 computed: (reason: sview, value: usize) = corr_value(pool, work, declarations, returned, state, position.line)
                 return computed.reason if sview_len(computed.reason) > 0
                 return corr_return(pool, work, computed.value, state, position.line)
+            return corr_return_void(pool, work, state, position.line) if work.active_returns_void
             return "return-value"
+        Ast::Stmt.Contract("assert", expression, position):
+            asserted: (reason: sview, value: usize) = corr_assertion_value(pool, work, declarations, expression, state, position.line, 0)
+            return asserted.reason if sview_len(asserted.reason) > 0
+            return "assertion" if not corr_record(pool, work, asserted.value, state, position.line, "assert")
+            return "budget" if not corr_assume(pool, state, asserted.value, true, 0)
+            return ""
         Ast::Stmt.If(condition, then_body, else_body, _):
             return corr_walk_if(pool, work, declarations, condition, then_body, else_body, state, in_loop, depth)
         Ast::Stmt.For(bind, variables, iterable, body, position):
@@ -482,11 +541,17 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
         Ast::Decl.Func(_, params, return_type, body, effects, decorators, _):
             return "effects" if effects.count > 0
             return "decorators" if decorators.count > 0
+            returns_void: mutable bool = false
             if return_type is declared_return_type:
-                result_type: (name: sview, is_mutable: bool) = corr_type_name(work.taken, declared_return_type, false)
-                return "return-type" if sview_len(result_type.name) == 0
+                match declared_return_type:
+                    Ast::Expr.Ident("void", _):
+                        returns_void <- true
+                    _:
+                        result_type: (name: sview, is_mutable: bool) = corr_type_name(work.taken, declared_return_type, false)
+                        return "return-type" if sview_len(result_type.name) == 0
             else:
                 return "return-type"
+            work.active_returns_void <- returns_void
             state: mutable CorrState = corr_state_empty()
             for param in params |pool, work, declarations, state|:
                 return "parameter" if param.is_mutable or param.has_default or param.is_affine
@@ -501,8 +566,8 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
             validation_values: mutable darray[usize] = []
             validation_names.extend(state.names)
             validation_values.extend(state.values)
-            validation_names.push("result")
-            validation_values.push(corr_ident(pool, "result"))
+            validation_names.push("result") if not returns_void
+            validation_values.push(corr_ident(pool, "result")) if not returns_void
             first: mutable usize = 0
             for statement in body |pool, work, state, validation_names, validation_values, first|:
                 match statement:
@@ -514,13 +579,15 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
                             return "contract" if corr_eval(pool, predicate, &validation_names, &validation_values, 0) == 0
                             work.ensures.push(predicate)
                         else:
-                            return "contract"
+                            break
                         first <- first + 1
                     _:
                         break
             reason: sview = corr_walk_block(pool, work, declarations, body, first, &state, false, 0)
             return reason if sview_len(reason) > 0
-            return "missing-return" if state.live
+            if state.live:
+                return corr_return_void(pool, work, &state, work.functions[function_index].line) if returns_void
+                return "missing-return"
             return ""
         _:
             return "declaration"
