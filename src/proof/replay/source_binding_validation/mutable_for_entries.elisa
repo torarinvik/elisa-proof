@@ -1,0 +1,88 @@
+# Mutable locals captured by a for statement have their initial equality at
+# each original invariant entry. No initial equality is granted at preservation.
+extend ElisaProof:
+    private:
+        def proof_replay_mutable_for_invariant(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, statement: Ast::Stmt, target: sview) -> bool:
+            match statement:
+                Ast::Stmt.For(bind, variables, iterable, body, position):
+                    return false if bind != "" or variables.count != 1 or variables[0] == target or position.line != certificate.line
+                    return false if proof_expr_has_call(iterable) or proof_source_expression_has_overloaded_operator(iterable, report.source_primitive_operator_mask, 0)
+                    matching: mutable usize = 0
+                    for member in body |report, trace, certificate, matching|:
+                        match member:
+                            Ast::Stmt.Contract("invariant", expression, _):
+                                expected: Ast::Expr = proof_replay_local_initializer_constants(report, trace, expression, 0)
+                                matching <- matching + 1 if proof_replay_expr_equal(expected, certificate.goal) and proof_replay_captured_entry_position(expression, certificate.goal)
+                            _:
+                                pass
+                    return matching == 1
+                Ast::Stmt.Expr(Ast::Expr.Block(statements, value, captures, _), _):
+                    return false if statements.count != 1
+                    capture_count: mutable usize = 0
+                    for capture in captures |target, capture_count|:
+                        capture_count <- capture_count + 1 if capture == target
+                    return false if capture_count != 1
+                    match value:
+                        Ast::Expr.Invalid:
+                            pass
+                        _:
+                            return false
+                    match statements[0]:
+                        Ast::Stmt.For(_, _, _, _, _):
+                            return proof_replay_mutable_for_invariant(report, trace, certificate, statements[0], target)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_mutable_for_initial_value(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, name) and proof_replay_local_binding_immutable_integer_parameter(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
+                _:
+                    return false
+
+        def proof_replay_mutable_for_entry_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count or report.replay_owner_line == 0
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.rule != "goal" or certificate.line != report.trace_owner_line
+            return false if not proof_replay_captured_entry_no_loop_facts(report, certificate)
+            work: mutable usize = 0
+            return false if not proof_replay_captured_entry_environment(&report.source_declarations, 0, &work)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    return false if target == "" or proof_internal_name_is_rebind(target)
+                    return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0)
+                    context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+                    return false if not context.known or context.body.count > 4096
+                    declarations: mutable usize = 0
+                    for member in context.body |target, declarations|:
+                        match member:
+                            Ast::Stmt.VarDecl(local, _, _, _):
+                                declarations <- declarations + 1 if local == target
+                            _:
+                                pass
+                    return false if declarations != 1
+                    initialized: mutable bool = false
+                    for member in context.body |report, trace, certificate, target, target_position, source_value, initialized|:
+                        if proof_replay_mutable_for_invariant(report, trace, certificate, member, target):
+                            return initialized
+                        match member:
+                            Ast::Stmt.VarDecl(local, type_expression, initializer, position):
+                                normalized: Ast::Expr = proof_replay_local_initializer_constants(report, trace, initializer, 0)
+                                if local == target:
+                                    return false if position.line != trace.line or not proof_replay_local_binding_pos_matches(trace.expression, position) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position)
+                                    return false if not proof_replay_local_binding_integer_type(type_expression, 0) or not proof_replay_local_binding_mutable_integer_type(type_expression)
+                                    return false if not proof_replay_expr_equal(normalized, source_value) or not proof_replay_mutable_for_initial_value(report, trace, normalized)
+                                    initialized <- true
+                                elif initialized:
+                                    # Later declarations cannot write or alias the captured scalar.
+                                    return false if not proof_replay_local_binding_integer_type(type_expression, 0) or not proof_replay_mutable_for_initial_value(report, trace, normalized)
+                                    return false if proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
+                            _:
+                                return false if initialized
+                    return false
+                _:
+                    return false
