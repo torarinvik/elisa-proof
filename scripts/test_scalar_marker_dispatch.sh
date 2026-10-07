@@ -3,6 +3,7 @@
 set -euo pipefail
 MARKER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$MARKER_ROOT/scripts/compiler_provenance.sh"
+source "$MARKER_ROOT/scripts/link_flags.sh"
 MARKER_COMPILER="$(elisa_default_stage0 "$MARKER_ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 if ! elisa_compiler_is_stage0 "$MARKER_COMPILER"; then
     printf 'this differential test requires the pinned stage0 compiler\n' >&2
@@ -19,6 +20,6 @@ cleanup_marker() {
 }
 trap cleanup_marker EXIT
 "$MARKER_COMPILER" -emit obj -O0 -o "$MARKER_SCRATCH/probe.o" "$MARKER_FIXTURE"
-"${CLANG:-clang}" -Wl,-dead_strip -o "$MARKER_SCRATCH/probe" "$MARKER_SCRATCH/probe.o" "$MARKER_ROOT/build/profile_hooks.o"
+"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$MARKER_SCRATCH/probe" "$MARKER_SCRATCH/probe.o" "$MARKER_ROOT/build/profile_hooks.o"
 "$MARKER_SCRATCH/probe"
 printf 'strict scalar-marker dispatch matches original parsers for mixed and singleton contexts\n'

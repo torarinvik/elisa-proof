@@ -213,15 +213,15 @@ fi
 # The stamp names the clang that built the hook object, so switching toolchains rebuilds it
 # instead of linking an object from the previous clang.
 PROFILE_HOOKS_STAMP="$PROFILE_HOOKS_OBJ.clang"
-profile_hooks_clang="$(shasum -a 256 "$CLANG_TOOL" | cut -d' ' -f1) $("$CLANG_TOOL" --version | head -1) $(shasum -a 256 "$PROFILE_HOOKS_SOURCE" | cut -d' ' -f1) -O2"
+profile_hooks_clang="$(elisa_sha256 "$CLANG_TOOL" | cut -d' ' -f1) $("$CLANG_TOOL" --version | head -1) $(elisa_sha256 "$PROFILE_HOOKS_SOURCE" | cut -d' ' -f1) -O2"
 profile_hooks_stamp="$profile_hooks_clang"
 if [[ -f "$PROFILE_HOOKS_OBJ" ]]; then
-    profile_hooks_stamp+=" $(shasum -a 256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)"
+    profile_hooks_stamp+=" $(elisa_sha256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)"
 fi
 if [[ ! -f "$PROFILE_HOOKS_OBJ" || ! -f "$PROFILE_HOOKS_STAMP" || "$(<"$PROFILE_HOOKS_STAMP")" != "$profile_hooks_stamp" ]]; then
     "$CLANG_TOOL" -c -O2 -o "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_SOURCE"
     mv -f "$PROFILE_HOOKS_TEMP" "$PROFILE_HOOKS_OBJ"
-    printf '%s %s\n' "$profile_hooks_clang" "$(shasum -a 256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)" > "$PROFILE_HOOKS_STAMP"
+    printf '%s %s\n' "$profile_hooks_clang" "$(elisa_sha256 "$PROFILE_HOOKS_OBJ" | cut -d' ' -f1)" > "$PROFILE_HOOKS_STAMP"
 fi
 # Objects are shared across checkouts and agents, keyed by everything the compile reads: the
 # source snapshot, the pinned compiler revision and binary, and every compile flag. A hit skips
@@ -247,7 +247,7 @@ for compiler_file in "${ELISA_STAGE1_BIN:-${stage1_root:+$stage1_root/bin/elisac
 done
 compiler_digest_of() {
     [[ ${#compiler_files[@]} -gt 0 ]] || return 0
-    shasum -a 256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n'
+    elisa_sha256 "${compiler_files[@]}" | cut -d' ' -f1 | tr -d '\n'
 }
 compiler_environment_digest="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --effective-env-digest)"
 compiler_target_triple="$("$CLANG_TOOL" -dumpmachine)"
@@ -257,7 +257,7 @@ object_key_of() {
     [[ -n "$current_compiler_digest" ]] || return 0
     dependencies="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --dependency-root "$SNAPSHOT_ROOT" --dependency-main "$main")" || return $?
     { printf '%s\n' "$RESOLVED_REV" "$current_compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
-        printf '%s\n' "$dependencies"; } | shasum -a 256 | cut -d' ' -f1
+        printf '%s\n' "$dependencies"; } | elisa_sha256 | cut -d' ' -f1
 }
 build_identity_of() {
     local index="$1" object_key="$2" flags input sign_version
@@ -352,7 +352,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
     BINARY_REUSED+=(0)
     cached_object="$OBJECT_CACHE/$object_key.o"
     if [[ "$OBJECT_CACHE" != "0" && -n "$object_key" && -f "$cached_object" && -f "$cached_object.sha256" && \
-          "$(shasum -a 256 "$cached_object" | cut -d' ' -f1)" == "$(<"$cached_object.sha256")" ]]; then
+          "$(elisa_sha256 "$cached_object" | cut -d' ' -f1)" == "$(<"$cached_object.sha256")" ]]; then
         cp "$cached_object" "$(stage_object_of "$index")"
         printf 'build: reused cached object %s\n' "${object_key:0:12}" >&2
     else
@@ -439,7 +439,7 @@ if [[ "$compile_count" -gt 0 ]]; then
             mkdir -p "$OBJECT_CACHE"
             cp "$(stage_object_of "$index")" "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN"
             mv -f "$OBJECT_CACHE/$object_key.o.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o"
-            shasum -a 256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
+            elisa_sha256 "$OBJECT_CACHE/$object_key.o" | cut -d' ' -f1 > "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN"
             mv -f "$OBJECT_CACHE/$object_key.o.sha256.$BUILD_TOKEN" "$OBJECT_CACHE/$object_key.o.sha256"
         fi
     done
@@ -484,7 +484,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --installed-as "$PROOF_OUTPUT" \
         "${PAIR_MANIFEST_ARGS[@]+"${PAIR_MANIFEST_ARGS[@]}"}" \
         --output "$MANIFEST_TEMP"
-    shasum -a 256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
+    elisa_sha256 "$MANIFEST_TEMP" | cut -d' ' -f1 > "$(manifest_checksum_temp_of "$index")"
 done
 # Linking and manifest generation also take time. Revalidate at the publication boundary so
 # a moved toolchain cannot make a stale intermediate manifest or generation authoritative.

@@ -2,6 +2,7 @@
 set -euo pipefail
 ROW_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROW_ROOT/scripts/compiler_provenance.sh"
+source "$ROW_ROOT/scripts/link_flags.sh"
 ROW_COMPILER="$(elisa_default_stage0 "$ROW_ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 elisa_compiler_is_stage0 "$ROW_COMPILER" || exit 2
 elisa_verify_stage0_provenance "$ROW_COMPILER" "$ROW_ROOT"
@@ -15,7 +16,7 @@ cleanup_rows() {
 trap cleanup_rows EXIT
 for ROW_FIXTURE in extern_effect_rows_runtime extern_effect_rows_parser_runtime source_call_coverage_parser_runtime effect_source_validation_parser_runtime extern_return_text_runtime numeric_literal_sort_runtime kernel_typed_literals_runtime; do
     "$ROW_COMPILER" -emit obj -O0 -o "$ROW_SCRATCH/row.o" "$ROW_ROOT/examples/$ROW_FIXTURE.elisa"
-    "${CLANG:-clang}" -Wl,-dead_strip -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
+    "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$ROW_SCRATCH/probe" "$ROW_SCRATCH/row.o" "$ROW_ROOT/build/profile_hooks.o"
     "$ROW_SCRATCH/probe"
 done
 printf 'strict native extern-row, declaration identity, direct call coverage and source-bound effect replay controls pass; reduced return-text/literal-sort metadata controls pass, new parser correspondence and typed-literal/native-resource admission remain pending\n'

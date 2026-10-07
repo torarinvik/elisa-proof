@@ -1,12 +1,15 @@
 # shellcheck shell=bash
 # Sourced by build.sh, test.sh and dogfood.sh: the flags that dead-strip a linked Elisa product.
-# Apple ld spells it -dead_strip. GNU ld spells it --gc-sections, needs -no-pie because the
-# compiler's objects are not position independent, and needs libm, which Apple's libSystem
-# carries implicitly; --no-as-needed keeps libm even though it precedes the objects.
-if [[ "$(uname -s)" == "Darwin" ]]; then
-    ELISA_DEAD_STRIP_LINK=(-Wl,-dead_strip)
-else
-    ELISA_DEAD_STRIP_LINK=(-no-pie -Wl,--gc-sections -Wl,--no-as-needed -lm)
+# scripts/platform.sh (a mirror of Elisa-compiler's) supplies the host spelling: Apple ld's
+# -dead_strip, or GNU ld's --gc-sections plus -no-pie (the compiler's objects are not position
+# independent) and the unresolved-symbol allowance. GNU ld also needs libm, which Apple's
+# libSystem carries implicitly; --no-as-needed keeps libm even though it precedes the objects.
+# shellcheck source=scripts/platform.sh
+source "$(dirname -- "${BASH_SOURCE[0]}")/platform.sh"
+# shellcheck disable=SC2206 # the platform values are flag lists meant to split
+ELISA_DEAD_STRIP_LINK=($ELISA_LD_DEAD_STRIP $ELISA_LINK_EXE_FLAGS)
+if [[ "$ELISA_HOST_OS" != "Darwin" ]]; then
+    ELISA_DEAD_STRIP_LINK+=(-Wl,--no-as-needed -lm)
 fi
 
 # Honor the same explicit LLVM tools as the compiler wrapper. Linux provisioned
@@ -55,7 +58,7 @@ elisa_link_native() {
         rm -f "$log"
         return 0
     fi
-    if [[ "$(uname -s)" == "Darwin" ]]; then
+    if [[ "$ELISA_HOST_OS" == "Darwin" ]]; then
         cat "$log" >&2
         return 1
     fi
