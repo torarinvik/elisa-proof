@@ -410,3 +410,32 @@ proof-frame-allowance-sweep.log. Artifacts: frame_policy_certificates_runtime-O0
 frame_source_admission_runtime-O0/-O2 and frame-allowance-full-arena.
 Source preservation/spec predicates and per-event producer attempts remain next;
 no frame report certificate family has been enabled yet.
+
+### Source-bound preservation and clause-spec checks
+
+`direct_preservation_replays` now compares every ordered source preserve place
+against the preserve-only canonical list, then checks policy types and the exact
+source mutation target through the same fact-free kernel boundary. Changes
+membership remains a separate allowance predicate. `frame_source_specs.elisa`
+binds a spec root to a unique header/body clause by source kind, full span,
+formal count and typed place. Both APIs require independently parsed, semantically
+admitted source context with checked identity; neither creates report attempts.
+
+The composed source runtime now passes 23 controls at O0 and O2 with 96761822.
+Added controls cover preservation success, overlap failure, wrong source preserve
+list, facts/position forgery, header/body specs, wrong spec kind/span/place,
+nonexistent declared field and injected spec facts. The all-products strict O2
+build succeeds, generation `f133975b111a41d187c948f41603a245`. Admission matrix,
+invariant diagnostics and kernel inventory pass. Uncached engine sweep remains
+66/73 with the same seven failures. Logs: engine build/validation/
+prover-frame-spec-preservation-build.log and proof-frame-spec-preservation-sweep.log.
+Runtime artifacts: frame_source_admission_runtime-O0/-O2.
+
+Per-event producer attempts and source-context certificate dispatch are still
+required. ProofObligationEntry already carries source owner/line/kind/index and
+attempt spans, so frame events can use that origin metadata without merging
+existing allowance/preservation events. Add an independent frame event inventory
+that checks original source occurrences as well as certificate correspondence;
+metadata/count consistency alone must not authorize an omitted or relabelled
+source event. Qualified/generic type paths and nested/alias/dynamic/callee writes
+remain part of the unfinished frame work and full implementation objective.
