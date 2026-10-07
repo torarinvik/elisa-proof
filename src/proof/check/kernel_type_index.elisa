@@ -1,0 +1,141 @@
+# Owner-aware source type declaration index for proposition formation.
+extend ElisaProof:
+    private:
+        # Identity zero is reserved for missing/unresolved declarations, so source offsets are shifted by one.
+        const PROOF_SOURCE_KERNEL_IDENTITY_OFFSET: usize = 1
+
+        struct ProofSourceKernelTypeEntry:
+            name: sview
+            owner_path: darray[sview]
+            target: Ast::Expr
+            identity: usize
+            name_hash: u32
+            is_alias: bool
+
+        struct ProofSourceKernelTypeIndex:
+            entries: mutable darray[ProofSourceKernelTypeEntry]
+            bucket_heads: mutable darray[usize]
+            next_indices: mutable darray[usize]
+            scope_path: mutable darray[sview]
+            complete: mutable bool
+
+        def proof_source_kernel_copy_scope(scope: darray[sview]&) -> darray[sview]:
+            copied: mutable darray[sview] = []
+            copied.extend(scope)
+            return copied
+
+        def proof_source_kernel_collect_type_index(declarations: darray[Ast::Decl]&, entries: mutable darray[ProofSourceKernelTypeEntry]&, module_path: darray[sview]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |entries, depth|:
+                match declaration:
+                    Ast::Decl.Alias(name, target, _):
+                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, owner_path: proof_source_kernel_copy_scope(module_path), target: target, identity: 0, name_hash: proof_name_hash(name), is_alias: true})
+                    Ast::Decl.Struct(name, _, _, _, _, _, position):
+                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, owner_path: proof_source_kernel_copy_scope(module_path), target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
+                    Ast::Decl.Enum(name, _, _, _, position):
+                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, owner_path: proof_source_kernel_copy_scope(module_path), target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
+                    Ast::Decl.Module(module_name, body, _):
+                        # Module declarations may already contain a qualified name while nested.
+                        # The common path helper preserves the parser's full-path semantics.
+                        nested_path: darray[sview] = proof_global_constant_scope_with_module(module_path, module_name)
+                        return false if not proof_source_kernel_collect_type_index(&body, entries, nested_path, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_kernel_collect_type_index(&body, entries, module_path, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_build_type_index(entries: darray[ProofSourceKernelTypeEntry]) -> ProofSourceKernelTypeIndex:
+            index: mutable ProofSourceKernelTypeIndex = ProofSourceKernelTypeIndex{entries: entries, bucket_heads: [], next_indices: [], scope_path: [], complete: false}
+            count: usize = entries.count
+            capacity: usize = proof_index_capacity(count)
+            if capacity == 0:
+                index.complete <- true
+                return index
+            index.bucket_heads.resize(capacity)
+            index.next_indices.resize(count)
+            for slot in 0..<capacity |slot, count|:
+                index.bucket_heads[slot] <- count
+            for entry in 0..<count |entry, index, capacity, count|:
+                hash: u32 = index.entries[entry].name_hash
+                slot: usize = (hash.i64() % capacity.i64()).usize()
+                index.next_indices[entry] <- index.bucket_heads[slot]
+                index.bucket_heads[slot] <- entry
+            index.complete <- true
+            return index
+
+        def proof_source_kernel_type_path_equal(left: darray[sview]&, right: darray[sview]&) -> bool:
+            return false if left.count != right.count
+            for segment in 0..<left.count |segment, left, right|:
+                return false if left[segment] != right[segment]
+            return true
+
+        def proof_source_kernel_flatten_type_path(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    path.push(name)
+                    return true
+                Ast::Expr.Scope(base, name, _):
+                    return false if not proof_source_kernel_flatten_type_path(base, path, depth + 1)
+                    path.push(name)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_flatten_type_path(inner, path, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_kernel_flatten_type_path(base, path, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_kernel_flatten_type_path(inner, path, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return false
+                _:
+                    return false
+
+        def proof_source_kernel_named_type_lookup_at_path(index: ProofSourceKernelTypeIndex, type_expression: Ast::Expr, name: sview) -> (count: usize, identity: usize):
+            path: mutable darray[sview] = []
+            return proof_source_kernel_named_type_lookup_in_scope(index, name, index.scope_path) if not proof_source_kernel_flatten_type_path(type_expression, &path, 0) or path.count <= 1
+            owner_path: mutable darray[sview] = []
+            for segment in 0..<(path.count - 1) |segment, path, owner_path|:
+                owner_path.push(path[segment])
+            count: mutable usize = 0
+            identity: mutable usize = 0
+            for entry_index in 0..<index.entries.count |entry_index, index, owner_path, name, count, identity|:
+                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
+                continue if entry.name != name or entry.is_alias
+                if proof_source_kernel_type_path_equal(entry.owner_path, owner_path):
+                    count <- count + 1
+                    identity <- entry.identity
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
+            return (count, identity)
+
+        def proof_source_kernel_type_is_qualified(expression: Ast::Expr) -> bool:
+            path: mutable darray[sview] = []
+            return proof_source_kernel_flatten_type_path(expression, &path, 0) and path.count > 1
+
+        # Unqualified source types follow lexical lookup: the nearest enclosing module wins,
+        # and duplicates at that exact scope remain ambiguous. No leaf-name fallback crosses
+        # sibling modules. Qualified struct and enum spellings use the exact owner path above.
+        def proof_source_kernel_named_type_lookup_in_scope(index: ProofSourceKernelTypeIndex, name: sview, module_path: darray[sview]&) -> (count: usize, identity: usize):
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not index.complete
+            best_depth: mutable usize = 0
+            count: mutable usize = 0
+            identity: mutable usize = 0
+            for entry_index in 0..<index.entries.count |entry_index, index, name, module_path, best_depth, count, identity|:
+                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
+                continue if entry.name != name or entry.is_alias
+                continue if entry.owner_path.count > module_path.count
+                prefix_match: mutable bool = true
+                for segment in 0..<entry.owner_path.count |segment, entry, module_path, prefix_match|:
+                    prefix_match <- false if entry.owner_path[segment] != module_path[segment]
+                continue if not prefix_match
+                if entry.owner_path.count > best_depth:
+                    best_depth <- entry.owner_path.count
+                    count <- 1
+                    identity <- entry.identity
+                elif entry.owner_path.count == best_depth:
+                    count <- count + 1
+                    identity <- entry.identity
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
+            return (count, identity)
