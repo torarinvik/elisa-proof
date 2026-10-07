@@ -22,3 +22,14 @@ This is an open task. The positive control establishes the legitimate branch
 case; it does not authenticate arbitrary claimed event identities. Production
 admission has not been changed in this slice. Engine validation artifacts:
 `report-invariants-probe` (status 34), `report-branch-accounting` (status 0).
+
+An attempt-span prototype records the contiguous attempts preceding each
+accounting event, including empty spans for unsupported events. Its checker
+rejects gaps, overlaps, out-of-range spans and trailing orphan attempts.
+The omitted-open-event mutation advances past status 34 under this prototype.
+Integration is incomplete: synthetic source-coverage fixtures also introduce
+extra branch attempts and must preserve their intended event associations.
+The prototype patch is retained in engine build/validation as
+`obligation-attempt-span-candidate.patch`; production source was restored.
+A separate minimal nested-array clear control returns the expected count 2,
+so the suspected reset defect was not reproduced and is not claimed.
