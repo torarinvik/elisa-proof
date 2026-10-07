@@ -1,0 +1,91 @@
+# An identity update through a body-local scalar copy preserves the loop value.
+# Both equations are scoped to this exact source preservation certificate.
+extend ElisaProof:
+    private:
+        def proof_replay_for_alias_loop(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, statement: Ast::Stmt, target: sview, depth: usize) -> bool:
+            return false if depth >= 64
+            match statement:
+                Ast::Stmt.Expr(Ast::Expr.Block(statements, _, captures, _), _):
+                    return false if statements.count != 1 or captures.count != 1 or captures[0] != target
+                    return proof_replay_for_alias_loop(report, trace, certificate, statements[0], target, depth + 1)
+                Ast::Stmt.For(bind, variables, iterable, body, loop_position):
+                    return false if bind != "" or variables.count != 1 or variables[0] == target or loop_position.line != certificate.line
+                    return false if body.count != 3 or proof_expr_has_call(iterable)
+                    return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
+                    # Entry and preservation share a source line and goal spelling.
+                    # Require the source-exact body range witness to distinguish them.
+                    range_found: mutable bool = false
+                    match iterable:
+                        Ast::Expr.Binary(start, operator, _, _):
+                            return false if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                            normalized_start: Ast::Expr = proof_replay_local_initializer_constants(report, trace, start, 0)
+                            binder: Ast::Expr = Ast::Expr.Tuple([Ast::Expr.Ident(variables[0], loop_position), Ast::Expr.IntLit(loop_position.offset.i64(), loop_position)], loop_position)
+                            expected_range: Ast::Expr = Ast::Expr.Binary(normalized_start, TokenKind.LtEq, binder, loop_position)
+                            for index in 0..<certificate.facts_count |index, report, certificate, trace, loop_position, expected_range, range_found|:
+                                origin: usize = report.traces.origin_indices[certificate.facts_start + index]
+                                continue if origin >= report.traces.records.count
+                                fact: ProofFactTrace = report.traces.records[origin]
+                                range_found <- true if fact.kind == "loop-range" and fact.name == trace.name and fact.line == loop_position.line and proof_replay_expr_equal(fact.expression, expected_range)
+                        _:
+                            return false
+                    return false if not range_found
+                    return false if proof_source_expression_has_overloaded_operator(iterable, report.source_primitive_operator_mask, 0)
+                    alias: mutable sview = ""
+                    copy_position: mutable Ast::Pos = loop_position
+                    match body[1]:
+                        Ast::Stmt.VarDecl(local, type_expression, Ast::Expr.Ident(receiver, _), position):
+                            return false if local == "" or local == target or local == variables[0] or receiver != target
+                            return false if proof_replay_local_binding_unsigned_type_name(type_expression, 0) == "" or proof_replay_local_binding_mutable_integer_type(type_expression)
+                            alias <- local
+                            copy_position <- position
+                        _:
+                            return false
+                    assignment_position: mutable Ast::Pos = loop_position
+                    match body[2]:
+                        Ast::Stmt.Assign(Ast::Expr.Ident(assigned, _), TokenKind.LArrow, Ast::Expr.Ident(value, _), position):
+                            return false if assigned != target or value != alias
+                            assignment_position <- position
+                        _:
+                            return false
+                    match trace.expression:
+                        Ast::Expr.Binary(Ast::Expr.Ident(left, left_position), TokenKind.EqEq, Ast::Expr.Ident(right, right_position), _):
+                            if left == alias and right == target:
+                                return false if trace.line != copy_position.line or not proof_replay_local_binding_pos_matches(trace.expression, copy_position)
+                                return false if not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(left, left_position), copy_position)
+                                return false if not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(right, right_position), loop_position)
+                            elif left == target and right == alias:
+                                return false if trace.line != assignment_position.line or not proof_replay_local_binding_pos_matches(trace.expression, assignment_position)
+                                return false if not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(left, left_position), assignment_position)
+                                return false if not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(right, right_position), copy_position)
+                            else:
+                                return false
+                        _:
+                            return false
+                    match body[0]:
+                        Ast::Stmt.Contract("invariant", expression, _):
+                            return false if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+                            normalized: Ast::Expr = proof_replay_local_initializer_constants(report, trace, expression, 0)
+                            return proof_replay_expr_equal(normalized, certificate.goal)
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_for_alias_update_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.rule != "goal" or certificate.line != report.trace_owner_line
+            work: mutable usize = 0
+            return false if not proof_replay_captured_entry_environment(&report.source_declarations, 0, &work)
+            context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+            return false if not context.known or context.body.count > 4096
+            for index in 0..<context.body.count |index, report, trace, certificate, context|:
+                continue if index == 0
+                continue if not proof_replay_local_binding_first_rebind_is_unambiguous(context.body, index, 0)
+                match context.body[index - 1]:
+                    Ast::Stmt.VarDecl(target, type_expression, _, _):
+                        continue if not proof_replay_local_binding_mutable_integer_type(type_expression) or proof_replay_local_binding_unsigned_type_name(type_expression, 0) == ""
+                        return true if proof_replay_for_alias_loop(report, trace, certificate, context.body[index], target, 0)
+                    _:
+                        pass
+            return false
