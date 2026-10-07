@@ -108,8 +108,8 @@ def main():
                 process = run(*arguments)
                 assert process.returncode == 0, (source.name, name, process.stdout[:300])
 
-        # Positive: an admissible source with an unrelated open goal still serves a goal-scoped
-        # route. Inadmissibility, not incompleteness, is what the refusals below test.
+        # An admissible source with an unrelated open goal still serves repair and
+        # catalog routes. Selected proof success additionally requires completeness.
         target = ROOT / "examples/tactic_repair_target.elisa"
         assert run("--tactics", ROOT / "examples/tactic_script_repair_target.json", target).returncode == 0
         # This compound equality is deliberately a tactic-repair target. Its
@@ -125,10 +125,22 @@ def main():
         checked = [goal for goal in partial_report["goals"]
                    if goal["name"] == "checked_control" and goal["rule"] == "goal"]
         assert len(checked) == 1 and checked[0]["proven"] and checked[0]["replay_status"] == "replayed"
-        accepted = run("--goal", str(checked[0]["goal_id"]), checked_partial)
+        selected = run("--goal", str(checked[0]["goal_id"]), checked_partial)
+        selected_report = json.loads(selected.stdout)
+        assert selected.returncode == 1 and selected_report["status"] == "unknown"
+        assert selected_report["source"]["admissible"] is True
+        assert selected_report["source"]["complete"] is False
+        assert selected_report["goal"]["proven"] is False
+        assert selected_report["goal"]["replay_status"] == "replayed"
+        checked_complete = directory / "checked_complete.elisa"
+        checked_complete.write_text("def checked_control() -> i64:\n    ensure result == 7\n    return 7\n")
+        complete_report = json.loads(run("--json", checked_complete).stdout)
+        complete_goal = next(goal for goal in complete_report["goals"] if goal["rule"] == "goal")
+        accepted = run("--goal", str(complete_goal["goal_id"]), checked_complete)
         accepted_report = json.loads(accepted.stdout)
-        assert accepted.returncode == 0 and accepted_report["source"]["admissible"] is True
-        assert accepted_report["source"]["complete"] is False
+        assert accepted.returncode == 0 and accepted_report["status"] == "proved"
+        assert accepted_report["source"]["admissible"] and accepted_report["source"]["complete"]
+        assert accepted_report["goal"]["proven"] and accepted_report["goal"]["replay_status"] == "replayed"
 
         partial = run("--repair-all", target)
         assert partial.returncode == 1 and json.loads(partial.stdout)["status"] in ("partial", "repaired")

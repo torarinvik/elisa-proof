@@ -42,3 +42,14 @@ probe links and reaches status 34: `OMITTED_OPEN_OBLIGATION_WITH_ATTEMPT_ADMITTE
 That adversarial assertion remains unchanged and failing. It is an open
 inventory-boundary investigation, not a passing probe. Logs/objects are in
 engine build/validation under `report-invariants-probe` and `assert-*-probe`.
+
+The source-admission matrix now passes all six malformed classes across all
+12 CLI routes. Its stale partial-source success expectation was corrected to
+the documented proved-only result contract: even an independently replayed
+selected goal returns unknown when the source is incomplete. A standalone
+complete control returns proved. Production admission logic is unchanged.
+The CLI result-lattice suite also passes, retaining exact-match, forged/foreign,
+missing, open, incomplete and replay-gap refusals. Its selected-gap control now
+uses the existing loop-counter replay-gap fixture instead of condition-call
+positions, whose certificates now replay. Log: engine
+`build/validation/cli-result-lattice-refresh.log`.

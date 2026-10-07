@@ -157,8 +157,9 @@ plain_gap = invoke(gap_contract_source)
 assert plain_gap.returncode == 1 and "verification state: unknown" in plain_gap.stdout, plain_gap.stdout
 assert " gaps" in plain_gap.stdout, plain_gap.stdout
 
-gap_source = ROOT / "examples" / "condition_call_positions.elisa"
-gap_code, gap_report = report_for(gap_source)
+# Reuse the explicit replay-gap fixture; condition-call replay is now supported.
+gap_source = gap_contract_source
+gap_code, gap_report = gap_contract_code, gap_contract_report
 gap_goals = [goal for goal in gap_report["goals"] if goal["replay_status"] == "gap"]
 assert gap_code == 1 and gap_goals, gap_report
 gap_id = gap_goals[0]["goal_id"]
