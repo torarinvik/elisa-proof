@@ -30,6 +30,10 @@ extend ElisaProofFrameSource:
             has_changes: mutable bool = false
             contract_work: mutable usize = 0
             value_work: mutable usize = 0
+            local_names: mutable darray[sview] = []
+            local_types: mutable darray[Ast::Expr] = []
+            local_names.extend(context.formals)
+            local_types.extend(context.formal_types)
             environment_work: mutable usize = 0
             scalar_environment: bool = contract_environment(declarations, 0, &environment_work)
             for index in 0..<policy.clauses.count |index, policy, events, has_changes, declarations, name, line|:
@@ -37,19 +41,19 @@ extend ElisaProofFrameSource:
                 return (false, []) if not place_typed(declarations, name, line, clause.place)
                 has_changes <- true if clause.kind == "changes"
                 events.push(Event{call_effect: false, change_index: 0, kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
-            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line, contract_work, value_work, scalar_environment, calls, tokens, source, source_length|:
+            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line, contract_work, value_work, scalar_environment, calls, tokens, source, source_length, local_names, local_types|:
                 match context.body[index]:
                     Ast::Stmt.Contract(kind, expression, _):
                         if kind != "changes" and kind != "preserves":
                             return (false, []) if kind != "requires" and kind != "require" and kind != "ensures" and kind != "ensure"
-                            return (false, []) if not scalar_environment or not scalar_contract(expression, &context.formals, &context.formal_types, context.return_type, kind == "ensures" or kind == "ensure", 0, &contract_work)
+                            return (false, []) if not scalar_environment or not scalar_contract(expression, &local_names, &local_types, context.return_type, kind == "ensures" or kind == "ensure", 0, &contract_work)
                     Ast::Stmt.Assign(_, operator, value, position):
                         # Compound operators can invoke overloaded code. Their
                         # target is reconstructed elsewhere, but inventory needs
                         # an independent mapping of those additional effects.
                         return (false, []) if operator != TokenKind.LArrow
                         if not inert_value(value, 0):
-                            return (false, []) if not scalar_environment or not scalar_value(value, &context.formals, &context.formal_types, 0, &value_work)
+                            return (false, []) if not scalar_environment or not scalar_read(value, &local_names, &local_types, 0, &value_work)
                         actual = direct_write(declarations, name, line, position)
                         return (false, []) if not actual.known or not place_typed(declarations, name, line, actual.place)
                         if has_changes:
@@ -62,15 +66,15 @@ extend ElisaProofFrameSource:
                     Ast::Stmt.Return(value, _):
                         if value is expression:
                             if not inert_value(expression, 0):
-                                return (false, []) if not scalar_environment or not scalar_value(expression, &context.formals, &context.formal_types, 0, &value_work)
+                                return (false, []) if not scalar_environment or not scalar_read(expression, &local_names, &local_types, 0, &value_work)
                     Ast::Stmt.If(_, then_body, else_body, _):
                         return (false, []) if not calls
-                        for arm in [then_body, else_body] |context, value_work, scalar_environment|:
-                            for statement in arm |context, value_work, scalar_environment|:
+                        for arm in [then_body, else_body] |context, value_work, scalar_environment, local_names, local_types|:
+                            for statement in arm |context, value_work, scalar_environment, local_names, local_types|:
                                 match statement:
                                     Ast::Stmt.Return(value, _):
                                         if value is expression:
-                                            return (false, []) if not scalar_environment or not scalar_value(expression, &context.formals, &context.formal_types, 0, &value_work)
+                                            return (false, []) if not scalar_environment or not scalar_read(expression, &local_names, &local_types, 0, &value_work)
                                     _:
                                         return (false, [])
                         mapped = source_condition_effects(declarations, name, line, index, tokens, source, source_length)
@@ -83,6 +87,22 @@ extend ElisaProofFrameSource:
                                 if policy.clauses[clause_index].kind == "preserves":
                                     return (false, []) if events.count >= 4096
                                     events.push(Event{call_effect: true, change_index: effect.change_index, kind: "preserve", position: effect.position, statement_index: index, clause_index: clause_index, place: effect.place})
+                    Ast::Stmt.VarDecl(binding, declared_type, _, _):
+                        return (false, []) if not calls or not contract_scalar_type(declared_type)
+                        for existing in local_names |binding|:
+                            return (false, []) if existing == binding
+                        mapped = source_condition_effects(declarations, name, line, index, tokens, source, source_length)
+                        return (false, []) if not mapped.known
+                        for effect in mapped.effects |effect, events, index, has_changes, policy|:
+                            if has_changes:
+                                return (false, []) if events.count >= 4096
+                                events.push(Event{call_effect: true, change_index: effect.change_index, kind: "allow", position: effect.position, statement_index: index, clause_index: 0, place: effect.place})
+                            for clause_index in 0..<policy.clauses.count |clause_index, policy, events, effect, index|:
+                                if policy.clauses[clause_index].kind == "preserves":
+                                    return (false, []) if events.count >= 4096
+                                    events.push(Event{call_effect: true, change_index: effect.change_index, kind: "preserve", position: effect.position, statement_index: index, clause_index: clause_index, place: effect.place})
+                        local_names.push(binding)
+                        local_types.push(declared_type)
                     _:
                         return (false, [])
             return (true, events)
