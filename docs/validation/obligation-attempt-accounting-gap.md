@@ -76,3 +76,16 @@ associate them with unrelated resource evidence. Header and body frame specs,
 direct/dynamic writes, call frame mapping and preservation checks share this
 accounting path and all need coverage. False frame containment and overlapping
 preservation controls must remain refused after accepted checks replay.
+
+The pending certificate rule now has a source-neutral frame relation model
+in `kernel_replay/frame_policy_model.elisa`. Places use caller parameter
+ordinals and canonical zero-to-three field paths. It checks the entire bounded
+policy before looking for containment, and refuses writes overlapping a
+preserved ancestor or descendant. A strict O0 standalone compile/link/run
+passes 13 controls: exact and ancestor containment, sibling preservation,
+outside-frame writes, ancestor/descendant overlap, foreign/out-of-range
+parameter identity, malformed trailing policy entries, empty changes and
+over-budget parameter count. Runtime artifact: engine
+`build/validation/frame-policy-relations`. Certificate encoding, source
+correspondence, replay dispatch and producer event integration remain pending;
+this model alone is not used to admit any source theorem.
