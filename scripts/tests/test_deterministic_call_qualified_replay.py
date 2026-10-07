@@ -224,7 +224,10 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     for index in 0..<report.traces.records.count |index, report, local_trace_index|:
         candidate: ProofFactTrace = report.traces.records[index]
         continue if candidate.kind != "function-summary" or candidate.name != "caller_local" or candidate.dependency != "bounded"
+        # The first trace binds result to the call; the later trace restates it
+        # over result_value and is not an expected_call for this source check.
         local_trace_index <- index
+        break
     return 19 if local_trace_index >= report.traces.records.count
     local_trace: ProofFactTrace = report.traces.records[local_trace_index]
     local_result_index: usize = local_trace.summary_bindings_start + 1
