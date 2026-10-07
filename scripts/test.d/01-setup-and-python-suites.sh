@@ -256,6 +256,7 @@ run_py_test test_for_identity_update.py
 run_py_test test_for_alias_update.py
 run_py_test test_scoped_summary_alias.py
 run_py_test test_invariant_for_retention.py
+run_py_test test_captured_search_entry.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
