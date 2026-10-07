@@ -357,3 +357,32 @@ prover-frame-source-types-bounded-build.log and proof-frame-source-types-sweep.l
 Next integration must compose full source policy, typed paths, exact source writes
 and the fact-free kernel rule using independently parsed source context, then bind
 each frame event to its own matching certificate attempt.
+
+### Composed direct write replay boundary
+
+`frame_source_admission.elisa::direct_write_replays` requires zero facts, the full
+canonical arena/kernel frame rule, complete independently reconstructed header/body
+policy lists, declared field types for every policy place, and the unique exact
+source mutation target with matching type/ordinal/path. Its caller must supply
+independently parsed, semantically admitted source and token context with a checked
+identity. This helper does not itself admit a report or create a certificate family.
+
+Nine parser-backed controls pass at O0 and O2 with 96761822: valid direct write,
+injected facts, forged source position/owner, changed source target, changed source
+policy, invented preserve list, missing declared field and omitted source preserve
+clause. Probe included in the runtime matrix; artifacts: engine build/validation/
+frame_source_admission_runtime-O0 and -O2. All-products strict O2 build succeeds,
+generation `fee71c1752164967b0082219059991aa`; source admission matrix/invariant
+diagnostics and kernel inventory pass. Engine sweep remains 66/73 with the same
+seven failures. Logs: engine build/validation/prover-frame-source-admission-build.log
+and proof-frame-source-admission-sweep.log.
+
+Per-event integration must preserve the existing separate allowance and preservation
+checks: the current `write` kernel rule proves their conjunction, so it cannot
+replace a successful allowance event when a distinct preservation event correctly
+fails. Add a changes-membership predicate with checked complete policy metadata,
+bind preservation predicates to the exact source preserve list, and bind spec
+predicates to exact source clause spans. Retain all existing events and diagnostics,
+then wire source-context replay and producer certificate attempts. Qualified owner/
+type identities, nested/aliased/dynamic/callee mappings and complete event inventory
+remain required before claiming the static-frame accounting gap closed.
