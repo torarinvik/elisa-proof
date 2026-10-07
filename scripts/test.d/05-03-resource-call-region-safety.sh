@@ -206,3 +206,16 @@ if [[ "$condition_call_positions_status" -ne 0 ]]; then
     printf 'proof test matrix failed: executable calls in branch conditions\n' >&2
     exit 1
 fi
+
+# A range loop binder is a scalar copy, not a borrow of the outer binding it shadows; a
+# collection binder that shadows a local borrow is still refused in a contract.
+set +e
+run_json_report "$ROOT_DIR/examples/range_binder_shadow.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["semantic_errors"] == 0; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
+range_binder_shadow_status=${PIPESTATUS[1]}
+run_json_report "$ROOT_DIR/examples/rejected_collection_binder_shadow.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert ("borrow-contract-unsupported", 5) in {(f["kind"], f["line"]) for f in report["findings"]}'
+collection_binder_shadow_status=${PIPESTATUS[1]}
+set -e
+if [[ "$range_binder_shadow_status" -ne 0 || "$collection_binder_shadow_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: a range loop binder was read as a borrow, or a collection binder was not\n' >&2
+    exit 1
+fi
