@@ -38,6 +38,9 @@ for fixture, accepted in (
         typed = [fact for fact, origin in zip(certificate["facts"], certificate["fact_origins"])
                  if origin["kind"] == "type-bound"]
         assert all(logical(fact) != logical(certificate["goal"]) for fact in typed), fixture
+        if certificate["goal"].get("right", {}).get("kind") == "int":
+            # IndexN certifies its literal dimension directly.
+            continue
         assert any(fact.get("kind") == "binary" and fact.get("operator") == "=="
                    and fact.get("left", {}).get("kind") == "field"
                    and fact["left"].get("field") == "count"

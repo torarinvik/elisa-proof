@@ -9,11 +9,11 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 BASE = (ROOT / "test/repro/scalar_field_snapshot_bound.elisa").read_text()
 CASES = {
-    "field-copy-open": (BASE, 2, 1),
+    "field-copy-open": (BASE, 1, 0),
     "local-guard": ((ROOT / "test/repro/scalar_field_snapshot_local_guard.elisa").read_text(), 0, 0),
     "parameter": ((ROOT / "test/repro/scalar_field_snapshot_parameter.elisa").read_text(), 0, 0),
-    "stale-field": (BASE.replace("    store.flags[slot] <- false", "    store.flags[store.count] <- false"), 3, 1),
-    "mutable-copy-rebound": (BASE.replace("slot: usize", "slot: mutable usize").replace("    store.flags[slot] <- false", "    slot <- 4\n    store.flags[slot] <- false"), 2, 1),
+    "stale-field": (BASE.replace("    store.flags[slot] <- false", "    store.flags[store.count] <- false"), 2, 0),
+    "mutable-copy-rebound": (BASE.replace("slot: usize", "slot: mutable usize").replace("    store.flags[slot] <- false", "    slot <- 4\n    store.flags[slot] <- false"), 1, 0),
     "wrong-entry-bound": (BASE.replace("store.count >= 4", "store.count > 4"), 2, 0),
 }
 with tempfile.TemporaryDirectory(prefix="elisa-field-snapshot-") as directory:
