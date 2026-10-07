@@ -20,6 +20,11 @@ for name, expected_exit, expected_reason in (
         if name == "contract_placement":
             assert report["status"] == "proved" and report["summary"]["obligations"] == 31
             assert report["summary"]["proven"] == 31 and report["trust"]["kernel_replayed_certificates"] == 31
+        if name == "condition_call_positions":
+            assert report["summary"]["obligations"] == 30 and report["trust"]["kernel_replayed_certificates"] == 18
+            if route == "--json":
+                frames = [(goal["name"], goal["rule"]) for goal in report["goals"] if goal["rule"].startswith("frame-")]
+                assert frames == [("bump", "frame-spec"), ("bump", "frame-allow"), ("measure", "frame-spec"), ("measure", "frame-allow")]
         if expected_reason:
             assert report["status"] == "failed" and report["verification_state"] == "unknown"
             assert report["summary"]["proven"] == report["summary"]["obligations"]
