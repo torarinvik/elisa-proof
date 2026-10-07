@@ -21,8 +21,10 @@ def checked(store: mutable Store&) -> void:
 """
 for name, source, accepted in (
     ("read-only", BASE, True),
+    ("captured-read-only", BASE.replace("for index in 0..<4:", "for index in 0..<4 |store|:").replace("invariant hit <= 4", "invariant true"), True),
     ("zero-iterations", BASE.replace("0..<4:", "0..<0:"), True),
     ("changed-field", BASE.replace("        break if", "        store.count <- 4\n        break if"), False),
+    ("captured-changed-field", BASE.replace("for index in 0..<4:", "for index in 0..<4 |store|:").replace("invariant hit <= 4", "invariant true").replace("        break if", "        store.count <- 4\n        break if"), False),
     ("wrong-entry", BASE.replace("store.count >= 4", "store.count > 4"), False),
 ):
     with tempfile.TemporaryDirectory() as directory:
