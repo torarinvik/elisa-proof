@@ -267,6 +267,7 @@ run_py_test test_reference_free_enum_summary.py
 run_py_test test_source_binding_harness_includes.py
 run_py_test test_literal_call_partial_requires.py
 run_py_test test_signed_product_growth.py
+run_py_test test_same_module_call_replay.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
