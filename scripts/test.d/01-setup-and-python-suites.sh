@@ -338,6 +338,7 @@ if [[ "$kernel_proposition_admission_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: native proposition-admission harness did not compile\n' >&2
     exit 1
 fi
+"$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/report-branch-accounting.o" "$ROOT_DIR/examples/report_branch_accounting_runtime.elisa"
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/examples/report_invariants_runtime.elisa" >/dev/null 2>&1
 report_invariants_compile_status=$?
 if [[ "$report_invariants_compile_status" -ne 0 ]]; then
