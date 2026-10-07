@@ -6,7 +6,6 @@
 # prover's fact engine, compared node by node with the replayed package's arena. Index 0 of every
 # pool is the invalid term; each constructor returns it when a child is invalid or a budget is hit,
 # so an unsupported expression can never become a matched obligation.
-
 const module CorrLimit:
     TERMS: usize = 262144
     TERM_SIZE: usize = 4096
@@ -16,9 +15,8 @@ const module CorrLimit:
     OBLIGATIONS: usize = 4096
     NESTING: usize = 64
     FUNCTIONS: usize = 4096
-
 struct CorrTerm:
-    # "ident", "int", "bool", "unary", "binary", "call" (callee in `name`), or "tuple".
+    # "ident", "int", "bool", "unary", "binary", "call", "field", or typed "enum".
     kind: sview
     operator: sview
     value: i64
@@ -29,40 +27,253 @@ struct CorrTerm:
     args_count: usize
     size: usize
     depth: usize
-
 struct CorrPool:
     terms: mutable darray[CorrTerm]
     args: mutable darray[usize]
-
+    source_types: mutable darray[Ast::Decl]
+    source_type_names: mutable darray[sview]
+    source_type_owner_starts: mutable darray[usize]
+    source_type_owner_counts: mutable darray[usize]
+    source_type_owners: mutable darray[sview]
+    source_const_names: mutable darray[sview]
+    source_const_values: mutable darray[i64]
+    source_const_owner_starts: mutable darray[usize]
+    source_const_owner_counts: mutable darray[usize]
+    source_const_owners: mutable darray[sview]
 def corr_pool_new() -> CorrPool:
-    pool: mutable CorrPool = CorrPool{terms: [], args: []}
+    pool: mutable CorrPool = CorrPool{terms: [], args: [], source_types: [], source_type_names: [], source_type_owner_starts: [], source_type_owner_counts: [], source_type_owners: [], source_const_names: [], source_const_values: [], source_const_owner_starts: [], source_const_owner_counts: [], source_const_owners: []}
     pool.terms.push(CorrTerm{kind: "invalid", operator: "", value: 0, name: "", left: 0, right: 0, args_start: 0, args_count: 0, size: 0, depth: 0})
     return pool
-
+def corr_collect_source_types(pool: mutable CorrPool&, declarations: darray[Ast::Decl]&, path: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |pool, path, depth|:
+        match declaration:
+            Ast::Decl.Module(name, body, _):
+                path.push(name)
+                nested: bool = corr_collect_source_types(pool, body, path, depth + 1)
+                path <- path.truncate(path.count - 1)
+                return false if not nested
+            Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                return false if pool.source_types.count >= CorrLimit::FUNCTIONS
+                pool.source_types.push(declaration)
+                pool.source_type_names.push(name)
+                pool.source_type_owner_starts.push(pool.source_type_owners.count)
+                pool.source_type_owner_counts.push(path.count)
+                pool.source_type_owners.extend(path)
+            Ast::Decl.Const(name, type_expression, initializer, is_mutable, _):
+                if not is_mutable and corr_integer_type_expression(type_expression):
+                    match initializer:
+                        Ast::Expr.IntLit(value, _) if value >= 0:
+                            pool.source_const_names.push(name)
+                            pool.source_const_values.push(value)
+                            pool.source_const_owner_starts.push(pool.source_const_owners.count)
+                            pool.source_const_owner_counts.push(path.count)
+                            pool.source_const_owners.extend(path)
+                        _:
+                            pass
+            _:
+                pass
+    return true
+def corr_source_type_index(pool: CorrPool&, name: sview) -> usize:
+    found: mutable usize = pool.source_types.count
+    hits: mutable usize = 0
+    for index in 0..<pool.source_types.count |index, pool, name, found, hits|:
+        if corr_scope_segment_leaf_equal(pool.source_type_names[index], name):
+            found <- index
+            hits <- hits + 1
+    return pool.source_types.count if hits != 1
+    return found
+def corr_scope_segment_leaf_equal(source_segment: sview, wanted: sview) -> bool:
+    start: mutable usize = 0
+    wanted_start: mutable usize = 0
+    length: usize = sview_len(source_segment)
+    wanted_length: usize = sview_len(wanted)
+    return false if wanted_length == 0 or length == 0
+    for index in 0..<length |index, source_segment, start|:
+        if index + 1 < length and sview_at(source_segment, index) == 58 and sview_at(source_segment, index + 1) == 58:
+            start <- index + 2
+    for index in 0..<wanted_length |index, wanted, wanted_start|:
+        if index + 1 < wanted_length and sview_at(wanted, index) == 58 and sview_at(wanted, index + 1) == 58:
+            wanted_start <- index + 2
+    return string_view_slice(source_segment, start.i64(), length.i64()) == string_view_slice(wanted, wanted_start.i64(), wanted_length.i64())
+def corr_source_type_index_expression(pool: CorrPool&, expression: Ast::Expr) -> usize:
+    segments: mutable darray[sview] = []
+    match expression:
+        Ast::Expr.Ident(name, _):
+            return corr_source_type_index(pool, name)
+        Ast::Expr.Scope(_, _, _):
+            pass
+        _:
+            return pool.source_types.count
+    return pool.source_types.count if not corr_const_scope_segments(expression, &segments, 0) or segments.count == 0
+    found: mutable usize = pool.source_types.count
+    hits: mutable usize = 0
+    for type_index in 0..<pool.source_types.count |type_index, pool, segments, found, hits|:
+        full_count: usize = pool.source_type_owner_counts[type_index] + 1
+        continue if segments.count > full_count
+        start: usize = full_count - segments.count
+        same: mutable bool = true
+        for segment_index in 0..<segments.count |segment_index, pool, type_index, segments, start, same|:
+            source_segment: mutable sview = ""
+            if start + segment_index == pool.source_type_owner_counts[type_index]:
+                source_segment <- pool.source_type_names[type_index]
+            else:
+                source_segment <- pool.source_type_owners[pool.source_type_owner_starts[type_index] + start + segment_index]
+            same <- false if not corr_scope_segment_leaf_equal(source_segment, segments[segment_index])
+        if same:
+            found <- type_index
+            hits <- hits + 1
+    return pool.source_types.count if hits != 1
+    return found
+def corr_source_type_value(pool: CorrPool&, type_index: usize) -> bool:
+    return false if type_index >= pool.source_types.count
+    match pool.source_types[type_index]:
+        Ast::Decl.Struct(_, _, _, _, _, _, _):
+            return true
+        Ast::Decl.Enum(_, _, is_const, _, _):
+            return is_const
+        _:
+            return false
+def corr_source_enum_variant(pool: CorrPool&, type_index: usize, member: sview) -> bool:
+    return false if type_index >= pool.source_types.count or member == ""
+    match pool.source_types[type_index]:
+        Ast::Decl.Enum(_, variants, is_const, _, _):
+            return false if not is_const
+            hits: mutable usize = 0
+            for variant in variants |member, hits|:
+                hits <- hits + 1 if variant.name == member
+            return hits == 1
+        _:
+            return false
+def corr_source_field_type(pool: CorrPool&, type_index: usize, member: sview) -> sview:
+    return "" if type_index >= pool.source_types.count or member == ""
+    match pool.source_types[type_index]:
+        Ast::Decl.Struct(_, members, _, _, _, _, _):
+            found: mutable sview = ""
+            hits: mutable usize = 0
+            for field in members |member, found, hits|:
+                if field.name == member and not field.is_private and not field.is_ghost:
+                    found <- proof_ident_name(field.type_expression)
+                    hits <- hits + 1
+            return "" if hits != 1
+            return found
+        _:
+            return ""
+def corr_type_name(taken: darray[sview]&, expression: Ast::Expr, allow_mutable: bool, pool: CorrPool&) -> (name: sview, is_mutable: bool):
+    match expression:
+        Ast::Expr.Ident(name, _):
+            return (name, false) if corr_scalar_type(name) and not corr_name_listed(taken, name)
+            type_index: usize = corr_source_type_index(pool, name)
+            return (name, false) if corr_source_type_value(pool, type_index)
+            return ("", false)
+        Ast::Expr.Scope(_, _, _):
+            type_index: usize = corr_source_type_index_expression(pool, expression)
+            return (pool.source_type_names[type_index], false) if corr_source_type_value(pool, type_index)
+            return ("", false)
+        Ast::Expr.Unary(operator, operand, _):
+            return ("", false) if not allow_mutable or operator != TokenKind.Mutable
+            inner: (name: sview, is_mutable: bool) = corr_type_name(taken, operand, false, pool)
+            return (inner.name, true)
+        _:
+            return ("", false)
+def corr_integer_type_expression(expression: Ast::Expr) -> bool:
+    match expression:
+        Ast::Expr.Ident(name, _):
+            return corr_signed_width(name) > 0 or corr_unsigned_width(name) > 0
+        _:
+            return false
+def corr_source_constant_path_segment[@r](pool: CorrPool& @r, constant_index: usize, segment_index: usize) -> sview @r:
+    return "" if constant_index >= pool.source_const_names.count
+    owner_count: usize = pool.source_const_owner_counts[constant_index]
+    if segment_index < owner_count:
+        return pool.source_const_owners[pool.source_const_owner_starts[constant_index] + segment_index]
+    return pool.source_const_names[constant_index] if segment_index == owner_count
+    return ""
+def corr_source_constant_index(pool: CorrPool&, expression: Ast::Expr) -> usize:
+    segments: mutable darray[sview] = []
+    return pool.source_const_names.count if not corr_const_scope_segments(expression, &segments, 0) or segments.count == 0
+    found: mutable usize = pool.source_const_names.count
+    hits: mutable usize = 0
+    for constant_index in 0..<pool.source_const_names.count |constant_index, pool, segments, found, hits|:
+        full_count: usize = pool.source_const_owner_counts[constant_index] + 1
+        continue if segments.count > full_count
+        start: usize = full_count - segments.count
+        same: mutable bool = true
+        for segment_index in 0..<segments.count |segment_index, pool, constant_index, segments, start, same|:
+            same <- false if not corr_scope_segment_leaf_equal(corr_source_constant_path_segment(pool, constant_index, start + segment_index), segments[segment_index])
+        if same:
+            found <- constant_index
+            hits <- hits + 1
+    return pool.source_const_names.count if hits != 1
+    return found
+def corr_const_scope_segments(expression: Ast::Expr, segments: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    match expression:
+        Ast::Expr.Ident(name, _):
+            segments.push(name)
+            return true
+        Ast::Expr.Scope(base, name, _):
+            return false if not corr_const_scope_segments(base, segments, depth + 1)
+            segments.push(name)
+            return true
+        _:
+            return false
+def corr_source_enum_path_segment[@r](pool: CorrPool& @r, type_index: usize, segment_index: usize) -> sview @r:
+    return "" if type_index >= pool.source_types.count
+    owner_count: usize = pool.source_type_owner_counts[type_index]
+    if segment_index < owner_count:
+        return pool.source_type_owners[pool.source_type_owner_starts[type_index] + segment_index]
+    return "" if segment_index != owner_count
+    match pool.source_types[type_index]:
+        Ast::Decl.Enum(type_name, _, is_const, _, _):
+            return type_name if is_const
+        _:
+            return ""
+    return ""
+def corr_source_enum_path_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, type_index: usize, segment_index: usize) -> bool:
+    return false if root == 0 or root >= nodes.count
+    segment: sview = corr_source_enum_path_segment(pool, type_index, segment_index)
+    return false if segment == ""
+    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+    if segment_index == 0:
+        return node.kind == "ident" and corr_scope_segment_leaf_equal(segment, node.name) and node.operator == "" and node.value == 0 and node.left == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.secondary_name == ""
+    return node.kind == "scope" and corr_scope_segment_leaf_equal(segment, node.name) and node.operator == "" and node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.secondary_name == "" and corr_source_enum_path_equal(nodes, children, node.left, pool, type_index, segment_index - 1)
+def corr_source_enum_name_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, type_index: usize, member: sview) -> bool:
+    return false if type_index >= pool.source_types.count or member == "" or root == 0 or root >= nodes.count
+    match pool.source_types[type_index]:
+        Ast::Decl.Enum(_, variants, is_const, _, _):
+            return false if not is_const or not corr_source_enum_variant(pool, type_index, member)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return false if node.kind != "field" or node.name != member or node.operator != "" or node.value != 0 or node.right != 0 or node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.secondary_name != ""
+            segment_count: usize = pool.source_type_owner_counts[type_index] + 1
+            return corr_source_enum_path_equal(nodes, children, node.left, pool, type_index, segment_count - 1)
+        _:
+            return false
+def corr_enum(pool: mutable CorrPool&, type_index: usize, member: sview) -> usize:
+    return 0 if not corr_source_enum_variant(pool, type_index, member)
+    return corr_add(pool, "enum", "", type_index.i64(), member, 0, 0, 0, 0, 1, 1)
+def corr_field(pool: mutable CorrPool&, object: usize, member: sview) -> usize:
+    return 0 if object == 0 or object >= pool.terms.count or member == ""
+    return corr_add(pool, "field", "", 0, member, object, 0, 0, 0, pool.terms[object].size + 1, pool.terms[object].depth + 1)
 def corr_add(pool: mutable CorrPool&, kind: sview, operator: sview, value: i64, name: sview, left: usize, right: usize, args_start: usize, args_count: usize, size: usize, depth: usize) -> usize:
     return 0 if pool.terms.count >= CorrLimit::TERMS or size > CorrLimit::TERM_SIZE or depth > CorrLimit::TERM_DEPTH
     pool.terms.push(CorrTerm{kind: kind, operator: operator, value: value, name: name, left: left, right: right, args_start: args_start, args_count: args_count, size: size, depth: depth})
     return pool.terms.count - 1
-
 def corr_ident(pool: mutable CorrPool&, name: sview) -> usize:
     return 0 if sview_len(name) == 0
     return corr_add(pool, "ident", "", 0, name, 0, 0, 0, 0, 1, 1)
-
 def corr_int(pool: mutable CorrPool&, value: i64) -> usize:
     # A negative payload is a high-bit unsigned literal whose type tag the encoder recovers from
     # the lexer; this checker never reconstructs that tag, so it never builds one.
     return 0 if value < 0
     return corr_add(pool, "int", "", value, "", 0, 0, 0, 0, 1, 1)
-
 def corr_bool(pool: mutable CorrPool&, value: bool) -> usize:
     return corr_add(pool, "bool", "", 1 if value else 0, "", 0, 0, 0, 0, 1, 1)
-
 def corr_unary(pool: mutable CorrPool&, operator: sview, operand: usize) -> usize:
     return 0 if operand == 0 or operand >= pool.terms.count
     size: usize = pool.terms[operand].size + 1
     depth: usize = pool.terms[operand].depth + 1
     return corr_add(pool, "unary", operator, 0, "", operand, 0, 0, 0, size, depth)
-
 def corr_binary(pool: mutable CorrPool&, operator: sview, left: usize, right: usize) -> usize:
     return 0 if left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
     size: usize = pool.terms[left].size + pool.terms[right].size + 1
@@ -159,7 +370,7 @@ def corr_lookup(names: darray[sview]&, values: darray[usize]&, name: sview) -> u
 
 # The value of a call-free subset expression in an environment of symbolic values. Division and
 # remainder are left out: their obligations belong to other rules this checker does not model.
-def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, depth: usize) -> usize:
+def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, types: darray[sview]&, depth: usize) -> usize:
     return 0 if depth > CorrLimit::TERM_DEPTH
     match expression:
         Ast::Expr.IntLit(value, _):
@@ -168,23 +379,121 @@ def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[svie
             return corr_bool(pool, value)
         Ast::Expr.Ident(name, _):
             return corr_lookup(names, values, name)
+        Ast::Expr.Scope(_, _, _):
+            constant_index: usize = corr_source_constant_index(pool, expression)
+            return 0 if constant_index >= pool.source_const_values.count
+            return corr_int(pool, pool.source_const_values[constant_index])
         Ast::Expr.Paren(inner, _):
-            return corr_eval(pool, inner, names, values, depth + 1)
+            return corr_eval(pool, inner, names, values, types, depth + 1)
         Ast::Expr.Unary(operator, operand, _):
             spelled: mutable sview = ""
             spelled <- "-" if operator == TokenKind.Minus
             spelled <- "not" if operator == TokenKind.Not
             return 0 if sview_len(spelled) == 0
-            inner: usize = corr_eval(pool, operand, names, values, depth + 1)
+            inner: usize = corr_eval(pool, operand, names, values, types, depth + 1)
             return corr_unary(pool, spelled, inner)
         Ast::Expr.Binary(left, operator, right, _):
             spelled: sview = corr_binary_operator(operator)
             return 0 if sview_len(spelled) == 0
-            left_term: usize = corr_eval(pool, left, names, values, depth + 1)
-            right_term: usize = corr_eval(pool, right, names, values, depth + 1)
+            left_term: usize = corr_eval(pool, left, names, values, types, depth + 1)
+            right_term: usize = corr_eval(pool, right, names, values, types, depth + 1)
             return corr_binary(pool, spelled, left_term, right_term)
+        Ast::Expr.Field(object, member, _):
+            match object:
+                Ast::Expr.Ident(name, _):
+                    value: usize = corr_lookup(names, values, name)
+                    slot: mutable usize = names.count
+                    for index in 0..<names.count |index, names, name, slot|:
+                        slot <- index if names[index] == name
+                    if value != 0 and slot < types.count:
+                        type_index: usize = corr_source_type_index(pool, types[slot])
+                        field_type: sview = corr_source_field_type(pool, type_index, member)
+                        return 0 if sview_len(field_type) == 0
+                        return 0 if not corr_scalar_type(field_type) and not corr_source_type_value(pool, corr_source_type_index(pool, field_type))
+                        return corr_field(pool, value, member)
+                    enum_type: usize = corr_source_type_index(pool, name)
+                    return corr_enum(pool, enum_type, member) if enum_type < pool.source_types.count
+                    return 0
+                Ast::Expr.Scope(_, _, _):
+                    enum_type: usize = corr_source_type_index_expression(pool, object)
+                    return corr_enum(pool, enum_type, member) if enum_type < pool.source_types.count
+                    return 0
+                _:
+                    return 0
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            callee_name: mutable sview = ""
+            match callee:
+                Ast::Expr.Ident(name, _): callee_name <- name
+                Ast::Expr.Scope(_, member, _): callee_name <- member
+                _: return 0
+            return 0 if sview_len(callee_name) == 0
+            for label in argument_names:
+                return 0 if label != ""
+            actuals: mutable darray[usize] = []
+            for argument in arguments |pool, names, values, types, actuals, depth|:
+                actual: usize = corr_eval(pool, argument, names, values, types, depth + 1)
+                return 0 if actual == 0
+                actuals.push(actual)
+            return corr_call(pool, callee_name, &actuals)
         _:
             return 0
+
+def corr_eval_failure(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, types: darray[sview]&, depth: usize) -> sview:
+    return "expression-depth" if depth > CorrLimit::TERM_DEPTH
+    match expression:
+        Ast::Expr.IntLit(value, _):
+            return "negative-or-unrepresentable-literal" if value < 0
+            return "term-budget"
+        Ast::Expr.BoolLit(_, _):
+            return "term-budget"
+        Ast::Expr.Ident(name, _):
+            return "unbound-identifier" if corr_lookup(names, values, name) == 0
+            return "term-budget"
+        Ast::Expr.Scope(_, _, _):
+            return "source-constant-table-empty" if pool.source_const_names.count == 0
+            if corr_source_constant_index(pool, expression) >= pool.source_const_names.count:
+                segments: mutable darray[sview] = []
+                return "malformed-source-constant-scope" if not corr_const_scope_segments(expression, &segments, 0) or segments.count == 0
+                leaf: sview = segments[segments.count - 1]
+                for constant_name in pool.source_const_names |leaf|:
+                    return "unresolved-source-constant-owner-path" if constant_name == leaf
+                return "unresolved-source-constant-name"
+            return "term-budget"
+        Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+            return corr_eval_failure(pool, inner, names, values, types, depth + 1)
+        Ast::Expr.Binary(left, operator, right, _):
+            return "unsupported-binary-operator" if corr_binary_operator(operator) == ""
+            left_value: usize = corr_eval(pool, left, names, values, types, depth + 1)
+            return corr_eval_failure(pool, left, names, values, types, depth + 1) if left_value == 0
+            return corr_eval_failure(pool, right, names, values, types, depth + 1) if corr_eval(pool, right, names, values, types, depth + 1) == 0
+            return "term-budget"
+        Ast::Expr.Field(object, member, _):
+            match object:
+                Ast::Expr.Ident(name, _):
+                    slot: mutable usize = names.count
+                    for index in 0..<names.count |index, names, name, slot|:
+                        slot <- index if names[index] == name
+                    if slot < values.count and values[slot] != 0:
+                        return "field-type-unavailable" if slot >= types.count
+                        type_index: usize = corr_source_type_index(pool, types[slot])
+                        return "field-struct-unresolved" if type_index >= pool.source_types.count
+                        return "field-not-public-source-data" if corr_source_field_type(pool, type_index, member) == ""
+                        return "field-term-budget"
+                    enum_index: usize = corr_source_type_index(pool, name)
+                    return "enum-type-unresolved" if enum_index >= pool.source_types.count
+                    return "enum-variant-unresolved" if not corr_source_enum_variant(pool, enum_index, member)
+                    return "enum-term-budget"
+                Ast::Expr.Scope(_, _, _):
+                    enum_index: usize = corr_source_type_index_expression(pool, object)
+                    return "qualified-enum-type-unresolved" if enum_index >= pool.source_types.count
+                    return "qualified-enum-variant-unresolved" if not corr_source_enum_variant(pool, enum_index, member)
+                    return "qualified-enum-term-budget"
+                _:
+                    return "field-object-unresolved"
+        Ast::Expr.Call(_, _, _, _):
+            return "unprepared-call"
+        _:
+            return "unsupported-expression-shape"
 
 const module CorrTypeWidth:
     SMALL_UNSIGNED_8: i64 = 255
@@ -255,6 +564,10 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
     return false if depth > CorrLimit::TERM_DEPTH or root >= nodes.count or term == 0 or term >= pool.terms.count
     node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
     expected: CorrTerm = pool.terms[term]
+    if expected.kind == "enum":
+        return corr_source_enum_name_equal(nodes, children, root, pool, expected.value.usize(), expected.name)
+    if expected.kind == "field":
+        return node.kind == "field" and node.operator == "" and node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and node.secondary_name == "" and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     return false if node.kind != expected.kind or node.operator != expected.operator or node.secondary_name != ""
     if expected.kind == "ident" or expected.kind == "int" or expected.kind == "bool":
         return node.value == expected.value and node.name == expected.name and corr_node_leaf(node)
