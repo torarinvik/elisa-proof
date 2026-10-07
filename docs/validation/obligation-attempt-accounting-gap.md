@@ -279,3 +279,28 @@ matrix. Artifacts: engine build/validation/frame-source-headers and
 frame-source-headers-o2. Header clause decoding remains next; the header helper
 is not yet imported into production replay. The production owner API changed,
 so a fresh full build is still required before qualifying that revision.
+
+### Header paths and combined source policy
+
+`frame_source_header_policy.elisa` independently decodes ordered comma-separated
+changes/preserves formal paths from the bounded signature token stream, retaining
+each target's full source span. It recognizes clause boundaries, skips grouped
+non-frame payloads and refuses unknown roots, indexed/computed paths, malformed
+targets, excessive field depth and clause count. `source_policy` combines header
+then body clauses and checks both 64-place partition limits without returning
+partial results. Expression-bodied signatures are explicitly refused by this
+helper until their signature delimiter is modeled. Source bytes/tokens still
+require independent identity binding; semantic field/type validity is separate.
+
+The expanded header probe passes at O0 and O2 with 96761822, including mixed
+clauses, whole/nested/comma targets, source positions, unknown/indexed/computed
+paths, expression-body refusal, header/body order, 64 changes plus one preserve
+acceptance, and a 65th change refusal. Both header modules are now in the replay
+facade. The all-products strict O2 build succeeds, generation
+`c211196c42f343b98a63a8bd8497d8ed`; admission matrix and invariant diagnostics
+pass, kernel inventory remains 10 tables / 188 entries, and the uncached engine
+sweep remains 66/73 with the same seven failures. Logs: engine build/validation/
+prover-frame-header-source-build.log and proof-frame-header-source-sweep.log.
+No new frame certificate family is admitted yet. Next: combine full source policy
+with arena correspondence, validate actual formal/field types and qualified owner
+identity, and connect each static event to a matching checked frame attempt.

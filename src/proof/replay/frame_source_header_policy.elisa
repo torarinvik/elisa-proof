@@ -1,0 +1,83 @@
+extend ElisaProofFrameSource:
+    private:
+        def signature_clause(word: sview) -> bool:
+            return when word:
+                "can" | "requires" | "require" | "ensures" | "ensure" | "fulfills" | "changes" | "preserves" | "decreases" | "invariant" | "uses" | "raises" | "where" | "at" | "abi" -> true
+                _ -> false
+
+        def header_target(tokens: darray[Lexer::Token]&, source: u8&, index: usize, end: usize, formals: darray[sview]&) -> (known: bool, place: ElisaProofKernelFramePolicy::Place, next: usize, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
+            return (false, empty, 0, Ast::pos_at_line(0)) if index >= end or tokens[index].kind != TokenKind.Ident
+            root = Lexer::text_or_empty(tokens[index], source)
+            return (false, empty, 0, Ast::pos_at_line(0)) if signature_clause(root)
+            position: mutable Ast::Pos = Ast::pos_of_token(tokens[index])
+            expression: mutable Ast::Expr = Ast::Expr.Ident(root, position)
+            next: mutable usize = index + 1
+            depth: mutable usize = 0
+            while next < end and tokens[next].kind == TokenKind.Dot |next, depth, expression, position, tokens, source, end|:
+                return (false, empty, 0, Ast::pos_at_line(0)) if depth >= 3 or end - next < 2 or tokens[next + 1].kind != TokenKind.Ident
+                field = Lexer::text_or_empty(tokens[next + 1], source)
+                expression <- Ast::Expr.Field(expression, field, position)
+                last = Ast::pos_of_token(tokens[next + 1])
+                position.end_line <- last.end_line
+                position.end_column <- last.end_column
+                position.end_offset <- last.end_offset
+                depth <- depth + 1
+                next <- next + 2
+            decoded = place(expression, formals)
+            return (decoded.known, decoded.place, next, position)
+
+    public:
+        def header_policy(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            bounds = header_bounds(declarations, name, line, tokens, source, source_length)
+            return (false, 0, []) if not bounds.known
+            context = owner(declarations, name, line)
+            return (false, 0, []) if not context.known
+            clauses: mutable darray[Clause] = []
+            index: mutable usize = bounds.start + 2
+            depth: mutable usize = 0
+            while index < bounds.end |index, depth, clauses, bounds, tokens, source, context|:
+                token = tokens[index]
+                if token.kind == TokenKind.LParen or token.kind == TokenKind.LBracket or token.kind == TokenKind.LBrace:
+                    depth <- depth + 1
+                elif token.kind == TokenKind.RParen or token.kind == TokenKind.RBracket or token.kind == TokenKind.RBrace:
+                    return (false, 0, []) if depth == 0
+                    depth <- depth - 1
+                elif depth == 0 and token.kind == TokenKind.Ident:
+                    kind = Lexer::text_or_empty(token, source)
+                    preceding_selector: bool = index > bounds.start and (tokens[index - 1].kind == TokenKind.Dot or tokens[index - 1].kind == TokenKind.Scope)
+                    if not preceding_selector and (kind == "changes" or kind == "preserves"):
+                        index <- index + 1
+                        while true |index, clauses, bounds, tokens, source, context, kind|:
+                            return (false, 0, []) if clauses.count >= 64
+                            target = header_target(tokens, source, index, bounds.end, &context.formals)
+                            return (false, 0, []) if not target.known
+                            clauses.push(Clause{kind: kind, place: target.place, position: target.position})
+                            index <- target.next
+                            break if index >= bounds.end or tokens[index].kind != TokenKind.Comma
+                            index <- index + 1
+                        if index < bounds.end:
+                            return (false, 0, []) if tokens[index].kind != TokenKind.Ident or not signature_clause(Lexer::text_or_empty(tokens[index], source))
+                        continue
+                index <- index + 1
+            return (true, context.formals.count, clauses)
+
+        def source_policy(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, parameter_count: usize, clauses: darray[Clause]) can[Memory.Allocate, Abort.Panic]:
+            header = header_policy(declarations, name, line, tokens, source, source_length)
+            return (false, 0, []) if not header.known
+            body = body_policy(declarations, name, line)
+            return (false, 0, []) if not body.known or body.parameter_count != header.parameter_count
+            clauses: mutable darray[Clause] = []
+            changes: mutable usize = 0
+            preserves: mutable usize = 0
+            for clause in header.clauses |clauses, changes, preserves|:
+                changes <- changes + 1 if clause.kind == "changes"
+                preserves <- preserves + 1 if clause.kind == "preserves"
+                return (false, 0, []) if changes > 64 or preserves > 64
+                clauses.push(clause)
+            for clause in body.clauses |clauses, changes, preserves|:
+                changes <- changes + 1 if clause.kind == "changes"
+                preserves <- preserves + 1 if clause.kind == "preserves"
+                return (false, 0, []) if changes > 64 or preserves > 64
+                clauses.push(clause)
+            return (true, header.parameter_count, clauses)
