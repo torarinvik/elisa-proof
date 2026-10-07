@@ -419,14 +419,17 @@ extend ElisaProof:
 
         # The binding equation must be live in this certificate, not merely true at an earlier
         # source point. Loop-entry equalities are excluded from preservation contexts; source
-        # replay then checks the certificate with that stale premise removed.
+        # replay then checks the certificate with that stale premise removed. This is the only
+        # source route for local bindings (see proof_replay_local_binding_source_valid), so it
+        # holds whether the binding is a certificate fact or a premise of a derived step.
         def proof_replay_local_binding_fact_live(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             return true if proof_replay_local_binding_immutable_declaration_source(report, trace)
             return true if proof_replay_local_binding_widening_cast_declaration_source(report, trace)
-            return true if proof_replay_local_binding_literal_call_argument_source(report, trace)
+            # A literal-argument definition is consumed by its own call's certificates.
+            return certificate.line == trace.line if proof_replay_local_binding_literal_call_argument_source(report, trace)
             preservation_context: mutable bool = false
             source_guard_context: mutable bool = false
             source_invariant_context: mutable bool = false
@@ -450,79 +453,6 @@ extend ElisaProof:
                 _:
                     return false
 
-        # Literal arguments to a typed call are represented by fresh proof symbols. Reconstruct
-        # the binding from the exact source call and the callee parameter slot instead of
-        # trusting an internal-name equality from the producer. This accepts only a unique
-        # direct call at the binding's source span, with one literal argument that is recorded
-        # for exactly one formal parameter in that call's summary.
-        def proof_replay_local_binding_literal_call_argument_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
-            return false if trace.name == "" or trace.line == 0
-            match trace.expression:
-                Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, literal, _):
-                    return false if not proof_internal_name_is_rebind(symbol) or not proof_replay_literal_value(literal)
-                    accepted_bindings: mutable usize = 0
-                    accepted_call: mutable Ast::Expr = Ast::Expr.Invalid
-                    for candidate in report.traces.records |candidate, report, trace, symbol, literal, accepted_bindings, accepted_call|:
-                        continue if candidate.kind != "function-summary" or candidate.name != trace.name or candidate.line != trace.line
-                        continue if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
-                        continue if candidate.summary_bindings_start > report.traces.summary_names.count or candidate.summary_bindings_count > report.traces.summary_names.count - candidate.summary_bindings_start
-                        continue if candidate.summary_bindings_count == 0
-                        summary_found: mutable bool = false
-                        summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
-                        for executable in report.executables.summaries |executable, candidate, summary_found, summary|:
-                            if executable.name == candidate.dependency and (candidate.owner_line == 0 or executable.line == candidate.owner_line):
-                                return false if summary_found
-                                summary_found <- true
-                                summary <- executable
-                        continue if not summary_found or summary.parameters_count == 0 or summary.parameters_start > report.executables.parameters.count or summary.parameters_count > report.executables.parameters.count - summary.parameters_start
-                        source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call(report, candidate, summary)
-                        continue if not source_call.known
-                        call_owner_matches: bool = match source_call.call:
-                            Ast::Expr.Call(callee, _, _, _): proof_replay_summary_owner_matches_call(report, candidate, summary, callee)
-                            _: false
-                        continue if not call_owner_matches
-                        match source_call.call:
-                            Ast::Expr.Call(_, arguments, argument_names, _):
-                                continue if arguments.count != summary.parameters_count or (argument_names.count != 0 and argument_names.count != arguments.count)
-                                matched_slots: mutable usize = 0
-                                for slot in 0..<summary.parameters_count |slot, arguments, argument_names, summary, report, candidate, symbol, literal, matched_slots|:
-                                    binding_index: usize = candidate.summary_bindings_start + slot
-                                    continue if report.traces.summary_names[binding_index] != report.executables.parameters[summary.parameters_start + slot]
-                                    bound_name_matches: mutable bool = false
-                                    match report.traces.summary_values[binding_index]:
-                                        Ast::Expr.Ident(bound_name, _): bound_name_matches <- bound_name == symbol
-                                        _:
-                                            pass
-                                    continue if not bound_name_matches
-                                    argument_index: mutable usize = slot
-                                    if argument_names.count > 0 and argument_names[slot] != "":
-                                        argument_index <- arguments.count
-                                        for index in 0..<arguments.count |index, argument_names, report, summary, slot, argument_index|:
-                                            formal_index: usize = summary.parameters_start + slot
-                                            argument_index <- index if argument_names[index] == report.executables.parameters[formal_index]
-                                    elif argument_names.count > 0:
-                                        saw_named: mutable bool = false
-                                        for argument_name in argument_names |argument_name, saw_named|:
-                                            saw_named <- true if argument_name != ""
-                                        return false if saw_named
-                                    continue if argument_index >= arguments.count
-                                    source_argument: Ast::Expr = arguments[argument_index]
-                                    source_argument_matches: bool = proof_replay_expr_equal(source_argument, literal) or proof_replay_summary_call_global_constant_matches(report, candidate, source_argument, literal)
-                                    continue if not source_argument_matches
-                                    continue if proof_replay_expr_equal(source_argument, literal) and not proof_replay_local_binding_expr_positions_match(literal, source_argument)
-                                    matched_slots <- matched_slots + 1
-                                if matched_slots == 1:
-                                    if accepted_bindings == 0:
-                                        accepted_bindings <- 1
-                                        accepted_call <- source_call.call
-                                    elif not proof_replay_summary_call_same_source_span(report, trace, source_call.call, accepted_call):
-                                        return false
-                            _:
-                                pass
-                    return accepted_bindings == 1
-                _:
-                    return false
-
         def proof_replay_local_binding_update_target(expression: Ast::Expr) -> sview:
             match expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.Plus, _, _):
@@ -532,12 +462,13 @@ extend ElisaProof:
                 _:
                     return ""
 
+        # Every route that admits a local binding -- a certificate's own fact, or a premise of a
+        # derived step found through the trace index -- comes through here, so the liveness of
+        # the binding in the consuming certificate is part of its source validity.
         def proof_replay_local_binding_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0
             match trace.expression:
-                Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, right, _):
-                    if proof_internal_name_is_rebind(name):
-                        return proof_replay_local_binding_literal_call_argument_source(report, trace) or proof_replay_local_binding_loop_source(report, trace, proof_replay_local_binding_update_target(right), right, report.trace_owner_line, true)
-                    return proof_replay_local_binding_immutable_declaration_source(report, trace) or proof_replay_local_binding_widening_cast_declaration_source(report, trace) or proof_replay_local_binding_loop_source(report, trace, name, right, report.trace_owner_line, false)
+                Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.EqEq, _, _):
+                    return proof_replay_local_binding_fact_live(report, trace)
                 _:
                     return false

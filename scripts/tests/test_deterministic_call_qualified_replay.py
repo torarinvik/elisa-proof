@@ -41,9 +41,16 @@ include "../src/proof/tactics.elisa"
 
 extend ElisaProof:
     public:
-        def test_summary_local_binding_source(report: ProofReport&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:
-            matches: mutable usize = 0
-            return proof_replay_summary_local_call_declarations(report.source_declarations, owner, owner_line, local_name, binding_position, call, &matches, 0) and matches == 1
+        # The alias is consumed by the certificate at the `return` that reads the local.
+        def test_summary_local_binding_source(report: mutable ProofReport&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:
+            saved_owner_line: u32 = report.replay_owner_line
+            saved_consumer_line: u32 = report.trace_owner_line
+            report.replay_owner_line <- owner_line
+            report.trace_owner_line <- binding_position.line
+            valid: bool = proof_replay_summary_local_alias_valid(report, owner, local_name, binding_position, call)
+            report.replay_owner_line <- saved_owner_line
+            report.trace_owner_line <- saved_consumer_line
+            return valid
 
         def test_summary_argument_order_replay() -> bool:
             report: mutable ProofReport = proof_empty_report()
