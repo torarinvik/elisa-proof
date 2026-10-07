@@ -573,3 +573,6 @@ the integrated runtime matrix. All-products strict O2 build succeeds, generation
 classes on all twelve routes. Engine artifacts: frame_report_recording-O0/-O2
 and prover-frame-report-recording-build.log. These are focused results; full
 implementation plan and broader frame effect mappings remain open.
+
+Further source/report correspondence work and validation are recorded in
+[frame-report-source-correspondence.md](frame-report-source-correspondence.md).
