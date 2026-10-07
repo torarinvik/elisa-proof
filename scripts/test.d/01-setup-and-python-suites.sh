@@ -96,6 +96,7 @@ run_py_test test_literal_quotient_denial.py
 run_py_test test_captured_initializer_entry.py
 run_py_test test_mutable_for_entry.py
 run_py_test test_for_saturation_replay.py
+run_py_test test_record_fixed_arrays.py
 run_py_test test_indexed_scalar_snapshot.py
 run_py_test test_captured_loop_entry.py
 run_py_test test_portable_frame.py
