@@ -20,6 +20,7 @@ import sys
 import tarfile
 import uuid
 from compiler_environment import select_compiler_environment
+from compiler_recipe_inputs import committed_recipe_paths
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
@@ -143,12 +144,7 @@ def committed_compiler_source_digest(repository: str, revision: str) -> str:
 
 def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
     """Hash the build recipes Stage1 records, directly from the pinned commit."""
-    recipe_paths = (
-        "scripts/elisac_stage1.sh",
-        "scripts/elisac_stage1_seed.sh",
-        "scripts/build_runtime_object.sh",
-        "scripts/write_profiler_hook_fallbacks.sh",
-    )
+    recipe_paths = committed_recipe_paths(repository, revision)
     try:
         result = subprocess.run(
             ["git", "-C", repository, "archive", "--format=tar", revision,
