@@ -9,6 +9,8 @@ BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 for name, accepted in (
     ("arithmetic_call_result_alias", True),
     ("call_result_literal_alias", True),
+    ("signed_call_result_chain", True),
+    ("signed_call_result_chain_rejected", False),
     ("rejected_arithmetic_call_result_alias", False),
     ("call_result_wrong_alias_rejected", False),
     ("call_result_distinct_invocations_rejected", False),
