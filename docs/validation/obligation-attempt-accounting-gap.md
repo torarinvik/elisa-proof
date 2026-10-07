@@ -181,3 +181,18 @@ match, with empty outputs on refusal. All eight controls now compile, link and r
 regular runtime matrix. The original extend lowering failure is not repaired by
 this fixture change; production source admission remains unchanged. Artifacts:
 engine `build/validation/frame-source-owners-o0` and `frame-source-owners`.
+
+### Ordered source body policy
+
+`replay/frame_source_policy.elisa` reconstructs top-level body changes/preserves
+clauses from the unique source owner, retaining kind, formal ordinal, ordered
+field path and complete AST position. It rejects any malformed clause without
+returning a partial policy, caps statements at 4096 and clauses at 64, and does
+not use producer frame metadata. Parser-backed controls pass at O0 and O2 with
+96761822, including ordered clauses/positions, wrong owner line, a foreign root
+after a valid clause, exact 64-clause acceptance and 65-clause refusal. The probe
+is in the runtime matrix; artifacts are engine build/validation/frame-source-policy
+and frame-source-policy-o2. This is source reconstruction, not source theorem
+admission: header clauses, type/field validation, source identity/qualified owner,
+write-site mapping and certificate correspondence remain required. Production
+replay does not yet import these helpers.
