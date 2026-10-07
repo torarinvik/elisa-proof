@@ -4,6 +4,7 @@ set -euo pipefail
 
 LEAF_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$LEAF_ROOT/scripts/compiler_provenance.sh"
+source "$LEAF_ROOT/scripts/link_flags.sh"
 LEAF_COMPILER="$(elisa_default_stage0 "$LEAF_ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 if ! elisa_compiler_is_stage0 "$LEAF_COMPILER"; then
     printf 'this focused regression requires the pinned stage0 compiler\n' >&2
@@ -25,9 +26,9 @@ cleanup_leaf() {
 trap cleanup_leaf EXIT
 "$LEAF_COMPILER" -emit obj -O0 -o "$LEAF_SCRATCH/runtime.o" "$LEAF_RUNTIME_SOURCE"
 "$LEAF_COMPILER" -emit obj -O0 -o "$LEAF_SCRATCH/probe.o" "$LEAF_ROOT/examples/kernel_interval_contradiction_runtime.elisa"
-"${CLANG:-clang}" -Wl,-dead_strip -o "$LEAF_SCRATCH/probe" "$LEAF_SCRATCH/probe.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
+"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$LEAF_SCRATCH/probe" "$LEAF_SCRATCH/probe.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
 "$LEAF_SCRATCH/probe"
 "$LEAF_COMPILER" -emit obj -O0 -o "$LEAF_SCRATCH/congruence.o" "$LEAF_ROOT/examples/kernel_congruence_runtime.elisa"
-"${CLANG:-clang}" -Wl,-dead_strip -o "$LEAF_SCRATCH/congruence" "$LEAF_SCRATCH/congruence.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
+"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$LEAF_SCRATCH/congruence" "$LEAF_SCRATCH/congruence.o" "$LEAF_SCRATCH/runtime.o" "$LEAF_ROOT/build/profile_hooks.o"
 "$LEAF_SCRATCH/congruence"
 printf 'strict native kernel leaf, malformed graph, contradiction and congruence controls pass\n'

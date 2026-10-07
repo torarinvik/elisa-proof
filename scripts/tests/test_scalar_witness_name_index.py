@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import subprocess
+import sys
 import tempfile
 
 
@@ -15,6 +16,8 @@ COMPILER_ROOT = Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-
 STAGE1 = COMPILER_ROOT / "bin" / "elisac-stage1"
 FRESHNESS_CHECK = COMPILER_ROOT / "scripts" / "assert_stage1_fresh.sh"
 FIXTURE = ROOT / "test" / "repro" / "scalar_witness_name_index.elisa"
+sys.path.insert(0, str(ROOT / "scripts"))
+import elisa_platform  # noqa: E402
 
 
 def fnv1a_u32(text: str) -> int:
@@ -60,11 +63,6 @@ def stage1_host_environment() -> dict:
         if platform.machine() in ("x86_64", "AMD64"):
             env.setdefault("ELISA_HOST_X86_64", "1")
     return env
-
-
-# Apple ld spells dead stripping -dead_strip; GNU ld needs the flags scripts/link_flags.sh uses.
-DEAD_STRIP_LINK = (["-Wl,-dead_strip"] if platform.system() == "Darwin"
-                   else ["-no-pie", "-Wl,--gc-sections", "-Wl,--no-as-needed", "-lm"])
 
 
 def materialize_fixture(destination: Path) -> None:
@@ -198,8 +196,7 @@ def main() -> None:
         run(str(STAGE1), "-permissive", "-emit", "obj", "-O0", "-o", str(object_file), str(fixture),
             env=stage1_host_environment())
         run(clang, "-c", str(hooks_source), "-o", str(hooks_object))
-        run(clang, *DEAD_STRIP_LINK, "-o", str(executable), str(object_file), str(hooks_object),
-            str(runtime))
+        run(clang, *elisa_platform.EXE_LINK, "-o", str(executable), str(object_file), str(hooks_object), str(runtime), *elisa_platform.LIBM)
         run(str(executable))
 
     source_revision = compiler_source_revision()
