@@ -17,7 +17,12 @@ REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof
 COMPILER = os.environ.get("ELISA_COMPILER_BIN", "")
 FIXTURE = ROOT / "examples/loop_invariants_compile.elisa"
 COMPILER_ROOT = Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler"))
-PINNED_FRONTEND_REV = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
+# Match compiler_snapshot.sh: a compatibility run may explicitly select a
+# revision without changing the repository's qualified default pin.
+PINNED_FRONTEND_REV = (os.environ.get("ELISA_COMPILER_REV", "").strip()
+                       or (ROOT / "ELISA_COMPILER_REV").read_text().strip())
+if re.fullmatch(r"[0-9a-f]{40}", PINNED_FRONTEND_REV) is None:
+    raise SystemExit("compiler revision must be a full lowercase commit SHA")
 
 REPLAY_HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
 include "../../Elisa-compiler/elisacore_std/collections.elisa"

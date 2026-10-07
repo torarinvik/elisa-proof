@@ -88,3 +88,19 @@ DiagnosticKind.StoreRefToLocal ordinal is 622; report output already states
 that kind_code is revision-specific. The exact remaining findings, failed
 verification reasons and complete replay assertions are preserved. Replaying
 the updated matrix assertion against the isolated product passes.
+
+The b8ff7592 serial KEEP_GOING matrix completed with status 1 and 80 failed
+steps (26 command failures and 54 explicit step failures), including cascades.
+It used absolute compiler/runtime paths; the earlier relative-path run was
+interrupted and is not qualification evidence. Its log is engine
+`build/validation/prover-b8ff7592-absolute-matrix.log`.
+
+The range-binder and diagnostic changes are now integrated at 6bd2d1ad. The
+main all-products build passes, as do range-binder, source-admission and kernel
+inventory gates. The loop-invariant compile harness now honors an explicit
+ELISA_COMPILER_REV override while retaining the exact frontend snapshot check,
+compiler freshness and mutation controls. Its strict compile/link/run passes
+with compiler 96761822; default/override selection and malformed-revision
+refusal were checked. Logs: `prover-6bd2d1ad-integrated-build.log` and
+`loop-invariant-compiler-override.log`. The repository default compiler pin
+remains unchanged, and the full matrix remains failing.
