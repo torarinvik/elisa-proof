@@ -239,3 +239,24 @@ spellings, source negatives, forged positions/owners and altered certificate
 formal ordinals. This establishes target correspondence only: it does not prove
 write authorization or authenticate header policy/source file identity. Nested
 flow, alias/type mapping and production certificate admission remain open.
+
+### Production compilation of source reconstruction helpers
+
+The replay facade now imports all five frame source reconstruction modules. The
+all-products strict O2 build succeeds with compiler 96761822 (generation
+`aaf92589dee5450b8922c22655d4705a`); source admission still refuses six malformed
+classes on all twelve CLI routes, admission diagnostics retain both static-frame
+accounting refusals, and the kernel inventory matches ten tables / 188 entries.
+The fresh uncached engine sweep remains 66/73 with the same seven failing rows.
+Logs: engine build/validation/prover-frame-source-integrated-build.log and
+proof-frame-source-integrated-sweep.log. Importing these helpers does not enable
+a frame certificate family or alter admission.
+
+Next integration requirements, in dependency order: independently retain/rebuild
+signature frame clauses from source tokens (the current report retains AST and
+annotations but no source token stream); validate formal/field types and qualified
+owner identity; compose policy-list and exact-write correspondence with the
+fact-free kernel rule; add producer certificate lowering and bind every static
+frame event to its own matching attempt; then extend nested/alias/dynamic/callee
+write mappings and run the full compatibility matrix. Header metadata must not
+be silently omitted or accepted solely because a producer annotation claims it.
