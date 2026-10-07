@@ -33,3 +33,21 @@ The prototype patch is retained in engine build/validation as
 `obligation-attempt-span-candidate.patch`; production source was restored.
 A separate minimal nested-array clear control returns the expected count 2,
 so the suspected reset defect was not reproduced and is not claimed.
+
+The span implementation is now integrated. Each event records `attempts_start`
+and `attempts_count`; the recorder consumes attempts since the previous event.
+Admission requires ordered contiguous spans with safe bounds and complete
+coverage. Empty event spans and multiple attempts per event remain supported.
+The strict report-invariant harness now passes, including its omitted-open-event
+control. The branch control passes and rejects missing trailing coverage,
+nonzero first start and an out-of-range count, then accepts the restored span.
+
+Both proof/replay products build with compiler 96761822. An uncached engine
+sweep retains 66/73, with the same seven failures. Conditional, guarded-call,
+deterministic-call and portable disjunction controls pass. The broader source
+admission matrix still fails its previously failing focused goal/theorem query;
+no complete matrix success is claimed. Logs: `prover-attempt-span-build.log`,
+`proof-attempt-span-full-sweep.log`, `source-admission-span.log` in engine
+build/validation. The new spans are internal report accounting metadata;
+portable replay retains its separate source/certificate validation boundary.
+Further resealed-metadata mutation and outcome-association coverage remain open.
