@@ -1,0 +1,54 @@
+extend ElisaProofFrameSource:
+    private:
+        def lower_place(actual: ElisaProofKernelFramePolicy::Place, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&) -> usize can[Memory.Allocate, Abort.Panic]:
+            fields: mutable darray[usize] = []
+            for index in 0..<actual.depth |index, actual, nodes, fields|:
+                field: sview = actual.field if index == 0 else actual.field2 if index == 1 else actual.field3
+                fields.push(nodes.count)
+                nodes.push(ElisaProofKernelCore::ProofKernelNode{kind: "frame-field", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: field, secondary_name: ""})
+            start: usize = children.count if fields.count > 0 else 0
+            for field in fields |children|:
+                children.push(field)
+            root: usize = nodes.count
+            nodes.push(ElisaProofKernelCore::ProofKernelNode{kind: "frame-place", operator: "frame-place-v1", left: 0, right: 0, auxiliary: actual.parameter, children_start: start, children_count: fields.count, value: 0, name: "", secondary_name: ""})
+            return root
+
+    public:
+        # Reserve a conservative bounded upper limit before changing either
+        # arena. Refused source/budgets leave both existing prefixes untouched.
+        def lower_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, node_limit: usize, child_limit: usize) -> (known: bool, roots: darray[usize]) can[Memory.Allocate, Abort.Panic]:
+            inventory = direct_events(declarations, name, line, tokens, source, source_length)
+            policy = source_policy(declarations, name, line, tokens, source, source_length)
+            return (false, []) if not inventory.known or not policy.known
+            return (false, []) if node_limit > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or child_limit > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
+            # Source limits bound clauses to 128 and events to 4096; these sums
+            # and products cannot overflow usize before the subtraction guards.
+            places: usize = inventory.events.count + policy.clauses.count
+            node_addition: usize = places * 4 + inventory.events.count
+            child_addition: usize = places * 3 + inventory.events.count * policy.clauses.count
+            return (false, []) if nodes.count > node_limit or node_addition > node_limit - nodes.count
+            return (false, []) if children.count > child_limit or child_addition > child_limit - children.count
+            policy_roots: mutable darray[usize] = []
+            for clause in policy.clauses |nodes, children, policy_roots|:
+                policy_roots.push(lower_place(clause.place, nodes, children))
+            roots: mutable darray[usize] = []
+            for event in inventory.events |event, nodes, children, policy, policy_roots, roots, name|:
+                actual: usize = lower_place(event.place, nodes, children)
+                start: usize = children.count
+                split: mutable usize = 0
+                operation: mutable sview = "spec"
+                if event.kind == "allow":
+                    operation <- "allow"
+                    for index in 0..<policy.clauses.count |index, policy, policy_roots, children, split|:
+                        if policy.clauses[index].kind == "changes":
+                            children.push(policy_roots[index])
+                            split <- split + 1
+                    for index in 0..<policy.clauses.count |index, policy, policy_roots, children|:
+                        children.push(policy_roots[index]) if policy.clauses[index].kind == "preserves"
+                elif event.kind == "preserve":
+                    operation <- "preserve"
+                    children.push(policy_roots[event.clause_index])
+                count: usize = children.count - start
+                roots.push(nodes.count)
+                nodes.push(ElisaProofKernelCore::ProofKernelNode{kind: "frame-policy", operator: operation, left: actual, right: split, auxiliary: policy.parameter_count, children_start: start if count > 0 else 0, children_count: count, value: 0, name: name, secondary_name: "frame-policy-v1"})
+            return (true, roots)

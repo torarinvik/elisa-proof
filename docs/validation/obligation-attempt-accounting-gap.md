@@ -511,3 +511,26 @@ matrix/invariant diagnostics and kernel inventory pass. Fresh engine sweep remai
 prover-frame-event-dispatch-build.log and proof-frame-event-dispatch-sweep.log.
 Artifacts: frame_source_admission_runtime-O0/-O2. Per-event producer recording,
 source-context report replay and complete inventory/report attachment remain next.
+
+### Canonical source event lowering
+
+`frame_source_lowering.elisa` generates canonical field/place/policy nodes and
+one root per original direct event. Policy places are lowered once, allowance
+children retain the complete changes/preserves partition, and individual preserve
+roots retain the specific original clause. Source inventory/type checks and a
+conservative bounded capacity reservation happen before either arena is changed.
+Caller limits may tighten but cannot exceed kernel limits; refused source or
+budgets leave both existing arena prefixes untouched. Lowering retains roots for
+failing predicates so it cannot silently drop an obligation.
+
+The composed runtime passes 47 controls at O0/O2 with 96761822, adding generated
+root replay, node/child budget refusal, existing-prefix preservation, repeated
+append, retention of a failing preservation event and enlarged-limit refusal.
+All-products strict O2 build succeeds, generation
+`6d93c0c1fedc4f7e84ac78add0ee25cc`; admission matrix/invariant diagnostics and
+kernel inventory pass. Engine sweep remains 66/73 with the same seven failures.
+Logs: engine build/validation/prover-frame-source-lowering-build.log and
+proof-frame-source-lowering-sweep.log. Artifacts: frame_source_admission_runtime-O0/-O2.
+Report attempt/certificate emission and source-context dispatch remain to be wired;
+this lowering is not a new report admission rule. Broader event/effect mappings
+and the full implementation plan remain unfinished.
