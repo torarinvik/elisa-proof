@@ -227,3 +227,15 @@ This helper does not yet cover nested control flow, compound mutation operators,
 aliases, mapped callee writes or dynamic indexes, nor does it validate field types.
 Those paths and header reconstruction remain part of the full frame admission
 work; no production admission rule has been loosened or replaced.
+
+Direct write follow-up: all eleven parser compound operators (`+=`, `-=`, `*=`,
+`/=`, `%=`, `^=`, `|=`, `&=`, `<<=`, `>>=`, `?=`) now use the same exact source
+target reconstruction as `<-`. The operator whitelist continues to exclude `=`
+bindings and non-assignment tokens. `direct_write_matches` binds the reconstructed
+source target to the canonical frame policy's actual place with exact formal
+count, ordinal and ordered field path, rejecting foreign owners and forward roots.
+The expanded parser-backed probe passes at O0 and O2 for all twelve mutation
+spellings, source negatives, forged positions/owners and altered certificate
+formal ordinals. This establishes target correspondence only: it does not prove
+write authorization or authenticate header policy/source file identity. Nested
+flow, alias/type mapping and production certificate admission remain open.
