@@ -1,0 +1,65 @@
+# `old(v.count)` for a darray reference parameter names a fresh symbol fixed at function entry
+# by `E == v.count` (proof_seed_entry_counts). Replay accepts that definition only when
+#   - it is traced at the owner function's own declaration line, in the certificate's owner;
+#   - `v` is an unshadowed parameter of the owner and `E` a reserved rebind symbol that no other
+#     binding or summary of the owner defines differently (the shared uniqueness rule);
+#   - no statement from function entry up to the consumer may change `v`'s count: element
+#     writes `v[i] <- e` keep the count, any other possible write of `v` ends the binding. A
+#     compound statement that starts at or before the consumer counts as a whole, so writes
+#     later in a loop body are seen too; outside a loop-preservation context, a loop on the
+#     consumer's own line is a loop-entry check and is not entered.
+extend ElisaProof:
+    private:
+        def proof_replay_entry_count_written(declarations: darray[Ast::Decl]&, statement: Ast::Stmt, name: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match statement:
+                Ast::Stmt.Assign(Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _), _, value, _):
+                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0) if root != name
+                    return proof_replay_source_expr_touches(declarations, index, name, true, 0) or proof_replay_source_expr_touches(declarations, value, name, true, 0)
+                Ast::Stmt.If(condition, yes, no, _):
+                    return true if proof_replay_source_expr_touches(declarations, condition, name, true, 0)
+                    return proof_replay_entry_count_body_written(declarations, yes, name, depth + 1) or proof_replay_entry_count_body_written(declarations, no, name, depth + 1)
+                Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
+                    return true if proof_replay_source_expr_touches(declarations, condition, name, true, 0)
+                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1)
+                Ast::Stmt.Expr(Ast::Expr.Block(nested, value, _, _), _):
+                    return true if proof_replay_source_expr_touches(declarations, value, name, true, 0)
+                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1)
+                _:
+                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0)
+
+        def proof_replay_entry_count_body_written(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for statement in body |declarations, name, depth|:
+                return true if proof_replay_entry_count_written(declarations, statement, name, depth + 1)
+            return false
+
+        def proof_replay_local_binding_entry_count_source(report: ProofReport&, trace: ProofFactTrace, loop_entry: bool) -> bool:
+            return false if trace.name == "" or trace.line == 0 or report.trace_owner_line == 0
+            return false if trace.line != report.replay_owner_line
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, Ast::Expr.Field(Ast::Expr.Ident(parameter, _), field, _), _):
+                    return false if field != "count" or not proof_internal_name_is_rebind(symbol) or symbol_position.line != trace.line
+                    return false if not proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, parameter, 0)
+                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, parameter)
+                    match trace.expression:
+                        Ast::Expr.Binary(_, _, count_place, _):
+                            return false if not proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, count_place)
+                        _:
+                            return false
+                    body: mutable darray[Ast::Stmt] = []
+                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    for statement in body |report, parameter, loop_entry|:
+                        position: Ast::Pos = proof_replay_statement_position(statement)
+                        if position.line > report.trace_owner_line:
+                            break
+                        if position.line == report.trace_owner_line and loop_entry:
+                            match statement:
+                                Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _) | Ast::Stmt.Expr(Ast::Expr.Block(_, _, _, _), _):
+                                    break
+                                _:
+                                    pass
+                        return false if proof_replay_entry_count_written(report.source_declarations, statement, parameter, 0)
+                    return true
+                _:
+                    return false

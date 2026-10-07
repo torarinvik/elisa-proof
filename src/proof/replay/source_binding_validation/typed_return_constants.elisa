@@ -1,0 +1,90 @@
+# A closed constant returned from a signed function is bound to a fresh proof symbol carrying
+# the declared return type (`symbol == constant`, see proof_add_typed_return_constant), so the
+# ensure compares typed values instead of ambiguous bare constants. The symbol is a definition;
+# replay accepts it only when
+#   - its owner function is the certificate's owner and declares a signed integer return type
+#     whose width holds the constant (so the symbol's type facts stay consistent with it);
+#   - the symbol sits at exactly one source return of that function (or the function's tail
+#     expression) whose value is the constant, or one arm of that value's conditional, at the
+#     same source positions, or a named constant whose validated global-constant fact gives it;
+#   - no other local-binding or summary of the function gives the symbol another value or site
+#     (the uniqueness rule shared with literal-argument definitions);
+#   - and it is consumed only by certificates at its own return line.
+extend ElisaProof:
+    private:
+        def proof_replay_typed_return_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, return_type: mutable Ast::Expr&, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, return_type, body, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, declared_return, statements, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches <- matches + 1
+                            return_type <- declared_return
+                            body.clear()
+                            body.extend(statements)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_typed_return_owner(nested, owner, owner_line, return_type, body, matches, depth + 1)
+                    _:
+                        pass
+
+        # The source return value, or one arm of its conditional, is the bound constant.
+        # A named constant matches through a validated global-constant fact of the owner.
+        def proof_replay_typed_return_value_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, value: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            return true if proof_replay_expr_equal(source, value) and proof_replay_local_binding_expr_positions_match(value, source)
+            match source:
+                Ast::Expr.If(_, then_value, else_value, _):
+                    return proof_replay_typed_return_value_matches(report, trace, then_value, value, depth + 1) or proof_replay_typed_return_value_matches(report, trace, else_value, value, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_typed_return_value_matches(report, trace, inner, value, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    return proof_replay_summary_call_global_constant_matches(report, trace, source, value)
+                _:
+                    return false
+
+        # Count the source returns at `position` whose value is `value`; `at_tail` admits the
+        # function's final expression statement, which the producer checks as a return.
+        def proof_replay_typed_return_sites(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: Ast::Pos, value: Ast::Expr, at_tail: bool, found: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            index: mutable usize = 0
+            body_count: usize = body.count
+            for statement in body |report, trace, body_count, position, value, at_tail, found, depth, index|:
+                index <- index + 1
+                match statement:
+                    Ast::Stmt.Return(returned, statement_position):
+                        if returned is source_value:
+                            found <- found + 1 if proof_replay_source_position_equal(statement_position, position) and proof_replay_typed_return_value_matches(report, trace, source_value, value, 0)
+                    Ast::Stmt.Expr(source_value, statement_position):
+                        if at_tail and index == body_count:
+                            found <- found + 1 if proof_replay_source_position_equal(statement_position, position) and proof_replay_typed_return_value_matches(report, trace, source_value, value, 0)
+                    Ast::Stmt.If(_, yes, no, _):
+                        proof_replay_typed_return_sites(report, trace, yes, position, value, false, found, depth + 1)
+                        proof_replay_typed_return_sites(report, trace, no, position, value, false, found, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_typed_return_sites(report, trace, nested, position, value, false, found, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |report, trace, position, value, found, depth|:
+                            proof_replay_typed_return_sites(report, trace, arm.body, position, value, false, found, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_typed_return_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.name == "" or trace.line == 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, value, _):
+                    return false if not proof_internal_name_is_rebind(symbol) or symbol_position.line != trace.line
+                    owner_line: u32 = proof_replay_trace_owner_function_line(report, trace.name, trace.line)
+                    return false if owner_line == 0 or owner_line != report.replay_owner_line
+                    return_type: mutable Ast::Expr = Ast::Expr.Absent
+                    body: mutable darray[Ast::Stmt] = []
+                    matches: mutable usize = 0
+                    proof_replay_typed_return_owner(report.source_declarations, trace.name, owner_line, &return_type, &body, &matches, 0)
+                    return false if matches != 1
+                    width: i64 = proof_signed_type_width(return_type, report.source_declarations, 0)
+                    return false if width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
+                    found: mutable usize = 0
+                    proof_replay_typed_return_sites(report, trace, body, symbol_position, value, true, &found, 0)
+                    return false if found != 1
+                    return proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, value)
+                _:
+                    return false
