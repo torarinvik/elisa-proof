@@ -1,5 +1,47 @@
 extend ElisaProof:
     private:
+        # Unknown or deep forms refuse, so a later AST constructor cannot bypass this boundary.
+        def proof_replay_expression_contains_call_node(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1) or proof_replay_expression_contains_call_node(index, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_replay_expression_contains_call_node(object, depth + 1) or proof_replay_expression_contains_call_node(low, depth + 1) or proof_replay_expression_contains_call_node(high, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_expression_contains_call_node(left, depth + 1) or proof_replay_expression_contains_call_node(right, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    return true if proof_replay_expression_contains_call_node(object, depth + 1)
+                    for element in elements |depth|:
+                        return true if proof_replay_expression_contains_call_node(element, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |depth|:
+                        return true if proof_replay_expression_contains_call_node(element, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |depth|:
+                        return true if proof_replay_expression_contains_call_node(entry.key, depth + 1) or proof_replay_expression_contains_call_node(entry.value, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_expression_contains_call_node(base, depth + 1)
+                    for field in fields |depth|:
+                        return true if proof_replay_expression_contains_call_node(field.value, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_expression_contains_call_node(condition, depth + 1) or proof_replay_expression_contains_call_node(yes, depth + 1) or proof_replay_expression_contains_call_node(no, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                    return proof_replay_expression_contains_call_node(iterable, depth + 1) or proof_replay_expression_contains_call_node(condition, depth + 1) or proof_replay_expression_contains_call_node(value, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_replay_expression_contains_call_node(base, depth + 1) or proof_replay_expression_contains_call_node(predicate, depth + 1)
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return true
+                _:
+                    return true
+            return false
+
         # Rebuild deterministic call sites from caller source, not the trace payload.
         def proof_replay_deterministic_call_arguments_equal(source: darray[Ast::Expr]&, source_names: darray[sview]&, expected: darray[Ast::Expr]&, expected_names: darray[sview]&) -> bool:
             return false if source.count != expected.count
@@ -165,13 +207,16 @@ extend ElisaProof:
             no_skip: Ast::Pos = Ast::pos_at_line(0)
             for statement in body |cast_sites, declarations, expected, line, names, values, depth, no_skip|:
                 match statement:
-                    Ast::Stmt.VarDecl(local_name, _, initializer, position):
+                    Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
                         return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, initializer, expected, line, names, values, depth + 1)
                         return (true, 0) if position.line > line
                         return (false, 0) if proof_replay_deterministic_call_name_bound(names, local_name)
                         resolved_initializer: Ast::Expr = proof_replay_substitute_many(initializer, names, values)
                         names.push(local_name)
-                        values.push(resolved_initializer)
+                        if proof_replay_deterministic_call_immutable_type(type_expression) and proof_replay_expression_contains_call_node(resolved_initializer, 0):
+                            values.push(Ast::Expr.Absent)
+                        else:
+                            values.push(resolved_initializer)
                         # A source-validated built-in widening cast does not mutate caller
                         # bindings. Other methods still reset all reconstructed values.
                         initializer_skip: mutable Ast::Pos = no_skip
