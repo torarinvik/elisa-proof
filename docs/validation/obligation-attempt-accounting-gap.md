@@ -386,3 +386,27 @@ predicates to exact source clause spans. Retain all existing events and diagnost
 then wire source-context replay and producer certificate attempts. Qualified owner/
 type identities, nested/aliased/dynamic/callee mappings and complete event inventory
 remain required before claiming the static-frame accounting gap closed.
+
+### Distinct changes allowance predicate
+
+Canonical frame policy now supports `allow`: every policy place is still fully
+decoded/validated, but the judgment proves changes membership independently of
+preservation. The existing `write` judgment continues to prove both. Source list
+correspondence accepts these two complete-policy operations; composed source
+replay exposes separate `direct_allowance_replays` and `direct_write_replays`
+entry points and explicitly checks the requested operation. No existing write
+entry point was weakened. This permits later recording of the original separate
+allowance and preservation events without changing their diagnostic meanings.
+
+Expanded frame arena and source admission probes pass at O0/O2 with 96761822.
+Controls establish allowance success alongside preservation/conjunction failure,
+outside-changes refusal, malformed trailing preserve metadata refusal, and
+ordinary proposition/fact refusal for a valid allowance root. The full adversarial
+arena runtime passes at O0. All-products strict O2 build succeeds, generation
+`12954209772f4905ae52b0b7fddcafc7`. Admission matrix/diagnostics and kernel inventory
+pass; uncached engine sweep remains 66/73 with the same seven failures. Logs:
+engine build/validation/prover-frame-allowance-build.log and
+proof-frame-allowance-sweep.log. Artifacts: frame_policy_certificates_runtime-O0/-O2,
+frame_source_admission_runtime-O0/-O2 and frame-allowance-full-arena.
+Source preservation/spec predicates and per-event producer attempts remain next;
+no frame report certificate family has been enabled yet.

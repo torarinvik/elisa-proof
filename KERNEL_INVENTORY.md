@@ -92,7 +92,7 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `structural-safety` | structural | `name` = SCC root, children = edges, `secondary_name` = `structural-v1` | `check/flow_and_type_model.elisa` |
 | `frame-field` | frame policy | nonempty field label; other fields zero/empty | frame policy runtime probes; source producer pending |
 | `frame-place` | frame policy | versioned parameter ordinal and up to three backward field children | frame policy runtime probes; source producer pending |
-| `frame-policy` | frame policy | versioned spec/write/preserve operation, actual place, bounded partitioned policy children and owner label | frame policy runtime probes; source producer pending |
+| `frame-policy` | frame policy | versioned spec/allow/write/preserve operation, actual place, bounded partitioned policy children and owner label | frame policy runtime probes; source producer pending |
 <!-- /inventory:node-kinds -->
 
 ## Typing binding kinds
