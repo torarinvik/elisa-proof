@@ -70,6 +70,7 @@ extend ElisaProofKernelReplay:
                 if binding.kind == "function-parameter":
                     parameter_indices.push(binding_index)
                     parameter_binding_count <- parameter_binding_count + 1
+            return (false, empty) if not proof_kernel_replay_enum_underlying_bindings_valid(environment, work)
             parameter_bucket_heads: mutable darray[usize] = []
             parameter_next_indices: mutable darray[usize] = []
             if parameter_binding_count > 0:
@@ -113,6 +114,7 @@ extend ElisaProofKernelReplay:
                 if binding.kind == "function-parameter":
                     scratch.function_parameter_indices.push(binding_index)
                     parameter_binding_count <- parameter_binding_count + 1
+            return (false, 0, 0) if not proof_kernel_replay_enum_underlying_bindings_valid(environment, work)
             return (true, value_binding_count, parameter_binding_count)
 
         def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
@@ -254,6 +256,10 @@ extend ElisaProofKernelReplay:
             elif binding.kind == "enum-tag":
                 return false if binding.owner == "" or binding.sort != "named" or binding.type_name != binding.owner
                 return false if binding.element_sort != "" or binding.element_type_name != "" or binding.type_identity == 0 or binding.owner_type_identity != binding.type_identity or binding.element_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
+            elif binding.kind == "enum-underlying":
+                return false if binding.owner == "" or binding.name != binding.owner or binding.sort != "integer"
+                return false if binding.type_name != "i8" and binding.type_name != "i16" and binding.type_name != "i32" and binding.type_name != "i64" and binding.type_name != "u8" and binding.type_name != "u16" and binding.type_name != "u32" and binding.type_name != "u64"
+                return false if binding.element_sort != "" or binding.element_type_name != "" or binding.type_identity != 0 or binding.owner_type_identity == 0 or binding.element_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
             else:
                 return false
             tuple_type: bool = binding.sort == "aggregate" and binding.type_name == "tuple"
@@ -273,6 +279,51 @@ extend ElisaProofKernelReplay:
                 return true
             return binding.element_sort == "" and binding.element_type_name == "" and binding.element_type_identity == 0 and (tuple_type or named_type_binding or nullable_reference_binding or nullable_opaque_reference_binding or binding.type_identity == 0)
 
+        # An underlying-type row is meaningful only beside one exact declared const enum. Validate
+        # the whole relation under the existing work budget. Count every same-identity type row
+        # and backing row, regardless of owner spelling, so a forged alias or conflicting owner
+        # cannot hide beside the selected name. Duplicate backing rows refuse even when no cast
+        # queries the enum.
+        def proof_kernel_replay_enum_underlying_bindings_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> bool:
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            for index in 0..<total_bindings |index, environment, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                expected: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if expected.kind != "enum-underlying"
+                type_identity_rows: mutable usize = 0
+                matching_type_rows: mutable usize = 0
+                tag_rows: mutable usize = 0
+                member_rows: mutable usize = 0
+                underlying_rows: mutable usize = 0
+                scope_rows: mutable usize = 0
+                scope_expected_count: mutable usize = 0
+                scope_final_rows: mutable usize = 0
+                conflicting_owner: mutable bool = false
+                for candidate_index in 0..<total_bindings |candidate_index, environment, expected, type_identity_rows, matching_type_rows, tag_rows, member_rows, underlying_rows, scope_rows, scope_expected_count, scope_final_rows, conflicting_owner, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, candidate_index)
+                    if candidate.kind == "type" and candidate.type_identity == expected.owner_type_identity:
+                        type_identity_rows <- type_identity_rows + 1
+                        matching_type_rows <- matching_type_rows + 1 if candidate.name == expected.owner and candidate.type_name == expected.owner and candidate.sort == "named"
+                    if candidate.kind == "enum-tag" and candidate.type_identity == expected.owner_type_identity:
+                        tag_rows <- tag_rows + 1
+                        conflicting_owner <- true if candidate.owner != expected.owner
+                    if candidate.kind == "enum-member" and candidate.type_identity == expected.owner_type_identity:
+                        member_rows <- member_rows + 1
+                        conflicting_owner <- true if candidate.owner != expected.owner
+                    if candidate.kind == "enum-scope-segment" and candidate.type_identity == expected.owner_type_identity:
+                        scope_rows <- scope_rows + 1
+                        conflicting_owner <- true if candidate.owner != expected.owner
+                        scope_expected_count <- candidate.parameter_count if scope_expected_count == 0
+                        conflicting_owner <- true if candidate.parameter_count != scope_expected_count
+                        scope_final_rows <- scope_final_rows + 1 if candidate.parameter_index + 1 == candidate.parameter_count and candidate.name == expected.owner
+                        conflicting_owner <- true if candidate.parameter_index + 1 == candidate.parameter_count and candidate.name != expected.owner
+                    if candidate.kind == "enum-underlying" and candidate.owner_type_identity == expected.owner_type_identity:
+                        underlying_rows <- underlying_rows + 1
+                        conflicting_owner <- true if candidate.owner != expected.owner or candidate.name != expected.owner
+                return false if type_identity_rows != 1 or matching_type_rows != 1 or tag_rows == 0 or member_rows == 0 or underlying_rows != 1 or scope_rows == 0 or scope_rows != scope_expected_count or scope_final_rows != 1 or conflicting_owner
+            return true
+
         def proof_kernel_replay_type_environment_binding_count(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) -> usize:
             return ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET + 1 if environment.global_bindings.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
             return ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET + 1 if environment.bindings.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET - environment.global_bindings.count
@@ -290,7 +341,8 @@ extend ElisaProofKernelReplay:
             for index in 0..<total_bindings |index, environment|:
                 binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
                 return false if not proof_kernel_replay_typing_binding_valid(binding)
-            return true
+            work: mutable usize = 0
+            return proof_kernel_replay_enum_underlying_bindings_valid(environment, &work)
 
         def proof_kernel_replay_type_environment_invalid_binding_name(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) -> sview:
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
@@ -298,6 +350,8 @@ extend ElisaProofKernelReplay:
             for index in 0..<total_bindings |index, environment|:
                 binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
                 return binding.name if not proof_kernel_replay_typing_binding_valid(binding)
+            work: mutable usize = 0
+            return "__kernel_enum_underlying__" if not proof_kernel_replay_enum_underlying_bindings_valid(environment, &work)
             return ""
 
         def proof_kernel_replay_type_scan_budget_admitted(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, node_count: usize) -> bool:
