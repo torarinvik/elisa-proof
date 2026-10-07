@@ -85,6 +85,7 @@ run_py_test test_build_manifest_sidecar_integrity.py
 run_py_test test_compiler_recipe_inputs.py
 run_py_test test_plain_enum_propositions.py
 run_py_test test_conditional_scaled_sum.py
+run_py_test test_guarded_call_result.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
 run_py_test test_cycle_arena_runtime_rejection.py
