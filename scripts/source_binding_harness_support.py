@@ -11,6 +11,7 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
     replay_file = root / "src/proof/replay.elisa"
     private_helpers = {
         (root / "src/proof/replay/source_binding_validation.elisa").resolve(): "source_binding_validation_test.elisa",
+        (root / "src/proof/replay/source_binding_validation/typed_return_constants.elisa").resolve(): "typed_return_constants_test.elisa",
         (root / "src/proof/replay/source_binding_validation/immutable_bindings.elisa").resolve(): "immutable_bindings_test.elisa",
     }
     includes = re.findall(r'^include "([^"]+)"$', replay_file.read_text(encoding="utf-8"), re.MULTILINE)
@@ -81,6 +82,7 @@ def run_source_binding_replay_harness(
         "__BINDING_SINK_SOURCE__": (root / "test/repro/audit_local_binding_sink_adversarial.elisa").read_text(encoding="utf-8"),
         "__NESTED_BUILTIN_SOURCE__": (root / "test/repro/audit_local_binding_nested_builtin_positive.elisa").read_text(encoding="utf-8"),
         "__SIMPLE_LOCAL_BINDING_SOURCE__": (root / "test/repro/audit_local_binding_simple_positive.elisa").read_text(encoding="utf-8"),
+        "__TYPED_RETURN_SOURCE__": (root / "examples/typed_return_constant.elisa").read_text(encoding="utf-8"),
         "__FALSE_INVARIANT_SOURCE__": baseline_source.replace("invariant rounds <= limit", "invariant rounds < limit", 1),
         "__OVERRUN_SOURCE__": baseline_source.replace("rounds <- rounds + 1", "rounds <- rounds + 2", 1),
         "__STALE_INITIALIZER_SOURCE__": baseline_source.replace(
@@ -123,7 +125,9 @@ def run_source_binding_replay_harness(
                 capture_output=True,
                 text=True,
                 cwd=root,
-                timeout=600,
+                # This standalone harness embeds the pinned parser and proof replay modules;
+                # Stage1 can take longer than the product build on a busy validation host.
+                timeout=2400,
             )
             if compiled.returncode:
                 raise AssertionError(

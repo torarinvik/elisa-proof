@@ -1,0 +1,64 @@
+# Validate the synthetic typed witness used when a signed return constant needs its
+# declared width. The witness is live only for the exact source return and exact type.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT: usize = 64
+
+        def proof_replay_typed_return_pos_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
+            return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+        def proof_replay_typed_return_signed_width(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, width: mutable i64&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, width, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, return_type, _, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches <- matches + 1
+                            width <- proof_signed_type_width(return_type, declarations, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_typed_return_signed_width(nested, owner, owner_line, width, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_typed_return_find_source(body: darray[Ast::Stmt]&, value: Ast::Expr, position: Ast::Pos, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT
+            for statement in body |body, value, position, matches, depth|:
+                match statement:
+                    Ast::Stmt.Return(returned, return_position):
+                        if proof_replay_typed_return_pos_equal(return_position, position) and proof_replay_expr_equal(returned, value) and proof_replay_local_binding_expr_positions_match(returned, value):
+                            matches <- matches + 1
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_replay_typed_return_find_source(then_body, value, position, matches, depth + 1)
+                        proof_replay_typed_return_find_source(else_body, value, position, matches, depth + 1)
+                    Ast::Stmt.While(_, nested, _):
+                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
+                    Ast::Stmt.For(_, _, _, nested, _):
+                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |arm, value, position, matches, depth|:
+                            proof_replay_typed_return_find_source(arm.body, value, position, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_typed_return_constant_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line != trace.line
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, value, _):
+                    return false if not proof_internal_name_is_rebind(symbol) or not proof_closed_integer_arithmetic(value, 0)
+                    width: mutable i64 = 0
+                    declaration_matches: mutable usize = 0
+                    proof_replay_typed_return_signed_width(report.source_declarations, trace.name, report.replay_owner_line, &width, &declaration_matches, 0)
+                    return false if declaration_matches != 1 or width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
+                    body: mutable darray[Ast::Stmt] = []
+                    owner_matches: mutable usize = 0
+                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, 0)
+                    return false if owner_matches != 1
+                    position: Ast::Pos = Ast::expr_pos(trace.expression)
+                    return false if position.line != trace.line
+                    source_matches: mutable usize = 0
+                    proof_replay_typed_return_find_source(body, value, position, &source_matches, 0)
+                    return source_matches == 1
+                _:
+                    return false
