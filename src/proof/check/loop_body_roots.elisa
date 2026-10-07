@@ -1,31 +1,64 @@
 extend ElisaProof:
     private:
+        def proof_collect_block_expression_writes(expression: Ast::Expr, written: mutable darray[sview]&, depth: usize, work: mutable usize&) -> void:
+            if depth >= 64 or work >= 4096:
+                proof_push_aliased(written, "*")
+                return
+            work <- work + 1
+            match expression:
+                Ast::Expr.Block(statements, yielded, _, _):
+                    proof_collect_assignment_roots_bounded(statements, written, depth + 1, work)
+                    proof_collect_block_expression_writes(yielded, written, depth + 1, work)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_block_expression_writes(inner, written, depth + 1, work)
+                _:
+                    pass
+
         # The roots a body assigns, in every nested statement form. Captured blocks nested in the
         # body are walked too: their capture lists bound what they can name, but a name they do
         # assign is still assigned by this body.
         def proof_collect_assignment_roots(body: darray[Ast::Stmt]&, written: mutable darray[sview]&) -> void:
-            for statement in body |written|:
+            work: mutable usize = 0
+            proof_collect_assignment_roots_bounded(body, written, 0, &work)
+
+        def proof_collect_assignment_roots_bounded(body: darray[Ast::Stmt]&, written: mutable darray[sview]&, depth: usize, work: mutable usize&) -> void:
+            if depth >= 64 or body.count > 4096:
+                proof_push_aliased(written, "*")
+                return
+            for statement in body |written, depth, work|:
+                if work >= 4096:
+                    proof_push_aliased(written, "*")
+                    return
+                work <- work + 1
                 match statement:
-                    Ast::Stmt.Assign(target, _, _, _):
+                    Ast::Stmt.Assign(target, _, value, _):
                         proof_push_aliased(written, proof_place_root_name(target, 0))
+                        proof_collect_block_expression_writes(value, written, depth + 1, work)
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_block_expression_writes(initializer, written, depth + 1, work)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_collect_assignment_roots(block_body, written)
-                    Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_collect_assignment_roots(then_body, written)
-                        proof_collect_assignment_roots(else_body, written)
-                    Ast::Stmt.While(_, while_body, _):
-                        proof_collect_assignment_roots(while_body, written)
-                    Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_collect_assignment_roots(for_body, written)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |written|:
-                            proof_collect_assignment_roots(arm.body, written)
+                        proof_collect_assignment_roots_bounded(block_body, written, depth + 1, work)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_block_expression_writes(condition, written, depth + 1, work)
+                        proof_collect_assignment_roots_bounded(then_body, written, depth + 1, work)
+                        proof_collect_assignment_roots_bounded(else_body, written, depth + 1, work)
+                    Ast::Stmt.While(condition, while_body, _):
+                        proof_collect_block_expression_writes(condition, written, depth + 1, work)
+                        proof_collect_assignment_roots_bounded(while_body, written, depth + 1, work)
+                    Ast::Stmt.For(_, _, iterable, for_body, _):
+                        proof_collect_block_expression_writes(iterable, written, depth + 1, work)
+                        proof_collect_assignment_roots_bounded(for_body, written, depth + 1, work)
+                    Ast::Stmt.Match(subject, arms, _):
+                        proof_collect_block_expression_writes(subject, written, depth + 1, work)
+                        for arm in arms |written, depth, work|:
+                            proof_collect_block_expression_writes(arm.guard, written, depth + 1, work)
+                            proof_collect_assignment_roots_bounded(arm.body, written, depth + 1, work)
                     Ast::Stmt.Expr(expression, _):
-                        match expression:
-                            Ast::Expr.Block(statements, _, _, _):
-                                proof_collect_assignment_roots(statements, written)
-                            _:
-                                pass
+                        proof_collect_block_expression_writes(expression, written, depth + 1, work)
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_block_expression_writes(returned, written, depth + 1, work) if value is returned
+                    Ast::Stmt.Contract(_, expression, _):
+                        proof_collect_block_expression_writes(expression, written, depth + 1, work)
                     _:
                         pass
 
@@ -38,7 +71,12 @@ extend ElisaProof:
         def proof_collect_extent_written_roots(body: darray[Ast::Stmt]&, element: mutable darray[sview]&, whole: mutable darray[sview]&) -> void:
             for statement in body |element, whole|:
                 match statement:
-                    Ast::Stmt.Assign(target, _, _, _):
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        work: mutable usize = 0
+                        proof_collect_block_expression_writes(initializer, whole, 0, &work)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        work: mutable usize = 0
+                        proof_collect_block_expression_writes(value, whole, 0, &work)
                         root: sview = proof_place_root_name(target, 0)
                         match target:
                             Ast::Expr.Index(_, _, _):
@@ -74,38 +112,8 @@ extend ElisaProof:
         # holding it -- which the aliasing walk sees -- or hand control to a callee, which this
         # sees. A body with neither cannot reach anything it does not itself name.
         def proof_body_has_call(body: darray[Ast::Stmt]&, operator_mask: usize) -> bool:
-            for statement in body |operator_mask|:
-                match statement:
-                    Ast::Stmt.Assign(target, _, value, _):
-                        return true if proof_expr_has_call(target) or proof_expr_has_move(target) or proof_source_expression_has_overloaded_operator(target, operator_mask, 0)
-                        return true if proof_expr_has_call(value) or proof_expr_has_move(value) or proof_source_expression_has_overloaded_operator(value, operator_mask, 0)
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_expr_has_call(initializer) or proof_expr_has_move(initializer) or proof_source_expression_has_overloaded_operator(initializer, operator_mask, 0)
-                    Ast::Stmt.Expr(expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
-                    Ast::Stmt.Block(_, _, _, block_body, _):
-                        return true if proof_body_has_call(block_body, operator_mask)
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
-                        return true if proof_body_has_call(then_body, operator_mask) or proof_body_has_call(else_body, operator_mask)
-                    Ast::Stmt.While(condition, while_body, _):
-                        return true if proof_expr_has_call(condition) or proof_expr_has_move(condition) or proof_source_expression_has_overloaded_operator(condition, operator_mask, 0)
-                        return true if proof_body_has_call(while_body, operator_mask)
-                    Ast::Stmt.For(bind, _, iterable, for_body, _):
-                        return true if bind == "parallel"
-                        return true if proof_expr_has_call(iterable) or proof_expr_has_move(iterable) or proof_source_expression_has_overloaded_operator(iterable, operator_mask, 0)
-                        return true if proof_body_has_call(for_body, operator_mask)
-                    Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_expr_has_call(scrutinee) or proof_expr_has_move(scrutinee) or proof_source_expression_has_overloaded_operator(scrutinee, operator_mask, 0)
-                        for arm in arms:
-                            return true if proof_expr_has_call(arm.guard) or proof_source_expression_has_overloaded_operator(arm.guard, operator_mask, 0) or proof_body_has_call(arm.body, operator_mask)
-                    Ast::Stmt.Return(value, _):
-                        return true if value is returned and (proof_expr_has_call(returned) or proof_expr_has_move(returned) or proof_source_expression_has_overloaded_operator(returned, operator_mask, 0))
-                    Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_expr_has_call(expression) or proof_expr_has_move(expression) or proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
-                    _:
-                        pass
-            return false
+            work: mutable usize = 0
+            return proof_body_has_effect_bounded(body, operator_mask, 0, &work)
 
         # A fact that survives an iteration of a body whose only writes to `extent_safe` names are
         # element writes. Every name it mentions is either untouched by the body, or an
@@ -198,8 +206,12 @@ extend ElisaProof:
                 proof_forget_values(names, values, position)
                 proof_clear_facts_keep_type_bounds(facts, names, parameters, report, owner)
                 return
-            for existing in report.escaping_names |written|:
-                proof_push_aliased(written, existing)
+            body_aliased: mutable darray[sview] = []
+            proof_collect_aliased_names(body, functions, &body_aliased, false, no_value_roots)
+            scalar_writes_only: bool = body_aliased.count == 0 and not proof_body_has_call(body, report.source_primitive_operator_mask) and all target in written where not (any candidate in names where candidate == target) or proof_scalar_witnessed(facts, target)
+            if not scalar_writes_only:
+                for existing in report.escaping_names |written|:
+                    proof_push_aliased(written, existing)
             # A collection the body only writes elements of still has the extent it had at entry,
             # so the facts that mention it purely as `name.count` -- the binder's own range among
             # them -- are re-established after the forgetting. A name aliased anywhere, or written
@@ -207,8 +219,6 @@ extend ElisaProof:
             element_roots: mutable darray[sview] = []
             whole_roots: mutable darray[sview] = []
             proof_collect_extent_written_roots(body, &element_roots, &whole_roots)
-            body_aliased: mutable darray[sview] = []
-            proof_collect_aliased_names(body, functions, &body_aliased, false, no_value_roots)
             # The frame's aliased set is in the disqualifier because a reference to the name may
             # be held in another binding, and something in the body could mutate through it. That
             # needs the body either to name the holder -- which puts the holder in the body's own
@@ -219,7 +229,7 @@ extend ElisaProof:
             extent_safe: mutable darray[sview] = []
             for candidate in element_roots |extent_safe, whole_roots, body_aliased, reaches_beyond_itself, report|:
                 continue if candidate == ""
-                continue if any existing in whole_roots where existing == candidate
+                continue if any existing in whole_roots where existing == candidate or existing == "*"
                 continue if any existing in body_aliased where existing == candidate
                 continue if reaches_beyond_itself and (any existing in report.escaping_names where existing == candidate)
                 proof_push_aliased(&extent_safe, candidate)
