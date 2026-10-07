@@ -1,0 +1,67 @@
+extend ElisaProofFrameSource:
+    private:
+        def inert_value(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return inert_value(inner, depth + 1)
+                _:
+                    return false
+
+    public:
+        struct Event:
+            kind: sview
+            position: Ast::Pos
+            statement_index: usize
+            clause_index: usize
+            place: ElisaProofKernelFramePolicy::Place
+
+        # Complete only for the explicit direct-body subset. Unknown statement,
+        # expression or write mappings invalidate the entire inventory.
+        def direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            policy = source_policy(declarations, name, line, tokens, source, source_length)
+            context = owner(declarations, name, line)
+            return (false, []) if not policy.known or not context.known
+            events: mutable darray[Event] = []
+            has_changes: mutable bool = false
+            for index in 0..<policy.clauses.count |index, policy, events, has_changes, declarations, name, line|:
+                clause = policy.clauses[index]
+                return (false, []) if not place_typed(declarations, name, line, clause.place)
+                has_changes <- true if clause.kind == "changes"
+                events.push(Event{kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
+            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line|:
+                match context.body[index]:
+                    Ast::Stmt.Contract(kind, _, _):
+                        return (false, []) if kind != "changes" and kind != "preserves"
+                    Ast::Stmt.Assign(_, operator, value, position):
+                        # Compound operators can invoke overloaded code. Their
+                        # target is reconstructed elsewhere, but inventory needs
+                        # an independent mapping of those additional effects.
+                        return (false, []) if operator != TokenKind.LArrow or not inert_value(value, 0)
+                        actual = direct_write(declarations, name, line, position)
+                        return (false, []) if not actual.known or not place_typed(declarations, name, line, actual.place)
+                        if has_changes:
+                            return (false, []) if events.count >= 4096
+                            events.push(Event{kind: "allow", position: position, statement_index: index, clause_index: 0, place: actual.place})
+                        for clause_index in 0..<policy.clauses.count |clause_index, policy, events, position, index, actual|:
+                            if policy.clauses[clause_index].kind == "preserves":
+                                return (false, []) if events.count >= 4096
+                                events.push(Event{kind: "preserve", position: position, statement_index: index, clause_index: clause_index, place: actual.place})
+                    Ast::Stmt.Return(value, _):
+                        if value is expression:
+                            return (false, []) if not inert_value(expression, 0)
+                    _:
+                        return (false, [])
+            return (true, events)
+
+        def direct_events_match(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, claimed: darray[Event]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            expected = direct_events(declarations, name, line, tokens, source, source_length)
+            return false if not expected.known or claimed.count != expected.events.count
+            for index in 0..<claimed.count |index, claimed, expected|:
+                actual = claimed[index]
+                original = expected.events[index]
+                return false if actual.kind != original.kind or actual.statement_index != original.statement_index or actual.clause_index != original.clause_index or not same_position(actual.position, original.position)
+                return false if actual.place.parameter != original.place.parameter or actual.place.depth != original.place.depth or actual.place.field != original.place.field or actual.place.field2 != original.place.field2 or actual.place.field3 != original.place.field3
+            return true

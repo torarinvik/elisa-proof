@@ -439,3 +439,34 @@ that checks original source occurrences as well as certificate correspondence;
 metadata/count consistency alone must not authorize an omitted or relabelled
 source event. Qualified/generic type paths and nested/alias/dynamic/callee writes
 remain part of the unfinished frame work and full implementation objective.
+
+### Source-derived direct event inventory
+
+Inspection confirms the checker records one preservation obligation per preserve
+place (not one combined preservation event). `frame_source_events.elisa` now
+reconstructs distinct spec occurrences, one allowance event when changes exist,
+and one preservation event for each source preserve clause per direct write.
+Events retain full position, original statement index, source clause index and
+actual place. Exact origin comparison rejects omitted, duplicated and altered
+entries; it does not validate verdicts or attach report certificates.
+
+This first inventory is explicitly limited to direct `<-` writes with literal/
+identifier/parenthesized values and simple returns. Unknown calls, aliases, nested
+statements, other contract forms and compound operators invalidate the entire
+inventory without exposing a partial result. Compound target correspondence
+remains supported by the earlier helper, but inventory must also reconstruct
+potential overloaded-operator effects before claiming completeness for them.
+The full implementation still requires those broader paths.
+
+Sixteen inventory controls pass at O0/O2 with 96761822, including per-clause counts
+and identities, allowance-free preservation, unsupported effects after a valid
+early write, duplicate/position/omission forgeries and compound refusal. Added to
+the runtime matrix. All-products strict O2 build succeeds, generation
+`9ec4e45b6c0946359380b3c9cf138c5c`; admission matrix/diagnostics and kernel inventory
+pass. Engine sweep remains 66/73 with the same seven failures. Logs: engine
+build/validation/prover-frame-source-events-guarded-build.log and
+proof-frame-source-events-sweep.log. Artifacts: frame_source_events_runtime-O0/-O2.
+Next: add individual preservation-clause replay (the current preservation helper
+proves the whole list), then bind producer events/attempts and certificate dispatch
+to this independently reconstructed source inventory. Production admission remains
+unchanged and the accounting gap remains open.
