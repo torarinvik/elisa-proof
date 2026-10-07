@@ -1,0 +1,46 @@
+# Execute value-block assignments with private local scope and conservative exit state.
+extend ElisaProof:
+    private:
+        def proof_check_value_block_assignment(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            match statement:
+                Ast::Stmt.Assign(target, operator, initializer, position):
+                    return false if operator != TokenKind.LArrow or proof_ident_name(target) == ""
+                    match initializer:
+                        Ast::Expr.Block(statements, yielded, _, _):
+                            return false if not (any existing in names where existing == proof_ident_name(target))
+                            if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
+                                flow.valid <- false
+                                return true
+                            proof_check_direct_frame_write(proof_substitute(target, names, values), names, frame_parameters, changes, preserves, report, name, position.line)
+                            # Execute in a private scope: an accumulator may shadow the target.
+                            # The yielded expression still executes, so its calls and indexes
+                            # receive the same safety checks as an ordinary expression statement.
+                            block_body: mutable darray[Ast::Stmt] = []
+                            block_body.extend(statements)
+                            block_body.push(Ast::Stmt.Expr(yielded, position))
+                            block_names: mutable darray[sview] = proof_copy_names(names)
+                            block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+                            block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+                            block_fixed_names: mutable darray[Ast::Expr] = proof_copy_exprs(fixed_names)
+                            block_fixed_extents: mutable darray[i64] = []
+                            block_fixed_extents.extend(fixed_extents)
+                            block_flow: mutable ProofFlow = proof_empty_flow()
+                            proof_check_returns(block_body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, &block_fixed_names, &block_fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &block_flow)
+                            flow.valid <- false if not block_flow.valid
+                            flow.normal <- block_flow.normal
+                            flow.breaks <- flow.breaks or block_flow.breaks
+                            flow.continues <- flow.continues or block_flow.continues
+                            proof_append_continue_states(flow, block_flow)
+                            # Local facts and values do not escape. Havoc everything the block
+                            # may reach, plus the assigned outer target. No initial accumulator
+                            # value or arbitrary-iteration equality justifies an exit assertion.
+                            effects: mutable darray[Ast::Stmt] = []
+                            effects.extend(block_body)
+                            effects.push(Ast::Stmt.Assign(target, operator, Ast::Expr.Invalid, position))
+                            proof_forget_loop_entry(names, values, facts, effects, functions, frame_parameters, report, name, position)
+                            proof_forget_loop_mutated_reference_parameters(names, values, effects, functions, frame_parameters, name, fixed_names, fixed_extents)
+                            return true
+                        _:
+                            return false
+                _:
+                    return false
