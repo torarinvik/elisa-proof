@@ -102,6 +102,27 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_symbol_name(nodes, node.left, depth + 1, work) if node.kind == "paren"
             return ""
 
+        def proof_kernel_replay_call_owner_identity(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, callee_root: usize, depth: usize, work: mutable usize&) -> usize:
+            return 0 if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or callee_root >= nodes.count
+            callee: ElisaProofKernelCore::ProofKernelNode = nodes[callee_root]
+            if callee.kind == "paren":
+                return proof_kernel_replay_call_owner_identity(nodes, environment, callee.left, depth + 1, work)
+            if callee.kind == "scope":
+                return proof_kernel_replay_scope_owner_identity(nodes, environment, callee.left, work)
+            if callee.kind == "ident":
+                found: mutable usize = 0
+                seen: mutable bool = false
+                for binding_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |binding_index, environment, found, seen, work|:
+                    return 0 if not proof_kernel_replay_type_work_consume(work)
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                    continue if binding.kind != "module-context"
+                    return 0 if seen
+                    return 0 if not proof_kernel_replay_owner_identity_recorded(environment, binding.owner_type_identity, work)
+                    found <- binding.owner_type_identity
+                    seen <- true
+                return found if seen
+            return 0
+
         def proof_kernel_replay_symbol_name_root(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work: mutable usize&) -> usize:
             return nodes.count if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or root >= nodes.count
             return nodes.count if not proof_kernel_replay_type_work_consume(work)
@@ -317,7 +338,7 @@ extend ElisaProofKernelReplay:
                     return false if index >= call.children_count and not parameter.parameter.parameter_has_default
             return true
 
-        def proof_kernel_replay_call_result_sort_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, call: ElisaProofKernelCore::ProofKernelNode, callee_name: sview, depth: usize, remaining: usize, work: mutable usize&) -> ProofKernelInferredSort:
+        def proof_kernel_replay_call_result_sort_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, call: ElisaProofKernelCore::ProofKernelNode, callee_name: sview, callee_owner_identity: usize, depth: usize, remaining: usize, work: mutable usize&) -> ProofKernelInferredSort:
             requires depth <= PROOF_KERNEL_CALL_DEPTH_PRECONDITION
             requires remaining > 0
             decreases remaining
@@ -327,16 +348,12 @@ extend ElisaProofKernelReplay:
             name_seen: mutable bool = false
             ambiguous: mutable bool = false
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            for index in 0..<total_bindings |index, nodes, children, environment, call, callee_name, depth, remaining, selected, found, name_seen, ambiguous, work|:
+            for index in 0..<total_bindings |index, nodes, children, environment, call, callee_name, callee_owner_identity, depth, remaining, selected, found, name_seen, ambiguous, work|:
                 return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
                 function: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if function.kind != "function" or function.name != callee_name
-                # The source-neutral call node retains only the leaf of a qualified callee. Once
-                # two declarations share that leaf, the environment no longer identifies which
-                # module member the source resolver selected. Reject the whole name, even when
-                # the declarations happen to return the same sort or only one accepts the
-                # supplied arguments; otherwise a qualified call can be admitted against the
-                # wrong declaration with no diagnostic.
+                continue if function.kind != "function" or function.name != callee_name or function.owner_type_identity != callee_owner_identity
+                # The call path is matched against exact module owner segments before this
+                # lookup. Within that exact owner, duplicate declarations remain ambiguous.
                 if name_seen:
                     ambiguous <- true
                 else:
@@ -400,9 +417,9 @@ extend ElisaProofKernelReplay:
             if node.kind == "scope":
                 enum_member: (is_enum_path: bool, sort: ProofKernelInferredSort) = proof_kernel_replay_qualified_enum_member_sort(nodes, environment, root, work)
                 return enum_member.sort if enum_member.is_enum_path
-                qualifier: sview = proof_kernel_replay_scope_qualifier(nodes, root)
-                return proof_kernel_replay_unknown_sort() if qualifier == ""
-                owned: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_owned_value_binding(environment, typing_index, node.name, qualifier, work)
+                owner_identity: usize = proof_kernel_replay_scope_owner_identity(nodes, environment, node.left, work)
+                return proof_kernel_replay_unknown_sort() if owner_identity == 0
+                owned: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_owned_value_binding(environment, typing_index, node.name, owner_identity, work)
                 return proof_kernel_replay_binding_sort(owned.binding) if owned.known
                 return proof_kernel_replay_unknown_sort()
             # Every leaf returned above; a compound term needs one more level of budget. A bare
@@ -424,7 +441,8 @@ extend ElisaProofKernelReplay:
                     target: ProofKernelInferredSort = proof_kernel_replay_primitive_numeric_sort(callee.name)
                     return target if target.known and proof_kernel_replay_numeric_sort(receiver) and proof_kernel_replay_numeric_sort(target)
                     return proof_kernel_replay_unknown_sort()
-                return proof_kernel_replay_call_result_sort_remaining(nodes, children, environment, typing_index, node, callee_name, depth + 1, remaining - 1, work)
+                callee_owner_identity: usize = proof_kernel_replay_call_owner_identity(nodes, environment, node.left, 0, work)
+                return proof_kernel_replay_call_result_sort_remaining(nodes, children, environment, typing_index, node, callee_name, callee_owner_identity, depth + 1, remaining - 1, work)
                 return proof_kernel_replay_unknown_sort()
             if node.kind == "construct":
                 type_name_root: usize = proof_kernel_replay_symbol_name_root(nodes, node.left, depth + 1, work)
