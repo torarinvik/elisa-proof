@@ -152,3 +152,22 @@ boundary, and is included in the regular runtime matrix. Artifact: engine
 source owner, checking actual declared policy and field/type correspondence,
 and integrating certificate/event admission remain pending. The decoder by
 itself does not authenticate the caller-supplied formal-name list.
+
+### Exact source owner lookup
+
+`replay/frame_source_owners.elisa` derives ordered formal names and body statements
+from a unique function name plus declaration line in the independently bound AST.
+It rejects duplicate matches, malformed formal names, more than 64 formals,
+64-level traversal exhaustion and a cumulative 4096-declaration budget exhaustion.
+A failed lookup returns empty outputs, including when an earlier match existed.
+The source file identity and qualified owner identity still require admission checks.
+
+The parser-backed `examples/frame_source_owners_runtime.elisa` passes six controls
+at strict O2 with compiler 96761822: exact source/formal order, wrong line, wrong
+name, duplicate owner with cleared outputs, and depth exhaustion. The same O0
+executable crashes in main (EXC_BAD_ACCESS); increasing linker stack size did not
+resolve it. This probe is not yet in the runtime matrix and the new lookup is not
+yet imported into production replay. Investigate the O0 lowering failure before
+claiming optimization-independent qualification. Policy/type correspondence and
+certificate/event admission remain open. Artifact: engine
+`build/validation/frame-source-owners` (O2, exit 0).
