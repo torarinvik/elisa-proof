@@ -470,3 +470,24 @@ Next: add individual preservation-clause replay (the current preservation helper
 proves the whole list), then bind producer events/attempts and certificate dispatch
 to this independently reconstructed source inventory. Production admission remains
 unchanged and the accounting gap remains open.
+
+### Individual source preserve-clause replay
+
+`frame_source_preserve_clause.elisa` adds an independent per-clause preservation
+boundary. It requires a preserve kernel root with exactly one policy child, a
+valid index into the combined original header/body clauses, the preserves kind,
+exact typed preserved place and exact typed source mutation target. The whole-list
+preservation entry point remains available with its original conjunction meaning.
+The source clause index is not a producer-filtered preserve ordinal.
+
+The composed runtime passes 28 controls at O0/O2 with 96761822, including an
+unaffected preserve clause succeeding while another overlaps, the overlapping
+clause failing, wrong clause identity, changes-as-preserves refusal and invalid
+index refusal. All-products strict O2 build succeeds, generation
+`2d7f35c9dc52410980b3f1e5cb694f1d`; source admission matrix/invariant diagnostics
+and kernel inventory pass. Uncached engine sweep remains 66/73 with the same
+seven failures. Logs: engine build/validation/prover-frame-preserve-clause-build.log
+and proof-frame-preserve-clause-sweep.log. Artifacts: frame_source_admission_runtime-O0/-O2.
+Per-event producer attempts, source-context dispatch and full inventory/report
+attachment remain next; broader source/effect mappings and the full implementation
+plan remain unfinished.
