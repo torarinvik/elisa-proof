@@ -53,3 +53,10 @@ missing, open, incomplete and replay-gap refusals. Its selected-gap control now
 uses the existing loop-counter replay-gap fixture instead of condition-call
 positions, whose certificates now replay. Log: engine
 `build/validation/cli-result-lattice-refresh.log`.
+
+The kernel inventory gate now passes: ten tables and 185 entries match the
+source. The documentation removes a duplicate deterministic-call row, records
+qualified enum scope typing and const-enum facts, and lists the current shared
+source-adapter/search and package preflight dependencies. It also distinguishes
+shape checks from selected source validators. This is an inventory repair; no
+production trust boundary or full-matrix verdict changed.

@@ -110,6 +110,7 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | `field` | a field of an owner type | owner and owner type identity set |
 | `enum-member` | an enum member value | owner is the enum; identities agree |
 | `enum-tag` | an enum tag used in `is` tests | owner is the enum; identities agree |
+| `enum-scope-segment` | one qualified enum path segment | enum type identity and bounded path ordinal/count agree |
 <!-- /inventory:typing-kinds -->
 
 ## Certificate rules
@@ -159,17 +160,18 @@ kernel root, or replay dispatch are sound.
 Each fact a certificate uses must be bound to a `ProofFactTrace` whose kernel expression is
 structurally equal to the fact.
 
-Boundary kinds are **trusted source facts**. They are sound only because the named producer in
-`check/` emits them for exactly the source construct in the table. Replay checks only their
-shape: `proof_replay_boundary_trace_shape_valid` requires no dependency and no premises, so a
-summary trace cannot be relabelled as one.
+Boundary kinds describe source facts emitted by the named producer in `check/`.
+`proof_replay_boundary_trace_shape_valid` requires no dependency and no premises, so a
+summary trace cannot be relabelled as one. Selected kinds also have source validators in
+`replay/boundary_trace_shapes.elisa`, including constants, enum facts, match exhaustiveness
+and deterministic calls. These validators narrow the producer trust boundary; they do not
+establish independent source correspondence for every boundary fact.
 
 <!-- inventory:boundary-trace-kinds -->
 | Kind | Producer | Source construct |
 |---|---|---|
 | `global-constant` | `check/global_constants.elisa` | a module constant's value (re-validated by `replay/global_constant_validation.elisa`) |
 | `global-constant-qualified` | `check/global_constants.elisa` | a module constant reached through a qualified name (re-validated by `replay/global_constant_validation.elisa`) |
-| `deterministic-call` | `check/function_contracts_and_frames.elisa` | scalar witness marker for a source-site pure call (reconstructed from declarations at replay) |
 | `variant-exclusion` | `check/variant_exclusion.elisa` | `not (x is E.V) or not (x is E.W)` for distinct variants of a uniquely declared enum (re-validated by `replay/variant_exclusion_validation.elisa`) |
 | `match-exhaustiveness` | `check/returns/matches.elisa` | complete finite match over a uniquely declared enum's variants (re-validated against source declarations and proposition typing) |
 | `precondition` | `check/declaration_checks.elisa` | a function `requires` clause |
@@ -187,6 +189,8 @@ summary trace cannot be relabelled as one.
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 | `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
+| `const-enum-exclusion` | `check/operator_impl_chain.elisa` | distinct const-enum variant exclusion; replay validates source enum identity and values |
+| `const-enum-member-value` | `check/enum_value_types.elisa`, `check/operator_impl_chain.elisa` | const-enum member scalar comparison; replay validates source member value |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step
@@ -325,11 +329,22 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_head_name` | `proof/expr/ast_equal.elisa` | source adapter; module/type head lookup, not callable contract resolution |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 | `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
+| `proof_closed_integer_arithmetic` | `proof/linear/fixed_width_arithmetic_integrated_helpers.elisa` | untrusted search (shared) |
+| `proof_count_named_aggregates` | `proof/check/enum_value_types.elisa` | source adapter; aggregate identity lookup |
+| `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_is_comparison` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
+| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
+| `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | source adapter; builtin operator override guard |
+| `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; signed machine width |
+| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
+| `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; resolved type head |
+| `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
@@ -367,4 +382,5 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_push` | `app/portable_io.elisa` | output |
 | `proof_push_json_i64` | `app/portable_io.elisa` | output |
 | `proof_push_json_string` | `app/portable_io.elisa` | output |
+| `proof_package_input_preflight` | `portable/package_reader.elisa` | bounded package input preflight |
 <!-- /inventory:correspondence-external-calls -->
