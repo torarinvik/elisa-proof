@@ -113,3 +113,16 @@ runtime probes are now included in the primary matrix's integrated kernel
 runtime script. General arena dispatch, source binding and producer event
 certification remain pending. No source theorem is admitted by this addition.
 Artifact: engine `build/validation/frame-policy-certificates`.
+
+General arena admission now recognizes the three canonical frame node kinds
+and checks their exact child kinds with backward edges. The dedicated public
+`proof_kernel_replay_frame_report_checked_arena` validates the entire arena,
+refuses all supplied facts and then evaluates the frame policy. Frame nodes
+remain non-propositions: ordinary goal replay refuses them even when the caller
+supplies the policy itself as an assumption. The expanded strict O0 runtime
+probe passes 24 controls, including full arena admission, ordinary-proposition
+refusal, injected-fact refusal, false policy and cyclic-child refusal. The
+kernel inventory passes ten tables and 188 entries. Runtime artifact: engine
+`build/validation/frame-policy-arena`. Source-bound certificate dispatch and
+producer event lowering are still pending; the mathematical frame relation
+verdict does not authenticate any source frame declaration or write.
