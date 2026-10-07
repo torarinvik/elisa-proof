@@ -39,7 +39,47 @@ extend ElisaProof:
             return false if name == "" or name == target
             return false if not proof_replay_local_binding_parameter_source_unshadowed(declarations, owner, owner_line, name)
             return false if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
-            return proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+            return true if proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+            return proof_replay_local_binding_unwritten_integer_parameter(declarations, owner, owner_line, name)
+
+        # A mutable or by-reference integer parameter is as stable as an immutable one when the
+        # body never writes it: no assignment, lend, move or receiver call reaches its place
+        # (numeric conversions read only). Another `mutable` reference cannot alias it, since
+        # exclusive borrows are a language guarantee the producer also relies on.
+        def proof_replay_local_binding_unwritten_integer_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview) -> bool:
+            return false if owner == "" or owner_line == 0 or name == ""
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(declarations, owner, owner_line, &body, &owner_matches, 0)
+            return false if owner_matches != 1
+            matches: mutable usize = 0
+            integer: mutable bool = false
+            proof_replay_local_binding_parameter_integer_layers(declarations, owner, owner_line, name, &matches, &integer, 0)
+            return matches == 1 and integer and not proof_replay_source_body_touches(declarations, body, name, true, 0)
+
+        def proof_replay_local_binding_parameter_integer_layers(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, matches: mutable usize&, integer: mutable bool&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, name, matches, integer, depth|:
+                match declaration:
+                    Ast::Decl.Func(function_name, parameters, _, _, _, _, position):
+                        if function_name == owner and position.line == owner_line:
+                            for parameter in parameters |name, matches, integer|:
+                                if parameter.name == name:
+                                    matches <- matches + 1
+                                    integer <- proof_replay_local_binding_reference_integer_type(parameter.type_expression, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_local_binding_parameter_integer_layers(nested, owner, owner_line, name, matches, integer, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_reference_integer_type(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Mutable and operator != TokenKind.Ampersand and operator != TokenKind.Lmut
+                    return proof_replay_local_binding_reference_integer_type(inner, depth + 1)
+                _:
+                    return proof_replay_local_binding_integer_type(expression, 0)
 
         # Replay has no resolved cast-dispatch witness in local-binding traces. If any ordinary
         # or extern `__cast__` could occur in the imported unit, keep method-shaped numeric calls

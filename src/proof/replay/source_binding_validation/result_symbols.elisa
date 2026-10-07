@@ -1,0 +1,92 @@
+# A verified call that initializes a local (`child: u64 = f(...)`) may have its result stored
+# under a fresh proof symbol (`__elisa_rebind_N`) instead of the repeatable call expression. The
+# symbol names that one invocation's value, so facts over it hold for the rest of the function,
+# across later opaque calls; the local is tied to it by `child == symbol` only while the local
+# still holds the call's value. Replay accepts the symbol only as such a definition:
+#   - its position is the exact declaration statement, in the certificate's owner function,
+#     whose initializer is a direct call;
+#   - every local-binding of that function mentioning the symbol is exactly
+#     `local == symbol` at that declaration, and every function-summary value mentioning it is
+#     exactly the symbol at that position (the call's result binding);
+#   - `local == symbol` additionally needs the local to still hold the call's value at the
+#     consumer (the same reaching-definition check as a local-alias summary).
+extend ElisaProof:
+    private:
+        def proof_replay_result_symbol_find(body: darray[Ast::Stmt]&, position: Ast::Pos, found: mutable usize&, local: mutable sview&, call: mutable Ast::Expr&, depth: usize) -> void:
+            return if depth >= 96
+            for statement in body |position, found, local, call, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, initializer, statement_position):
+                        if proof_replay_source_position_equal(statement_position, position):
+                            found <- found + 1
+                            local <- name
+                            call <- initializer
+                            match initializer:
+                                Ast::Expr.Paren(inner, _):
+                                    call <- inner
+                                _:
+                                    pass
+                    Ast::Stmt.If(_, yes, no, _):
+                        proof_replay_result_symbol_find(yes, position, found, local, call, depth + 1)
+                        proof_replay_result_symbol_find(no, position, found, local, call, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_result_symbol_find(nested, position, found, local, call, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |position, found, local, call, depth|:
+                            proof_replay_result_symbol_find(arm.body, position, found, local, call, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        proof_replay_result_symbol_find(nested, position, found, local, call, depth + 1)
+                    _:
+                        pass
+
+        # The declaration a result symbol names: (known, local, call). Unknown when the position
+        # is not exactly one declaration of the owner whose initializer is a direct call, or when
+        # any binding or summary of the owner uses the symbol other than as that definition.
+        def proof_replay_result_symbol_definition(report: ProofReport&, owner: sview, symbol: sview, symbol_position: Ast::Pos) -> (known: bool, local: sview, call: Ast::Expr):
+            return (false, "", Ast::Expr.Invalid) if owner == "" or not proof_internal_name_is_rebind(symbol) or symbol_position.line == 0
+            body: mutable darray[Ast::Stmt] = []
+            return (false, "", Ast::Expr.Invalid) if not proof_replay_source_owner_body(report, owner, report.replay_owner_line, &body)
+            found: mutable usize = 0
+            local: mutable sview = ""
+            call: mutable Ast::Expr = Ast::Expr.Invalid
+            proof_replay_result_symbol_find(body, symbol_position, &found, &local, &call, 0)
+            return (false, "", Ast::Expr.Invalid) if found != 1 or local == "" or not proof_replay_is_call(call)
+            for candidate in report.traces.records |candidate, report, owner, symbol, symbol_position, local|:
+                continue if candidate.name != owner
+                continue if candidate.kind != "local-binding" and candidate.kind != "function-summary"
+                continue if proof_replay_trace_owner_function_line(report, candidate.name, candidate.line) != report.replay_owner_line
+                if candidate.kind == "local-binding":
+                    continue if not proof_expr_mentions_name(candidate.expression, symbol)
+                    match candidate.expression:
+                        Ast::Expr.Binary(Ast::Expr.Ident(bound, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
+                            return (false, "", Ast::Expr.Invalid) if bound != local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position) or candidate.line != symbol_position.line
+                        _:
+                            return (false, "", Ast::Expr.Invalid)
+                else:
+                    return (false, "", Ast::Expr.Invalid) if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
+                    for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, symbol, symbol_position|:
+                        value: Ast::Expr = report.traces.summary_values[candidate.summary_bindings_start + offset]
+                        continue if not proof_expr_mentions_name(value, symbol)
+                        return (false, "", Ast::Expr.Invalid) if not proof_replay_literal_rebind_summary_use_valid(value, symbol, symbol_position)
+            return (true, local, call)
+
+        # `local == symbol` for a result symbol: the definition is valid and the local still holds
+        # its call's value at the consumer.
+        def proof_replay_local_binding_result_symbol_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(local, local_position), TokenKind.EqEq, Ast::Expr.Ident(symbol, symbol_position), _):
+                    return false if proof_internal_name_is_rebind(local) or not proof_internal_name_is_rebind(symbol)
+                    return false if trace.line != symbol_position.line
+                    definition = proof_replay_result_symbol_definition(report, trace.name, symbol, symbol_position)
+                    return false if not definition.known or definition.local != local
+                    return false if not proof_replay_summary_raw_call_source_site(report, trace, definition.call)
+                    return proof_replay_summary_local_alias_valid(report, trace.name, local, symbol_position, definition.call)
+                _:
+                    return false
+
+        def proof_replay_is_result_symbol_binding(trace: ProofFactTrace) -> bool:
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.EqEq, Ast::Expr.Ident(symbol, _), _):
+                    return not proof_internal_name_is_rebind(local) and proof_internal_name_is_rebind(symbol)
+                _:
+                    return false
