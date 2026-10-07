@@ -118,3 +118,7 @@ compiler qualification and the broader engine implementation plan remain open.
 Portable structural frame export/replay and adversarial qualification are now
 recorded in [portable-frame-certificates.md](portable-frame-certificates.md).
 Source authentication and broader source event mappings remain separate work.
+
+Scalar body-contract inventory now closes the complete contract-placement
+fixture; details and remaining scope are in
+[frame-scalar-contracts.md](frame-scalar-contracts.md).
