@@ -24,6 +24,8 @@ include "../src/proof/replay/frame_source_lowering.elisa"
 include "../src/proof/replay/frame_source_calls.elisa"
 include "../src/proof/replay/frame_source_call_changes.elisa"
 
+include "../src/proof/replay/frame_source_call_replay.elisa"
+
 def check(source: u8&, expected: bool, parameter: usize, field: sview, mode: u8) -> bool can[Memory.Allocate, Abort.Panic]:
     tokens: darray[Token] = frontend_tokenize(source, source)
     file: Ast::File = frontend_parser_parse_file(source, tokens)
@@ -38,6 +40,29 @@ def check(source: u8&, expected: bool, parameter: usize, field: sview, mode: u8)
             return false if mapping.known != expected
             return mapping.places.count == 0 if not expected or mode == 2
             return mapping.places.count == 1 and mapping.places[0].parameter == parameter and mapping.places[0].depth == (0 if field == "" else 2 if mode == 3 else 1) and mapping.places[0].field == field and (mode != 3 or mapping.places[0].field2 == "value")
+        _:
+            return false
+
+def replay_control(mode: u8, expected: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+    source: u8& = "def run(counter: mutable usize&) -> bool changes counter:\n    return bump(counter)\ndef bump(value: mutable usize&) -> bool changes value:\n    value <- value + 1\n    return true\n"
+    tokens: darray[Token] = frontend_tokenize(source, source)
+    file: Ast::File = frontend_parser_parse_file(source, tokens)
+    return false if file.errors.count != 0
+    context = ElisaProofFrameSource::owner(&file.top_decls, "run", 1)
+    return false if not context.known
+    actual: ProofKernelNode = ProofKernelNode{kind: "frame-place", operator: "frame-place-v1", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+    predicate: ProofKernelNode = ProofKernelNode{kind: "frame-policy", operator: "allow", left: 0, right: 1, auxiliary: 1, children_start: 0, children_count: 1, value: 0, name: "foreign" if mode == 5 else "run", secondary_name: "frame-policy-v1"}
+    nodes: mutable darray[ProofKernelNode] = [actual, predicate]
+    children: mutable darray[usize] = [0]
+    facts: mutable darray[usize] = []
+    facts.push(0) if mode == 3
+    nodes[1].operator <- "spec" if mode == 4
+    match context.body[0]:
+        Ast::Stmt.Return(Ast::Expr.Call(_, _, _, position), _):
+            claimed: mutable Ast::Pos = position
+            claimed.column <- claimed.column + 1 if mode == 1
+            result: bool = ElisaProofFrameSource::call_allowance_replays(&file.top_decls, "run", 1, claimed, 1 if mode == 2 else 0, &tokens, source, tokens[tokens.count - 1].start.usize(), &nodes, &children, facts, 1)
+            return result == expected
         _:
             return false
 
@@ -57,4 +82,10 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 12 if not check("def run(counter: mutable usize&) -> bool:\n    return bump(1)\ndef bump(value: mutable usize&) -> bool:\n    changes value\n    value <- value + 1\n    return true\n", false, 0, "", 0)
     return 13 if not check("def run(box: mutable Box&) -> bool:\n    return bump(box.inner)\nstruct Inner:\n    value: mutable usize\nstruct Box:\n    inner: mutable Inner\ndef bump(value: mutable Inner&) -> bool:\n    changes value.value\n    value.value <- 1\n    return true\n", true, 0, "inner", 3)
     return 14 if not check("def run(counter: mutable usize&) -> bool:\n    return bump(counter)\ndef bump(value: mutable usize&) -> bool:\n    changes value\n    value <- helper()\n    return true\ndef helper() -> usize:\n    return 1\n", false, 0, "", 0)
+    return 15 if not replay_control(0, true)
+    return 16 if not replay_control(1, false)
+    return 17 if not replay_control(2, false)
+    return 18 if not replay_control(3, false)
+    return 19 if not replay_control(4, false)
+    return 20 if not replay_control(5, false)
     return 0

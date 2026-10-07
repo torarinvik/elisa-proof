@@ -38,3 +38,14 @@ all producer events and independently reconstructed mapped predicates. The
 condition-call fixture still refuses goal-attempt-coverage with 30 original
 obligations and 18 replayed certificates. The seven engine proof failures,
 full prover matrix and broader implementation plan remain open.
+
+## Caller allowance replay
+
+`frame_source_call_replay.elisa` binds an allowance root to the complete original
+caller policy and one exact mapped callee changes ordinal. It requires fact-free
+whole-arena kernel replay, exact predicate operation/owner/formal cardinality,
+ordered caller policy correspondence, and independently reconstructed actual
+place. The runtime probe now has twenty controls, adding an accepted caller
+allowance and rejection of wrong call position, out-of-range changes ordinal,
+injected facts, weaker predicate relabelling and foreign owner. Complete caller
+event accounting and preservation replay are still pending.
