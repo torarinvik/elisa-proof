@@ -91,6 +91,7 @@ run_py_test test_admission_invariant_diagnostics.py
 run_py_test test_frame_source_cli.py
 run_py_test test_frame_call_cli.py
 run_py_test test_source_call_result_alias.py
+run_py_test test_stable_conditional_predicates.py
 run_py_test test_indexed_scalar_snapshot.py
 run_py_test test_captured_loop_entry.py
 run_py_test test_portable_frame.py
