@@ -8,7 +8,9 @@ root = Path(__file__).resolve().parents[1]
 prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / 'build/elisa-proof'
 for name, accepted in (
         ('conditional_scaled_sum_bound', True),
+        ('conditional_computed_local_bound', True),
         ('rejected_conditional_scaled_sum_bound', False),
+        ('rejected_conditional_mutable_local', False),
         ('rejected_conditional_mutable_input', False)):
     result = subprocess.run([str(prover), '--json',
         str(root / 'test/repro' / (name + '.elisa'))],

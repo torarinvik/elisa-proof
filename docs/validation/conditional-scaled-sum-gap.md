@@ -27,3 +27,14 @@ this admission path. The engine timing proof still has three replay gaps:
 its fraction is a computed local, requiring independently checked dependency
 reconstruction before this rule can cover it. Full prover regression testing
 remains open.
+
+The next fix permits a uniquely declared earlier immutable integer local as
+a captured value in the conditional predicate or arms. It does not unfold
+that local's initializer or expand general arithmetic equation admission.
+The computed-local positive fixture fully replays 2/2; a mutable local is
+still refused. All five conditional cases and five enum cases pass. The
+uncached 73-row engine sweep still passes 64 and fails the same nine rows.
+Using a module constant in the cap reproduces a remaining replay gap;
+source constant rebinding must be reconstructed before the engine timing
+case is covered. Logs are retained in the engine validation directory as
+`prover-conditional-local-build.log` and `proof-conditional-local-full-sweep.log`.
