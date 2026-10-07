@@ -347,3 +347,5 @@ else:
         exit 1
     fi
 done
+
+python3 "$ROOT_DIR/scripts/test_signed_call_snapshots.py"
