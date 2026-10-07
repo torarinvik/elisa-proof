@@ -8,6 +8,7 @@ only; nothing in the proof checker reads it.
 """
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -140,6 +141,43 @@ def committed_compiler_source_digest(repository: str, revision: str) -> str:
         return digest.hexdigest()
     except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
         raise ValueError(f"cannot inspect pinned compiler source tree: {error}") from error
+
+
+LEGACY_RECIPE_PATHS = (
+    "scripts/elisac_stage1.sh",
+    "scripts/elisac_stage1_seed.sh",
+    "scripts/build_runtime_object.sh",
+    "scripts/write_profiler_hook_fallbacks.sh",
+)
+
+
+def committed_recipe_paths(repository: str, revision: str) -> tuple:
+    """Read the recipe list the pinned compiler's own provenance script hashes.
+
+    Compilers older than scripts/stage1_provenance.py, or whose script predates
+    BUILD_RECIPES, hash the legacy list. A script that declares BUILD_RECIPES in a
+    form this cannot evaluate is an error, never a silent fallback.
+    """
+    try:
+        script = subprocess.run(
+            ["git", "-C", repository, "show", f"{revision}:scripts/stage1_provenance.py"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return LEGACY_RECIPE_PATHS
+    for node in ast.parse(script).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "BUILD_RECIPES"):
+            try:
+                paths = ast.literal_eval(node.value)
+            except ValueError as error:
+                raise ValueError(f"cannot evaluate pinned BUILD_RECIPES: {error}") from error
+            if (not isinstance(paths, (tuple, list)) or not paths
+                    or not all(isinstance(path, str) for path in paths)):
+                raise ValueError("pinned BUILD_RECIPES is not a non-empty list of paths")
+            return tuple(paths)
+    return LEGACY_RECIPE_PATHS
 
 
 def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
