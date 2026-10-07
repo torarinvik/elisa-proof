@@ -148,6 +148,14 @@ SOURCE_LINES = [
     "    x: mutable i64 = 1",
     "    r: i64 = poke(x) + step(x)",  # SIBLING_CALL
     "    return r",
+    "def declared(x: i64) -> i64:",
+    "    k: i64 = x + 1",
+    "    return step(k)",  # DECL_CALL
+    "",
+    "def reassigned(x: i64) -> i64:",
+    "    k: mutable i64 = x",
+    "    k <- k + 1",
+    "    return step(k)",  # REASSIGNED_CALL
     "",
 ]
 
@@ -155,6 +163,7 @@ TAGS = [
     "LOOP_BODY", "LOOP_ASSIGNED", "LOOP_AFTER", "BRANCH_AFTER", "BUMP_ASSIGN", "BUMP_CALL",
     "FOR_CALL", "MATCH_AFTER", "METHOD_AFTER", "SHADOW_CALL", "GUARD_CALL", "NESTED_CALL",
     "ELSE_AFTER", "COMPOUND_AFTER", "LENT_AFTER", "SHARED_AFTER", "ENCLOSED_CALL", "SIBLING_CALL", "LOOKED_AFTER",
+    "DECL_CALL", "REASSIGNED_CALL",
 ]
 
 
@@ -436,6 +445,17 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 58 if test_summary_site_accepted(&report, "bumped", test_loop_with_argument(bump_call.value, bump_value.value))
     return 59 if test_summary_site_accepted(&report, "bumped", test_loop_shifted(bump_call.value))
     return 60 if test_summary_site_accepted(&report, "counted", bump_call.value)
+    # A local whose only binding is its declaration reads as itself: the producer's raw marker
+    # names its current value. A forged value is still refused.
+    decl_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "declared", DECL_CALL, false)
+    return 63 if not decl_call.known
+    return 64 if not test_loop_site_accepted(&report, "declared", decl_call.value)
+    return 65 if test_loop_site_accepted(&report, "declared", test_loop_with_literal(decl_call.value, 0))
+    # Once assigned, the raw name would read the declaration value: refused.
+    reassigned_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "reassigned", REASSIGNED_CALL, false)
+    return 66 if not reassigned_call.known
+    return 67 if test_loop_site_accepted(&report, "reassigned", reassigned_call.value)
+    return 68 if test_loop_site_accepted(&report, "reassigned", test_loop_with_literal(reassigned_call.value, 0))
     return 0
 '''
 
@@ -472,7 +492,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail; mutable-slot, same-name and sibling writes reset while enclosing calls do not; summary sites match raw text at the exact span")
+    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail; mutable-slot, same-name and sibling writes reset while enclosing calls do not; summary sites match raw text at the exact span; sole-declaration locals match only at their declaration value and forged/reassigned markers fail")
 
 
 if __name__ == "__main__":
