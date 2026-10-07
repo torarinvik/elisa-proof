@@ -114,3 +114,7 @@ their broader branches/calls/conditions are not yet a complete source inventory.
 Nested, aliased, dynamic and callee-mapped effects, expression-bodied headers,
 qualified owners, portable source-context replay, the full compatibility matrix,
 compiler qualification and the broader engine implementation plan remain open.
+
+Portable structural frame export/replay and adversarial qualification are now
+recorded in [portable-frame-certificates.md](portable-frame-certificates.md).
+Source authentication and broader source event mappings remain separate work.
