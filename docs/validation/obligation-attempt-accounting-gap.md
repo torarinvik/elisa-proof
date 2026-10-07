@@ -89,3 +89,15 @@ over-budget parameter count. Runtime artifact: engine
 `build/validation/frame-policy-relations`. Certificate encoding, source
 correspondence, replay dispatch and producer event integration remain pending;
 this model alone is not used to admit any source theorem.
+
+The frame-place arena format has a canonical decoder in
+`kernel_replay/frame_policy_places.elisa`: versioned frame-place nodes carry
+parameter ordinals and up to three ordered frame-field leaves. All unused
+metadata must be zero/empty, empty paths have zero child offset, and selectors
+must point backward to canonical leaf nodes. A strict O0 compile/link/run
+passes 16 controls including field/whole-place round trips, cycles, foreign
+parameters, truncated child tables, invalid roots, unknown versions, metadata
+mutation, noncanonical empty paths and over-depth paths. Runtime artifact:
+engine `build/validation/frame-policy-places`. General arena admission and
+source certificate dispatch remain pending; the decoder is not proof of the
+source origin of a supplied place or policy.
