@@ -174,7 +174,9 @@ def toolchain_identity():
     frontend = manifest.get("frontend", {})
     proof = manifest.get("proof", {})
     binary = manifest.get("binary", {})
-    expected_revision = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
+    expected_revision = os.environ.get("ELISA_COMPILER_REV", "").strip()
+    if not expected_revision:
+        expected_revision = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
     compiler_revision = compiler.get("source_revision")
     frontend_revision = frontend.get("revision")
     current_source_digest = tree_sha256(ROOT / "src")

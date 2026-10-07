@@ -1,5 +1,6 @@
 """Stable census summaries include every failed finding and exclude noisy timings."""
 import json
+import os
 from pathlib import Path
 import hashlib
 import subprocess
@@ -92,8 +93,19 @@ def provenance_guard_test():
         Path(str(binary) + ".manifest.json").write_text(json.dumps(manifest))
         old_root, old_binary = refusal_census.ROOT, refusal_census.BINARY
         refusal_census.ROOT, refusal_census.BINARY = root, binary
+        saved_revision = os.environ.pop("ELISA_COMPILER_REV", None)
         try:
-            assert refusal_census.toolchain_identity()["compiler_revision"] == "rev123abc"
+            with patch.dict(os.environ, {"ELISA_COMPILER_REV": ""}):
+                assert refusal_census.toolchain_identity()["compiler_revision"] == "rev123abc"
+            with patch.dict(os.environ, {"ELISA_COMPILER_REV": "rev123"}):
+                assert refusal_census.toolchain_identity()["frontend_revision"] == "rev123"
+            with patch.dict(os.environ, {"ELISA_COMPILER_REV": "wrong-revision"}):
+                try:
+                    refusal_census.toolchain_identity()
+                except RuntimeError as error:
+                    assert "provenance does not match" in str(error)
+                else:
+                    raise AssertionError("mismatched explicit compiler revision was accepted")
             source.write_text(source.read_text() + "# changed after build\n")
             try:
                 refusal_census.toolchain_identity()
@@ -110,6 +122,8 @@ def provenance_guard_test():
             else:
                 raise AssertionError("binary/manifest mismatch was accepted")
         finally:
+            if saved_revision is not None:
+                os.environ["ELISA_COMPILER_REV"] = saved_revision
             refusal_census.ROOT, refusal_census.BINARY = old_root, old_binary
 
 
