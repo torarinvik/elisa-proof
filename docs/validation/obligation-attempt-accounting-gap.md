@@ -260,3 +260,22 @@ fact-free kernel rule; add producer certificate lowering and bind every static
 frame event to its own matching attempt; then extend nested/alias/dynamic/callee
 write mappings and run the full compatibility matrix. Header metadata must not
 be silently omitted or accepted solely because a producer annotation claims it.
+
+### Exact source signature bounds
+
+Owner reconstruction now also returns the exact AST def-keyword position.
+`frame_source_headers.elisa` locates the unique corresponding Def token and
+checks actual keyword/name bytes, source span bounds, monotone signature spans,
+matching parentheses/brackets/braces, a 64-delimiter depth cap and a 4096-token
+signature budget. It requires a top-level colon rather than consuming another
+declaration or body. Tokens/source must still belong to the independently checked
+file identity; this helper does not authenticate a caller-supplied token stream.
+
+Eight parser-backed controls pass at O0 and O2 with 96761822: exact header bounds,
+wrong owner/line, out-of-bounds token, mismatched delimiter, missing colon and
+duplicate exact Def span. Existing owner, policy and write probes were recompiled
+and pass at O0 with the extended owner result. Header probe added to the runtime
+matrix. Artifacts: engine build/validation/frame-source-headers and
+frame-source-headers-o2. Header clause decoding remains next; the header helper
+is not yet imported into production replay. The production owner API changed,
+so a fresh full build is still required before qualifying that revision.
