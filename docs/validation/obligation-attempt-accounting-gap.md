@@ -534,3 +534,20 @@ proof-frame-source-lowering-sweep.log. Artifacts: frame_source_admission_runtime
 Report attempt/certificate emission and source-context dispatch remain to be wired;
 this lowering is not a new report admission rule. Broader event/effect mappings
 and the full implementation plan remain unfinished.
+
+### Source-derived individual verdict retention
+
+`direct_event_decisions` independently derives the complete supported source
+inventory and returns one ordered EventDecision per root, including original
+event identity, arena root and replay verdict. Inventory/count failures return
+unknown with no decisions; an invalid or failed predicate remains a false
+decision and does not suppress later events. Known inventory is distinct from
+proof success. No report admission or trusted producer verdict is introduced.
+
+The composed standalone probe passes 52 controls at O0 and O2 with compiler
+96761822. Added controls cover five successful decisions plus a sixth failed
+preservation event, exact root/occurrence retention, omitted-root refusal, and
+invalid first root with retained later success. Artifacts are engine
+build/validation/frame_source_decisions-O0 and frame_source_decisions-O2.
+Production binaries have not been rebuilt for this addition; full report
+recording/source-context dispatch and broader source inventory remain open.
