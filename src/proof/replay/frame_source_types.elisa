@@ -1,0 +1,82 @@
+extend ElisaProofFrameSource:
+    private:
+        def type_entry(declarations: darray[Ast::Decl]&, name: sview, depth: usize, budget: mutable usize&, matches: mutable usize&, members: mutable darray[Ast::StructMember]&, alias: mutable Ast::Expr&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64
+            for declaration in declarations |name, depth, budget, matches, members, alias|:
+                return false if budget == 0
+                budget <- budget - 1
+                match declaration:
+                    Ast::Decl.Struct(candidate, fields, _, _, _, _, _):
+                        if candidate == name:
+                            return false if matches != 0 or fields.count > budget
+                            matches <- matches + 1
+                            for field in fields |members, budget|:
+                                budget <- budget - 1
+                                members.push(field)
+                    Ast::Decl.Alias(candidate, target, _):
+                        if candidate == name:
+                            return false if matches != 0
+                            matches <- matches + 1
+                            alias <- target
+                    Ast::Decl.Enum(candidate, _, _, _, _):
+                        return false if candidate == name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not type_entry(nested, name, depth + 1, budget, matches, members, alias)
+                    _:
+                        pass
+            return true
+
+        def field_type(declarations: darray[Ast::Decl]&, expression: Ast::Expr, field: sview, depth: usize, budget: mutable usize&) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            return (false, Ast::Expr.Invalid) if depth >= 64 or budget == 0
+            budget <- budget - 1
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return field_type(declarations, inner, field, depth + 1, budget)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
+                        return field_type(declarations, inner, field, depth + 1, budget)
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, _):
+                    members: mutable darray[Ast::StructMember] = []
+                    alias: mutable Ast::Expr = Ast::Expr.Invalid
+                    matches: mutable usize = 0
+                    return (false, Ast::Expr.Invalid) if not type_entry(declarations, name, 0, budget, &matches, &members, &alias) or matches != 1
+                    match alias:
+                        Ast::Expr.Invalid:
+                            found: mutable usize = 0
+                            result: mutable Ast::Expr = Ast::Expr.Invalid
+                            for member in members |field, found, result|:
+                                if member.name == field:
+                                    found <- found + 1
+                                    result <- member.type_expression
+                            match result:
+                                Ast::Expr.Invalid:
+                                    return (false, result)
+                                _:
+                                    return (found == 1, result)
+                        _:
+                            return field_type(declarations, alias, field, depth + 1, budget)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+    public:
+        # Independently check declared fields along a formal-rooted nominal path.
+        # Qualified/generic/tuple types need their own exact type identity lookup.
+        def place_typed(declarations: darray[Ast::Decl]&, name: sview, line: u32, actual: ElisaProofKernelFramePolicy::Place) -> bool can[Memory.Allocate, Abort.Panic]:
+            context = owner(declarations, name, line)
+            return false if not context.known or actual.parameter >= context.formal_types.count or actual.depth > 3
+            return false if (actual.depth == 0 and actual.field != "") or (actual.depth < 2 and actual.field2 != "") or (actual.depth < 3 and actual.field3 != "")
+            current: mutable Ast::Expr = context.formal_types[actual.parameter]
+            match current:
+                Ast::Expr.Invalid:
+                    return false
+                _:
+                    pass
+            budget: mutable usize = 4096
+            for index in 0..<actual.depth |index, actual, current, budget, declarations|:
+                field: sview = actual.field if index == 0 else actual.field2 if index == 1 else actual.field3
+                return false if field == ""
+                resolved = field_type(declarations, current, field, 0, &budget)
+                return false if not resolved.known
+                current <- resolved.type_expression
+            return true

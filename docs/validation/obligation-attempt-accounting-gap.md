@@ -326,3 +326,34 @@ does not retain them. A source-bound replay entry point can receive that context
 without treating copied report annotations as authority. Formal/field type and
 qualified-owner checks, nested/alias mapping, and per-event frame certificate
 production/admission remain open.
+
+### Source nominal field typing
+
+Owner reconstruction now retains ordered formal type expressions from the exact
+source declaration. `frame_source_types.elisa` validates canonical formal ordinals
+and field paths against unique source struct/alias declarations, unwraps reference/
+mutability/storage/refinement wrappers, follows nested member types, rejects
+duplicate fields/types and cyclic aliases, and shares a 4096-step declaration/member
+budget across the whole path. Owner body size is checked at 4096 statements before
+copying it; exhaustion clears all returned arrays, including formal types.
+Qualified/generic/tuple type identity and mutation permissions remain separate
+checks; source semantic admission is still required. This helper is not yet used
+by a frame certificate admission rule.
+
+Parser-backed type controls pass at O0 and O2 with 96761822: aliased reference to
+a nested nominal field, missing field, scalar field access, malformed path, wrong
+owner line, ambiguous type, cyclic aliases, duplicate fields, cumulative budget
+exhaustion, whole formal and out-of-range ordinal. Owner body 4096/4097 boundary
+controls also pass at O0/O2. Existing owner/policy/write/header probes were
+recompiled at both profiles after adding the formal type result. Type probe added
+to the runtime matrix; artifacts use engine build/validation/
+frame_source_types_runtime-O0 and -O2, and frame_source_owners_runtime-O0/-O2.
+
+All-products strict O2 production build succeeds, generation
+`892a7cfc2b544babac9a9963f52969dd`. Source admission matrix and invariant diagnostics
+pass; kernel inventory remains 10 tables / 188 entries. Fresh engine sweep remains
+66/73 with the same seven failures. Logs: engine build/validation/
+prover-frame-source-types-bounded-build.log and proof-frame-source-types-sweep.log.
+Next integration must compose full source policy, typed paths, exact source writes
+and the fact-free kernel rule using independently parsed source context, then bind
+each frame event to its own matching certificate attempt.

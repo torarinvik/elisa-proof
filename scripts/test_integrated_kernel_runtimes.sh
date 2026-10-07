@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Uses the primary matrix's qualified compiler and runtime setup.
-for frame_probe in frame_policy_relations_runtime frame_policy_places_runtime frame_policy_certificates_runtime frame_source_places_runtime frame_source_owners_runtime frame_source_policy_runtime frame_source_writes_runtime frame_source_headers_runtime; do
+for frame_probe in frame_policy_relations_runtime frame_policy_places_runtime frame_policy_certificates_runtime frame_source_places_runtime frame_source_owners_runtime frame_source_policy_runtime frame_source_writes_runtime frame_source_headers_runtime frame_source_types_runtime; do
     if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$frame_probe.o" "$ROOT_DIR/examples/$frame_probe.elisa" >/dev/null 2>&1 ||
         ! "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/$frame_probe" "$standalone_probe_dir/$frame_probe.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}" ||
         ! "$standalone_probe_dir/$frame_probe"; then
