@@ -102,6 +102,7 @@ run_py_test test_float_integer_bounds.py
 run_py_test test_scalar_field_priority.py
 run_py_test test_float_scalar_resources.py
 run_py_test test_fixed_index_admission.py
+run_py_test test_local_record_fixed_index.py
 run_py_test test_indexed_scalar_snapshot.py
 run_py_test test_captured_loop_entry.py
 run_py_test test_portable_frame.py
