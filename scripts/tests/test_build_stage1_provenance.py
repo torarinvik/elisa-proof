@@ -58,6 +58,11 @@ def make_compiler(root: Path, *, installed_snapshot: bool) -> tuple[str, Path]:
         path = root / recipe
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# fixture: {recipe}\n")
+    (root / "scripts/stage1_provenance.py").write_text(
+        "BUILD_RECIPES = ('scripts/elisac_stage1.sh', "
+        "'scripts/elisac_stage1_seed.sh', 'scripts/build_runtime_object.sh', "
+        "'scripts/write_profiler_hook_fallbacks.sh')\n"
+    )
     revision = commit(root, "frontend baseline")
     product = root / "bin/elisac-stage1"
     product.parent.mkdir()
@@ -87,7 +92,7 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
                  "link_flags.sh", "build_manifest.py", "compiler_environment.py",
-                 "verify_product_pair.py"):
+                 "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")
     (compiler / "elisacore_std/prelude.elisa").write_text("pinned stdlib\n")
@@ -100,6 +105,11 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
     (compiler / "build/runtime/elisacore_runtime.o").write_bytes(b"runtime object")
     wrapper = compiler / "scripts/elisac_stage1.sh"
     executable(wrapper, "#!/bin/sh\nexec \"$(dirname \"$0\")/../bin/elisac-stage1\" \"$@\"\n")
+    (compiler / "scripts/stage1_provenance.py").write_text(
+        "BUILD_RECIPES = ('scripts/elisac_stage1.sh', "
+        "'scripts/elisac_stage1_seed.sh', 'scripts/build_runtime_object.sh', "
+        "'scripts/write_profiler_hook_fallbacks.sh')\n"
+    )
     revision = commit(compiler, "Stage1 build fixture")
     product = compiler / "bin/elisac-stage1"
     product.parent.mkdir()
