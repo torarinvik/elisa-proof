@@ -21,6 +21,7 @@ BASE = '''def entry(start: usize, stop: usize) -> usize:
 for name, source, expected in (
     ('entry', BASE, True),
     ('wrong-count', BASE.replace('count: mutable usize = 0','count: mutable usize = 10'), False),
+    ('body-shadow', BASE.replace('        invariant count <= 9','        count: usize = 10\n        invariant count <= 9'), False),
     ('intervening-write', BASE.replace('    for slot','    count <- 10\n    for slot'), False),
     ('intervening-call', 'def overwrite(value: mutable usize&):\n    value <- 10\n\n'+BASE.replace('    for slot','    overwrite(&count)\n    for slot'), False),
 ):
@@ -42,3 +43,18 @@ for name, source, expected in (
                 assert done.returncode != 0
             assert not report['trust']['trusted_assumptions']
     print('mutable for entry:',name,'accepted' if expected else 'refused')
+
+# A post-loop claim cannot borrow the initial zero after an actual update.
+stale = BASE.replace('    cursor: mutable usize', '    ensure result == 0\n    cursor: mutable usize').replace('count <- count', 'count <- 1').replace('    0\n', '    count\n')
+with tempfile.TemporaryDirectory() as folder:
+    path=Path(folder)/'stale.elisa'
+    path.write_text(stale)
+    for route in ('--json','--function-json'):
+        args=[BINARY,route]+(['entry'] if route=='--function-json' else [])+[str(path)]
+        done=subprocess.run(args,capture_output=True,text=True,timeout=60)
+        report=json.loads(done.stdout)
+        assert done.returncode == 1
+        final = report['goals'][-1]
+        assert final['rule']=='goal' and not final['proven'], final
+        assert not report['trust']['trusted_assumptions']
+print('mutable for entry: stale exit refused')
