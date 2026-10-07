@@ -13,6 +13,8 @@ extend ElisaProofFrameSource:
     public:
         struct Event:
             kind: sview
+            call_effect: bool
+            change_index: usize
             position: Ast::Pos
             statement_index: usize
             clause_index: usize
@@ -20,7 +22,7 @@ extend ElisaProofFrameSource:
 
         # Complete only for the explicit direct-body subset. Unknown statement,
         # expression or write mappings invalidate the entire inventory.
-        def direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+        def source_events_impl(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, calls: bool) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
             policy = source_policy(declarations, name, line, tokens, source, source_length)
             context = owner(declarations, name, line)
             return (false, []) if not policy.known or not context.known
@@ -34,8 +36,8 @@ extend ElisaProofFrameSource:
                 clause = policy.clauses[index]
                 return (false, []) if not place_typed(declarations, name, line, clause.place)
                 has_changes <- true if clause.kind == "changes"
-                events.push(Event{kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
-            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line, contract_work, value_work, scalar_environment|:
+                events.push(Event{call_effect: false, change_index: 0, kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
+            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line, contract_work, value_work, scalar_environment, calls, tokens, source, source_length|:
                 match context.body[index]:
                     Ast::Stmt.Contract(kind, expression, _):
                         if kind != "changes" and kind != "preserves":
@@ -52,18 +54,44 @@ extend ElisaProofFrameSource:
                         return (false, []) if not actual.known or not place_typed(declarations, name, line, actual.place)
                         if has_changes:
                             return (false, []) if events.count >= 4096
-                            events.push(Event{kind: "allow", position: position, statement_index: index, clause_index: 0, place: actual.place})
+                            events.push(Event{call_effect: false, change_index: 0, kind: "allow", position: position, statement_index: index, clause_index: 0, place: actual.place})
                         for clause_index in 0..<policy.clauses.count |clause_index, policy, events, position, index, actual|:
                             if policy.clauses[clause_index].kind == "preserves":
                                 return (false, []) if events.count >= 4096
-                                events.push(Event{kind: "preserve", position: position, statement_index: index, clause_index: clause_index, place: actual.place})
+                                events.push(Event{call_effect: false, change_index: 0, kind: "preserve", position: position, statement_index: index, clause_index: clause_index, place: actual.place})
                     Ast::Stmt.Return(value, _):
                         if value is expression:
                             if not inert_value(expression, 0):
                                 return (false, []) if not scalar_environment or not scalar_value(expression, &context.formals, &context.formal_types, 0, &value_work)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return (false, []) if not calls
+                        for arm in [then_body, else_body] |context, value_work, scalar_environment|:
+                            for statement in arm |context, value_work, scalar_environment|:
+                                match statement:
+                                    Ast::Stmt.Return(value, _):
+                                        if value is expression:
+                                            return (false, []) if not scalar_environment or not scalar_value(expression, &context.formals, &context.formal_types, 0, &value_work)
+                                    _:
+                                        return (false, [])
+                        mapped = source_condition_effects(declarations, name, line, index, tokens, source, source_length)
+                        return (false, []) if not mapped.known
+                        for effect in mapped.effects |effect, events, index, has_changes, policy|:
+                            if has_changes:
+                                return (false, []) if events.count >= 4096
+                                events.push(Event{call_effect: true, change_index: effect.change_index, kind: "allow", position: effect.position, statement_index: index, clause_index: 0, place: effect.place})
+                            for clause_index in 0..<policy.clauses.count |clause_index, policy, events, effect, index|:
+                                if policy.clauses[clause_index].kind == "preserves":
+                                    return (false, []) if events.count >= 4096
+                                    events.push(Event{call_effect: true, change_index: effect.change_index, kind: "preserve", position: effect.position, statement_index: index, clause_index: clause_index, place: effect.place})
                     _:
                         return (false, [])
             return (true, events)
+
+        def strict_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return source_events_impl(declarations, name, line, tokens, source, source_length, false)
+
+        def direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return source_events_impl(declarations, name, line, tokens, source, source_length, true)
 
         def direct_events_match(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, claimed: darray[Event]&) -> bool can[Memory.Allocate, Abort.Panic]:
             expected = direct_events(declarations, name, line, tokens, source, source_length)
@@ -71,6 +99,6 @@ extend ElisaProofFrameSource:
             for index in 0..<claimed.count |index, claimed, expected|:
                 actual = claimed[index]
                 original = expected.events[index]
-                return false if actual.kind != original.kind or actual.statement_index != original.statement_index or actual.clause_index != original.clause_index or not same_position(actual.position, original.position)
+                return false if actual.call_effect != original.call_effect or actual.change_index != original.change_index or actual.kind != original.kind or actual.statement_index != original.statement_index or actual.clause_index != original.clause_index or not same_position(actual.position, original.position)
                 return false if actual.place.parameter != original.place.parameter or actual.place.depth != original.place.depth or actual.place.field != original.place.field or actual.place.field2 != original.place.field2 or actual.place.field3 != original.place.field3
             return true
