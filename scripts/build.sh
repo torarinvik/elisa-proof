@@ -182,6 +182,16 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
         --resolve-stage1-provenance --compiler-product "$COMPILER_PRODUCT" \
         --compiler-root "$stage1_root" --frontend-repo "$COMPILER_SRC" \
         --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+    snapshot_std_root="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --validate-stage1-snapshot-std-root --snapshot-root "$SNAPSHOT_COMPILER" \
+        --compiler-product "$COMPILER_PRODUCT" --compiler-root "$stage1_root" \
+        --frontend-repo "$COMPILER_SRC" --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+    if [[ -n "${ELISA_STAGE1_RUNTIME_STD_ROOT:-}" && \
+          "$(cd "$ELISA_STAGE1_RUNTIME_STD_ROOT" 2>/dev/null && pwd -P || true)" != "$snapshot_std_root" ]]; then
+        printf 'build: refusing runtime std root outside the provenance-checked compiler snapshot\n' >&2
+        exit 2
+    fi
+    export ELISA_STAGE1_RUNTIME_STD_ROOT="$snapshot_std_root"
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
