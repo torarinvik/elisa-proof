@@ -243,6 +243,7 @@ run_py_test test_unsigned_remainder_range.py
 run_py_test test_unsigned_division_bounds.py
 run_py_test test_signed_division_boundaries.py
 run_py_test test_unsigned_u8_shift_boundaries.py
+run_py_test test_loop_readonly_outer_index.py
 run_py_test test_loop_state_joins.py
 run_py_test test_captured_loop_constants.py
 run_py_test test_indexed_boolean_denial.py
