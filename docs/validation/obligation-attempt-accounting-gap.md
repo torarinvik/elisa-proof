@@ -196,3 +196,17 @@ and frame-source-policy-o2. This is source reconstruction, not source theorem
 admission: header clauses, type/field validation, source identity/qualified owner,
 write-site mapping and certificate correspondence remain required. Production
 replay does not yet import these helpers.
+
+### Body policy to arena correspondence
+
+`replay/frame_source_correspondence.elisa` compares the complete independently
+reconstructed body policy against canonical frame-policy write lists: exact owner
+name, version, parameter count, list cardinality, changes/preserves partition,
+ordered formal ordinals and field paths. It rejects forward place references and
+malformed canonical places. The expanded parser-backed policy probe passes at
+O0 and O2, including a matching certificate list and swapped partition contents,
+wrong partition boundary and altered formal ordinal negatives. This helper only
+establishes body-list correspondence; write-site/source identity/type validation
+and signature policy remain separate obligations. Parser signature clauses are
+stored in side-table rows rather than body Contract nodes, so header handling
+requires independent token/source reconstruction before production integration.
