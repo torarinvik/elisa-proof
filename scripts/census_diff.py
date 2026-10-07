@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,9 +31,11 @@ def retry_newly_unreadable(baseline, current, retry=run_census):
     """Retry inputs that became unreadable after the baseline, including newly added inputs."""
     previously_unreadable = set(baseline.get("unreadable", []))
     retry_names = [name for name in current.get("unreadable", []) if name not in previously_unreadable]
-    for name in retry_names:
-        source = ROOT / name if name.startswith("src/") else ROOT / "examples" / name
-        _, data, seconds, _ = retry(source, RETRY_TIMEOUT_SECONDS)
+    sources = [ROOT / name if name.startswith("src/") else ROOT / "examples" / name for name in retry_names]
+    # Independent proof runs: retry them all at once rather than one 600 s timeout after another.
+    with ThreadPoolExecutor(max_workers=max(1, len(sources))) as pool:
+        attempts = list(pool.map(lambda source: retry(source, RETRY_TIMEOUT_SECONDS), sources))
+    for name, (_, data, seconds, _) in zip(retry_names, attempts):
         if data is None:
             continue
 
