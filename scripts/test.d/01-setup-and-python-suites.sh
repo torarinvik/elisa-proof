@@ -263,6 +263,7 @@ run_py_test test_region_outer_facts.py
 run_py_test test_conditional_fixed_extent.py
 run_py_test test_branch_local_loop_atom.py
 run_py_test test_private_value_declaration.py
+run_py_test test_reference_free_enum_summary.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
