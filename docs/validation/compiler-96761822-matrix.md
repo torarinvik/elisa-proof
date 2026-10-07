@@ -24,3 +24,12 @@ Subsequent focused repairs:
 No full matrix rerun or whole-prover success is claimed. Logs are retained
 under engine build/validation: `prover-2a0d0804-all-build.log`,
 `prover-2a0d0804-matrix.log`, `kernel-expr-equal-compile.log`.
+
+The qualified-call source mutation harness was then migrated from removed
+flat report members to `traces.records`, `traces.summary_names`,
+`traces.summary_values` and the executable store. With the same strict fresh
+Stage1 path, it compiles and executes successfully. Its nested source-owner,
+omitted/duplicate/wrong-owner, argument order, source span, reassignment,
+wrong-module and forged local-binding assertions remain intact. This repairs
+one matrix harness; no full matrix success is inferred. Engine log:
+`qualified-call-harness-layout.log`.
