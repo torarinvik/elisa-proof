@@ -1,0 +1,133 @@
+# Authenticate a decimal saturation update from its original captured for scope.
+# The first witness is unambiguous only with a contract-only function prefix.
+extend ElisaProof:
+    private:
+        def proof_replay_for_decimal_shape(expression: Ast::Expr, target: sview, digit: sview, cap: i64) -> bool:
+            position: Ast::Pos = Ast::expr_pos(expression)
+            root: Ast::Expr = Ast::Expr.Ident(target, position)
+            limit: Ast::Expr = Ast::Expr.IntLit(cap, position)
+            ten: Ast::Expr = Ast::Expr.IntLit(10, position)
+            threshold: Ast::Expr = Ast::Expr.Binary(limit, TokenKind.Slash, ten, position)
+            condition: Ast::Expr = Ast::Expr.Binary(root, TokenKind.GtEq, threshold, position)
+            product: Ast::Expr = Ast::Expr.Binary(root, TokenKind.Star, ten, position)
+            addition: Ast::Expr = Ast::Expr.Binary(product, TokenKind.Plus, Ast::Expr.Ident(digit, position), position)
+            expected: Ast::Expr = Ast::Expr.If(condition, limit, addition, position)
+            return proof_replay_expr_equal(expression, expected)
+
+        def proof_replay_for_decimal_digit(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.If(_, _, addition, _):
+                    match addition:
+                        Ast::Expr.Binary(_, TokenKind.Plus, addend, _):
+                            return proof_ident_name(addend)
+                        _:
+                            return ""
+                _:
+                    return ""
+
+        def proof_replay_for_decimal_block(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.Block(statements, yielded, captures, _):
+                    return false if captures.count != 0
+                    return proof_replay_for_decimal_block(report, trace, certificate, yielded, depth + 1) if statements.count == 0
+                    return false if statements.count != 2
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(target, type_expression, initializer, _):
+                            return false if proof_ident_name(type_expression) != "u64"
+                            match initializer:
+                                Ast::Expr.IntLit(initial, _):
+                                    return false if initial != 0
+                                _:
+                                    return false
+                            return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0)
+                            return false if proof_ident_name(yielded) != target
+                            match statements[1]:
+                                Ast::Stmt.For(bind, variables, iterable, body, position):
+                                    return false if bind != "" or variables.count != 1 or variables[0] == target or position.line != certificate.line or body.count != 2
+                                    return false if not proof_replay_local_binding_prefix_expression_safe(iterable, 0)
+                                    return false if proof_source_expression_has_overloaded_operator(iterable, report.source_primitive_operator_mask, 0)
+                                    match body[0]:
+                                        Ast::Stmt.Contract("invariant", invariant, _):
+                                            match invariant:
+                                                Ast::Expr.Binary(Ast::Expr.Ident(root, _), TokenKind.LtEq, Ast::Expr.IntLit(cap, _), _):
+                                                    return false if proof_source_expression_has_overloaded_operator(invariant, report.source_primitive_operator_mask, 0)
+                                                    return false if root != target or cap < 10 or cap > 1000000000000000000
+                                                    match body[1]:
+                                                        Ast::Stmt.Assign(Ast::Expr.Ident(assigned, _), TokenKind.LArrow, value, assignment_position):
+                                                            return false if assigned != target or assignment_position.line != trace.line
+                                                            return false if not proof_replay_local_binding_pos_matches(trace.expression, assignment_position)
+                                                            match trace.expression:
+                                                                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, witnessed, _):
+                                                                    return false if symbol != proof_internal_rebind_name(0) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(symbol, symbol_position), assignment_position)
+                                                                    return false if not proof_replay_expr_equal(value, witnessed)
+                                                                    return false if proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
+                                                                    digit: sview = proof_replay_for_decimal_digit(value)
+                                                                    return false if digit == "" or digit == target or digit == variables[0]
+                                                                    return false if not proof_replay_for_decimal_shape(value, target, digit, cap)
+                                                                    return false if proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, digit, 0) != "u64"
+                                                                    goal_position: Ast::Pos = Ast::expr_pos(invariant)
+                                                                    expected: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.LtEq, Ast::Expr.IntLit(cap, goal_position), goal_position)
+                                                                    return false if not proof_replay_expr_equal(expected, certificate.goal) or not proof_replay_captured_entry_position(invariant, certificate.goal)
+                                                                    return proof_replay_for_decimal_context(report, trace, certificate, invariant, digit)
+                                                                _:
+                                                                    return false
+                                                        _:
+                                                            return false
+                                                _:
+                                                    return false
+                                        _:
+                                            return false
+                                _:
+                                    return false
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_for_decimal_context(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, invariant: Ast::Expr, digit: sview) -> bool:
+            context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+            return false if not context.known
+            digit_bound: mutable bool = false
+            for statement in context.body |digit, digit_bound|:
+                match statement:
+                    Ast::Stmt.Contract("requires", requirement, _):
+                        match requirement:
+                            Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.LtEq, Ast::Expr.IntLit(bound, _), _):
+                                digit_bound <- true if name == digit and bound == 9
+                            _:
+                                pass
+                    _:
+                        pass
+            return false if not digit_bound
+            return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
+            matching: mutable usize = 0
+            for index in 0..<certificate.facts_count |report, trace, certificate, invariant, matching|:
+                origin: usize = report.traces.origin_indices[certificate.facts_start + index]
+                return false if origin >= report.traces.records.count
+                fact: ProofFactTrace = report.traces.records[origin]
+                if fact.name == trace.name and fact.line == certificate.line and fact.kind == "loop-invariant":
+                    matching <- matching + 1 if proof_replay_expr_equal(fact.expression, invariant) and proof_replay_captured_entry_position(fact.expression, invariant)
+            return matching == 1
+
+        def proof_replay_for_decimal_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count or report.replay_owner_line == 0
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line or certificate.rule != "goal"
+            work: mutable usize = 0
+            return false if not proof_replay_captured_entry_environment(&report.source_declarations, 0, &work)
+            context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+            return false if not context.known or context.body.count > 4096
+            for statement in context.body |report, trace, certificate|:
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return false if kind != "requires" and kind != "ensure" and kind != "ensures"
+                        return false if not proof_replay_local_binding_prefix_expression_safe(expression, 0)
+                        return false if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+                    Ast::Stmt.Return(returned, _):
+                        if returned is expression:
+                            return proof_replay_for_decimal_block(report, trace, certificate, expression, 0)
+                        return false
+                    _:
+                        return false
+            return false
