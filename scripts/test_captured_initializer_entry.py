@@ -9,18 +9,17 @@ ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
 BASE = '''def captured_initializer(limit: usize) -> usize:
     requires limit <= 32
-    ensure result == 0
     found: usize =
         for slot in 0..<limit |found: usize = 32| -> found:
             invariant found <= 32
-            found <- slot
+            pass
     0
 '''
 for name, source, accepted in (
     ('entry', BASE, True),
     ('wrong-initial', BASE.replace('found: usize = 32', 'found: usize = 33'), False),
-    ('wrong-update', BASE.replace('found <- slot', 'found <- 64'), False),
-    ('stale-exit', BASE.replace('ensure result == 0', 'ensure result == 32').replace('    0\n', '    found\n'), False),
+    ('wrong-update', BASE.replace('pass', 'found <- 64'), False),
+    ('stale-exit', BASE.replace('    found: usize =', '    ensure result == 32\n    found: usize =').replace('pass', 'found <- slot').replace('    0\n', '    found\n'), False),
 ):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory)/'input.elisa'
