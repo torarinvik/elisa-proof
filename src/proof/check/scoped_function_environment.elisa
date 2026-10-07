@@ -1,0 +1,81 @@
+# Lexically scope source function signatures before kernel proposition typing.
+extend ElisaProof:
+    private:
+        # Kernel call nodes carry only a callee leaf. Scope the declaration signature table to
+        # the caller's lexical owner before typing so a sibling module's same-spelled function
+        # cannot make a locally resolved call ambiguous (or be selected accidentally). When
+        # multiple declarations share the name in the same owner, withhold all of them.
+        def proof_source_kernel_owner_path(owner: sview) -> darray[sview]:
+            empty: darray[sview] = []
+            return proof_global_constant_scope_with_module(empty, owner) if owner != ""
+            return empty
+
+        def proof_source_kernel_owner_prefix_depth(owner: sview, scope_path: darray[sview]&) -> usize:
+            path: darray[sview] = proof_source_kernel_owner_path(owner)
+            return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if path.count > scope_path.count
+            for index in 0..<path.count |index, path, scope_path|:
+                return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if path[index] != scope_path[index]
+            return path.count
+
+        def proof_source_kernel_scoped_function_bindings(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], names: darray[sview]&, scope_path: darray[sview]&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
+            selected_signatures: mutable darray[usize] = []
+            scoped: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
+            for index in 0..<global_bindings.count |index, global_bindings, names, scope_path, selected_signatures, scoped|:
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[index]
+                continue if binding.kind != "function"
+                shadowed: bool = any local_name in names where local_name == binding.name
+                continue if shadowed
+                total: mutable usize = 0
+                best_depth: mutable usize = 0
+                owner_matches: mutable usize = 0
+                selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = binding
+                for candidate in global_bindings |candidate, binding, scope_path, total, best_depth, owner_matches, selected|:
+                    continue if candidate.kind != "function" or candidate.name != binding.name
+                    total <- total + 1
+                    candidate_depth: usize = proof_source_kernel_owner_prefix_depth(candidate.owner, scope_path)
+                    continue if candidate_depth == PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT
+                    if candidate_depth > best_depth:
+                        best_depth <- candidate_depth
+                        owner_matches <- 1
+                        selected <- candidate
+                    elif candidate_depth == best_depth:
+                        owner_matches <- owner_matches + 1
+                        selected <- candidate
+                owner_matches <- 1 if owner_matches == 0 and total == 1
+                selected <- binding if owner_matches == 1 and total == 1
+                if owner_matches == 1:
+                    if binding.signature_identity == selected.signature_identity:
+                        selected_signatures.push(selected.signature_identity)
+                        scoped.push(selected)
+            for binding in global_bindings:
+                if binding.kind != "function" and binding.kind != "function-parameter":
+                    scoped.push(binding)
+                elif binding.kind == "function-parameter":
+                    include_parameter: bool = any signature in selected_signatures where signature == binding.signature_identity
+                    scoped.push(binding) if include_parameter
+            return (true, scoped)
+
+        def proof_source_kernel_symbol_leaf(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or root >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return node.name if node.kind == "ident" or node.kind == "scope"
+            return proof_source_kernel_symbol_leaf(nodes, node.left, depth + 1) if node.kind == "paren"
+            return ""
+
+        # Qualified calls to repeated leaves lose their owner in the kernel call node. Inspect
+        # the encoded arena itself (including nested calls), and refuse these instead of typing
+        # them against the caller's local same-named signature.
+        def proof_source_kernel_has_ambiguous_qualified_call(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) -> bool:
+            for node in nodes:
+                continue if node.kind != "call" or node.left >= nodes.count
+                callee: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
+                qualified: mutable bool = callee.kind == "scope"
+                if callee.kind == "paren" and callee.left < nodes.count:
+                    qualified <- nodes[callee.left].kind == "scope"
+                continue if not qualified
+                name: sview = proof_source_kernel_symbol_leaf(nodes, node.left, 0)
+                count: mutable usize = 0
+                for binding in bindings |binding, name, count|:
+                    count <- count + 1 if binding.kind == "function" and binding.name == name
+                return true if count > 1
+            return false

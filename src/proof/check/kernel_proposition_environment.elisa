@@ -359,14 +359,14 @@ extend ElisaProof:
             return true if not resolved.known or resolved.type_name == ""
             return ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, kind, name, owner, resolved.sort, resolved.type_name, resolved.element_sort, resolved.element_type_name, resolved.type_identity, owner_type_identity, resolved.element_type_identity)
 
-        def proof_source_kernel_add_function_signature(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, position: Ast::Pos, reference_parameters: darray[ProofSourceKernelReferenceParameter]&, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_add_function_signature(bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, owner: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, position: Ast::Pos, reference_parameters: darray[ProofSourceKernelReferenceParameter]&, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex) -> bool can[Memory.Allocate, Abort.Panic]:
             return_expression: mutable Ast::Expr = Ast::Expr.Ident("void", Ast::pos_at_line(0))
             if return_type is declared_return_type:
                 return_expression <- declared_return_type
             result_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(return_expression, "", declarations, type_index, 0)
             return true if not result_sort.known or result_sort.type_name == ""
             signature_identity: usize = position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET
-            added_signature: bool = ElisaProofKernelCore::proof_kernel_add_function_signature(bindings, name, result_sort.sort, result_sort.type_name, result_sort.element_sort, result_sort.element_type_name, result_sort.type_identity, result_sort.element_type_identity, signature_identity, parameters.count)
+            added_signature: bool = ElisaProofKernelCore::proof_kernel_add_function_signature(bindings, name, owner, result_sort.sort, result_sort.type_name, result_sort.element_sort, result_sort.element_type_name, result_sort.type_identity, result_sort.element_type_identity, signature_identity, parameters.count)
             return false if not added_signature
             reference_names: mutable darray[sview] = []
             for reference in reference_parameters |position, reference_names|:
@@ -405,7 +405,7 @@ extend ElisaProof:
                         for parameter in parameters |tuple_label_index, all_declarations, type_index, bindings, depth|:
                             parameter_fields: bool = proof_source_kernel_collect_tuple_fields(parameter.type_expression, tuple_label_index, all_declarations, type_index, bindings, depth + 1)
                             return false if not parameter_fields
-                        added: bool = proof_source_kernel_add_function_signature(bindings, name, parameters, return_type, position, reference_parameters, all_declarations, type_index)
+                        added: bool = proof_source_kernel_add_function_signature(bindings, name, module_owner, parameters, return_type, position, reference_parameters, all_declarations, type_index)
                         return false if not added
                     Ast::Decl.Struct(name, members, _, _, _, _, position):
                         type_identity: usize = position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET
@@ -468,6 +468,8 @@ extend ElisaProof:
         def proof_source_kernel_type_environment(names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], workspace: mutable ProofSourceKernelFormationWorkspace&, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
             local_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if names.count != types.count or names.count != source_types.count
+            scoped_globals: (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_scoped_function_bindings(global_bindings, names, workspace.type_index.scope_path)
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not scoped_globals.known
             # Lexical contexts are flat and ordered outer-to-inner. Keep the nearest declaration
             # for each name so the kernel sees Elisa's resolved binding, not an ambiguous pair.
             # The names are AST-backed sviews; the imported file outlives this whole formation pass.
@@ -489,7 +491,7 @@ extend ElisaProof:
                         added <- proof_source_kernel_add_type_binding(&local_bindings, "value", names[index], "", 0, source_types[index], types[index], declarations, workspace.type_index, 0)
                     if not added:
                         return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings})
-            environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}
+            environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scoped_globals.bindings, bindings: local_bindings}
             return (true, environment)
 
         def proof_source_kernel_proposition_formed[@r](expression: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], workspace: mutable ProofSourceKernelFormationWorkspace& @r, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace& @r, file: Ast::File&, failure: mutable sview&) -> bool can[Memory.Allocate, Abort.Panic]:
@@ -501,6 +503,9 @@ extend ElisaProof:
             root: usize = proof_kernel_encode_annotated(expression, &workspace.nodes, &workspace.children, file.enum_annotations)
             if root >= workspace.nodes.count:
                 failure <- "kernel proposition term exceeded its bounded arena"
+                return false
+            if proof_source_kernel_has_ambiguous_qualified_call(workspace.nodes, global_bindings):
+                failure <- "qualified call has an ambiguous function owner"
                 return false
             typing: (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) = proof_source_kernel_type_environment(names, types, source_types, global_bindings, workspace, file.top_decls, file.enum_annotations)
             failure <- "local-context-unrepresented" if not typing.known
