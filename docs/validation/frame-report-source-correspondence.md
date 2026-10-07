@@ -54,3 +54,27 @@ and 190-entry kernel inventory pass. CLI frame recording remains disabled, so
 the two static frame-accounting repros still report goal-attempt-coverage.
 Artifacts: engine build/validation/frame_source_api-O0/-O2 and
 prover-frame-source-api-build.log.
+
+## Structural ledger admission bridge
+
+The existing source-postcondition inventory check rejected every non-postcondition
+source tag, including newly recorded frame events. `report_frame_inventory.elisa`
+now recognizes changes/preserves/allow/preserve tags only when there is exactly
+one bounded AST owner, one associated attempt, matching owner and frame family,
+matching proven/has-certificate state, an inert true mirror and zero facts. Owner
+lookup shares a 4096-declaration budget and refuses depth/exhaustion/ambiguity.
+Foreign owners and unknown tags remain rejected. This is structural validation;
+it neither replays a frame root nor replaces original-source event coverage.
+The AST-only replay API still refuses these certificates. Production static
+frame events have not yet been replaced or attached, so their original accounting
+failures persist.
+
+The report-model probe passes at O0; its expanded O2 version adds foreign-owner
+and unknown-tag invariant rejection (eight source replay mutation controls).
+The existing reduced report-invariant runtime compiles and passes, ensuring the
+standalone model remains supported. All-products strict O2 build passes,
+generation 7ef40bfe119e42b385a3e53ef210c571. Source admission matrix, invariant
+diagnostics and kernel inventory pass. Artifacts: engine build/validation/
+frame_inventory_bridge-O0/-O2, report_invariants-frame-bridge and
+prover-frame-inventory-bridge-build.log. Producer event attachment and CLI source
+replay integration remain the next work; broad implementation scope is unchanged.
