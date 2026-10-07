@@ -8,9 +8,14 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 BASE = (ROOT / "test/repro/read_only_search_field_bound.elisa").read_text()
+CONDITIONAL = (ROOT / "test/repro/conditional_search_field_bound.elisa").read_text()
 for name, source, accepted in (
     ("read-only-search", BASE, True),
     ("zero-iterations", BASE.replace("0..<4", "0..<0"), True),
+    ("conditional-assignment", CONDITIONAL, True),
+    ("conditional-wrong-initializer", CONDITIONAL.replace("hit: usize = 4", "hit: usize = 5"), False),
+    ("conditional-wrong-preservation", CONDITIONAL.replace("break index if store.flags[index]", "hit <- 5"), False),
+    ("conditional-wrong-entry", CONDITIONAL.replace("store.count >= 4", "store.count > 4"), False),
     ("wrong-initializer", BASE.replace("hit: usize = 4", "hit: usize = 5"), False),
     ("wrong-preservation", BASE.replace("break index if store.flags[index]", "hit <- 5"), False),
     ("changed-record", BASE.replace("    slot: usize", "    store.count <- 4\n    slot: usize"), False),
