@@ -1,0 +1,60 @@
+extend ElisaProofFrameSource:
+    public:
+        struct CallEffect:
+            position: Ast::Pos
+            change_index: usize
+            place: ElisaProofKernelFramePolicy::Place
+
+    private:
+        def condition_effects_walk(expression: Ast::Expr, declarations: darray[Ast::Decl]&, name: sview, line: u32, formals: darray[sview]&, types: darray[Ast::Expr]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&, effects: mutable darray[CallEffect]&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64 or work >= 4096
+            work <- work + 1
+            match expression:
+                Ast::Expr.Call(_, arguments, _, position):
+                    # Arguments must be independently call-free scalar values.
+                    # Nested calls need their own evaluation-order inventory.
+                    for argument in arguments |formals, types, depth, work|:
+                        return false if not scalar_value(argument, formals, types, depth + 1, work)
+                    invocation = source_call(declarations, name, line, position)
+                    return false if not invocation.known
+                    callee = owner(declarations, invocation.callee, invocation.callee_line)
+                    return false if not callee.known or not contract_scalar_type(callee.return_type)
+                    mapping = source_call_changes(declarations, name, line, position, tokens, source, source_length)
+                    return false if not mapping.known
+                    for index in 0..<mapping.places.count |index, mapping, effects, position|:
+                        return false if effects.count >= 4096
+                        effects.push(CallEffect{position: position, change_index: index, place: mapping.places[index]})
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return condition_effects_walk(inner, declarations, name, line, formals, types, tokens, source, source_length, depth + 1, work, effects)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Not and operator != TokenKind.Plus and operator != TokenKind.Minus
+                    return condition_effects_walk(inner, declarations, name, line, formals, types, tokens, source, source_length, depth + 1, work, effects)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
+                    return false if not condition_effects_walk(left, declarations, name, line, formals, types, tokens, source, source_length, depth + 1, work, effects)
+                    before_right: usize = effects.count
+                    return false if not condition_effects_walk(right, declarations, name, line, formals, types, tokens, source, source_length, depth + 1, work, effects)
+                    # A skipped pure call adds no physical-write event. A skipped
+                    # effectful call must not be claimed to have certainly run.
+                    return false if (operator == TokenKind.And or operator == TokenKind.Or) and effects.count != before_right
+                    return true
+                _:
+                    return scalar_value(expression, formals, types, depth + 1, work)
+
+    public:
+        # The condition is recovered from the original owner's statement ordinal;
+        # callers cannot substitute a producer expression or omit an operand.
+        def source_condition_effects(declarations: darray[Ast::Decl]&, name: sview, line: u32, statement_index: usize, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, effects: darray[CallEffect]) can[Memory.Allocate, Abort.Panic]:
+            context = owner(declarations, name, line)
+            return (false, []) if not context.known or statement_index >= context.body.count
+            work: mutable usize = 0
+            return (false, []) if not contract_environment(declarations, 0, &work)
+            work <- 0
+            effects: mutable darray[CallEffect] = []
+            match context.body[statement_index]:
+                Ast::Stmt.If(condition, _, _, _):
+                    return (false, []) if not condition_effects_walk(condition, declarations, name, line, &context.formals, &context.formal_types, tokens, source, source_length, 0, &work, &effects)
+                    return (true, effects)
+                _:
+                    return (false, [])

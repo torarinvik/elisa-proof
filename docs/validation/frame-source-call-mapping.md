@@ -62,3 +62,23 @@ allowance-facade all-products build completed as generation
 b406c2a29a3640c9a9ca8d2e846b7357; existing frame CLI regressions pass. Complete
 caller event inventory/producer integration is still pending, so no engine
 proof failure is claimed repaired by these helpers.
+
+## Original conditional-call effect inventory
+
+`source_condition_effects` recovers the original owner's If condition by statement
+ordinal, then reconstructs ordered mapped effects through scalar operators.
+Traversal shares a 4096-node budget, refuses depth 64, checks primitive return
+types and original call-free scalar arguments, and preserves exact occurrence
+positions plus each callee changes ordinal. Unknown scopes/operators/type
+implementations refuse. A short-circuit right operand must add no write effects;
+effectful calls there invalidate the entire returned inventory. This helper
+does not prove logical call preconditions or numeric results.
+
+Eight new controls cover bare/negated/comparison/arithmetic calls, an effectful
+left with a readonly right call, refusal of effectful right calls for both
+short-circuit operators, and two distinct comparison call occurrences. The probe
+now has 32 controls; the distinct calls retain different source columns. This
+condition inventory is not yet a complete body inventory and is not dispatched
+by report admission. Caller branches, local bindings/indexing, event origins
+and producer/report integration remain necessary before condition-call admission
+or any of the seven failing engine policies can be claimed repaired.
