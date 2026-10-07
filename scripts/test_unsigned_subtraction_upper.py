@@ -65,7 +65,8 @@ with tempfile.TemporaryDirectory() as directory:
     proved_block = run("--proof", str(proved_id), str(guarded))
     assert proved_block.returncode == 0 and "\nproof guarded_word_" in proved_block.stdout, proved_block.stdout
     open_block = run("--proof", str(open_id), str(unguarded))
-    assert open_block.returncode == 0 and "\nopen unguarded_word_" in open_block.stdout, open_block.stdout
+    # The focused proof route uses the same nonzero exit for an open goal as JSON.
+    assert open_block.returncode == 1 and "\nopen unguarded_word_" in open_block.stdout, open_block.stdout
     proved_path = Path(directory) / "proved.txt"
     proved_path.write_text(proved_block.stdout, encoding="utf-8")
     faithful = run("--check-proof", str(proved_path), str(guarded))

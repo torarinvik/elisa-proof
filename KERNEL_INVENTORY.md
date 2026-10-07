@@ -332,6 +332,7 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_closed_formula_at_width` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_closed_formula_width_uniform` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
