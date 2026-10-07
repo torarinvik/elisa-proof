@@ -7,8 +7,13 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
 BASE = (ROOT / "examples/captured_search_invariant.elisa").read_text()
+QUALIFIED = (ROOT / "examples/captured_search_qualified_constant.elisa").read_text()
 for name, source, accepted in (
     ("valid", BASE, True),
+    ("qualified", QUALIFIED, True),
+    ("other-owner", "const module Other:\n    MAX: usize = 1\n" + QUALIFIED, True),
+    ("qualified-wide", QUALIFIED.replace("MAX: usize = 4", "MAX: usize = 5"), False),
+    ("wrong-owner", "const module Other:\n    MAX: usize = 5\n" + QUALIFIED.replace("slot: usize = Limits::MAX", "slot: usize = Other::MAX"), False),
     ("wide-range", BASE.replace("0..<4", "0..<5"), False),
     ("wide-initial", BASE.replace("slot: usize = 4", "slot: usize = 5"), False),
     ("wrong-invariant", BASE.replace("invariant slot <= 4", "invariant slot <= 3"), False),
