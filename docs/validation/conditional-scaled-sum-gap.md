@@ -17,3 +17,13 @@ the result is 9000000000999999999, contradicting that claim.
 
 A fix must replay the valid conditional-derived bound while preserving the
 invalid-bound rejection and the engine's original implementation/contracts.
+
+The first source-validation fix admits source-exact conditional initializers
+whose comparison predicate and both integer arms read immutable parameters.
+The focused runner now fully replays the valid fixture and refuses both the
+invalid bound and a mutable-input fixture. The five enum regressions also pass.
+Calls, local aliases and overloaded primitive operations remain refused by
+this admission path. The engine timing proof still has three replay gaps:
+its fraction is a computed local, requiring independently checked dependency
+reconstruction before this rule can cover it. Full prover regression testing
+remains open.
