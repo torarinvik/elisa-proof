@@ -80,3 +80,11 @@ The fresh engine sweep runs all 73 proofs uncached and passes 66, with the same
 seven remaining rows: both ActionInput rows, audio animation events, triggers,
 virtual audio, motion overlay policy and sound-event assets. Log:
 `build/validation/proof-range-binder-full-sweep.log`.
+
+The collection builtin escape regression now checks the single severity-one
+error at line 15 in grow and its argument-2 local-storage escape message,
+without requiring compiler ordinal 620. The current compiler's
+DiagnosticKind.StoreRefToLocal ordinal is 622; report output already states
+that kind_code is revision-specific. The exact remaining findings, failed
+verification reasons and complete replay assertions are preserved. Replaying
+the updated matrix assertion against the isolated product passes.
