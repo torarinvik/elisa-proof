@@ -112,7 +112,24 @@ def main():
         # route. Inadmissibility, not incompleteness, is what the refusals below test.
         target = ROOT / "examples/tactic_repair_target.elisa"
         assert run("--tactics", ROOT / "examples/tactic_script_repair_target.json", target).returncode == 0
-        assert run("--goal", "1", target).returncode == 0 and run("--theorems", target).returncode == 0
+        # This compound equality is deliberately a tactic-repair target. Its
+        # automatic query must not claim a proved result merely because source
+        # admission succeeds.
+        unresolved = run("--goal", "1", target)
+        assert unresolved.returncode == 1 and json.loads(unresolved.stdout)["status"] == "unknown"
+        assert json.loads(unresolved.stdout)["source"]["admissible"] is True
+        assert run("--theorems", target).returncode == 0
+        checked_partial = directory / "checked_partial.elisa"
+        checked_partial.write_bytes(target.read_bytes() + b"\ndef checked_control() -> i64:\n    ensure result == 7\n    return 7\n")
+        partial_report = json.loads(run("--json", checked_partial).stdout)
+        checked = [goal for goal in partial_report["goals"]
+                   if goal["name"] == "checked_control" and goal["rule"] == "goal"]
+        assert len(checked) == 1 and checked[0]["proven"] and checked[0]["replay_status"] == "replayed"
+        accepted = run("--goal", str(checked[0]["goal_id"]), checked_partial)
+        accepted_report = json.loads(accepted.stdout)
+        assert accepted.returncode == 0 and accepted_report["source"]["admissible"] is True
+        assert accepted_report["source"]["complete"] is False
+
         partial = run("--repair-all", target)
         assert partial.returncode == 1 and json.loads(partial.stdout)["status"] in ("partial", "repaired")
 
