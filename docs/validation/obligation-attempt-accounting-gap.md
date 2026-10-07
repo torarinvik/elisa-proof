@@ -126,3 +126,16 @@ kernel inventory passes ten tables and 188 entries. Runtime artifact: engine
 `build/validation/frame-policy-arena`. Source-bound certificate dispatch and
 producer event lowering are still pending; the mathematical frame relation
 verdict does not authenticate any source frame declaration or write.
+
+The committed 976caffe all-products build completes successfully with compiler
+96761822. Admission diagnostics, all six malformed-source classes across twelve
+routes and the ten-table/188-entry kernel inventory pass on that product. The
+full adversarial `examples/kernel_arena_runtime/main.elisa` probe compiles
+strictly at O0, links and exits zero, covering the existing resource, tactic,
+quantifier, provenance and arithmetic arena controls. The uncached engine
+sweep remains 66/73, with the same seven failing rows. Logs/artifacts: engine
+`build/validation/prover-frame-arena-integrated-build.log`,
+`frame-integrated-arena-controls` and
+`proof-frame-arena-integrated-sweep.log`. Source admission still rejects static
+frame events without evidence; these qualification results do not close that
+source-bound integration requirement or the full compatibility matrix.
