@@ -551,3 +551,25 @@ invalid first root with retained later success. Artifacts are engine
 build/validation/frame_source_decisions-O0 and frame_source_decisions-O2.
 Production binaries have not been rebuilt for this addition; full report
 recording/source-context dispatch and broader source inventory remain open.
+
+### Report recording bridge
+
+The private `proof_record_direct_frame_events` helper lowers and independently
+checks the original complete supported inventory before recording one attempt
+and one source-tagged obligation per event. Successful events receive fact-free
+frame-spec/frame-allow/frame-preserve certificates; unsuccessful events retain
+failed attempts and goal-linked findings. It refuses an unaccounted preceding
+attempt. Certificates retain full source occurrence positions in the inert AST
+mirror and remain unreplayed. The helper is not called by the production checker:
+source-context certificate dispatch and complete report association still need
+to be implemented before enabling this family.
+
+The actual report-model runtime probe passes at O0/O2: valid four-event recording
+and six-event recording with five certificates and one failed preservation
+attempt. It checks contiguous singleton spans, original owner/event ordinals,
+fact-free storage, certificate associations and failed-goal findings. Included in
+the integrated runtime matrix. All-products strict O2 build succeeds, generation
+4ef55b40c32b4b1dbbbea75009fdbe4a; source admission mutation matrix passes six
+classes on all twelve routes. Engine artifacts: frame_report_recording-O0/-O2
+and prover-frame-report-recording-build.log. These are focused results; full
+implementation plan and broader frame effect mappings remain open.

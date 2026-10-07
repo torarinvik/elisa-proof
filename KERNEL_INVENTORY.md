@@ -156,6 +156,7 @@ kernel root, or replay dispatch are sound.
 | `proof_add_resource_goal_attempt` | `proof/certificate_admission.elisa` | resource-safety trace |
 | `proof_add_effect_goal_attempt` | `proof/certificate_admission.elisa` | effect-containment trace |
 | `proof_add_structural_goal_attempt` | `proof/certificate_admission.elisa` | structural-safety trace |
+| `proof_record_direct_frame_events` | `proof/replay/frame_report_recording.elisa` | source frame events; production dispatch not enabled |
 <!-- /inventory:certificate-producers -->
 
 ## Fact trace kinds
@@ -348,6 +349,7 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
 | `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; resolved type head |
 | `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
+| `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
