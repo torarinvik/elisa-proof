@@ -60,3 +60,15 @@ qualified enum scope typing and const-enum facts, and lists the current shared
 source-adapter/search and package preflight dependencies. It also distinguishes
 shape checks from selected source validators. This is an inventory repair; no
 production trust boundary or full-matrix verdict changed.
+
+An isolated build repairs the first fresh matrix failure,
+`source_context_scope.elisa`: numeric range iteration binders now shadow an
+outer namesake without inheriting its reference/write capability or borrowing
+its slot. Scalar iteration values also use the current child-state sentinel
+instead of pointing into an inherited binding by accident. Loop-header
+captures are parser-lowered separately. The all-products strict build passes;
+`test_range_binder_resources.py` proves the scope fixture with complete replay
+and retains false-shadow and genuine borrow-contract refusals. The kernel
+inventory gate passes. Build log: engine
+`build/validation/prover-range-binder-build.log`. This isolated correction is
+not included in the still-running b8ff7592 matrix.
