@@ -349,3 +349,5 @@ else:
 done
 
 python3 "$ROOT_DIR/scripts/test_signed_call_snapshots.py"
+
+python3 "$ROOT_DIR/scripts/tests/test_pop_snapshot_source.py"

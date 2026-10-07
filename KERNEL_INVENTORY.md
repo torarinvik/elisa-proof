@@ -191,6 +191,7 @@ establish independent source correspondence for every boundary fact.
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 | `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `collection-pop` | `check/collection_pop.elisa` | after a statement `v.pop()` on a mutable darray reference parameter: `1 <= S` (the builtin traps on an empty array) and `v.count == S - 1`, S the pre-pop count |
+| `collection-pop-value` | `check/collection_pop.elisa`, `replay/pop_value_source.elisa` | literal captured scalar from a source-exact first builtin pop on a mutable darray reference; replay independently requires last-slot equality, nonempty guard, matching element type, no user pop function and stable local suffix |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 | `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
@@ -354,6 +355,10 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
 | `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
 | `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
+| `proof_expr_has_move` | `proof/expr/constant_arithmetic.elisa` | source adapter; depth-bounded move syntax scan fails closed |
+| `proof_statement_position` | `proof/check/runtime_support_and_calls.elisa` | source adapter; statement span projection |
+| `proof_expression_is_terminal` | `proof/check/runtime_support_and_calls.elisa` | source adapter; reserved raise/panic expression classification |
+| `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
