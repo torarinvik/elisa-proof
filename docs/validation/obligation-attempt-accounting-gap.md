@@ -171,3 +171,13 @@ yet imported into production replay. Investigate the O0 lowering failure before
 claiming optimization-independent qualification. Policy/type correspondence and
 certificate/event admission remain open. Artifact: engine
 `build/validation/frame-source-owners` (O2, exit 0).
+
+Follow-up: the O0 crash was isolated to the probe's duplicate-array construction
+using two `duplicate.extend(&file.top_decls)` calls. Replacing these with individual
+`push` operations preserves the duplicate-owner negative and passes at O0. Added
+exact 4096-declaration acceptance and 4097-declaration refusal after a valid early
+match, with empty outputs on refusal. All eight controls now compile, link and run
+(exit 0) at O0 and O2 with compiler 96761822. The owner probe is included in the
+regular runtime matrix. The original extend lowering failure is not repaired by
+this fixture change; production source admission remains unchanged. Artifacts:
+engine `build/validation/frame-source-owners-o0` and `frame-source-owners`.
