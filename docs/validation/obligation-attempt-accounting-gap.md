@@ -210,3 +210,20 @@ establishes body-list correspondence; write-site/source identity/type validation
 and signature policy remain separate obligations. Parser signature clauses are
 stored in side-table rows rather than body Contract nodes, so header handling
 requires independent token/source reconstruction before production integration.
+
+### Source direct mutation targets
+
+`replay/frame_source_writes.elisa` independently finds a unique top-level `<-`
+assignment by all six source position fields in the exact owner body, decodes its
+formal-rooted target, and rejects local binders with the same root spelling. It
+uses no producer write or shadow metadata. Bounded owner/body traversal, unknown
+roots, indexed paths, wrong owners, forged positions and ambiguous matching
+assignments fail closed. Parser-backed controls pass at O0 and O2 with compiler
+96761822: direct field mutation with correct formal ordinal, unknown root, typed
+local shadow, binding-assignment shadow, indexed target, plus wrong owner and
+changed-column controls for each case. Artifacts: engine build/validation/
+frame-source-writes and frame-source-writes-o2. Included in the runtime matrix.
+This helper does not yet cover nested control flow, compound mutation operators,
+aliases, mapped callee writes or dynamic indexes, nor does it validate field types.
+Those paths and header reconstruction remain part of the full frame admission
+work; no production admission rule has been loosened or replaced.
