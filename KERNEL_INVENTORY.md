@@ -110,6 +110,7 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | `field` | a field of an owner type | owner and owner type identity set |
 | `enum-member` | an enum member value | owner is the enum; identities agree |
 | `enum-tag` | an enum tag used in `is` tests | owner is the enum; identities agree |
+| `enum-scope-segment` | one module/type segment of a qualified enum path | owner type identity set; `parameter_index` < `parameter_count` == path length; name is that segment |
 <!-- /inventory:typing-kinds -->
 
 ## Certificate rules
@@ -186,6 +187,8 @@ summary trace cannot be relabelled as one.
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 | `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
+| `const-enum-exclusion` | `check/operator_impl_chain.elisa` | a const-enum value differs from another explicit variant's value (distinct explicit discriminants) |
+| `const-enum-member-value` | `check/enum_value_types.elisa`, `check/operator_impl_chain.elisa` | a qualified const-enum member equals its declared constant value |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step
@@ -324,11 +327,19 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_head_name` | `proof/expr/ast_equal.elisa` | source adapter; module/type head lookup, not callable contract resolution |
+| `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; module/type head lookup, not callable contract resolution |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 | `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
+| `proof_count_named_aggregates` | `proof/check/enum_value_types.elisa` | source adapter |
+| `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter |
+| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter |
+| `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | report model |
+| `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter |
+| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter |
+| `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
@@ -366,4 +377,5 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_push` | `app/portable_io.elisa` | output |
 | `proof_push_json_i64` | `app/portable_io.elisa` | output |
 | `proof_push_json_string` | `app/portable_io.elisa` | output |
+| `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
 <!-- /inventory:correspondence-external-calls -->
