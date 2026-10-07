@@ -38,3 +38,16 @@ Using a module constant in the cap reproduces a remaining replay gap;
 source constant rebinding must be reconstructed before the engine timing
 case is covered. Logs are retained in the engine validation directory as
 `prover-conditional-local-build.log` and `proof-conditional-local-full-sweep.log`.
+
+The constant-initializer fix independently validates literal global-constant
+traces in the exact owner/scope before normalizing a source initializer.
+Parameter and direct-local shadowing are refused. The original initializer
+still undergoes the primitive-operator override check, and its normalized
+equation must exactly match the serialized premise.
+
+Seven conditional cases and five enum cases pass. The real engine
+`application_capture_timing` proof now proves/replays all 11 obligations with
+zero findings and zero semantic errors. The uncached engine sweep improves
+to 65/73: eight rows still fail. Logs: `prover-conditional-constants-build.log`
+and `proof-conditional-constants-full-sweep.log` in engine build/validation.
+The full prover test matrix remains unverified.

@@ -9,6 +9,8 @@ prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / 'build/eli
 for name, accepted in (
         ('conditional_scaled_sum_bound', True),
         ('conditional_computed_local_bound', True),
+        ('conditional_constant_bound', True),
+        ('rejected_conditional_constant_shadow', False),
         ('rejected_conditional_scaled_sum_bound', False),
         ('rejected_conditional_mutable_local', False),
         ('rejected_conditional_mutable_input', False)):
