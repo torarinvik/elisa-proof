@@ -261,6 +261,7 @@ run_py_test test_value_block_effect_retention.py
 run_py_test test_pure_range_search.py
 run_py_test test_region_outer_facts.py
 run_py_test test_conditional_fixed_extent.py
+run_py_test test_branch_local_loop_atom.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
