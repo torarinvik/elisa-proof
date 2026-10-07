@@ -44,10 +44,35 @@ nonzero first start and an out-of-range count, then accepts the restored span.
 
 Both proof/replay products build with compiler 96761822. An uncached engine
 sweep retains 66/73, with the same seven failures. Conditional, guarded-call,
-deterministic-call and portable disjunction controls pass. The broader source
-admission matrix still fails its previously failing focused goal/theorem query;
-no complete matrix success is claimed. Logs: `prover-attempt-span-build.log`,
+deterministic-call and portable disjunction controls pass. The source-admission matrix subsequently passed after its stale focused-goal
+expectation was aligned with the documented complete-source CLI contract
+(398b2c45). The full prover matrix remains failing. Logs: `prover-attempt-span-build.log`,
 `proof-attempt-span-full-sweep.log`, `source-admission-span.log` in engine
 build/validation. The new spans are internal report accounting metadata;
 portable replay retains its separate source/certificate validation boundary.
 Further resealed-metadata mutation and outcome-association coverage remain open.
+
+## Static frame event evidence gap
+
+The new admission diagnostic isolates goal-attempt-coverage for a minimal
+void-returning frame write (`test/repro/frame_accounting_allowed.elisa`).
+There are three successful events: a valid changes clause, an allowed write
+and resource safety. Only resource safety creates a goal/certificate, which
+replays. The report correctly remains refused despite 3/3 producer counters,
+no source diagnostics, no findings and no replay gaps. This is independent
+of postcondition and branch accounting.
+
+The outside-frame control has 3 events, 2 marked successful, one replayed
+resource certificate and frame-write-outside. The preservation control has
+5 events, 4 marked successful, one replayed resource certificate and
+frame-preserve-write. Both are semantically clean and refused.
+
+The correction needs checked evidence for each static frame event, bound to
+its source frame, actual write/call place, formal owner and policy operation.
+A replayed resource certificate alone checks resource transitions; it does
+not establish a changes/preserves policy. Do not remove these events, replace
+them with literal-true certificates, relax the proven-attempt lower bound or
+associate them with unrelated resource evidence. Header and body frame specs,
+direct/dynamic writes, call frame mapping and preservation checks share this
+accounting path and all need coverage. False frame containment and overlapping
+preservation controls must remain refused after accepted checks replay.
