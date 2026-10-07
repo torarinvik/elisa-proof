@@ -11,6 +11,7 @@ QUALIFIED = (ROOT / "examples/captured_search_qualified_constant.elisa").read_te
 for name, source, accepted in (
     ("valid", BASE, True),
     ("qualified", QUALIFIED, True),
+    ("qualified-postcondition", QUALIFIED.replace("-> void:", "-> usize:\n    ensure result <= Limits::MAX").replace("    return if slot == 4", "    return 4 if slot == 4") + "    slot\n", True),
     ("other-owner", "const module Other:\n    MAX: usize = 1\n" + QUALIFIED, True),
     ("qualified-wide", QUALIFIED.replace("MAX: usize = 4", "MAX: usize = 5"), False),
     ("wrong-owner", "const module Other:\n    MAX: usize = 5\n" + QUALIFIED.replace("slot: usize = Limits::MAX", "slot: usize = Other::MAX"), False),
@@ -31,7 +32,7 @@ for name, source, accepted in (
             assert not report["trust"]["trusted_assumptions"]
             assert report["summary"]["semantic_errors"] == 0
             if accepted:
-                assert report["summary"]["proven"] == report["summary"]["obligations"] == 8
+                assert report["summary"]["proven"] == report["summary"]["obligations"] >= 8
                 assert report["replay"]["gaps"] == 0
             else:
                 assert report["summary"]["unproven"] > 0
