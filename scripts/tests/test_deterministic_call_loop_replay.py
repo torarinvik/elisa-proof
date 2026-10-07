@@ -108,12 +108,53 @@ SOURCE_LINES = [
     "        v += 5",
     "    return step(v)",  # COMPOUND_AFTER
     "",
+    "def poke(v: mutable i64&) -> i64:",
+    "    v <- 3",
+    "    return 0",
+    "",
+    "def peek(v: i64&) -> i64:",
+    "    return v",
+    "",
+    "def look(v: i64&) -> i64:",
+    "    return v",
+    "",
+    "module Other:",
+    "    public:",
+    "        def peek(v: mutable i64&) -> i64:",
+    "            v <- 9",
+    "            return 0",
+    "",
+    "def lent(a: i64) -> i64:",
+    "    x: mutable i64 = 4",
+    "    y: i64 = poke(x)",
+    "    return step(x)",  # LENT_AFTER
+    "",
+    "def shared(a: i64) -> i64:",
+    "    x: i64 = 4",
+    "    y: i64 = peek(x)",
+    "    return step(x)",  # SHARED_AFTER
+    "",
+    "def looked(a: i64) -> i64:",
+    "    x: i64 = 4",
+    "    y: i64 = look(x)",
+    "    return step(x)",  # LOOKED_AFTER
+    "",
+    "def enclosed(a: i64) -> i64:",
+    "    xs: mutable darray[i64] = []",
+    "    xs.push(step(a))",  # ENCLOSED_CALL
+    "    return 0",
+    "",
+    "def sibling(a: i64) -> i64:",
+    "    x: mutable i64 = 1",
+    "    r: i64 = poke(x) + step(x)",  # SIBLING_CALL
+    "    return r",
+    "",
 ]
 
 TAGS = [
     "LOOP_BODY", "LOOP_ASSIGNED", "LOOP_AFTER", "BRANCH_AFTER", "BUMP_ASSIGN", "BUMP_CALL",
     "FOR_CALL", "MATCH_AFTER", "METHOD_AFTER", "SHADOW_CALL", "GUARD_CALL", "NESTED_CALL",
-    "ELSE_AFTER", "COMPOUND_AFTER",
+    "ELSE_AFTER", "COMPOUND_AFTER", "LENT_AFTER", "SHARED_AFTER", "ENCLOSED_CALL", "SIBLING_CALL", "LOOKED_AFTER",
 ]
 
 
@@ -161,6 +202,16 @@ extend ElisaProof:
             known: bool = proof_replay_deterministic_call_source_declarations(report.source_declarations, owner, 0, call, Ast::expr_pos(call).line, &matches, 0)
             return known and matches == 1
 
+        # A function-summary call is anchored by its raw text at its exact span.
+        def test_summary_site_accepted(report: mutable ProofReport&, owner: sview, call: Ast::Expr) -> bool:
+            owner_line: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, owner, Ast::expr_pos(call).line, &owner_line, 0)
+            report.replay_owner_line <- owner_line
+            trace: ProofFactTrace = ProofFactTrace{expression: call, kernel_expression: 0, kind: "function-summary", line: Ast::expr_pos(call).line, name: owner, dependency: "step", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
+            accepted: bool = proof_replay_summary_raw_call_source_site(report, trace, call)
+            report.replay_owner_line <- 0
+            return accepted
+
 using Ast
 using ElisaProof
 
@@ -168,10 +219,17 @@ def test_loop_find_expr(expression: Ast::Expr, line: u32, want_assign: bool, fou
     if depth >= 64:
         return
     match expression:
-        Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, _, position):
-            if not want_assign and callee == "step" and position.line == line:
-                found <- expression
-                hit <- true
+        Ast::Expr.Call(callee_expression, arguments, _, position):
+            match callee_expression:
+                Ast::Expr.Ident(callee, _):
+                    if not want_assign and callee == "step" and position.line == line:
+                        found <- expression
+                        hit <- true
+                        return
+                _:
+                    pass
+            for argument in arguments |line, want_assign, found, hit, depth|:
+                test_loop_find_expr(argument, line, want_assign, found, hit, depth + 1)
         Ast::Expr.Binary(left, _, right, _):
             test_loop_find_expr(left, line, want_assign, found, hit, depth + 1)
             test_loop_find_expr(right, line, want_assign, found, hit, depth + 1)
@@ -348,6 +406,34 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     compound_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "compound", COMPOUND_AFTER, false)
     return 45 if not compound_call.known
     return 46 if test_loop_site_accepted(&report, "compound", test_loop_with_literal(compound_call.value, 0))
+
+    # A callee with a mutable reference slot may rewrite a lent local: the initializer is stale.
+    lent_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "lent", LENT_AFTER, false)
+    return 47 if not lent_call.known
+    return 48 if test_loop_site_accepted(&report, "lent", test_loop_with_literal(lent_call.value, 4))
+    # A shared borrow cannot be written through, so the initializer still holds (`looked`) unless any
+    # same-spelled function (here `Other::peek`) takes a mutable slot: resolution is not trusted.
+    shared_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "shared", SHARED_AFTER, false)
+    return 49 if not shared_call.known
+    return 50 if test_loop_site_accepted(&report, "shared", test_loop_with_literal(shared_call.value, 4))
+    looked_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "looked", LOOKED_AFTER, false)
+    return 61 if not looked_call.known
+    return 62 if not test_loop_site_accepted(&report, "looked", test_loop_with_literal(looked_call.value, 4))
+    # A call enclosing the matched one writes only after it ran; a sibling call may write first.
+    enclosed_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "enclosed", ENCLOSED_CALL, false)
+    return 51 if not enclosed_call.known
+    return 52 if not test_loop_site_accepted(&report, "enclosed", enclosed_call.value)
+    return 53 if test_loop_site_accepted(&report, "enclosed", test_loop_with_literal(enclosed_call.value, 0))
+    sibling_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "sibling", SIBLING_CALL, false)
+    return 54 if not sibling_call.known
+    return 55 if test_loop_site_accepted(&report, "sibling", sibling_call.value)
+    return 56 if test_loop_site_accepted(&report, "sibling", test_loop_with_literal(sibling_call.value, 1))
+
+    # Summary sites: the raw call at its exact span, never a substituted or shifted one.
+    return 57 if not test_summary_site_accepted(&report, "bumped", bump_call.value)
+    return 58 if test_summary_site_accepted(&report, "bumped", test_loop_with_argument(bump_call.value, bump_value.value))
+    return 59 if test_summary_site_accepted(&report, "bumped", test_loop_shifted(bump_call.value))
+    return 60 if test_summary_site_accepted(&report, "counted", bump_call.value)
     return 0
 '''
 
@@ -384,7 +470,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail")
+    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail; mutable-slot, same-name and sibling writes reset while enclosing calls do not; summary sites match raw text at the exact span")
 
 
 if __name__ == "__main__":

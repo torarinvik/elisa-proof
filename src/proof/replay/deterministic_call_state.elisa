@@ -43,8 +43,55 @@ extend ElisaProof:
                     rebind_values.push(values[index])
             return proof_replay_substitute_many(expected, &rebind_names, &rebind_values)
 
-        # A callee that cannot write any caller local: one unique source function whose
-        # parameters are all immutable primitive scalars, so it receives no reference.
+        # Whether a parameter type may grant write access to the caller's place: any `mutable`
+        # or `lmut` anywhere in it. Forms this check does not model count as writable.
+        def proof_replay_deterministic_writable_type(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= 96
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.Unary(operator, inner, _):
+                    return true if operator == TokenKind.Mutable or operator == TokenKind.Lmut
+                    return proof_replay_deterministic_writable_type(inner, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _):
+                    return proof_replay_deterministic_writable_type(inner, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_deterministic_writable_type(object, depth + 1) or proof_replay_deterministic_writable_type(index, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_replay_deterministic_writable_type(object, depth + 1)
+                    for argument in arguments |depth|:
+                        return true if proof_replay_deterministic_writable_type(argument, depth + 1)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |depth|:
+                        return true if proof_replay_deterministic_writable_type(element, depth + 1)
+                    return false
+                _:
+                    return true
+
+        # Every declaration spelled `name`, at any module depth, is a source function none of
+        # whose parameters is mutable. `found` counts those functions; any other declaration
+        # with the spelling (an extern, a type, a constant) makes the name unsafe.
+        def proof_replay_deterministic_named_functions_safe(declarations: darray[Ast::Decl]&, name: sview, found: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or name == ""
+            for declaration in declarations |name, found, depth|:
+                match declaration:
+                    Ast::Decl.Func(found_name, parameters, _, _, _, _, _):
+                        if found_name == name:
+                            found <- found + 1
+                            for parameter in parameters |parameter|:
+                                return false if parameter.is_mutable or proof_replay_deterministic_writable_type(parameter.type_expression, 0)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_deterministic_named_functions_safe(nested, name, found, depth + 1)
+                    _:
+                        pass
+            return true
+
+        # A callee that cannot write any caller local: every source function the name could
+        # resolve to (all same-spelled functions in any module, so no resolution is trusted)
+        # has no mutable parameter. A by-value parameter receives a copy and a shared `T&`
+        # borrow cannot be written through, so only a `mutable`/`lmut` slot reaches a caller
+        # place. A name with no source function, or shared with any non-function, is unsafe.
         def proof_replay_deterministic_callee_local_safe(declarations: darray[Ast::Decl]&, callee: Ast::Expr) -> bool:
             name: mutable sview = ""
             match callee:
@@ -54,13 +101,56 @@ extend ElisaProof:
                     name <- callee_name
                 _:
                     return false
-            source = proof_replay_effect_named_declaration(declarations, name, 0)
-            return false if source.matches != 1
-            match source.declaration:
-                Ast::Decl.Func(_, parameters, _, _, _, _, _):
-                    for parameter in parameters |declarations|:
-                        return false if parameter.is_mutable or proof_replay_deterministic_parameter_type(parameter.type_expression, 0) or not proof_replay_deterministic_scalar_type(parameter.type_expression, declarations, 0)
-                    return true
+            found: mutable usize = 0
+            return false if not proof_replay_deterministic_named_functions_safe(declarations, name, &found, 0) or found == 0
+            return proof_replay_deterministic_named_non_function_count(declarations, name, 0) == 0
+
+        # Declarations spelled `name` that are not source functions, at any module depth.
+        def proof_replay_deterministic_named_non_function_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 1 if depth >= 96
+            count: mutable usize = 0
+            for declaration in declarations |name, count, depth|:
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, _):
+                        pass
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        count <- count + proof_replay_deterministic_named_non_function_count(nested, name, depth + 1)
+                    Ast::Decl.Extern(found_name, _, _, _, _, _, _, _):
+                        count <- count + 1 if found_name == name
+                    _:
+                        pass
+            return count
+
+        def proof_replay_deterministic_call_writes_nothing(declarations: darray[Ast::Decl]&, callee: Ast::Expr) -> bool:
+            match callee:
+                Ast::Expr.Field(_, _, _):
+                    return false
+                _:
+                    return proof_replay_deterministic_callee_local_safe(declarations, callee)
+
+        # Whether a call with exactly the span `inner` occurs inside one of the expressions.
+        # Forms not listed are not searched, so the answer errs toward "no".
+        def proof_replay_deterministic_span_within_any(expressions: darray[Ast::Expr]&, inner: Ast::Pos) -> bool:
+            return false if inner.line == 0
+            for expression in expressions |inner|:
+                return true if proof_replay_deterministic_span_occurs(expression, inner, 0)
+            return false
+
+        def proof_replay_deterministic_span_occurs(expression: Ast::Expr, inner: Ast::Pos, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, position):
+                    return true if proof_replay_deterministic_call_same_span(position, inner)
+                    return true if proof_replay_deterministic_span_occurs(callee, inner, depth + 1)
+                    for argument in arguments |inner, depth|:
+                        return true if proof_replay_deterministic_span_occurs(argument, inner, depth + 1)
+                    return false
+                Ast::Expr.Paren(nested, _) | Ast::Expr.Unary(_, nested, _) | Ast::Expr.Field(nested, _, _):
+                    return proof_replay_deterministic_span_occurs(nested, inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return proof_replay_deterministic_span_occurs(left, inner, depth + 1) or proof_replay_deterministic_span_occurs(right, inner, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_deterministic_span_occurs(condition, inner, depth + 1) or proof_replay_deterministic_span_occurs(yes, inner, depth + 1) or proof_replay_deterministic_span_occurs(no, inner, depth + 1)
                 _:
                     return false
 
@@ -94,7 +184,16 @@ extend ElisaProof:
                                 _:
                                     return true if proof_replay_deterministic_expr_writes(declarations, argument, skip, depth + 1)
                         return false
-                    return true if not proof_replay_deterministic_callee_local_safe(declarations, callee)
+                    # A call's own write happens after all of its arguments are evaluated, so a
+                    # call enclosing the matched one (`out.push(f(x))`) cannot change what the
+                    # matched call reads; its receiver and arguments still count.
+                    enclosing: bool = proof_replay_deterministic_span_within_any(arguments, skip)
+                    return true if not enclosing and not proof_replay_deterministic_call_writes_nothing(declarations, callee)
+                    match callee:
+                        Ast::Expr.Field(receiver, _, _):
+                            return true if proof_replay_deterministic_expr_writes(declarations, receiver, skip, depth + 1)
+                        _:
+                            pass
                     return proof_replay_deterministic_exprs_write(declarations, arguments, skip, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return true if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
