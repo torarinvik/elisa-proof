@@ -139,3 +139,16 @@ sweep remains 66/73, with the same seven failing rows. Logs/artifacts: engine
 `proof-frame-arena-integrated-sweep.log`. Source admission still rejects static
 frame events without evidence; these qualification results do not close that
 source-bound integration requirement or the full compatibility matrix.
+
+The source-binding layer now has an independent AST place decoder in
+`replay/frame_source_places.elisa`. It reconstructs formal ordinals and ordered
+field paths without reading producer ProofFramePlace values. It validates the
+entire bounded formal-name list, including unrelated duplicates/empty names,
+and refuses unknown roots, indexed/computed expressions, paths beyond three
+fields and exhausted AST traversal. The strict O0 source AST runtime probe
+passes 13 controls, including formal reordering and the exact traversal budget
+boundary, and is included in the regular runtime matrix. Artifact: engine
+`build/validation/frame-source-places`. Obtaining those formals from the exact
+source owner, checking actual declared policy and field/type correspondence,
+and integrating certificate/event admission remain pending. The decoder by
+itself does not authenticate the caller-supplied formal-name list.
