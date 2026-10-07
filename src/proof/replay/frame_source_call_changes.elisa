@@ -1,0 +1,65 @@
+extend ElisaProofFrameSource:
+    private:
+        def call_argument_place(expression: Ast::Expr, formals: darray[sview]&, depth: usize) -> (known: bool, value: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
+            empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
+            return (false, empty) if depth >= 64
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _):
+                    return call_argument_place(inner, formals, depth + 1)
+                _:
+                    decoded = place(expression, formals)
+                    return (decoded.known, decoded.place)
+
+        def append_call_place(base: ElisaProofKernelFramePolicy::Place, suffix: ElisaProofKernelFramePolicy::Place) -> (known: bool, value: ElisaProofKernelFramePolicy::Place):
+            return (false, base) if base.depth > 3 or suffix.depth > 3 or suffix.depth > 3 - base.depth
+            fields: mutable darray[sview] = []
+            for index in 0..<base.depth |index, base, fields|:
+                fields.push(base.field if index == 0 else base.field2 if index == 1 else base.field3)
+            for index in 0..<suffix.depth |index, suffix, fields|:
+                fields.push(suffix.field if index == 0 else suffix.field2 if index == 1 else suffix.field3)
+            return (true, ElisaProofKernelFramePolicy::Place{parameter: base.parameter, depth: fields.count, field: fields[0] if fields.count > 0 else "", field2: fields[1] if fields.count > 1 else "", field3: fields[2] if fields.count > 2 else ""})
+
+    public:
+        # One mapped place per original declared changes clause, preserving order.
+        # The callee's complete supported body must independently obey its policy.
+        # This is a call mapping, not whole caller event coverage or report admission.
+        def source_call_changes(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, places: darray[ElisaProofKernelFramePolicy::Place]) can[Memory.Allocate, Abort.Panic]:
+            environment_work: mutable usize = 0
+            return (false, []) if not contract_environment(declarations, 0, &environment_work)
+            invocation = source_call(declarations, name, line, position)
+            caller = owner(declarations, name, line)
+            return (false, []) if not invocation.known or not caller.known
+            callee = owner(declarations, invocation.callee, invocation.callee_line)
+            policy = source_policy(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length)
+            return (false, []) if not callee.known or not policy.known
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            lowered = lower_direct_events(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET)
+            return (false, []) if not lowered.known or not direct_event_roots_replay(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, &lowered.roots)
+            changes: mutable usize = 0
+            for clause in policy.clauses |changes|:
+                changes <- changes + 1 if clause.kind == "changes"
+            if changes == 0:
+                for statement in callee.body:
+                    match statement:
+                        Ast::Stmt.Assign(_, _, _, _):
+                            return (false, [])
+                        _:
+                            pass
+            places: mutable darray[ElisaProofKernelFramePolicy::Place] = []
+            match invocation.expression:
+                Ast::Expr.Call(_, arguments, argument_names, _):
+                    return (false, []) if arguments.count != callee.formals.count or argument_names.count != arguments.count
+                    for argument_name in argument_names:
+                        return (false, []) if argument_name != ""
+                    for clause in policy.clauses |clause, arguments, caller, declarations, name, line, places|:
+                        if clause.kind == "changes":
+                            return (false, []) if clause.place.parameter >= arguments.count
+                            actual = call_argument_place(arguments[clause.place.parameter], &caller.formals, 0)
+                            return (false, []) if not actual.known
+                            mapped = append_call_place(actual.value, clause.place)
+                            return (false, []) if not mapped.known or not place_typed(declarations, name, line, mapped.value)
+                            places.push(mapped.value)
+                _:
+                    return (false, [])
+            return (true, places)
