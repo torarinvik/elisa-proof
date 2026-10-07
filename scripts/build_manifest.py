@@ -8,6 +8,7 @@ only; nothing in the proof checker reads it.
 """
 
 import argparse
+import ast
 import hashlib
 import io
 import json
@@ -19,7 +20,6 @@ import subprocess
 import sys
 import tarfile
 import uuid
-from pathlib import Path
 from compiler_environment import select_compiler_environment
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
@@ -142,18 +142,46 @@ def committed_compiler_source_digest(repository: str, revision: str) -> str:
         raise ValueError(f"cannot inspect pinned compiler source tree: {error}") from error
 
 
+LEGACY_RECIPE_PATHS = (
+    "scripts/elisac_stage1.sh",
+    "scripts/elisac_stage1_seed.sh",
+    "scripts/build_runtime_object.sh",
+    "scripts/write_profiler_hook_fallbacks.sh",
+)
+
+
+def committed_recipe_paths(repository: str, revision: str) -> tuple:
+    """Read the recipe list the pinned compiler's own provenance script hashes.
+
+    Compilers older than scripts/stage1_provenance.py, or whose script predates
+    BUILD_RECIPES, hash the legacy list. A script that declares BUILD_RECIPES in a
+    form this cannot evaluate is an error, never a silent fallback.
+    """
+    try:
+        script = subprocess.run(
+            ["git", "-C", repository, "show", f"{revision}:scripts/stage1_provenance.py"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return LEGACY_RECIPE_PATHS
+    for node in ast.parse(script).body:
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id == "BUILD_RECIPES"):
+            try:
+                paths = ast.literal_eval(node.value)
+            except ValueError as error:
+                raise ValueError(f"cannot evaluate pinned BUILD_RECIPES: {error}") from error
+            if (not isinstance(paths, (tuple, list)) or not paths
+                    or not all(isinstance(path, str) for path in paths)):
+                raise ValueError("pinned BUILD_RECIPES is not a non-empty list of paths")
+            return tuple(paths)
+    return LEGACY_RECIPE_PATHS
+
+
 def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
     """Hash the build recipes Stage1 records, directly from the pinned commit."""
-    recipe_paths = (
-        "scripts/elisac_stage1.sh",
-        "scripts/elisac_stage1_seed.sh",
-        "scripts/assert_stage0_fresh.sh",
-        "scripts/process_rss.sh",
-        "scripts/platform.sh",
-        "scripts/build_runtime_object.sh",
-        "scripts/write_profiler_hook_fallbacks.sh",
-        "scripts/stage1_provenance.py",
-    )
+    recipe_paths = committed_recipe_paths(repository, revision)
     try:
         result = subprocess.run(
             ["git", "-C", repository, "archive", "--format=tar", revision,
@@ -264,47 +292,6 @@ def stage1_provenance_revision(product: str, compiler_root: str,
     )["source_revision"]
 
 
-def stage1_source_tree_digest(root: str) -> str:
-    """Hash the Stage1 frontend and stdlib using its provenance algorithm."""
-    root_path = Path(root).resolve()
-    files = []
-    for directory in ("src", "elisacore_std"):
-        base = root_path / directory
-        if not base.is_dir() or base.is_symlink():
-            raise ValueError(f"compiler snapshot is missing a regular {directory} directory")
-        files.extend(candidate for candidate in base.rglob("*") if candidate.is_file())
-    digest = hashlib.sha256()
-    for path in sorted(set(files), key=lambda value: value.relative_to(root_path).as_posix()):
-        digest.update(path.relative_to(root_path).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    if not files:
-        raise ValueError("compiler snapshot has no source files")
-    return digest.hexdigest()
-
-
-def validated_stage1_snapshot_std_root(snapshot_root: str, product: str,
-                                       compiler_root: str, frontend_repo: str,
-                                       frontend_revision: str) -> str:
-    """Select snapshot stdlib only when its exact source tree matches Stage1 provenance."""
-    provenance = validated_stage1_provenance(
-        product, compiler_root, frontend_repo, frontend_revision,
-    )
-    root = os.path.realpath(snapshot_root)
-    revision_path = os.path.join(root, ".rev")
-    try:
-        with open(revision_path, encoding="ascii") as handle:
-            snapshot_revision = handle.read().strip()
-    except OSError as error:
-        raise ValueError(f"compiler snapshot revision is unavailable: {error}") from error
-    if snapshot_revision != provenance["source_revision"]:
-        raise ValueError("compiler snapshot revision differs from selected Stage1 provenance")
-    if stage1_source_tree_digest(root) != provenance["source_tree_sha256"]:
-        raise ValueError("compiler snapshot source tree differs from selected Stage1 provenance")
-    return os.path.join(root, "elisacore_std")
-
-
 def target_triple(clang: str = "clang") -> str:
     try:
         result = subprocess.run([clang, "-dumpmachine"], check=True, capture_output=True, text=True)
@@ -333,7 +320,6 @@ def main() -> int:
     parser.add_argument("--pair-generation", default="")
     parser.add_argument("--new-pair-generation", action="store_true")
     parser.add_argument("--resolve-stage1-provenance", action="store_true")
-    parser.add_argument("--validate-stage1-snapshot-std-root", action="store_true")
     parser.add_argument("--check-existing", action="store_true")
     parser.add_argument("--refresh-proof-provenance", action="store_true")
     parser.add_argument("--refresh-manifest", default="")
@@ -372,19 +358,6 @@ def main() -> int:
             print(f"build manifest: {error}", file=sys.stderr)
             return 2
         print(revision)
-        return 0
-
-    if arguments.validate_stage1_snapshot_std_root:
-        try:
-            std_root = validated_stage1_snapshot_std_root(
-                arguments.snapshot_root, arguments.compiler_product,
-                arguments.compiler_root, arguments.frontend_repo,
-                arguments.frontend_revision,
-            )
-        except (OSError, ValueError) as error:
-            print(f"build manifest: {error}", file=sys.stderr)
-            return 2
-        print(std_root)
         return 0
 
     if arguments.recipes_digest:

@@ -47,21 +47,21 @@ extend ElisaProof:
 
         def test_summary_argument_order_replay() -> bool:
             report: mutable ProofReport = proof_empty_report()
-            report.executable_parameters.push("first")
-            report.executable_parameters.push("second")
-            report.fact_trace_summary_names.push("first")
-            report.fact_trace_summary_names.push("second")
+            report.executables.parameters.push("first")
+            report.executables.parameters.push("second")
+            report.traces.summary_names.push("first")
+            report.traces.summary_names.push("second")
             position: Ast::Pos = Ast::pos_at_line(1)
-            report.fact_trace_summary_values.push(Ast::Expr.Ident("left", position))
-            report.fact_trace_summary_values.push(Ast::Expr.Ident("right", position))
+            report.traces.summary_values.push(Ast::Expr.Ident("left", position))
+            report.traces.summary_values.push(Ast::Expr.Ident("right", position))
             summary: ProofExecutableSummary = ProofExecutableSummary{name: "ordered", line: 1, parameters_start: 0, parameters_count: 2, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: true, verified: true, verification_reason: ""}
             trace: ProofFactTrace = ProofFactTrace{expression: Ast::Expr.Absent, kernel_expression: 0, kind: "function-summary", line: 1, name: "caller", dependency: "ordered", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 3, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 1}
             arguments: darray[Ast::Expr] = [Ast::Expr.Ident("left", position), Ast::Expr.Ident("right", position)]
             argument_names: darray[sview] = ["", ""]
             call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("ordered", position), arguments, argument_names, position)
             return false if not proof_replay_summary_call_arguments_match(&report, trace, summary, call)
-            report.fact_trace_summary_values[0] <- Ast::Expr.Ident("right", position)
-            report.fact_trace_summary_values[1] <- Ast::Expr.Ident("left", position)
+            report.traces.summary_values[0] <- Ast::Expr.Ident("right", position)
+            report.traces.summary_values[1] <- Ast::Expr.Ident("left", position)
             return not proof_replay_summary_call_arguments_match(&report, trace, summary, call)
 
         def test_summary_source_call_known(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
@@ -139,17 +139,17 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     proof_check(file, &report)
     proof_replay_certificates(&report)
 
-    scoped_trace_index: mutable usize = report.fact_traces.count
-    for index in 0..<report.fact_traces.count |index, report, scoped_trace_index|:
-        candidate: ProofFactTrace = report.fact_traces[index]
+    scoped_trace_index: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, scoped_trace_index|:
+        candidate: ProofFactTrace = report.traces.records[index]
         if candidate.kind == "function-summary" and candidate.name == "caller_scoped" and candidate.dependency == "bounded":
             scoped_trace_index <- index
             break
-    return 45 if scoped_trace_index >= report.fact_traces.count
-    scoped_trace: mutable ProofFactTrace = report.fact_traces[scoped_trace_index]
+    return 45 if scoped_trace_index >= report.traces.records.count
+    scoped_trace: mutable ProofFactTrace = report.traces.records[scoped_trace_index]
     scoped_call_index: usize = scoped_trace.summary_bindings_start + scoped_trace.summary_bindings_count - 1
-    return 46 if scoped_call_index >= report.fact_trace_summary_values.count
-    scoped_call: Ast::Expr = report.fact_trace_summary_values[scoped_call_index]
+    return 46 if scoped_call_index >= report.traces.summary_values.count
+    scoped_call: Ast::Expr = report.traces.summary_values[scoped_call_index]
     return 49 if Ast::expr_pos(scoped_call).line != scoped_trace.line
     return 52 if not test_deterministic_source_contains(&report, scoped_trace.name, scoped_call)
     report.replay_owner_line <- SCOPED_CALLER_SOURCE_LINE
@@ -161,30 +161,30 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 48 if test_deterministic_source_call_site(&report, wrong_scoped_owner, scoped_call)
     report.replay_owner_line <- 0
 
-    summary_index: mutable usize = report.fact_traces.count
-    for index in 0..<report.fact_traces.count |index, report, summary_index|:
-        if report.fact_traces[index].kind == "function-summary" and report.fact_traces[index].name == "caller" and report.fact_traces[index].dependency == "bounded":
+    summary_index: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, summary_index|:
+        if report.traces.records[index].kind == "function-summary" and report.traces.records[index].name == "caller" and report.traces.records[index].dependency == "bounded":
             summary_index <- index
             break
-    return 9 if summary_index >= report.fact_traces.count
-    summary_original: ProofFactTrace = report.fact_traces[summary_index]
+    return 9 if summary_index >= report.traces.records.count
+    summary_original: ProofFactTrace = report.traces.records[summary_index]
     return 10 if not proof_replay_fact_trace_entry(&report, summary_index)
 
-    guard_trace_index: mutable usize = report.fact_traces.count
-    for index in 0..<report.fact_traces.count |index, report, guard_trace_index|:
-        candidate: ProofFactTrace = report.fact_traces[index]
+    guard_trace_index: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, guard_trace_index|:
+        candidate: ProofFactTrace = report.traces.records[index]
         if candidate.kind == "function-summary" and candidate.name == "caller_guard" and candidate.dependency == "bounded":
             guard_trace_index <- index
             break
-    return 43 if guard_trace_index >= report.fact_traces.count
+    return 43 if guard_trace_index >= report.traces.records.count
     report.replay_owner_line <- 26
     return 44 if not proof_replay_fact_trace_entry(&report, guard_trace_index)
     report.replay_owner_line <- 15
     summary_result_index: mutable usize = summary_original.summary_bindings_start
     for offset in 0..<summary_original.summary_bindings_count |offset, summary_original, report, summary_result_index|:
-        summary_result_index <- summary_original.summary_bindings_start + offset if report.fact_trace_summary_names[summary_original.summary_bindings_start + offset] == "result"
+        summary_result_index <- summary_original.summary_bindings_start + offset if report.traces.summary_names[summary_original.summary_bindings_start + offset] == "result"
     return 11 if summary_result_index == summary_original.summary_bindings_start
-    summary_result_original: Ast::Expr = report.fact_trace_summary_values[summary_result_index]
+    summary_result_original: Ast::Expr = report.traces.summary_values[summary_result_index]
     forged_summary_result: mutable Ast::Expr = Ast::Expr.Invalid
     match summary_result_original:
         Ast::Expr.Call(_, call_arguments, call_names, call_position):
@@ -196,33 +196,33 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     forged_owner_summary: Ast::Expr = Ast::Expr.Binary(forged_summary_result, TokenKind.GtEq, Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression)), Ast::expr_pos(summary_original.expression))
     forged_owner_encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_owner_summary, &report, summary_original.name)
     return 16 if not forged_owner_encoded.known
-    report.fact_trace_summary_values[summary_result_index] <- forged_summary_result
-    report.fact_traces[summary_index] <- ProofFactTrace{expression: forged_owner_summary, kernel_expression: forged_owner_encoded.root, kind: summary_original.kind, line: summary_original.line, name: summary_original.name, dependency: summary_original.dependency, premises_start: summary_original.premises_start, premises_count: summary_original.premises_count, kernel_premises_start: summary_original.kernel_premises_start, kernel_premises_count: summary_original.kernel_premises_count, summary_bindings_start: summary_original.summary_bindings_start, summary_bindings_count: summary_original.summary_bindings_count, summary_requires_start: summary_original.summary_requires_start, summary_requires_count: summary_original.summary_requires_count, summary_ensure_index: summary_original.summary_ensure_index, owner_line: summary_original.owner_line}
+    report.traces.summary_values[summary_result_index] <- forged_summary_result
+    report.traces.records[summary_index] <- ProofFactTrace{expression: forged_owner_summary, kernel_expression: forged_owner_encoded.root, kind: summary_original.kind, line: summary_original.line, name: summary_original.name, dependency: summary_original.dependency, premises_start: summary_original.premises_start, premises_count: summary_original.premises_count, kernel_premises_start: summary_original.kernel_premises_start, kernel_premises_count: summary_original.kernel_premises_count, summary_bindings_start: summary_original.summary_bindings_start, summary_bindings_count: summary_original.summary_bindings_count, summary_requires_start: summary_original.summary_requires_start, summary_requires_count: summary_original.summary_requires_count, summary_ensure_index: summary_original.summary_ensure_index, owner_line: summary_original.owner_line}
     return 17 if proof_replay_fact_trace_entry(&report, summary_index)
-    report.fact_traces[summary_index] <- summary_original
-    report.fact_trace_summary_values[summary_result_index] <- summary_result_original
+    report.traces.records[summary_index] <- summary_original
+    report.traces.summary_values[summary_result_index] <- summary_result_original
     return 18 if not proof_replay_fact_trace_entry(&report, summary_index)
 
-    report.fact_trace_summary_values[summary_result_index] <- Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression))
+    report.traces.summary_values[summary_result_index] <- Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression))
     forged_summary: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression)), TokenKind.GtEq, Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression)), Ast::expr_pos(summary_original.expression))
     summary_encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_summary, &report, summary_original.name)
     return 12 if not summary_encoded.known
-    report.fact_traces[summary_index] <- ProofFactTrace{expression: forged_summary, kernel_expression: summary_encoded.root, kind: summary_original.kind, line: summary_original.line, name: summary_original.name, dependency: summary_original.dependency, premises_start: summary_original.premises_start, premises_count: summary_original.premises_count, kernel_premises_start: summary_original.kernel_premises_start, kernel_premises_count: summary_original.kernel_premises_count, summary_bindings_start: summary_original.summary_bindings_start, summary_bindings_count: summary_original.summary_bindings_count, summary_requires_start: summary_original.summary_requires_start, summary_requires_count: summary_original.summary_requires_count, summary_ensure_index: summary_original.summary_ensure_index, owner_line: summary_original.owner_line}
+    report.traces.records[summary_index] <- ProofFactTrace{expression: forged_summary, kernel_expression: summary_encoded.root, kind: summary_original.kind, line: summary_original.line, name: summary_original.name, dependency: summary_original.dependency, premises_start: summary_original.premises_start, premises_count: summary_original.premises_count, kernel_premises_start: summary_original.kernel_premises_start, kernel_premises_count: summary_original.kernel_premises_count, summary_bindings_start: summary_original.summary_bindings_start, summary_bindings_count: summary_original.summary_bindings_count, summary_requires_start: summary_original.summary_requires_start, summary_requires_count: summary_original.summary_requires_count, summary_ensure_index: summary_original.summary_ensure_index, owner_line: summary_original.owner_line}
     return 13 if proof_replay_fact_trace_entry(&report, summary_index)
-    report.fact_traces[summary_index] <- summary_original
-    report.fact_trace_summary_values[summary_result_index] <- summary_result_original
+    report.traces.records[summary_index] <- summary_original
+    report.traces.summary_values[summary_result_index] <- summary_result_original
     return 14 if not proof_replay_fact_trace_entry(&report, summary_index)
 
-    local_trace_index: mutable usize = report.fact_traces.count
-    for index in 0..<report.fact_traces.count |index, report, local_trace_index|:
-        candidate: ProofFactTrace = report.fact_traces[index]
+    local_trace_index: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, local_trace_index|:
+        candidate: ProofFactTrace = report.traces.records[index]
         continue if candidate.kind != "function-summary" or candidate.name != "caller_local" or candidate.dependency != "bounded"
         local_trace_index <- index
-    return 19 if local_trace_index >= report.fact_traces.count
-    local_trace: ProofFactTrace = report.fact_traces[local_trace_index]
+    return 19 if local_trace_index >= report.traces.records.count
+    local_trace: ProofFactTrace = report.traces.records[local_trace_index]
     local_result_index: usize = local_trace.summary_bindings_start + 1
-    return 20 if local_result_index >= report.fact_trace_summary_values.count
-    local_call: mutable Ast::Expr = report.fact_trace_summary_values[local_result_index]
+    return 20 if local_result_index >= report.traces.summary_values.count
+    local_call: mutable Ast::Expr = report.traces.summary_values[local_result_index]
     match local_call:
         Ast::Expr.Paren(inner, _):
             local_call <- inner
@@ -235,10 +235,10 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 23 if not test_summary_local_binding_source(&report, "caller_local", 20, "result_value", local_binding_position, local_call)
     return 24 if test_summary_local_binding_source(&report, "caller_local", 20, "wrong_local", local_binding_position, local_call)
     summary_argument_index: usize = summary_original.summary_bindings_start
-    summary_argument_original: Ast::Expr = report.fact_trace_summary_values[summary_argument_index]
-    report.fact_trace_summary_values[summary_argument_index] <- Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression))
+    summary_argument_original: Ast::Expr = report.traces.summary_values[summary_argument_index]
+    report.traces.summary_values[summary_argument_index] <- Ast::Expr.IntLit(0, Ast::expr_pos(summary_original.expression))
     return 25 if proof_replay_fact_trace_entry(&report, summary_index)
-    report.fact_trace_summary_values[summary_argument_index] <- summary_argument_original
+    report.traces.summary_values[summary_argument_index] <- summary_argument_original
     return 26 if not proof_replay_fact_trace_entry(&report, summary_index)
 
     assignment_text: sview = "def assignment_add_one(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    return x + 1\n\ndef assignment_rhs_state(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    value: mutable i64 = x\n    value <- assignment_add_one(value)\n    return value\n"
@@ -250,13 +250,13 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     assignment_report: mutable ProofReport = proof_empty_report()
     proof_check(assignment_file, &assignment_report)
     proof_replay_certificates(&assignment_report)
-    assignment_trace_index: mutable usize = assignment_report.fact_traces.count
-    for index in 0..<assignment_report.fact_traces.count |index, assignment_report, assignment_trace_index|:
-        candidate: ProofFactTrace = assignment_report.fact_traces[index]
+    assignment_trace_index: mutable usize = assignment_report.traces.records.count
+    for index in 0..<assignment_report.traces.records.count |index, assignment_report, assignment_trace_index|:
+        candidate: ProofFactTrace = assignment_report.traces.records[index]
         if candidate.kind == "function-summary" and candidate.name == "assignment_rhs_state" and candidate.dependency == "assignment_add_one":
             assignment_trace_index <- index
             break
-    return 35 if assignment_trace_index >= assignment_report.fact_traces.count
+    return 35 if assignment_trace_index >= assignment_report.traces.records.count
     assignment_report.replay_owner_line <- 6
     return 36 if not proof_replay_fact_trace_entry(&assignment_report, assignment_trace_index)
     reassigned_text: sview = "def assignment_add_one(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    return x + 1\n\ndef assignment_rhs_state(x: i64) -> i64:\n    requires x >= 0\n    ensure result == x + 1\n    value: mutable i64 = x\n    value <- assignment_add_one(value)\n    value <- 0\n    return value\n"
@@ -269,10 +269,10 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     reassigned_return_found: mutable bool = false
     return 37 if not test_local_return_position_declarations(reassigned_file.top_decls, "assignment_rhs_state", 6, "value", &reassigned_position, &reassigned_return_found, 0)
     return 38 if not reassigned_return_found
-    assignment_trace: ProofFactTrace = assignment_report.fact_traces[assignment_trace_index]
+    assignment_trace: ProofFactTrace = assignment_report.traces.records[assignment_trace_index]
     assignment_summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
     assignment_summary_found: mutable bool = false
-    for candidate in assignment_report.executable_summaries |candidate, assignment_trace, assignment_summary_found, assignment_summary|:
+    for candidate in assignment_report.executables.summaries |candidate, assignment_trace, assignment_summary_found, assignment_summary|:
         if candidate.name == "assignment_add_one" and candidate.line == assignment_trace.owner_line:
             assignment_summary <- candidate
             assignment_summary_found <- true
@@ -281,15 +281,15 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 40 if not assignment_call.known
     return 41 if test_summary_local_binding_source(&assignment_report, "assignment_rhs_state", 6, "value", reassigned_position, assignment_call.call)
 
-    trace_index: mutable usize = report.fact_traces.count
-    for index in 0..<report.fact_traces.count |index, report, trace_index|:
-        if report.fact_traces[index].kind == "deterministic-call":
+    trace_index: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, trace_index|:
+        if report.traces.records[index].kind == "deterministic-call":
             trace_index <- index
             break
-    return 1 if trace_index >= report.fact_traces.count
+    return 1 if trace_index >= report.traces.records.count
     return 2 if not proof_replay_fact_trace_entry(&report, trace_index)
 
-    original: ProofFactTrace = report.fact_traces[trace_index]
+    original: ProofFactTrace = report.traces.records[trace_index]
     match original.expression:
         Ast::Expr.Call(marker_callee, marker_arguments, marker_names, position):
             return 3 if marker_arguments.count != 1
@@ -307,9 +307,9 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
                     position_forgery: Ast::Expr = Ast::Expr.Call(marker_callee, position_forged_arguments, marker_names, position)
                     position_encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(position_forgery, &report, original.name)
                     return 9 if not position_encoded.known
-                    report.fact_traces[trace_index] <- ProofFactTrace{expression: position_forgery, kernel_expression: position_encoded.root, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
+                    report.traces.records[trace_index] <- ProofFactTrace{expression: position_forgery, kernel_expression: position_encoded.root, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
                     return 10 if proof_replay_fact_trace_entry(&report, trace_index)
-                    report.fact_traces[trace_index] <- original
+                    report.traces.records[trace_index] <- original
                     return 11 if not proof_replay_fact_trace_entry(&report, trace_index)
                     wrong_module: Ast::Expr = Ast::Expr.Scope(Ast::Expr.Ident("Elsewhere", call_position), "Inner", call_position)
                     forged_callee: Ast::Expr = Ast::Expr.Scope(wrong_module, "bounded", call_position)
@@ -318,9 +318,9 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
                     forged_expression: Ast::Expr = Ast::Expr.Call(marker_callee, forged_arguments, marker_names, position)
                     encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_expression, &report, original.name)
                     return 4 if not encoded.known
-                    report.fact_traces[trace_index] <- ProofFactTrace{expression: forged_expression, kernel_expression: encoded.root, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
+                    report.traces.records[trace_index] <- ProofFactTrace{expression: forged_expression, kernel_expression: encoded.root, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
                     return 5 if proof_replay_fact_trace_entry(&report, trace_index)
-                    report.fact_traces[trace_index] <- original
+                    report.traces.records[trace_index] <- original
                     return 6 if not proof_replay_fact_trace_entry(&report, trace_index)
                 _:
                     return 7
@@ -332,8 +332,8 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     forged_binding_encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_binding, &report, "caller")
     return FORGED_LOCAL_BINDING_ENCODING_FAILED if not forged_binding_encoded.known
     forged_binding_trace: ProofFactTrace = ProofFactTrace{expression: forged_binding, kernel_expression: forged_binding_encoded.root, kind: "local-binding", line: 0, name: "caller", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
-    report.fact_traces.push(forged_binding_trace)
-    return FORGED_LOCAL_BINDING_ACCEPTED if proof_replay_fact_trace_entry(&report, report.fact_traces.count - 1)
+    report.traces.records.push(forged_binding_trace)
+    return FORGED_LOCAL_BINDING_ACCEPTED if proof_replay_fact_trace_entry(&report, report.traces.records.count - 1)
     return 0
 '''
 

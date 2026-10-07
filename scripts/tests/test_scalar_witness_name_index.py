@@ -3,8 +3,10 @@
 import hashlib
 from pathlib import Path
 import os
+import platform
 import re
 import subprocess
+import sys
 import tempfile
 
 
@@ -14,6 +16,8 @@ COMPILER_ROOT = Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-
 STAGE1 = COMPILER_ROOT / "bin" / "elisac-stage1"
 FRESHNESS_CHECK = COMPILER_ROOT / "scripts" / "assert_stage1_fresh.sh"
 FIXTURE = ROOT / "test" / "repro" / "scalar_witness_name_index.elisa"
+sys.path.insert(0, str(ROOT / "scripts"))
+import elisa_platform  # noqa: E402
 
 
 def fnv1a_u32(text: str) -> int:
@@ -46,8 +50,19 @@ def compiler_source_revision() -> str:
     return revision
 
 
-def run(*command: str, cwd: Path = ROOT) -> None:
-    subprocess.run(command, cwd=cwd, check=True)
+def run(*command: str, cwd: Path = ROOT, env: dict | None = None) -> None:
+    subprocess.run(command, cwd=cwd, check=True, env=env)
+
+
+def stage1_host_environment() -> dict:
+    """Stage1 reads its host from these flags, which its wrapper normally exports; without
+    them a raw Stage1 call on Linux compiles the macOS mmap flags and the product aborts."""
+    env = dict(os.environ)
+    if platform.system() == "Linux":
+        env.setdefault("ELISA_HOST_LINUX", "1")
+        if platform.machine() in ("x86_64", "AMD64"):
+            env.setdefault("ELISA_HOST_X86_64", "1")
+    return env
 
 
 def materialize_fixture(destination: Path) -> None:
@@ -178,9 +193,10 @@ def main() -> None:
         object_file = scratch / "scalar-witness-index.o"
         hooks_object = scratch / "profile-hooks.o"
         executable = scratch / "scalar-witness-index"
-        run(str(STAGE1), "-permissive", "-emit", "obj", "-O0", "-o", str(object_file), str(fixture))
+        run(str(STAGE1), "-permissive", "-emit", "obj", "-O0", "-o", str(object_file), str(fixture),
+            env=stage1_host_environment())
         run(clang, "-c", str(hooks_source), "-o", str(hooks_object))
-        run(clang, "-Wl,-dead_strip", "-o", str(executable), str(object_file), str(hooks_object), str(runtime))
+        run(clang, *elisa_platform.EXE_LINK, "-o", str(executable), str(object_file), str(hooks_object), str(runtime), *elisa_platform.LIBM)
         run(str(executable))
 
     source_revision = compiler_source_revision()

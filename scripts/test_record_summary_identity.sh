@@ -2,6 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/compiler_provenance.sh"
+source "$ROOT/scripts/link_flags.sh"
 COMPILER="$(elisa_default_stage0 "$ROOT")" || { printf 'pinned stage0 compiler not found\n' >&2; exit 2; }
 elisa_verify_stage0_provenance "$COMPILER" "$ROOT"
 # Refresh the pinned export and copy the actual proof sources/example together.
@@ -17,6 +18,6 @@ trap cleanup EXIT
     tail -80 "$WORK/build.log" >&2
     exit 1
 }
-"${CLANG:-clang}" -Wl,-dead_strip -o "$WORK/probe" "$WORK/probe.o" "$ROOT/build/profile_hooks.o"
+"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$WORK/probe" "$WORK/probe.o" "$ROOT/build/profile_hooks.o"
 "$WORK/probe"
 echo 'Exact record summary identity controls pass: nominal type, field names/order/count, nested values, capture-free constructor/update substitution, existing field differential controls'

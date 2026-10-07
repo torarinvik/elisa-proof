@@ -86,7 +86,7 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
                       compiler / "build/runtime", tools):
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
-                 "link_flags.sh", "build_manifest.py", "compiler_environment.py",
+                 "link_flags.sh", "platform.sh", "build_manifest.py", "compiler_environment.py",
                  "verify_product_pair.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")
@@ -252,6 +252,50 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
             Path(self.temporary.name) / "installed", installed_snapshot=True,
         )
         self.assertEqual(installed_case["compiler"]["stage"], "stage1")
+
+
+class PinnedRecipeListTests(unittest.TestCase):
+    """The recipe digest follows the BUILD_RECIPES list the pinned compiler declares."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def pin(self, provenance_script: str | None, recipes: tuple[str, ...]) -> str:
+        for recipe in recipes:
+            path = self.root / recipe
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"# fixture: {recipe}\n")
+        if provenance_script is not None:
+            (self.root / "scripts").mkdir(exist_ok=True)
+            (self.root / "scripts/stage1_provenance.py").write_text(provenance_script)
+        return commit(self.root, "recipe fixture")
+
+    def test_declared_list_is_hashed(self) -> None:
+        recipes = ("scripts/elisac_stage1.sh", "scripts/process_rss.sh",
+                   "scripts/stage1_provenance.py")
+        revision = self.pin(f"BUILD_RECIPES = {recipes!r}\n", recipes[:2])
+        self.assertEqual(build_manifest.committed_recipe_paths(str(self.root), revision), recipes)
+        expected = hashlib.sha256()
+        for name in sorted(recipes):
+            expected.update(name.encode() + b"\0" + (self.root / name).read_bytes() + b"\0")
+        self.assertEqual(
+            build_manifest.committed_compiler_recipe_digest(str(self.root), revision),
+            expected.hexdigest(),
+        )
+
+    def test_compiler_without_provenance_script_uses_legacy_list(self) -> None:
+        revision = self.pin(None, build_manifest.LEGACY_RECIPE_PATHS)
+        self.assertEqual(build_manifest.committed_recipe_paths(str(self.root), revision),
+                         build_manifest.LEGACY_RECIPE_PATHS)
+
+    def test_unevaluable_list_is_an_error(self) -> None:
+        revision = self.pin("BASE = ()\nBUILD_RECIPES = BASE + ('scripts/a.sh',)\n", ())
+        with self.assertRaises(ValueError):
+            build_manifest.committed_recipe_paths(str(self.root), revision)
 
 
 if __name__ == "__main__":

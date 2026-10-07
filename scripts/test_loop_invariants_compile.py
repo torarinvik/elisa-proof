@@ -46,9 +46,9 @@ using ElisaProof
 extend ElisaProof:
     public:
         def proof_test_local_binding_source_gate(report: mutable ProofReport&, certificate_index: usize, trace_index: usize) -> i64:
-            return TEST_LOCAL_BINDING_GATE_INVALID_INDEX if certificate_index >= report.certificates.count or trace_index >= report.fact_traces.count
+            return TEST_LOCAL_BINDING_GATE_INVALID_INDEX if certificate_index >= report.certificates.count or trace_index >= report.traces.records.count
             certificate: ProofGoalCertificate = report.certificates[certificate_index]
-            trace: ProofFactTrace = report.fact_traces[trace_index]
+            trace: ProofFactTrace = report.traces.records[trace_index]
             owner_line: mutable u32 = 0
             proof_replay_owner_function_line(report.source_declarations, certificate.name, certificate.line, &owner_line, 0)
             return TEST_LOCAL_BINDING_GATE_MISSING_OWNER if owner_line == 0
@@ -245,10 +245,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     plain = proof_test_loop_goals(baseline, "countdown", 19)
     return 102 if plain.count == 0 or not plain.all_replayed
 
-    init_index: mutable usize = baseline.fact_traces.count
-    rebind_index: mutable usize = baseline.fact_traces.count
-    for index in 0..<baseline.fact_traces.count |index, baseline, init_index, rebind_index|:
-        trace: ProofFactTrace = baseline.fact_traces[index]
+    init_index: mutable usize = baseline.traces.records.count
+    rebind_index: mutable usize = baseline.traces.records.count
+    for index in 0..<baseline.traces.records.count |index, baseline, init_index, rebind_index|:
+        trace: ProofFactTrace = baseline.traces.records[index]
         continue if trace.kind != "local-binding" or trace.name != "bounded_counter"
         match trace.expression:
             Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, _, _):
@@ -256,22 +256,22 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
                 rebind_index <- index if name == "__elisa_rebind_0" and trace.line == 11
             _:
                 pass
-    return 103 if init_index >= baseline.fact_traces.count or rebind_index >= baseline.fact_traces.count
+    return 103 if init_index >= baseline.traces.records.count or rebind_index >= baseline.traces.records.count
     baseline.replay_owner_line <- 6
     baseline.trace_owner_line <- 9
     return 104 if not proof_replay_fact_trace_entry(&baseline, init_index)
     return 105 if not proof_replay_fact_trace_entry(&baseline, rebind_index)
 
     # Altering only the trace site cannot preserve source provenance.
-    init_original: ProofFactTrace = baseline.fact_traces[init_index]
+    init_original: ProofFactTrace = baseline.traces.records[init_index]
     stale_trace: ProofFactTrace = ProofFactTrace{expression: init_original.expression, kernel_expression: init_original.kernel_expression, kind: init_original.kind, line: 11, name: init_original.name, dependency: init_original.dependency, premises_start: init_original.premises_start, premises_count: init_original.premises_count, kernel_premises_start: init_original.kernel_premises_start, kernel_premises_count: init_original.kernel_premises_count, summary_bindings_start: init_original.summary_bindings_start, summary_bindings_count: init_original.summary_bindings_count, summary_requires_start: init_original.summary_requires_start, summary_requires_count: init_original.summary_requires_count, summary_ensure_index: init_original.summary_ensure_index, owner_line: init_original.owner_line}
-    baseline.fact_traces[init_index] <- stale_trace
+    baseline.traces.records[init_index] <- stale_trace
     return 106 if proof_replay_fact_trace_entry(&baseline, init_index)
-    baseline.fact_traces[init_index] <- init_original
+    baseline.traces.records[init_index] <- init_original
 
     # The RHS and source location do not identify a rebind witness without its exact fresh
     # binding symbol. A different reserved pool entry must not be accepted for this assignment.
-    rebind_original: ProofFactTrace = baseline.fact_traces[rebind_index]
+    rebind_original: ProofFactTrace = baseline.traces.records[rebind_index]
     rebind_value: mutable Ast::Expr = Ast::Expr.Invalid
     match rebind_original.expression:
         Ast::Expr.Binary(_, TokenKind.EqEq, right, _):
@@ -283,8 +283,8 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     encoded_rebind: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_rebind_expression, &baseline, "bounded_counter")
     return 115 if not encoded_rebind.known
     forged_rebind_trace: ProofFactTrace = ProofFactTrace{expression: forged_rebind_expression, kernel_expression: encoded_rebind.root, kind: rebind_original.kind, line: rebind_original.line, name: rebind_original.name, dependency: rebind_original.dependency, premises_start: rebind_original.premises_start, premises_count: rebind_original.premises_count, kernel_premises_start: rebind_original.kernel_premises_start, kernel_premises_count: rebind_original.kernel_premises_count, summary_bindings_start: rebind_original.summary_bindings_start, summary_bindings_count: rebind_original.summary_bindings_count, summary_requires_start: rebind_original.summary_requires_start, summary_requires_count: rebind_original.summary_requires_count, summary_ensure_index: rebind_original.summary_ensure_index, owner_line: rebind_original.owner_line}
-    baseline.fact_traces.push(forged_rebind_trace)
-    return 116 if proof_replay_fact_trace_entry(&baseline, baseline.fact_traces.count - 1)
+    baseline.traces.records.push(forged_rebind_trace)
+    return 116 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
 
     # The old RHS witness is invalid once the actual source assignment changes.
     stale_rebind_bytes: mutable darray[u8] = []
@@ -312,8 +312,8 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_expression, &baseline, "bounded_counter")
     return 107 if not encoded.known
     forged_trace: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: encoded.root, kind: init_original.kind, line: init_original.line, name: init_original.name, dependency: init_original.dependency, premises_start: init_original.premises_start, premises_count: init_original.premises_count, kernel_premises_start: init_original.kernel_premises_start, kernel_premises_count: init_original.kernel_premises_count, summary_bindings_start: init_original.summary_bindings_start, summary_bindings_count: init_original.summary_bindings_count, summary_requires_start: init_original.summary_requires_start, summary_requires_count: init_original.summary_requires_count, summary_ensure_index: init_original.summary_ensure_index, owner_line: init_original.owner_line}
-    baseline.fact_traces.push(forged_trace)
-    return 108 if proof_replay_fact_trace_entry(&baseline, baseline.fact_traces.count - 1)
+    baseline.traces.records.push(forged_trace)
+    return 108 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
 
     # Old initializer evidence must not transfer to changed source at the same binding site.
     stale_bytes: mutable darray[u8] = []
@@ -353,11 +353,11 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     for certificate_index in 0..<widening_report.certificates.count |certificate_index, widening_report, cast_gate_checks|:
         certificate: ProofGoalCertificate = widening_report.certificates[certificate_index]
         continue if certificate.name != "bound_first"
-        continue if certificate.facts_start > widening_report.fact_origin_trace_indices.count or certificate.facts_count > widening_report.fact_origin_trace_indices.count - certificate.facts_start
+        continue if certificate.facts_start > widening_report.traces.origin_indices.count or certificate.facts_count > widening_report.traces.origin_indices.count - certificate.facts_start
         for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, widening_report, cast_gate_checks|:
-            trace_index: usize = widening_report.fact_origin_trace_indices[certificate.facts_start + fact_offset]
-            continue if trace_index >= widening_report.fact_traces.count
-            trace: ProofFactTrace = widening_report.fact_traces[trace_index]
+            trace_index: usize = widening_report.traces.origin_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= widening_report.traces.records.count
+            trace: ProofFactTrace = widening_report.traces.records[trace_index]
             continue if trace.kind != "local-binding"
             match trace.expression:
                 Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
