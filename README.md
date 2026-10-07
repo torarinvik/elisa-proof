@@ -57,6 +57,11 @@ goals exit `1`; a missing goal exits `2`. For `--check-proof`, `status` describe
 (`matches` or `diverges`) while `verification_state` describes proof status. A matching open block
 therefore reports `matches` with a non-proved verification state and exits `1`; only an exact
 matching block for a proved goal exits `0`. Unreadable blocks and missing goal IDs exit `2`.
+Full and summary JSON reports expose `admission_invariant_failure`, the first failed
+report-accounting boundary (or an empty string when those invariants hold). This is a
+diagnostic, not a proof verdict: an empty value may accompany open goals, source errors
+or replay gaps. A nonempty value keeps admission refused even when aggregate counters
+say every obligation is proven.
 In `summary`, `unproven` is `obligations - proven`; `finding_count` is the number of entries in
 the top-level `findings` array. The legacy `failed` field remains an alias for that finding count,
 not a count of unproven obligations, because one obligation may also produce non-goal diagnostics.

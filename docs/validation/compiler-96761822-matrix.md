@@ -104,3 +104,14 @@ with compiler 96761822; default/override selection and malformed-revision
 refusal were checked. Logs: `prover-6bd2d1ad-integrated-build.log` and
 `loop-invariant-compiler-override.log`. The repository default compiler pin
 remains unchanged, and the full matrix remains failing.
+
+Full and summary reports now name the first failed admission invariant.
+The fresh contract_placement and condition_call_positions reports fail
+goal-attempt-coverage even though their producer counters are fully proven,
+all certificates replay and there are no findings. Their static frame checks
+can increment successful obligation accounting without creating goal attempts;
+this needs checked event-to-evidence attribution, not relaxed count bounds.
+The new diagnostic preserves all six invariant checks and their order.
+All-products build, the eight full/summary route controls, the malformed-source
+matrix, kernel inventory and strict O0 report-mutation runtime probe pass.
+Build log: `build/validation/prover-admission-diagnostics-build.log`.
