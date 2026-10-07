@@ -26,6 +26,8 @@ struct CorrObligation:
 
 struct CorrFunction:
     name: sview
+    owner_start: usize
+    owner_count: usize
     line: u32
     declaration: usize
     scoped: bool
@@ -40,9 +42,12 @@ struct CorrWork:
     obligations: mutable darray[CorrObligation]
     obligation_facts: mutable darray[usize]
     functions: mutable darray[CorrFunction]
-    # Function declarations flattened from lexical modules/scopes. Leaf names must remain unique.
+    # Function declarations flattened from lexical modules/scopes, with exact owner paths.
     declarations: mutable darray[Ast::Decl]
     declaration_scoped: mutable darray[bool]
+    declaration_owner_starts: mutable darray[usize]
+    declaration_owner_counts: mutable darray[usize]
+    owner_segments: mutable darray[sview]
     seen: mutable darray[sview]
     parameters: mutable darray[sview]
     ensures: mutable darray[Ast::Expr]
@@ -50,13 +55,12 @@ struct CorrWork:
     taken: mutable darray[sview]
     # Functions declared with `lemma`: ghost declarations, whose calls this semantics does not model.
     lemmas: mutable darray[sview]
-    # Set while walking a scoped function. Until qualified call resolution retains full module
-    # paths, calls from or into scoped functions are refused rather than matched by leaf name.
-    active_scoped: mutable bool
+    # Context for the function currently being walked; anonymous scopes remain unsupported.
+    active_function: mutable usize
     next_epoch: mutable usize
 
 def corr_work_empty() -> CorrWork:
-    return CorrWork{obligations: [], obligation_facts: [], functions: [], declarations: [], declaration_scoped: [], seen: [], parameters: [], ensures: [], taken: [], lemmas: [], active_scoped: false, next_epoch: 0}
+    return CorrWork{obligations: [], obligation_facts: [], functions: [], declarations: [], declaration_scoped: [], declaration_owner_starts: [], declaration_owner_counts: [], owner_segments: [], seen: [], parameters: [], ensures: [], taken: [], lemmas: [], active_function: 0, next_epoch: 0}
 
 def corr_reserved_name(name: sview) -> bool:
     return true if sview_len(name) >= 2 and sview_at(name, 0) == '_' and sview_at(name, 1) == '_'
@@ -126,6 +130,57 @@ def corr_function_index(work: CorrWork&, name: sview) -> usize:
     return work.functions.count if hits != 1
     return found
 
+# A scope expression is accepted only as a path rooted in identifiers. Its segments are
+# compared to the declaration's lexical module path; expression evaluation and aliases are
+# deliberately outside this subset.
+def corr_scope_segments(expression: Ast::Expr, out: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    match expression:
+        Ast::Expr.Ident(name, _):
+            out.push(name)
+            return sview_len(name) > 0
+        Ast::Expr.Scope(base, member, _):
+            return false if sview_len(member) == 0
+            return false if not corr_scope_segments(base, out, depth + 1)
+            out.push(member)
+            return true
+        _:
+            return false
+
+def corr_call_target(work: CorrWork&, current: usize, callee: Ast::Expr) -> usize:
+    return work.functions.count if current >= work.functions.count or work.functions[current].scoped
+    match callee:
+        Ast::Expr.Ident(name, _):
+            return work.functions.count if name == ""
+            found: mutable usize = work.functions.count
+            for index in 0..<work.functions.count |index, work, current, name, found|:
+                continue if work.functions[index].name != name or work.functions[index].scoped
+                continue if work.functions[index].owner_count != work.functions[current].owner_count
+                same: mutable bool = true
+                for offset in 0..<work.functions[current].owner_count |offset, work, current, index, same|:
+                    same <- false if work.owner_segments[work.functions[current].owner_start + offset] != work.owner_segments[work.functions[index].owner_start + offset]
+                if same:
+                    return work.functions.count if found < work.functions.count
+                    found <- index
+            return found
+        Ast::Expr.Scope(_, _, _):
+            segments: mutable darray[sview] = []
+            return work.functions.count if not corr_scope_segments(callee, &segments, 0) or segments.count < 2
+            leaf: sview = segments[segments.count - 1]
+            owner_count: usize = segments.count - 1
+            found: mutable usize = work.functions.count
+            for index in 0..<work.functions.count |index, work, segments, leaf, owner_count, found|:
+                continue if work.functions[index].name != leaf or work.functions[index].scoped or work.functions[index].owner_count != owner_count
+                same: mutable bool = true
+                for offset in 0..<owner_count |offset, work, segments, index, same|:
+                    same <- false if work.owner_segments[work.functions[index].owner_start + offset] != segments[offset]
+                if same:
+                    return work.functions.count if found < work.functions.count
+                    found <- index
+            return found
+        _:
+            return work.functions.count
+
 def corr_name_allowed(work: CorrWork&, name: sview) -> bool:
     return false if sview_len(name) == 0 or corr_reserved_name(name)
     return false if corr_name_listed(work.seen, name)
@@ -158,12 +213,12 @@ def corr_record(pool: CorrPool&, work: mutable CorrWork&, goal: usize, state: Co
 # `e` with the arguments substituted; otherwise it is the call term itself.
 def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, state: mutable CorrState&, line: u32) -> (reason: sview, value: usize):
     match expression:
-        Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, _):
+        Ast::Expr.Call(callee_expression, arguments, argument_names, _):
             for label in argument_names |label|:
                 return ("named-argument", 0) if sview_len(label) > 0
-            target: usize = corr_function_index(work, callee)
+            target: usize = corr_call_target(work, work.active_function, callee_expression)
             return ("callee-unresolved", 0) if target >= work.functions.count
-            return ("scoped-call", 0) if work.active_scoped or work.functions[target].scoped
+            return ("scoped-call", 0) if work.functions[target].scoped
             return ("callee-unchecked", 0) if work.functions[target].status != "checked"
             actuals: mutable darray[usize] = []
             for argument in arguments |pool, state, actuals|:
@@ -176,7 +231,7 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                     formals: mutable darray[sview] = []
                     for param in params |formals|:
                         formals.push(param.name)
-                    call_term: usize = corr_call(pool, callee, &actuals)
+                    call_term: usize = corr_call(pool, work.functions[target].name, &actuals)
                     return ("budget", 0) if call_term == 0
                     summary_names: mutable darray[sview] = []
                     summary_names.extend(formals)
@@ -389,7 +444,7 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
     work.seen.clear()
     work.parameters.clear()
     work.ensures.clear()
-    work.active_scoped <- work.functions[function_index].scoped
+    work.active_function <- function_index
     match declarations[work.functions[function_index].declaration]:
         Ast::Decl.Func(_, params, return_type, body, effects, decorators, _):
             return "effects" if effects.count > 0
