@@ -49,3 +49,16 @@ place. The runtime probe now has twenty controls, adding an accepted caller
 allowance and rejection of wrong call position, out-of-range changes ordinal,
 injected facts, weaker predicate relabelling and foreign owner. Complete caller
 event accounting and preservation replay are still pending.
+
+## Caller preservation replay
+
+Caller preservation roots now bind one original combined header/body preservation
+clause and one original callee changes ordinal. Fact-free whole-arena replay,
+exact caller owner/formal count, preserved source path and mapped actual place
+are all required. Four new controls accept disjoint preserved formals and reject
+wrong changes ordinal, selection of a changes clause as preservation, and an
+overlapping actual place. The runtime probe has 24 controls. The previous
+allowance-facade all-products build completed as generation
+b406c2a29a3640c9a9ca8d2e846b7357; existing frame CLI regressions pass. Complete
+caller event inventory/producer integration is still pending, so no engine
+proof failure is claimed repaired by these helpers.
