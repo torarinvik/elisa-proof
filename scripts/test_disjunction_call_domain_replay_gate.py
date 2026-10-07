@@ -53,9 +53,8 @@ def replay_package(package):
         )
 
 
-# This is the minimized shape of the historical replay gap: a checked summary carries a
-# disjunction, and a call result is first assigned to a local. Local-binding provenance is not
-# accepted by replay yet, so producer search must not label this goal proven or emit a gap.
+# The historical local-alias gap now closes through independently checked source bindings.
+# Preserve complete replay and explicit refusal controls for wrong claims and changed locals.
 local_alias = """\
 def choice(status: u8) -> u8:
     ensure status > 9 or result == 1 or result >= 3 and result <= 11
@@ -73,34 +72,41 @@ def local_alias(value: bool) -> u8:
     local: u8 = status(value)
     return choice(local)
 """
-code, refused = run_function("local_alias", local_alias)
-assert code == 1 and refused["status"] == "failed", refused["status"]
-assert refused["verification_state"] == "unknown", refused["verification_state"]
-assert refused["summary"]["semantic_errors"] == 0, refused["summary"]
-assert refused["replay"]["gaps"] == 0, refused["replay"]
-assert refused["replay"]["certificates"] == refused["replay"]["replayed"], refused["replay"]
-assert any(
-    goal["name"] == "local_alias" and goal["rule"] == "goal" and not goal["proven"]
-    for goal in refused["goals"]
-), refused["goals"]
+code, bound = run_function("local_alias", local_alias)
+assert code == 0 and bound["status"] == "proved", bound["status"]
+assert bound["summary"]["semantic_errors"] == 0
+assert bound["replay"]["gaps"] == 0
+assert bound["replay"]["certificates"] == bound["replay"]["replayed"]
+assert not bound["trust"]["trusted_assumptions"]
 
-# The existing many-local stress fixture retains its high-fact shape. It must fail closed with no
-# replay gap, not claim that repeated call witnesses make unsupported local bindings trustworthy.
+# Acceptance cannot survive an unrelated result, a wider callee domain, or a
+# reassignment between capturing the call result and consuming the local.
+controls = (
+    local_alias.replace("ensure result == 1 or result >= 3 and result <= 11\n    local:", "ensure result == 2\n    local:"),
+    local_alias.replace("ensure result <= 9", "ensure result <= 12").replace("return 9 if value", "return 12 if value"),
+    local_alias.replace("local: u8 = status(value)", "local: mutable u8 = status(value)\n    local <- 12"),
+)
+for control in controls:
+    code, refused = run_function("local_alias", control)
+    assert code == 1 and refused["status"] == "failed", refused["status"]
+    assert refused["replay"]["gaps"] == 0
+    assert refused["replay"]["certificates"] == refused["replay"]["replayed"]
+    assert not refused["trust"]["trusted_assumptions"]
+
+# Many captures retain their high-fact stress shape and authenticate each source local.
 repeated = subprocess.run(
     [BINARY, "--function-json", "repeated_pure_call_domain",
      str(ROOT / "examples/open_disjunction_call_domain_probe.elisa")],
-    capture_output=True,
-    text=True,
-    timeout=180,
+    capture_output=True, text=True, timeout=180,
 )
 repeated_report = json.loads(repeated.stdout)
-assert repeated.returncode == 1 and repeated_report["verification_state"] == "unknown", repeated_report["status"]
-assert repeated_report["measurements"]["live_facts_peak"] >= 64, repeated_report["measurements"]
-assert repeated_report["replay"]["gaps"] == 0, repeated_report["replay"]
+assert repeated.returncode == 0 and repeated_report["status"] == "proved"
+assert repeated_report["measurements"]["live_facts_peak"] >= 64
+assert repeated_report["replay"]["gaps"] == 0
 assert repeated_report["replay"]["certificates"] == repeated_report["replay"]["replayed"]
 assert not repeated_report["trust"]["trusted_assumptions"]
 
-# Without unsupported local aliases, the same checked call-summary disjunction proves normally.
+# Direct composition continues to prove through the checked call-summary disjunction.
 positive = """\
 def choice(status: u8) -> u8:
     ensure status > 9 or result == 1 or result >= 3 and result <= 11
@@ -155,6 +161,12 @@ assert code == 0 and budget_report["status"] == "proved", budget_report["status"
 assert budget_report["replay"]["gaps"] == 0
 assert budget_report["replay"]["certificates"] == budget_report["replay"]["replayed"]
 
+# Portable replay checks the alias package kernel; source correspondence stays an adapter.
+alias_package = export_package(local_alias)
+alias_replay = replay_package(alias_package)
+assert alias_replay.returncode == 0, alias_replay.stderr or alias_replay.stdout
+assert json.loads(alias_replay.stdout)["status"] == "replayed"
+
 # Portable replay rejects malformed roots after accepting the positive source package.
 package = export_package(positive)
 portable = replay_package(package)
@@ -170,4 +182,4 @@ malformed_report = json.loads(malformed.stdout)
 assert malformed_report["status"] == "rejected"
 assert malformed_report["reason"] == "root-out-of-range", malformed_report
 
-print("call-domain disjunction gate: sound refusal, positive/false claims, candidate budget, malformed replay")
+print("call-domain disjunction gate: authenticated aliases, reassignment/domain/false-claim refusal, candidate budget, malformed replay")
