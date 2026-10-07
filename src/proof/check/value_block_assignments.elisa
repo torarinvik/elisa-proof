@@ -1,6 +1,43 @@
 # Execute value-block assignments with private local scope and conservative exit state.
 extend ElisaProof:
     private:
+        def proof_value_block_identity_loop(expression: Ast::Expr, target: sview, depth: usize) -> (known: bool, line: u32):
+            return (false, 0) if depth >= 8
+            match expression:
+                Ast::Expr.Block(statements, yielded, captures, _):
+                    return proof_value_block_identity_loop(yielded, target, depth + 1) if statements.count == 0 and captures.count == 0
+                    return (false, 0) if statements.count != 2 or proof_ident_name(yielded) != target
+                    match statements[0]:
+                        Ast::Stmt.VarDecl(local, type_expression, _, _):
+                            return (false, 0) if local != target or proof_ident_name(type_expression) != "usize"
+                        _:
+                            return (false, 0)
+                    match statements[1]:
+                        Ast::Stmt.For(_, _, _, _, position):
+                            return (true, position.line)
+                        _:
+                            return (false, 0)
+                _:
+                    return (false, 0)
+
+        def proof_restore_block_identity_upper_bounds(initializer: Ast::Expr, target: sview, block_facts: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> void:
+            loop: (known: bool, line: u32) = proof_value_block_identity_loop(initializer, target, 0)
+            return if not loop.known or proof_unsigned_marker_width_for_name(facts, target) == 0
+            for fact in block_facts |facts, report, owner, loop, target|:
+                match fact:
+                    Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.LtEq, Ast::Expr.IntLit(bound, _), _):
+                        continue if local != target or bound < 0
+                        witnessed: mutable bool = false
+                        for origin in report.traces.records |origin, owner, fact, loop, witnessed|:
+                            continue if origin.name != owner or origin.kind != "loop-invariant" or origin.line != loop.line
+                            witnessed <- true if proof_replay_expr_equal(origin.expression, fact)
+                        continue if not witnessed
+                        # The loop handler leaves only established/preserved invariants at
+                        # normal exit. Reuse this fact and its original trace unchanged.
+                        facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
+                    _:
+                        pass
+
         def proof_check_value_block_assignment(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
             match statement:
                 Ast::Stmt.Assign(target, operator, initializer, position):
@@ -39,6 +76,7 @@ extend ElisaProof:
                             effects.push(Ast::Stmt.Assign(target, operator, Ast::Expr.Invalid, position))
                             proof_forget_loop_entry(names, values, facts, effects, functions, frame_parameters, report, name, position)
                             proof_forget_loop_mutated_reference_parameters(names, values, effects, functions, frame_parameters, name, fixed_names, fixed_extents)
+                            proof_restore_block_identity_upper_bounds(initializer, proof_ident_name(target), block_facts, facts, report, name) if block_flow.valid and block_flow.normal
                             return true
                         _:
                             return false

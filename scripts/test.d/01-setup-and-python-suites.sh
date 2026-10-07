@@ -112,6 +112,7 @@ run_py_test test_captured_loop_entry.py
 run_py_test test_search_break_replay.py
 run_py_test test_mixed_record_search.py
 run_py_test test_value_block_assignment.py
+run_py_test test_block_result_bounds.py
 run_py_test test_portable_frame.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
