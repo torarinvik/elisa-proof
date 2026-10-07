@@ -258,6 +258,7 @@ run_py_test test_scoped_summary_alias.py
 run_py_test test_invariant_for_retention.py
 run_py_test test_captured_search_entry.py
 run_py_test test_value_block_effect_retention.py
+run_py_test test_pure_range_search.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
