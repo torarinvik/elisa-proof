@@ -151,19 +151,35 @@ extend ElisaProof:
             return false if depth >= 96
             return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(expression, expected, names, values, depth + 1)
 
-        # A call after a conditional can use an outer local only when both branches preserve
-        # its binding. Calls inside a branch are checked on that branch's local state.
-        def proof_replay_deterministic_branch_bindings_stable(body: darray[Ast::Stmt]&, depth: usize) -> bool:
+        # The plain local names a conditional branch assigns, for a call after the join: either
+        # branch may have run, so each such name becomes opaque there. Any other write target,
+        # or a statement form this walk does not model, fails closed.
+        def proof_replay_deterministic_branch_assigned_names(body: darray[Ast::Stmt]&, assigned: mutable darray[sview]&, depth: usize) -> bool:
             return false if depth >= 96
-            for statement in body |depth|:
+            for statement in body |assigned, depth|:
                 match statement:
                     Ast::Stmt.If(_, yes, no, _):
-                        return false if not proof_replay_deterministic_branch_bindings_stable(yes, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(no, depth + 1)
+                        return false if not proof_replay_deterministic_branch_assigned_names(yes, assigned, depth + 1) or not proof_replay_deterministic_branch_assigned_names(no, assigned, depth + 1)
+                    Ast::Stmt.Assign(target, operator, _, _):
+                        return false if operator != TokenKind.Assign and operator != TokenKind.LArrow
+                        match target:
+                            Ast::Expr.Ident(local_name, _):
+                                assigned.push(local_name)
+                            _:
+                                return false
                     Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Return(_, _) | Ast::Stmt.Expr(_, _) | Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return false
             return true
+
+        # Shadow the first `count` bindings with opaque values. Lookup takes the latest binding of
+        # a name, so this hides every earlier value without disturbing the enclosing scope marks.
+        def proof_replay_deterministic_call_havoc_bindings(names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, count: usize) -> void:
+            for index in 0..<count |index, names, values|:
+                name: sview = names[index]
+                names.push(name)
+                values.push(Ast::Expr.Absent)
 
         # Bind caller locals in statement order. This independent source walk reconstructs the
         # resolved actuals that the producer placed in the marker at the call's pre-state.
@@ -213,7 +229,11 @@ extend ElisaProof:
                         return (false, 0) if not no_matches.known
                         branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
                         return (true, branch_matches) if branch_matches > 0
-                        return (false, 0) if not proof_replay_deterministic_branch_bindings_stable(yes, depth + 1) or not proof_replay_deterministic_branch_bindings_stable(no, depth + 1)
+                        assigned: mutable darray[sview] = []
+                        return (false, 0) if not proof_replay_deterministic_branch_assigned_names(yes, &assigned, depth + 1) or not proof_replay_deterministic_branch_assigned_names(no, &assigned, depth + 1)
+                        for assigned_name in assigned |names, values|:
+                            names.push(assigned_name)
+                            values.push(Ast::Expr.Absent)
                     Ast::Stmt.Match(value, arms, position):
                         return (true, 0) if position.line > line
                         value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(value, expected, line, names, values, depth + 1) else 0
@@ -263,9 +283,26 @@ extend ElisaProof:
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return nested_matches
-                    Ast::Stmt.While(_, _, position):
+                    Ast::Stmt.While(condition, while_body, position):
                         return (true, 0) if position.line > line
-                        return (false, 0)
+                        # Any earlier iteration may have rewritten a binding, so neither the
+                        # guard nor the body may reuse a pre-loop value. Make every binding seen
+                        # so far opaque (its own name) rather than collecting the loop's writes:
+                        # a method call can mutate a root this walk cannot see as an assignment.
+                        # Within one iteration the body's own declarations and assignments are
+                        # then bound in statement order as usual.
+                        names_mark: usize = names.count
+                        values_mark: usize = values.count
+                        proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(condition, expected, line, names, values, depth + 1) else 0
+                        body_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(while_body, expected, line, names, values, depth + 1)
+                        names.resize(names_mark)
+                        values.resize(values_mark)
+                        return (false, 0) if not body_matches.known
+                        loop_matches: usize = condition_match + body_matches.matches
+                        return (true, loop_matches) if loop_matches > 0
+                        # The call follows the loop: the loop may have rewritten any binding.
+                        proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
