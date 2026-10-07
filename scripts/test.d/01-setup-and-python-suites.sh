@@ -92,6 +92,7 @@ run_py_test test_frame_source_cli.py
 run_py_test test_frame_call_cli.py
 run_py_test test_source_call_result_alias.py
 run_py_test test_indexed_scalar_snapshot.py
+run_py_test test_captured_loop_entry.py
 run_py_test test_portable_frame.py
 run_py_test test_build_source_snapshot_race.py
 run_py_test test_compiler_snapshot_preserves_files.py
@@ -402,6 +403,7 @@ field_runtime_inputs=()
 if ! elisa_compiler_is_stage0 "$SELF_HOST_COMPILER"; then
     field_runtime_inputs=("${kernel_runtime_inputs[@]}")
 fi
+source "$ROOT_DIR/scripts/test_source_snapshot_runtimes.sh"
 for ast_probe in field_equality_runtime marker_dispatch_runtime; do
     if ! "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/$ast_probe.o" "$ROOT_DIR/build/snapshot/elisa-proof/examples/$ast_probe.elisa" >/dev/null 2>&1; then
         printf 'proof test matrix failed: AST allocation optimization differential test %s did not compile\n' "$ast_probe" >&2
