@@ -304,3 +304,25 @@ prover-frame-header-source-build.log and proof-frame-header-source-sweep.log.
 No new frame certificate family is admitted yet. Next: combine full source policy
 with arena correspondence, validate actual formal/field types and qualified owner
 identity, and connect each static event to a matching checked frame attempt.
+
+### Full policy list correspondence
+
+Arena list matching now shares one bounded canonical comparison for body-only
+and complete header/body policies. `source_lists_match` reconstructs both source
+policy regions before comparing every place and partition; a body-only match is
+not a substitute for it. Header probe controls reject omitted header changes and
+swapped changes/preserves contents, while accepting the exact combined policy.
+Both header and prior body policy probes were compiled/linked/run at O0 and O2
+with 96761822. All-products production build succeeds, generation
+`5f96da6425444c26b903838d36d05e00`. Admission matrix, invariant diagnostics and
+10-table/188-entry kernel inventory pass. Fresh engine sweep remains 66/73 with
+the same seven failures. Logs: engine build/validation/prover-frame-full-policy-build.log
+and proof-frame-full-policy-sweep.log.
+
+Remaining admission integration must supply the independently parsed source and
+token buffer to replay, not a producer-authored policy row. The CLI has source
+bytes and lexer tokens at replay time; the existing AST-only proof_check API
+does not retain them. A source-bound replay entry point can receive that context
+without treating copied report annotations as authority. Formal/field type and
+qualified-owner checks, nested/alias mapping, and per-event frame certificate
+production/admission remain open.
