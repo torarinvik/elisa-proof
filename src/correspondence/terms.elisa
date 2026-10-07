@@ -16,9 +16,10 @@ const module CorrLimit:
     OBLIGATIONS: usize = 4096
     NESTING: usize = 64
     FUNCTIONS: usize = 4096
+    OWNER_SEGMENTS: usize = 262144
 
 struct CorrTerm:
-    # "ident", "int", "bool", "unary", "binary", "call" (callee in `name`), or "tuple".
+    # "ident", "int", "bool", "unary", "binary", "scope", "call", or "tuple".
     kind: sview
     operator: sview
     value: i64
@@ -87,7 +88,27 @@ def corr_node_with_children(pool: mutable CorrPool&, kind: sview, name: sview, c
 
 def corr_call(pool: mutable CorrPool&, callee: sview, arguments: darray[usize]&) -> usize:
     return 0 if sview_len(callee) == 0
-    return corr_node_with_children(pool, "call", callee, arguments)
+    callee_term: usize = corr_ident(pool, callee)
+    return corr_call_term(pool, callee_term, arguments)
+
+def corr_scope(pool: mutable CorrPool&, base: usize, member: sview) -> usize:
+    return 0 if base == 0 or sview_len(member) == 0 or base >= pool.terms.count
+    size: usize = pool.terms[base].size + 1
+    depth: usize = pool.terms[base].depth + 1
+    return corr_add(pool, "scope", "", 0, member, base, 0, 0, 0, size, depth)
+
+def corr_call_term(pool: mutable CorrPool&, callee: usize, arguments: darray[usize]&) -> usize:
+    return 0 if callee == 0 or callee >= pool.terms.count
+    size: mutable usize = pool.terms[callee].size + 2
+    depth: mutable usize = pool.terms[callee].depth + 1
+    for argument in arguments |pool, size, depth|:
+        return 0 if argument == 0 or argument >= pool.terms.count
+        size <- size + pool.terms[argument].size + 1
+        child_depth: usize = pool.terms[argument].depth + 2
+        depth <- child_depth if child_depth > depth
+    start: usize = pool.args.count
+    pool.args.extend(arguments)
+    return corr_add(pool, "call", "", 0, "", callee, 0, start, arguments.count, size, depth)
 
 def corr_call1(pool: mutable CorrPool&, callee: sview, argument: usize) -> usize:
     arguments: mutable darray[usize] = []
@@ -125,6 +146,10 @@ def corr_mentions(pool: CorrPool&, term: usize, name: sview, depth: usize) -> bo
     return true if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count
     node: CorrTerm = pool.terms[term]
     return node.name == name if node.kind == "ident"
+    if node.kind == "call":
+        for index in 0..<node.args_count |index, pool, node, name, depth|:
+            return true if corr_mentions(pool, pool.args[node.args_start + index], name, depth + 1)
+        return false
     return true if node.left != 0 and corr_mentions(pool, node.left, name, depth + 1)
     return true if node.right != 0 and corr_mentions(pool, node.right, name, depth + 1)
     for index in 0..<node.args_count |index, pool, node, name, depth|:
@@ -258,6 +283,8 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
     return false if node.kind != expected.kind or node.operator != expected.operator or node.secondary_name != ""
     if expected.kind == "ident" or expected.kind == "int" or expected.kind == "bool":
         return node.value == expected.value and node.name == expected.name and corr_node_leaf(node)
+    if expected.kind == "scope":
+        return node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     return false if node.value != 0 or node.name != ""
     if expected.kind == "unary":
         return node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
@@ -275,8 +302,7 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
             return false if not corr_node_equal(nodes, children, children[node.children_start + index], pool, pool.args[expected.args_start + index], depth + 1)
         return true
     return false if expected.kind != "call" or node.left >= nodes.count
-    callee: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
-    return false if callee.kind != "ident" or callee.operator != "" or callee.value != 0 or callee.name != expected.name or callee.secondary_name != "" or not corr_node_leaf(callee)
+    return false if not corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     for index in 0..<expected.args_count |index, nodes, children, node, pool, expected, depth|:
         slot: usize = children[node.children_start + index]
         return false if slot >= nodes.count

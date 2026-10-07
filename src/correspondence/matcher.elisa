@@ -47,25 +47,41 @@ def corr_collect_taken(declarations: darray[Ast::Decl]&, top_level: bool, taken:
                 pass
     return true
 
-# Every top-level function, in file order. A name declared anywhere else too, or twice, is
-# walked as unsupported; a name some other declaration takes is kept as a `blocked` entry, so a
-# call to it resolves to nothing and no variable may reuse it.
+def corr_collect_nested_functions(declarations: darray[Ast::Decl]&, owner: darray[sview]&, work: mutable CorrWork&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |owner, work, depth|:
+        match declaration:
+            Ast::Decl.Func(name, _, _, _, _, _, position):
+                return false if work.functions.count >= CorrLimit::FUNCTIONS or work.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count > CorrLimit::OWNER_SEGMENTS - work.owner_segments.count
+                owner_start: usize = work.owner_segments.count
+                work.owner_segments.extend(owner)
+                work.functions.push(CorrFunction{name: name, line: position.line, owner_start: owner_start, owner_count: owner.count, declaration: declaration, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+            Ast::Decl.Module(name, body, _):
+                next_owner: mutable darray[sview] = []
+                next_owner.extend(owner)
+                next_owner.push(name)
+                return false if work.module_owner_starts.count >= CorrLimit::FUNCTIONS or work.module_owner_segments.count > CorrLimit::OWNER_SEGMENTS or next_owner.count > CorrLimit::OWNER_SEGMENTS - work.module_owner_segments.count
+                work.module_owner_starts.push(work.module_owner_segments.count)
+                work.module_owner_counts.push(next_owner.count)
+                work.module_owner_segments.extend(next_owner)
+                return false if not corr_collect_nested_functions(body, &next_owner, work, depth + 1)
+            Ast::Decl.Scoped(body, _):
+                return false if not corr_collect_nested_functions(body, owner, work, depth + 1)
+            _:
+                pass
+    return true
+
 def corr_collect_functions(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable CorrWork&) -> bool:
     for annotation in annotations |work|:
         work.lemmas.push(annotation.name) if annotation.owner == "__lemma"
     taken: mutable darray[sview] = []
     return false if not corr_collect_taken(declarations, true, &taken, 0)
-    for index in 0..<declarations.count |index, declarations, work, taken|:
-        match declarations[index]:
-            Ast::Decl.Func(name, _, _, _, _, _, position):
-                return false if work.functions.count >= CorrLimit::FUNCTIONS
-                work.functions.push(CorrFunction{name: name, line: position.line, declaration: index, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
-            _:
-                pass
+    owner: mutable darray[sview] = []
+    return false if not corr_collect_nested_functions(declarations, &owner, work, 0)
     work.taken.extend(taken)
     for name in taken |work|:
         return false if work.functions.count >= CorrLimit::FUNCTIONS
-        work.functions.push(CorrFunction{name: name, line: 0, declaration: 0, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+        work.functions.push(CorrFunction{name: name, line: 0, owner_start: 0, owner_count: 0, declaration: Ast::Decl.Invalid, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
     return true
 
 def corr_hypothesis_held(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation) -> bool:
@@ -89,6 +105,11 @@ def corr_push_function(out: mutable darray[u8]&, work: CorrWork&, function: Corr
     proof_push(out, ",") if not first
     proof_push(out, "{\"name\":")
     proof_push_json_string(out, function.name)
+    proof_push(out, ",\"owner\":[")
+    for index in 0..<function.owner_count |index, out, work, function|:
+        proof_push(out, ",") if index > 0
+        proof_push_json_string(out, work.owner_segments[function.owner_start + index])
+    proof_push(out, "]")
     proof_push(out, ",\"line\":")
     proof_push_json_i64(out, function.line.i64())
     proof_push(out, ",\"status\":")
@@ -156,7 +177,7 @@ def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, decla
     for index in 0..<work.functions.count |index, pool, work, declarations, nodes, children, theorems, hypotheses|:
         continue if work.functions[index].status == "blocked"
         work.functions[index].obligations_start <- work.obligations.count
-        if corr_function_index(work, work.functions[index].name) != index:
+        if not corr_function_identity_is_unique(work, index):
             work.functions[index].status <- "unsupported"
             work.functions[index].reason <- "name"
             continue
