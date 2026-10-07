@@ -1,0 +1,42 @@
+extend ElisaProof:
+    private:
+        def proof_frame_certificate_family(rule: sview) -> bool:
+            return rule == "frame-spec" or rule == "frame-allow" or rule == "frame-preserve"
+
+        def proof_replay_frame_source_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64
+            for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_frame_source_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, work)
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        has_frame: mutable bool = false
+                        for certificate in report.certificates |has_frame, name|:
+                            has_frame <- true if certificate.name == name and proof_frame_certificate_family(certificate.rule)
+                        if has_frame and proof_direct_frame_report_matches_source(report, all_declarations, name, position.line, tokens, source, source_length):
+                            for index in 0..<report.certificates.count |index, report, name|:
+                                certificate = report.certificates[index]
+                                report.certificates[index].replayed <- true if certificate.name == name and proof_frame_certificate_family(certificate.rule)
+                    _:
+                        pass
+            return true
+
+    public:
+        # The AST-only API remains fail closed for frame certificates. Callers of
+        # this API provide the independently parsed original source context and
+        # still apply semantic source admission and whole-report invariants.
+        def proof_replay_certificates_with_source(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> void can[Memory.Allocate, Abort.Panic]:
+            proof_replay_certificates(report)
+            work: mutable usize = 0
+            complete: bool = report.kernel.arena_validated and proof_replay_frame_source_declarations(report, declarations, declarations, tokens, source, source_length, 0, &work)
+            report.replayed <- 0
+            report.replay_gaps <- 0
+            for index in 0..<report.certificates.count |index, report, complete|:
+                report.certificates[index].replayed <- false if not complete and proof_frame_certificate_family(report.certificates[index].rule)
+                if report.certificates[index].replayed:
+                    report.replayed <- report.replayed + 1
+                else:
+                    report.replay_gaps <- report.replay_gaps + 1
+            report.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if report.replay_gaps == 0 and not proof_replay_certificates_complete(report)

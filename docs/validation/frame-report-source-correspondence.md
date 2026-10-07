@@ -27,3 +27,30 @@ still report goal-attempt-coverage: production recording remains disabled.
 Artifacts: engine build/validation/frame_report_source-O0/-O2 and
 prover-frame-report-source-build.log. The integrated runtime matrix includes this
 probe; focused results do not establish full implementation-plan completion.
+
+## Source-context replay API
+
+`proof_replay_certificates_with_source` first performs ordinary replay, then walks
+the original declarations with a shared 4096-declaration and 64-level budget.
+Only complete independently source-matched frame reports can set frame certificate
+flags. Unmatched/orphan family records remain gaps. Traversal exhaustion revokes
+all provisional frame flags; counters and completeness are recomputed. The
+AST-only API continues to refuse this family and clears a prior source replay
+result. The ordinary rule dispatcher is not widened. The shared attempt mirror
+matcher accepts frame mirrors only for exact attempt/certificate association;
+source replay checks their full occurrence positions and roots separately.
+Zero-length fact spans must still be bounded and exactly associated.
+
+The API requires callers to supply independently parsed original source context
+and still apply semantic admission and report invariants. CLI producer integration
+and full whole-report coverage remain open. The runtime probe now checks source
+replay counts for both valid recordings and all seven mutations, plus AST-only
+refusal before and after source replay. During development, the first O0 probe
+found flag writes targeting copied foreach records; indexed report writes fixed
+that failure. The corrected O0 probe passes. O2 also passes after fact-span and shared association checks. The final
+all-products strict O2 build passes, generation
+a2fa74389b2148b488174fed7d43f1e9; source admission matrix, invariant diagnostics
+and 190-entry kernel inventory pass. CLI frame recording remains disabled, so
+the two static frame-accounting repros still report goal-attempt-coverage.
+Artifacts: engine build/validation/frame_source_api-O0/-O2 and
+prover-frame-source-api-build.log.
