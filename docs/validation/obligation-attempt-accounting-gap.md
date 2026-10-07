@@ -101,3 +101,15 @@ mutation, noncanonical empty paths and over-depth paths. Runtime artifact:
 engine `build/validation/frame-policy-places`. General arena admission and
 source certificate dispatch remain pending; the decoder is not proof of the
 source origin of a supplied place or policy.
+
+A bounded frame-policy arena evaluator now checks versioned spec, write and
+preservation nodes against canonical place records. It checks policy partition
+counts, both bounded lists, backward edges, actual place identity and every
+entry before evaluating containment/overlap. A strict O0 standalone
+compile/link/run passes 16 controls spanning genuine claims, wrong containment,
+preservation overlap, malformed/truncated tables, cycles, malformed operation
+partitions, unknown operations/versions and budget refusal. All three frame
+runtime probes are now included in the primary matrix's integrated kernel
+runtime script. General arena dispatch, source binding and producer event
+certification remain pending. No source theorem is admitted by this addition.
+Artifact: engine `build/validation/frame-policy-certificates`.
