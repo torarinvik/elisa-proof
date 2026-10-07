@@ -237,6 +237,7 @@ run_py_test test_source_map.py
 run_py_test test_unsigned_distinct_constants.py
 run_py_test test_unsigned_resource_source_policy.py
 run_py_test test_fixed_array_constant_indices.py
+run_py_test test_fixed_count_projection.py
 run_py_test test_return_branch_path_fact.py
 run_py_test test_kernel_inventory.py
 run_py_test test_portable_trust_inventory.py
