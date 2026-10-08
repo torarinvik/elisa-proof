@@ -1,5 +1,6 @@
 include "./same_module_call_source.elisa"
 include "./signed_call_snapshots.elisa"
+include "./typed_call_initializers.elisa"
 extend ElisaProof:
     private:
         # Rebuild deterministic call sites from caller source, not the trace payload.
@@ -129,21 +130,23 @@ extend ElisaProof:
         # Compare the marker only with the substituted source call (see deterministic_call_state).
         # A captured block may run with its captures rewritten by enclosing code the walk cannot
         # order, so it starts from a reset.
-        def proof_replay_deterministic_call_source_expression(declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_replay_deterministic_call_source_expression(declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, types: mutable darray[(name: sview, expression: Ast::Expr)]&, depth: usize) -> bool:
             return false if depth >= 96
             match expression:
                 Ast::Expr.Block(statements, block_result, captures, _):
                     names_mark: usize = names.count
                     values_mark: usize = values.count
+                    types_mark: usize = types.count
                     proof_replay_deterministic_call_havoc_bindings(names, values, names_mark) if captures.count > 0
                     source_line: u32 = Ast::expr_pos(expected).line
-                    statement_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, statements, expected, source_line, names, values, depth + 1)
+                    statement_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, statements, expected, source_line, names, values, types, depth + 1)
                     tail_matches: mutable bool = false
-                    tail_matches <- proof_replay_deterministic_call_source_expression_at_line(declarations, block_result, expected, source_line, names, values, depth + 1)
+                    tail_matches <- proof_replay_deterministic_call_source_expression_at_line(declarations, block_result, expected, source_line, names, values, types, depth + 1)
                     tail_match_count: mutable usize = 0
                     tail_match_count <- 1 if statement_matches.known and tail_matches
                     names.resize(names_mark)
                     values.resize(values_mark)
+                    types.resize(types_mark)
                     return statement_matches.known and statement_matches.matches + tail_match_count == 1
                 _:
                     pass
@@ -154,21 +157,21 @@ extend ElisaProof:
             marker: Ast::Expr = proof_replay_deterministic_call_marker_resolved(expected, names, values)
             return proof_replay_deterministic_call_source_contains(resolved, expected, depth + 1) or proof_replay_deterministic_call_source_contains(resolved, marker, depth + 1)
 
-        def proof_replay_deterministic_call_source_expression_at_line(declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_replay_deterministic_call_source_expression_at_line(declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, types: mutable darray[(name: sview, expression: Ast::Expr)]&, depth: usize) -> bool:
             return false if depth >= 96
-            return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(declarations, expression, expected, names, values, depth + 1)
+            return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(declarations, expression, expected, names, values, types, depth + 1)
 
         # Bind caller locals in statement order, reconstructing the resolved actuals that the
         # producer placed in the marker at the call's pre-state. Loops and joins that may rewrite
         # state reset every binding; a redeclared (shadowing) name or an unmodelled write target
         # fails closed.
-        def proof_replay_deterministic_call_source_statements(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> (known: bool, matches: usize):
+        def proof_replay_deterministic_call_source_statements(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, types: mutable darray[(name: sview, expression: Ast::Expr)]&, depth: usize) -> (known: bool, matches: usize):
             return (false, 0) if depth >= 96
             no_skip: Ast::Pos = Ast::pos_at_line(0)
-            for statement in body |declarations, expected, line, names, values, depth, no_skip|:
+            for statement in body |declarations, expected, line, names, values, types, depth, no_skip|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, initializer, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, initializer, expected, line, names, values, types, depth + 1)
                         return (true, 0) if position.line > line
                         return (false, 0) if proof_replay_deterministic_call_name_bound(names, local_name)
                         resolved_initializer: Ast::Expr = proof_replay_substitute_many(initializer, names, values)
@@ -177,11 +180,13 @@ extend ElisaProof:
                         # identity; evaluating the initializer again is a different operation.
                         snapshot: bool = proof_replay_signed_call_snapshot(declarations, type_expression, initializer)
                         values.push(Ast::Expr.Ident(local_name, position) if snapshot else resolved_initializer)
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, initializer, no_skip, depth + 1)
+                        readonly_cast: bool = proof_replay_typed_integer_cast(declarations, initializer, types)
+                        types.push((local_name, type_expression))
+                        proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if not readonly_cast and proof_replay_deterministic_expr_writes(declarations, initializer, no_skip, depth + 1)
                     Ast::Stmt.Assign(target, operator, value, position):
                         return (true, 0) if position.line > line
                         return (false, 0) if operator != TokenKind.Assign and operator != TokenKind.LArrow
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, types, depth + 1)
                         resolved_value: Ast::Expr = proof_replay_substitute_many(value, names, values)
                         match target:
                             Ast::Expr.Ident(local_name, _):
@@ -192,26 +197,29 @@ extend ElisaProof:
                         proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, value, no_skip, depth + 1)
                     Ast::Stmt.Expr(value, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, types, depth + 1)
                         proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, value, no_skip, depth + 1)
                     Ast::Stmt.Return(value, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, types, depth + 1)
                     Ast::Stmt.Contract(_, expression, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, expression, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(declarations, expression, expected, line, names, values, types, depth + 1)
                     Ast::Stmt.If(condition, yes, no, position):
                         return (true, 0) if position.line > line
-                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, condition, expected, line, names, values, depth + 1) else 0
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, condition, expected, line, names, values, types, depth + 1) else 0
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, yes, expected, line, names, values, depth + 1)
+                        types_mark: usize = types.count
+                        yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, yes, expected, line, names, values, types, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
+                        types.resize(types_mark)
                         return (false, 0) if not yes_matches.known
-                        no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, no, expected, line, names, values, depth + 1)
+                        no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, no, expected, line, names, values, types, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
+                        types.resize(types_mark)
                         return (false, 0) if not no_matches.known
                         branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
                         return (true, branch_matches) if branch_matches > 0
@@ -220,16 +228,20 @@ extend ElisaProof:
                             proof_replay_deterministic_call_havoc_bindings(names, values, names.count)
                     Ast::Stmt.Match(value, arms, position):
                         return (true, 0) if position.line > line
-                        value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, depth + 1) else 0
+                        value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, value, expected, line, names, values, types, depth + 1) else 0
                         arm_match_count: mutable usize = value_match
                         arms_write: mutable bool = proof_replay_deterministic_expr_writes(declarations, value, no_skip, depth + 1)
                         rebind_index: mutable usize = 0
-                        for arm in arms |arm, declarations, expected, line, names, values, depth, arm_match_count, rebind_index, arms_write, no_skip|:
+                        for arm in arms |arm, declarations, expected, line, names, values, types, depth, arm_match_count, rebind_index, arms_write, no_skip|:
                             names_mark: usize = names.count
                             values_mark: usize = values.count
+                            types_mark: usize = types.count
                             pattern_names: mutable darray[sview] = []
                             return (false, 0) if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
-                            for pattern_name in pattern_names |pattern_name, names, values|:
+                            payload_types: darray[Ast::Expr] = proof_replay_call_payload_types(declarations, value, arm.pattern, types)
+                            for pattern_index in 0..<pattern_names.count |pattern_names, payload_types, names, values, types|:
+                                pattern_name: sview = pattern_names[pattern_index]
+                                types.push((pattern_name, payload_types[pattern_index])) if payload_types.count == pattern_names.count
                                 return (false, 0) if proof_replay_deterministic_call_name_bound(names, pattern_name)
                                 names.push(pattern_name)
                                 values.push(Ast::Expr.Absent)
@@ -238,10 +250,11 @@ extend ElisaProof:
                                 names.push(rebind_name)
                                 values.push(Ast::Expr.Ident(pattern_name, Ast::expr_pos(expected)))
                                 rebind_index <- rebind_index + 1
-                            guard_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, arm.guard, expected, line, names, values, depth + 1) else 0
-                            arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, arm.body, expected, line, names, values, depth + 1)
+                            guard_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, arm.guard, expected, line, names, values, types, depth + 1) else 0
+                            arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, arm.body, expected, line, names, values, types, depth + 1)
                             names.resize(names_mark)
                             values.resize(values_mark)
+                            types.resize(types_mark)
                             return (false, 0) if not arm_matches.known
                             arm_match_count <- arm_match_count + guard_match + arm_matches.matches
                             arms_write <- true if proof_replay_deterministic_expr_writes(declarations, arm.guard, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, arm.body, depth + 1)
@@ -252,9 +265,11 @@ extend ElisaProof:
                         return (true, 0) if position.line > line
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        scoped_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, nested, expected, line, names, values, depth + 1)
+                        types_mark: usize = types.count
+                        scoped_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, nested, expected, line, names, values, types, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
+                        types.resize(types_mark)
                         return scoped_matches
                     Ast::Stmt.For(bind, variables, _, nested, position):
                         return (true, 0) if position.line > line
@@ -270,12 +285,14 @@ extend ElisaProof:
                         return (false, 0) if proof_replay_deterministic_call_name_bound(names, variables[0])
                         names_mark: usize = names.count
                         values_mark: usize = values.count
+                        types_mark: usize = types.count
                         proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
                         names.push(variables[0])
                         values.push(proof_loop_binder_value(variables[0], position))
-                        nested_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, nested, expected, line, names, values, depth + 1)
+                        nested_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, nested, expected, line, names, values, types, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
+                        types.resize(types_mark)
                         return nested_matches
                     Ast::Stmt.While(condition, while_body, position):
                         return (true, 0) if position.line > line
@@ -284,11 +301,13 @@ extend ElisaProof:
                         # body's own declarations and assignments are bound in statement order.
                         names_mark: usize = names.count
                         values_mark: usize = values.count
+                        types_mark: usize = types.count
                         proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
-                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, condition, expected, line, names, values, depth + 1) else 0
-                        body_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, while_body, expected, line, names, values, depth + 1)
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(declarations, condition, expected, line, names, values, types, depth + 1) else 0
+                        body_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(declarations, while_body, expected, line, names, values, types, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
+                        types.resize(types_mark)
                         return (false, 0) if not body_matches.known
                         loop_matches: usize = condition_match + body_matches.matches
                         return (true, loop_matches) if loop_matches > 0
@@ -313,10 +332,12 @@ extend ElisaProof:
                         if name == owner and (owner_line == 0 or position.line == owner_line):
                             names: mutable darray[sview] = []
                             values: mutable darray[Ast::Expr] = []
-                            for parameter in parameters |names, values|:
+                            types: mutable darray[(name: sview, expression: Ast::Expr)] = []
+                            for parameter in parameters |names, values, types|:
                                 names.push(parameter.name)
                                 values.push(Ast::Expr.Absent)
-                            source_matches = proof_replay_deterministic_call_source_statements(all, body, expected, line, &names, &values, 0)
+                                types.push((parameter.name, parameter.type_expression)) if not parameter.is_mutable
+                            source_matches = proof_replay_deterministic_call_source_statements(all, body, expected, line, &names, &values, &types, 0)
                             return false if not source_matches.known
                             matches <- matches + source_matches.matches
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):

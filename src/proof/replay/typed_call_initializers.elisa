@@ -1,0 +1,52 @@
+# Source types survive value resets. They authorize only builtin integer conversions;
+# no general method purity is inferred from a method's spelling.
+extend ElisaProof:
+    private:
+        def proof_replay_call_source_type(types: darray[(name: sview, expression: Ast::Expr)]&, name: sview) -> Ast::Expr:
+            matches: mutable usize = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            for binding in types |matches, found|:
+                if binding.name == name:
+                    matches <- matches + 1
+                    found <- binding.expression
+            found if matches == 1 else Ast::Expr.Invalid
+
+        def proof_replay_call_payload_types(declarations: darray[Ast::Decl]&, subject: Ast::Expr, pattern: Ast::Pattern, types: darray[(name: sview, expression: Ast::Expr)]&) -> darray[Ast::Expr]:
+            subject_type: Ast::Expr = proof_replay_call_source_type(types, proof_ident_name(subject))
+            enum_name: sview = proof_replay_local_binding_variant_enum_name(pattern)
+            return [] if enum_name == "" or proof_ident_name(subject_type) != enum_name
+            annotations: darray[Ast::EnumAnnotation] = []
+            payload: mutable darray[Ast::Expr] = []
+            return [] if not proof_payload_binder_types(pattern, declarations, annotations, &payload)
+            payload
+
+        # An ordinary function or extern with the numeric selector keeps dispatch opaque,
+        # even if its own parameter list appears read-only.
+        def proof_replay_call_cast_selector_absent(declarations: darray[Ast::Decl]&, selector: sview, depth: usize) -> bool:
+            return false if depth >= 64
+            for declaration in declarations |selector, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if name == selector or name == "__cast__"
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_call_cast_selector_absent(nested, selector, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_replay_typed_integer_cast(declarations: darray[Ast::Decl]&, initializer: Ast::Expr, types: darray[(name: sview, expression: Ast::Expr)]&) -> bool:
+            match initializer:
+                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), selector, _), arguments, argument_names, _):
+                    return false if arguments.count != 0 or argument_names.count != 0
+                    target_type: Ast::Expr = Ast::Expr.Ident(selector, Ast::expr_pos(initializer))
+                    source_type: Ast::Expr = proof_replay_call_source_type(types, receiver)
+                    # References, aliases, mutable types and user records are outside this rule.
+                    source_name: sview = proof_ident_name(source_type)
+                    return false if source_name == "" or (proof_unsigned_primitive_width(source_type) == 0 and proof_signed_primitive_width(source_type) == 0)
+                    return false if proof_unsigned_primitive_width(target_type) == 0 and proof_signed_primitive_width(target_type) == 0
+                    work: mutable usize = 0
+                    return false if not proof_replay_scalar_copy_type_unshadowed(declarations, source_name, 0, &work)
+                    return false if not proof_replay_scalar_copy_type_unshadowed(declarations, selector, 0, &work)
+                    proof_replay_call_cast_selector_absent(declarations, selector, 0)
+                _:
+                    false
