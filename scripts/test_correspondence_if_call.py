@@ -30,13 +30,17 @@ def correspond(bundle, source, expected_exit):
     return json.loads(result.stdout)
 
 
-positive = write("positive", """def truth() -> bool:
-    ensure result == true
-    return true
+positive = write("positive", """module HelperPolicy:
+    public:
+        def truth(value: i64) -> bool:
+            requires value >= 0
+            ensure result == true
+            return true
 
-def caller() -> bool:
+def caller(value: i64) -> bool:
+    requires value >= 0
     ensure result == true
-    if truth():
+    if HelperPolicy::truth(value):
         return true
     else:
         return false
@@ -48,7 +52,7 @@ assert {entry["name"]: entry["status"] for entry in report["functions"]} == {
     "truth": "checked", "caller": "checked"
 }, report
 
-changed = write("changed", positive.read_text().replace("ensure result == true", "ensure result == false", 1).replace("return true\n\ndef caller", "return false\n\ndef caller", 1))
+changed = write("changed", positive.read_text().replace("ensure result == true", "ensure result == false", 1).replace("            return true", "            return false", 1))
 report = correspond(bundle, changed, 1)
 assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
 assert {entry["name"]: (entry["status"], entry["reason"]) for entry in report["functions"]} == {
@@ -56,7 +60,7 @@ assert {entry["name"]: (entry["status"], entry["reason"]) for entry in report["f
     "caller": ("unsupported", "callee-unchecked"),
 }, report
 
-unchecked = write("unchecked", positive.read_text().replace("    ensure result == true\n", "", 1))
+unchecked = write("unchecked", positive.read_text().replace("            ensure result == true\n", "", 1))
 report = correspond(bundle, unchecked, 1)
 assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
 assert {entry["name"]: (entry["status"], entry["reason"]) for entry in report["functions"]}["caller"] == (
