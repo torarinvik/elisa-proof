@@ -45,3 +45,24 @@ that canonical typed marker as scalar identity; the kernel also checks the exact
 atom shape. The original fact budget is unchanged. Existing signed literal range facts
 are unchanged. The compiled typed-loop harness passes again with this replacement.
 Clean paired engine qualification of the follow-up is pending.
+
+## Follow-up clean paired qualification
+
+Clean source `57663d01`, generation `aa71933424c7491098a87dcadd25dda9`,
+builds in 44.18s at 2,284,464 KiB RSS under 8 GiB. Both source/manifests and
+actual binary hashes match (`build/loop-integer-width-budget-product-identity.json`).
+
+The original guard-and-flag regression passes positive and adversarial fixtures,
+with all 9/9 positive certificates independently replayed. Original integer
+ordering denial, float/integer bounds (both whole-file and focused routes), and
+Boolean/equality denial scripts also pass. False integer, floating total-order,
+unsafe upper bound, missing guard, Boolean and nullable claims remain refused.
+
+The uncached engine sweep passes all 73 reports / 4,246 obligations with zero
+semantic errors, diagnostics, gaps or trusted assumptions. The audio-animation
+budget regression is repaired within the original limit. Sweep time is 2.02s,
+216,288 KiB RSS under 3 GiB. Reports, inventory and bounded log are in
+`../elisa-engine/build/validation/loop-integer-width-budget-engine-reports/`,
+`loop-integer-width-budget-engine-inventory.json` and
+`loop-integer-width-budget-engine-sweep.log`. Full compatibility and production
+promotion remain open.
