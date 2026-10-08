@@ -1,0 +1,200 @@
+# A source-owned index for immutable scalar constants used by correspondence. Lookup is by exact
+# owner path plus member name; unsupported initializers and duplicate rows remain unresolvable.
+struct CorrSourceConstant:
+    name: sview
+    owner_start: usize
+    owner_count: usize
+    value: usize
+    supported: bool
+    unique: mutable bool
+
+struct CorrSourceConstants:
+    entries: mutable darray[CorrSourceConstant]
+    owner_segments: mutable darray[sview]
+
+def corr_source_constants_empty() -> CorrSourceConstants:
+    return CorrSourceConstants{entries: [], owner_segments: []}
+
+# The parser stores nested module declaration names as fully qualified `A::B` views. Normalize
+# each module node to that exact path rather than appending its already-qualified spelling to the
+# lexical parent (which would create `A/A::B`).
+def corr_source_module_path(name: sview, path: mutable darray[sview]&) -> bool:
+    path.clear()
+    length: usize = sview_len(name)
+    return false if length == 0 or length > CorrLimit::MODULE_PATH_BYTES
+    start: mutable usize = 0
+    index: mutable usize = 0
+    while index < length:
+        if sview_at(name, index) == 58:
+            return false if index == start or index + 1 >= length or sview_at(name, index + 1) != 58
+            return false if path.count >= CorrLimit::OWNER_SEGMENTS
+            path.push(string_view_slice(name, start.i64(), index.i64()))
+            index <- index + 2
+            start <- index
+        else:
+            index <- index + 1
+    return false if start >= length or path.count >= CorrLimit::OWNER_SEGMENTS
+    path.push(string_view_slice(name, start.i64(), length.i64()))
+    return true
+
+def corr_source_constant_value(pool: mutable CorrPool&, expression: Ast::Expr, depth: usize) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH
+    match expression:
+        Ast::Expr.IntLit(value, _):
+            return 0 if value < 0
+            return corr_int(pool, value)
+        Ast::Expr.BoolLit(value, _):
+            return corr_bool(pool, value)
+        Ast::Expr.Paren(inner, _):
+            return corr_source_constant_value(pool, inner, depth + 1)
+        _:
+            return 0
+
+def corr_collect_source_constants(pool: mutable CorrPool&, declarations: darray[Ast::Decl]&, owner: darray[sview]&, index: mutable CorrSourceConstants&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |pool, owner, index, depth|:
+        match declaration:
+            Ast::Decl.Module(name, body, _):
+                module_owner: mutable darray[sview] = []
+                return false if not corr_source_module_path(name, &module_owner)
+                return false if not corr_collect_source_constants(pool, body, &module_owner, index, depth + 1)
+            Ast::Decl.Scoped(body, _):
+                return false if not corr_collect_source_constants(pool, body, owner, index, depth + 1)
+            Ast::Decl.Const(name, type_expression, initializer, is_mutable, _):
+                return false if index.entries.count >= CorrLimit::SOURCE_CONSTANTS or index.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count > CorrLimit::OWNER_SEGMENTS - index.owner_segments.count
+                owner_start: usize = index.owner_segments.count
+                index.owner_segments.extend(owner)
+                type_is_i64: mutable bool = false
+                match type_expression:
+                    Ast::Expr.Ident("i64", _):
+                        type_is_i64 <- true
+                    _:
+                        pass
+                value: usize = corr_source_constant_value(pool, initializer, 0)
+                index.entries.push(CorrSourceConstant{name: name, owner_start: owner_start, owner_count: owner.count, value: value, supported: not is_mutable and type_is_i64 and value > 0, unique: true})
+            _:
+                pass
+    return true
+
+def corr_source_path_equal(left: darray[sview]&, left_start: usize, left_count: usize, right: darray[sview]&, right_start: usize, right_count: usize) -> bool:
+    return false if left_count != right_count or left_start > left.count or left_count > left.count - left_start or right_start > right.count or right_count > right.count - right_start
+    for index in 0..<left_count |index, left, left_start, right, right_start|:
+        return false if left[left_start + index] != right[right_start + index]
+    return true
+
+def corr_source_scope_parts(expression: Ast::Expr, parts: mutable darray[sview]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    match expression:
+        Ast::Expr.Ident(name, _):
+            parts.push(name)
+            return true
+        Ast::Expr.Scope(base, member, _):
+            return false if not corr_source_scope_parts(base, parts, depth + 1)
+            parts.push(member)
+            return true
+        _:
+            return false
+
+def corr_source_constant_lookup(index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, scope_parts: darray[sview]&) -> usize:
+    return 0 if scope_parts.count < 2 or owner_start > owner_segments.count or owner_count > owner_segments.count - owner_start
+    module_count: usize = scope_parts.count - 1
+    if owner_count > 0 and module_count >= owner_count:
+        owner_prefix: mutable bool = true
+        for part in 0..<owner_count |part, owner_segments, owner_start, scope_parts, owner_prefix|:
+            owner_prefix <- false if owner_segments[owner_start + part] != scope_parts[part]
+        if owner_prefix:
+            return corr_source_constant_find(index, scope_parts, module_count, scope_parts[scope_parts.count - 1])
+    path: mutable darray[sview] = []
+    for part in 0..<owner_count |part, owner_segments, owner_start, path|:
+        path.push(owner_segments[owner_start + part])
+    for part in 0..<module_count |part, scope_parts, path|:
+        path.push(scope_parts[part])
+    return corr_source_constant_find(index, &path, path.count, scope_parts[scope_parts.count - 1])
+
+def corr_source_constant_find(index: CorrSourceConstants&, path: darray[sview]&, path_count: usize, name: sview) -> usize:
+    found: mutable usize = 0
+    for entry in index.entries |index, path, path_count, name, found|:
+        if entry.unique and entry.name == name and corr_source_path_equal(index.owner_segments, entry.owner_start, entry.owner_count, path, 0, path_count):
+            found <- entry.value if entry.supported
+            found <- 0 if not entry.supported
+    return found
+
+def corr_source_constants_mark_unique(index: mutable CorrSourceConstants&) -> bool:
+    return false if index.entries.count > CorrLimit::SOURCE_CONSTANTS
+    for first in 0..<index.entries.count |first, index|:
+        return false if index.entries[first].owner_start > index.owner_segments.count or index.entries[first].owner_count > index.owner_segments.count - index.entries[first].owner_start
+        second: mutable usize = first + 1
+        while second < index.entries.count:
+            return false if index.entries[second].owner_start > index.owner_segments.count or index.entries[second].owner_count > index.owner_segments.count - index.entries[second].owner_start
+            if index.entries[first].name == index.entries[second].name and corr_source_path_equal(index.owner_segments, index.entries[first].owner_start, index.entries[first].owner_count, index.owner_segments, index.entries[second].owner_start, index.entries[second].owner_count):
+                index.entries[first].unique <- false
+                index.entries[second].unique <- false
+            second <- second + 1
+    return true
+
+def corr_source_constant_term(pool: mutable CorrPool&, parts: darray[sview]&) -> usize:
+    return 0 if parts.count < 2
+    term: mutable usize = corr_ident(pool, parts[0])
+    for index in 1..<parts.count |index, pool, parts, term|:
+        term <- corr_scope(pool, term, parts[index])
+        return 0 if term == 0
+    return term
+
+# Keep the same qualified term shape used by package generation. These equalities and scalar
+# markers are source facts only for unique immutable i64 literal declarations; ambiguous or
+# unsupported bindings contribute no hypothesis to correspondence.
+def corr_source_constants_add_facts(pool: mutable CorrPool&, state: mutable CorrState&, index: CorrSourceConstants&) -> bool:
+    for entry in index.entries |pool, state, index|:
+        continue if not entry.unique or not entry.supported or entry.owner_count == 0
+        return false if entry.owner_start > index.owner_segments.count or entry.owner_count > index.owner_segments.count - entry.owner_start
+        parts: mutable darray[sview] = []
+        for part in 0..<entry.owner_count |part, index, entry, parts|:
+            parts.push(index.owner_segments[entry.owner_start + part])
+        parts.push(entry.name)
+        symbol: usize = corr_source_constant_term(pool, &parts)
+        equality: usize = corr_binary(pool, "==", symbol, entry.value)
+        scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", symbol)
+        return false if equality == 0 or scalar == 0 or not corr_add_fact(state, equality) or not corr_add_fact(state, scalar)
+    return true
+
+def corr_eval_source_constants(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, depth: usize) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH
+    match expression:
+        Ast::Expr.IntLit(value, _):
+            return corr_int(pool, value)
+        Ast::Expr.BoolLit(value, _):
+            return corr_bool(pool, value)
+        Ast::Expr.Ident(name, _):
+            return corr_lookup(names, values, name)
+        Ast::Expr.Scope(_, _, _):
+            parts: mutable darray[sview] = []
+            return 0 if not corr_source_scope_parts(expression, &parts, 0)
+            return 0 if parts.count == 0 or corr_lookup(names, values, parts[0]) != 0
+            valid: usize = corr_source_constant_lookup(index, owner_segments, owner_start, owner_count, &parts)
+            return valid
+        Ast::Expr.Paren(inner, _):
+            return corr_eval_source_constants(pool, inner, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+        Ast::Expr.Unary(operator, operand, _):
+            spelled: mutable sview = ""
+            spelled <- "-" if operator == TokenKind.Minus
+            spelled <- "not" if operator == TokenKind.Not
+            return 0 if sview_len(spelled) == 0
+            value: usize = corr_eval_source_constants(pool, operand, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            return corr_unary(pool, spelled, value)
+        Ast::Expr.Binary(left, operator, right, _):
+            spelled: sview = corr_binary_operator(operator)
+            return 0 if sview_len(spelled) == 0
+            first: usize = corr_eval_source_constants(pool, left, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            second: usize = corr_eval_source_constants(pool, right, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            return 0 if first == 0 or second == 0
+            if operator == TokenKind.Slash:
+                divisor: CorrTerm = pool.terms[second]
+                return 0 if divisor.kind != "int" or divisor.value <= 0
+            return corr_binary(pool, spelled, first, second)
+        Ast::Expr.If(condition, then_expression, else_expression, _):
+            condition_term: usize = corr_eval_source_constants(pool, condition, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            then_term: usize = corr_eval_source_constants(pool, then_expression, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            else_term: usize = corr_eval_source_constants(pool, else_expression, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            return corr_if(pool, condition_term, then_term, else_term)
+        _:
+            return 0
