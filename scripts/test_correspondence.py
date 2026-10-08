@@ -439,6 +439,31 @@ assert statuses(nested_call_wrong_package) == {
     "one": UNMATCHED, "two": ("unsupported", "callee-unchecked")
 }, nested_call_wrong_package
 
+# The result type fact follows the exact nested callee owner when another module has a same-leaf
+# function with a different return type.
+qualified_helper_owner = write("qualified_helper_owner", """module Policy:
+    def one(x: i64) -> i64:
+        ensure result == 1
+        return 1
+
+    def two(x: i64) -> i64:
+        ensure result == 2
+        return one(x) + 1
+
+module Other:
+    def one(x: i64) -> bool:
+        ensure result == true
+        return true
+""")
+qualified_helper_package = package(qualified_helper_owner)
+qualified_helper_report = expect(qualified_helper_package, qualified_helper_owner, {
+    "one": ("checked", None), "two": ("checked", None)
+}, 0)
+assert qualified_helper_report["source_admissible"] is True, qualified_helper_report
+assert [(item["owner"], item["name"], item["status"]) for item in qualified_helper_report["functions"]] == [
+    (["Policy"], "one", "checked"), (["Policy"], "two", "checked"), (["Other"], "one", "checked")
+], qualified_helper_report
+
 # A shared leaf name in distinct owner paths is disambiguated by the source owner. The module
 # function has no obligations; the root declaration matches the root-anchored package.
 duplicate = write("duplicate", """module Inner:
