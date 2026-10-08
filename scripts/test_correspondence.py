@@ -99,12 +99,12 @@ expect(short_circuit_package, false_unevaluated_helper,
 
 # Constant lookup follows the exact nested source owner. A sibling module with the same leaf name
 # cannot supply the nested constant, and changing the selected declaration changes the obligation.
-nested_constant_source = write("nested_constant", """module Layout:
-    LIMIT: i64 = 1
+nested_constant_source = write("nested_constant", """const module Layout:
+    const LIMIT: i64 = 1
 
 module Policy:
     const module Layout:
-        LIMIT: i64 = 16
+        const LIMIT: i64 = 16
 
     def bounded(x: i64) -> i64:
         requires x >= 0 and x <= Layout::LIMIT
@@ -117,6 +117,10 @@ expect(nested_constant_package, nested_constant_source, {"bounded": ("checked", 
 changed_nested_constant = write("changed_nested_constant", nested_constant_source.read_text().replace("LIMIT: i64 = 16", "LIMIT: i64 = 15"))
 expect(nested_constant_package, changed_nested_constant,
        {"bounded": ("unmatched", "unproved-obligation")}, 1)
+wrong_nested_owner = write("wrong_nested_owner", nested_constant_source.read_text().replace("Layout::LIMIT", "Other::Layout::LIMIT"))
+wrong_owner_report = correspond(nested_constant_package, wrong_nested_owner, 1)
+assert wrong_owner_report["package"]["status"] == "replayed" and not wrong_owner_report["source_admissible"], wrong_owner_report
+assert all(entry["status"] != "checked" for entry in wrong_owner_report["functions"]), wrong_owner_report
 
 variable_divisor = write("variable_divisor", """def quotient(value: i64, divisor: i64) -> i64:
     requires divisor > 0
