@@ -12,7 +12,8 @@ unused finding payloads no longer survive in completed executor futures or the
 aggregate results table. All inputs and existing failure categories remain.
 
 The three callers (`refusal_census`, `census_diff`, `corpus_census`) consume these
-retained fields. Parsing still temporarily holds one complete report per active
+retained fields. Raw stdout/stderr are released immediately after parsing, before validation and
+projection. Parsing still temporarily holds one complete report per active
 worker; this change does not bound a single report's size or compiler child RSS.
 
 Acceptance remains open: unchanged deterministic census/refusal output and a

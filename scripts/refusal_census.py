@@ -67,13 +67,17 @@ def run(path, timeout):
             data = json.loads(result.stdout)
         except json.JSONDecodeError:
             return data_key(path), None, time.monotonic() - started, "invalid-json"
+        returncode = result.returncode
+        # Parsing creates a separate object graph. Release stdout/stderr before
+        # validation and projection rather than keeping both copies in the worker.
+        del result
         if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
             return data_key(path), None, time.monotonic() - started, "invalid-report"
         try:
             expected_exit = report_expected_exit(data)
         except ValueError:
             return data_key(path), None, time.monotonic() - started, "invalid-result-lattice"
-        if result.returncode != expected_exit:
+        if returncode != expected_exit:
             return data_key(path), None, time.monotonic() - started, "exit-status-mismatch"
         summary = data["summary"]
         if (type(summary.get("proven")) is not int or type(summary.get("obligations")) is not int
