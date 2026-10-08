@@ -76,8 +76,8 @@ module OtherPolicy:
     public:
         def truth(value: i64) -> bool:
             requires value >= 0
-            ensure result == true
-            return true
+            ensure result == false
+            return false
 """)
 report = correspond(bundle, wrong_owner, 1)
 assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
