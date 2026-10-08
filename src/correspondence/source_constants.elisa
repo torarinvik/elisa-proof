@@ -8,12 +8,49 @@ struct CorrSourceConstant:
     supported: bool
     unique: mutable bool
 
+struct CorrSourceEnumType:
+    name: sview
+    path_start: usize
+    path_count: usize
+    backing_type: sview
+    is_const: bool
+    unique: mutable bool
+    cast_safe: mutable bool
+
+struct CorrSourceTypeName:
+    name: sview
+    path_start: usize
+    path_count: usize
+    const_enum: bool
+    unique: mutable bool
+
+struct CorrSourceEnumMember:
+    name: sview
+    enum_index: usize
+    symbol_supported: bool
+    value_supported: bool
+    value: i64
+    unique: mutable bool
+
 struct CorrSourceConstants:
     entries: mutable darray[CorrSourceConstant]
     owner_segments: mutable darray[sview]
+    enum_types: mutable darray[CorrSourceEnumType]
+    type_names: mutable darray[CorrSourceTypeName]
+    enum_members: mutable darray[CorrSourceEnumMember]
 
 def corr_source_constants_empty() -> CorrSourceConstants:
-    return CorrSourceConstants{entries: [], owner_segments: []}
+    return CorrSourceConstants{entries: [], owner_segments: [], enum_types: [], type_names: [], enum_members: []}
+
+def corr_source_enum_value(expression: Ast::Expr) -> (known: bool, value: i64):
+    match expression:
+        Ast::Expr.IntLit(value, _):
+            return (true, value)
+        Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+            return (false, 0) if value == -9223372036854775807 - 1
+            return (true, -value)
+        _:
+            return (false, 0)
 
 # The parser stores nested module declaration names as fully qualified `A::B` views. Normalize
 # each module node to that exact path rather than appending its already-qualified spelling to the
@@ -72,9 +109,185 @@ def corr_collect_source_constants(pool: mutable CorrPool&, declarations: darray[
                         pass
                 value: usize = corr_source_constant_value(pool, initializer, 0)
                 index.entries.push(CorrSourceConstant{name: name, owner_start: owner_start, owner_count: owner.count, value: value, supported: not is_mutable and type_is_i64 and value > 0, unique: true})
+            Ast::Decl.Struct(name, _, _, _, _, _, _):
+                return false if index.type_names.count >= CorrLimit::SOURCE_CONSTANTS or index.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count + 1 > CorrLimit::OWNER_SEGMENTS - index.owner_segments.count
+                path_start: usize = index.owner_segments.count
+                index.owner_segments.extend(owner)
+                index.owner_segments.push(name)
+                index.type_names.push(CorrSourceTypeName{name: name, path_start: path_start, path_count: owner.count + 1, const_enum: false, unique: true})
+            Ast::Decl.Alias(name, _, _):
+                return false if index.type_names.count >= CorrLimit::SOURCE_CONSTANTS or index.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count + 1 > CorrLimit::OWNER_SEGMENTS - index.owner_segments.count
+                path_start: usize = index.owner_segments.count
+                index.owner_segments.extend(owner)
+                index.owner_segments.push(name)
+                index.type_names.push(CorrSourceTypeName{name: name, path_start: path_start, path_count: owner.count + 1, const_enum: false, unique: true})
+            Ast::Decl.Enum(name, variants, is_const, backing_expression, _):
+                return false if index.enum_types.count >= CorrLimit::SOURCE_CONSTANTS or index.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count + 1 > CorrLimit::OWNER_SEGMENTS - index.owner_segments.count
+                path_start: usize = index.owner_segments.count
+                index.owner_segments.extend(owner)
+                index.owner_segments.push(name)
+                backing: mutable sview = ""
+                match backing_expression:
+                    Ast::Expr.Ident(backing_name, _):
+                        backing <- backing_name
+                    _:
+                        pass
+                enum_index: usize = index.enum_types.count
+                index.enum_types.push(CorrSourceEnumType{name: name, path_start: path_start, path_count: owner.count + 1, backing_type: backing, is_const: is_const, unique: true, cast_safe: true})
+                index.type_names.push(CorrSourceTypeName{name: name, path_start: path_start, path_count: owner.count + 1, const_enum: is_const, unique: true})
+                for variant in variants |index, enum_index, is_const|:
+                    return false if index.enum_members.count >= CorrLimit::SOURCE_CONSTANTS * 16
+                    value: (known: bool, value: i64) = corr_source_enum_value(variant.value_expr)
+                    supported_value: bool = is_const and backing == "i64" and variant.fields.count == 0 and value.known
+                    index.enum_members.push(CorrSourceEnumMember{name: variant.name, enum_index: enum_index, symbol_supported: is_const and variant.fields.count == 0, value_supported: supported_value, value: value.value, unique: true})
             _:
                 pass
     return true
+
+def corr_source_enum_override_pass(declarations: darray[Ast::Decl]&, owner: darray[sview]&, index: mutable CorrSourceConstants&, depth: usize, checks: mutable usize&) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |owner, index, depth|:
+        match declaration:
+            Ast::Decl.Func(name, _, _, _, _, _, _):
+                if name == "i64" or name == "__cast__":
+                    for enum_index in 0..<index.enum_types.count |enum_index, index, name, checks|:
+                        return false if checks >= CorrLimit::SOURCE_ENUM_CHECKS
+                        checks <- checks + 1
+                        index.enum_types[enum_index].cast_safe <- false
+            Ast::Decl.Module(name, body, _):
+                next_owner: mutable darray[sview] = []
+                return false if not corr_source_module_path(name, &next_owner)
+                return false if not corr_source_enum_override_pass(body, &next_owner, index, depth + 1, checks)
+            Ast::Decl.Scoped(body, _):
+                return false if not corr_source_enum_override_pass(body, owner, index, depth + 1, checks)
+            _:
+                pass
+    return true
+
+def corr_source_enum_mark_unique(index: mutable CorrSourceConstants&) -> bool:
+    return false if index.enum_types.count > CorrLimit::SOURCE_CONSTANTS or index.type_names.count > CorrLimit::SOURCE_CONSTANTS or index.enum_members.count > CorrLimit::SOURCE_CONSTANTS * 16
+    checks: mutable usize = 0
+    for first in 0..<index.type_names.count |first, index, checks|:
+        left: CorrSourceTypeName = index.type_names[first]
+        return false if left.path_start > index.owner_segments.count or left.path_count > index.owner_segments.count - left.path_start
+        for second in first + 1..<index.type_names.count |first, second, index, left, checks|:
+            return false if checks >= CorrLimit::SOURCE_ENUM_CHECKS
+            checks <- checks + 1
+            right: CorrSourceTypeName = index.type_names[second]
+            return false if right.path_start > index.owner_segments.count or right.path_count > index.owner_segments.count - right.path_start
+            if left.name == right.name and corr_source_path_equal(index.owner_segments, left.path_start, left.path_count, index.owner_segments, right.path_start, right.path_count):
+                index.type_names[first].unique <- false
+                index.type_names[second].unique <- false
+    for first in 0..<index.enum_types.count |first, index|:
+        left: CorrSourceEnumType = index.enum_types[first]
+        return false if left.path_start > index.owner_segments.count or left.path_count > index.owner_segments.count - left.path_start
+        for second in first + 1..<index.enum_types.count |first, second, index, left, checks|:
+            return false if checks >= CorrLimit::SOURCE_ENUM_CHECKS
+            checks <- checks + 1
+            right: CorrSourceEnumType = index.enum_types[second]
+            return false if right.path_start > index.owner_segments.count or right.path_count > index.owner_segments.count - right.path_start
+            if left.name == right.name and corr_source_path_equal(index.owner_segments, left.path_start, left.path_count, index.owner_segments, right.path_start, right.path_count):
+                index.enum_types[first].unique <- false
+                index.enum_types[second].unique <- false
+    for first in 0..<index.enum_members.count |first, index|:
+        left: CorrSourceEnumMember = index.enum_members[first]
+        return false if left.enum_index >= index.enum_types.count
+        for second in first + 1..<index.enum_members.count |first, second, index, left, checks|:
+            return false if checks >= CorrLimit::SOURCE_ENUM_CHECKS
+            checks <- checks + 1
+            right: CorrSourceEnumMember = index.enum_members[second]
+            return false if right.enum_index >= index.enum_types.count
+            if left.enum_index == right.enum_index and left.name == right.name:
+                index.enum_members[first].unique <- false
+                index.enum_members[second].unique <- false
+    return true
+
+def corr_source_enum_type_is_lexical(index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, name: sview) -> bool:
+    return false if owner_start > owner_segments.count or owner_count > owner_segments.count - owner_start or owner_count >= CorrLimit::OWNER_SEGMENTS
+    matches: mutable usize = 0
+    for declared in index.type_names |index, owner_segments, owner_start, owner_count, name, matches|:
+        continue if not declared.unique or not declared.const_enum or declared.name != name or declared.path_count != owner_count + 1
+        continue if declared.path_start > index.owner_segments.count or declared.path_count > index.owner_segments.count - declared.path_start
+        exact: mutable bool = index.owner_segments[declared.path_start + owner_count] == name
+        for part in 0..<owner_count |part, owner_segments, owner_start, declared, exact|:
+            exact <- false if index.owner_segments[declared.path_start + part] != owner_segments[owner_start + part]
+        matches <- matches + 1 if exact
+    return false if matches != 1
+    matches <- 0
+    for enum_type in index.enum_types |index, owner_segments, owner_start, owner_count, name, matches|:
+        continue if not enum_type.is_const or not enum_type.unique or enum_type.name != name
+        continue if enum_type.path_count != owner_count + 1 or enum_type.path_start > index.owner_segments.count or enum_type.path_count > index.owner_segments.count - enum_type.path_start
+        exact: mutable bool = index.owner_segments[enum_type.path_start + owner_count] == name
+        for part in 0..<owner_count |part, owner_segments, owner_start, enum_type, exact|:
+            exact <- false if index.owner_segments[enum_type.path_start + part] != owner_segments[owner_start + part]
+        matches <- matches + 1 if exact
+    return matches == 1
+
+def corr_source_enum_type_for_parts(index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, parts: darray[sview]&) -> usize:
+    return index.enum_types.count if parts.count == 0 or owner_start > owner_segments.count or owner_count > owner_segments.count - owner_start
+    candidate: mutable darray[sview] = []
+    if parts.count == 1:
+        for part in 0..<owner_count |part, owner_segments, owner_start, candidate|:
+            candidate.push(owner_segments[owner_start + part])
+        candidate.push(parts[0])
+    else:
+        candidate.extend(parts)
+    found: mutable usize = index.enum_types.count
+    matches: mutable usize = 0
+    for enum_index in 0..<index.enum_types.count |enum_index, index, candidate, found, matches|:
+        enum_type: CorrSourceEnumType = index.enum_types[enum_index]
+        continue if not enum_type.is_const or not enum_type.unique or enum_type.path_count != candidate.count
+        continue if enum_type.path_start > index.owner_segments.count or enum_type.path_count > index.owner_segments.count - enum_type.path_start
+        exact: mutable bool = true
+        for part in 0..<candidate.count |part, index, enum_type, candidate, exact|:
+            exact <- false if index.owner_segments[enum_type.path_start + part] != candidate[part]
+        if exact:
+            found <- enum_index
+            matches <- matches + 1
+    return index.enum_types.count if matches != 1
+    type_matches: mutable usize = 0
+    for declared in index.type_names |index, candidate, type_matches|:
+        continue if not declared.unique or not declared.const_enum or declared.path_count != candidate.count or declared.path_start > index.owner_segments.count or declared.path_count > index.owner_segments.count - declared.path_start
+        exact: mutable bool = true
+        for part in 0..<candidate.count |part, index, declared, candidate, exact|:
+            exact <- false if index.owner_segments[declared.path_start + part] != candidate[part]
+        type_matches <- type_matches + 1 if exact
+    return found if type_matches == 1
+    return index.enum_types.count
+
+def corr_source_enum_member_lookup(index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, type_parts: darray[sview]&, member_name: sview) -> (known: bool, enum_index: usize, member_index: usize):
+    enum_index: usize = corr_source_enum_type_for_parts(index, owner_segments, owner_start, owner_count, type_parts)
+    return (false, index.enum_types.count, index.enum_members.count) if enum_index >= index.enum_types.count
+    found: mutable usize = index.enum_members.count
+    matches: mutable usize = 0
+    for member_index in 0..<index.enum_members.count |index, enum_index, member_name, found, matches|:
+        member: CorrSourceEnumMember = index.enum_members[member_index]
+        if member.enum_index == enum_index and member.name == member_name and member.unique and member.symbol_supported:
+            found <- member_index
+            matches <- matches + 1
+    return (true, enum_index, found) if matches == 1
+    return (false, index.enum_types.count, index.enum_members.count)
+
+def corr_source_enum_member_term(pool: mutable CorrPool&, index: CorrSourceConstants&, enum_index: usize, member_index: usize, member_is_scope: bool) -> usize:
+    return 0 if enum_index >= index.enum_types.count or member_index >= index.enum_members.count
+    enum_type: CorrSourceEnumType = index.enum_types[enum_index]
+    member: CorrSourceEnumMember = index.enum_members[member_index]
+    return 0 if member.enum_index != enum_index or not member.unique or not member.symbol_supported
+    return 0 if enum_type.path_start > index.owner_segments.count or enum_type.path_count > index.owner_segments.count - enum_type.path_start
+    type_term: mutable usize = corr_ident(pool, index.owner_segments[enum_type.path_start])
+    for part in 1..<enum_type.path_count |part, pool, index, enum_type, type_term|:
+        type_term <- corr_scope(pool, type_term, index.owner_segments[enum_type.path_start + part])
+        return 0 if type_term == 0
+    return corr_scope(pool, type_term, member.name) if member_is_scope
+    return corr_field(pool, type_term, member.name)
+
+def corr_source_enum_member_wire_value(index: CorrSourceConstants&, enum_index: usize, member_index: usize) -> (known: bool, value: i64):
+    return (false, 0) if enum_index >= index.enum_types.count or member_index >= index.enum_members.count
+    enum_type: CorrSourceEnumType = index.enum_types[enum_index]
+    member: CorrSourceEnumMember = index.enum_members[member_index]
+    return (false, 0) if not enum_type.unique or not enum_type.cast_safe or not enum_type.is_const or enum_type.backing_type != "i64"
+    return (false, 0) if member.enum_index != enum_index or not member.unique or not member.symbol_supported or not member.value_supported
+    return (true, member.value)
 
 def corr_source_path_equal(left: darray[sview]&, left_start: usize, left_count: usize, right: darray[sview]&, right_start: usize, right_count: usize) -> bool:
     return false if left_count != right_count or left_start > left.count or left_count > left.count - left_start or right_start > right.count or right_count > right.count - right_start
@@ -140,6 +353,12 @@ def corr_source_constant_term(pool: mutable CorrPool&, parts: darray[sview]&) ->
         return 0 if term == 0
     return term
 
+def corr_source_enum_value_term(pool: mutable CorrPool&, value: i64) -> usize:
+    if value < 0:
+        positive: usize = corr_int(pool, -value)
+        return corr_unary(pool, "-", positive)
+    return corr_int(pool, value)
+
 # Keep the same qualified term shape used by package generation. These equalities and scalar
 # markers are source facts only for unique immutable i64 literal declarations; ambiguous or
 # unsupported bindings contribute no hypothesis to correspondence.
@@ -155,27 +374,43 @@ def corr_source_constants_add_facts(pool: mutable CorrPool&, state: mutable Corr
         equality: usize = corr_binary(pool, "==", symbol, entry.value)
         scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", symbol)
         return false if equality == 0 or scalar == 0 or not corr_add_fact(state, equality) or not corr_add_fact(state, scalar)
+    for member_index in 0..<index.enum_members.count |member_index, pool, state, index|:
+        member: CorrSourceEnumMember = index.enum_members[member_index]
+        continue if not member.unique or not member.symbol_supported or member.enum_index >= index.enum_types.count
+        enum_type: CorrSourceEnumType = index.enum_types[member.enum_index]
+        continue if not enum_type.unique or not enum_type.is_const or (corr_signed_width(enum_type.backing_type) == 0 and corr_unsigned_width(enum_type.backing_type) == 0)
+        symbol: usize = corr_source_enum_member_term(pool, index, member.enum_index, member_index, false)
+        scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", symbol)
+        return false if symbol == 0 or scalar == 0 or not corr_add_fact(state, scalar)
+        if member.value_supported and enum_type.backing_type == "i64":
+            value: usize = corr_source_enum_value_term(pool, member.value)
+            equality: usize = corr_binary(pool, "==", symbol, value)
+            return false if value == 0 or equality == 0 or not corr_add_fact(state, equality)
     return true
 
 # Return-expression markers are obtained from the checked callee's declared scalar type. Keep the
 # emitted forms identical to the prover's call-result witnesses; unsupported scalar families add
 # no facts and therefore remain conservatively unmatched when the theorem needs them.
-def corr_source_call_result_type_facts(pool: mutable CorrPool&, state: mutable CorrState&, term: usize, taken: darray[sview]&, type_expression: Ast::Expr) -> bool:
+def corr_source_call_result_type_facts(pool: mutable CorrPool&, state: mutable CorrState&, term: usize, taken: darray[sview]&, index: CorrSourceConstants&, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize, type_expression: Ast::Expr) -> bool:
     return false if term == 0
     match type_expression:
         Ast::Expr.Ident(type_name, _):
-            return false if not corr_scalar_type(type_name) or corr_name_listed(taken, type_name)
-            signed: i64 = corr_signed_width(type_name)
-            if signed > 0:
-                width: usize = corr_int(pool, signed)
-                place: usize = corr_call2(pool, "__elisa_signed_place_type_bound", term, width)
-                scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
-                return false if place == 0 or scalar == 0 or not corr_add_fact(state, place)
-                return corr_add_fact(state, scalar)
-            if type_name == "bool":
-                scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
-                return corr_add_fact(state, scalar)
-            return true
+            if corr_scalar_type(type_name):
+                return false if corr_name_listed(taken, type_name)
+                signed: i64 = corr_signed_width(type_name)
+                if signed > 0:
+                    width: usize = corr_int(pool, signed)
+                    place: usize = corr_call2(pool, "__elisa_signed_place_type_bound", term, width)
+                    scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
+                    return false if place == 0 or scalar == 0 or not corr_add_fact(state, place)
+                    return corr_add_fact(state, scalar)
+                if type_name == "bool":
+                    scalar: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
+                    return corr_add_fact(state, scalar)
+                return true
+            return false if not corr_source_enum_type_is_lexical(index, owner_segments, owner_start, owner_count, type_name)
+            marker: usize = corr_call1(pool, "__elisa_primitive_scalar_type", term)
+            return marker != 0 and corr_add_fact(state, marker)
         _:
             return false
 
@@ -193,7 +428,35 @@ def corr_eval_source_constants(pool: mutable CorrPool&, expression: Ast::Expr, n
             return 0 if not corr_source_scope_parts(expression, &parts, 0)
             return 0 if parts.count == 0 or corr_lookup(names, values, parts[0]) != 0
             valid: usize = corr_source_constant_lookup(index, owner_segments, owner_start, owner_count, &parts)
-            return valid
+            return valid if valid != 0
+            return 0 if parts.count < 2
+            type_parts: mutable darray[sview] = []
+            for part in 0..<parts.count - 1 |part, parts, type_parts|:
+                type_parts.push(parts[part])
+            found: (known: bool, enum_index: usize, member_index: usize) = corr_source_enum_member_lookup(index, owner_segments, owner_start, owner_count, &type_parts, parts[parts.count - 1])
+            return 0 if not found.known
+            return corr_source_enum_member_term(pool, index, found.enum_index, found.member_index, true)
+        Ast::Expr.Field(base, member, _):
+            parts: mutable darray[sview] = []
+            return 0 if not corr_source_scope_parts(base, &parts, 0)
+            return 0 if parts.count == 0 or corr_lookup(names, values, parts[0]) != 0
+            found: (known: bool, enum_index: usize, member_index: usize) = corr_source_enum_member_lookup(index, owner_segments, owner_start, owner_count, &parts, member)
+            return 0 if not found.known
+            return corr_source_enum_member_term(pool, index, found.enum_index, found.member_index, false)
+        Ast::Expr.Call(Ast::Expr.Field(receiver, "i64", _), arguments, argument_names, _):
+            return 0 if arguments.count != 0 or argument_names.count != 0
+            match receiver:
+                Ast::Expr.Field(base, member, _) | Ast::Expr.Scope(base, member, _):
+                    parts: mutable darray[sview] = []
+                    return 0 if not corr_source_scope_parts(base, &parts, 0)
+                    return 0 if parts.count == 0 or corr_lookup(names, values, parts[0]) != 0
+                    found: (known: bool, enum_index: usize, member_index: usize) = corr_source_enum_member_lookup(index, owner_segments, owner_start, owner_count, &parts, member)
+                    return 0 if not found.known
+                    wire_value: (known: bool, value: i64) = corr_source_enum_member_wire_value(index, found.enum_index, found.member_index)
+                    return 0 if not wire_value.known
+                    return corr_source_enum_value_term(pool, wire_value.value)
+                _:
+                    return 0
         Ast::Expr.Paren(inner, _):
             return corr_eval_source_constants(pool, inner, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
         Ast::Expr.Unary(operator, operand, _):

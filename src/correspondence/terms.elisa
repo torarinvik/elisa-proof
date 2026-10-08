@@ -11,6 +11,7 @@ const module CorrLimit:
     TERMS: usize = 262144
     TERM_SIZE: usize = 4096
     TERM_DEPTH: usize = 128
+    REWRITE_STEPS: usize = 16384
     FACTS: usize = 2048
     VARIABLES: usize = 512
     OBLIGATIONS: usize = 4096
@@ -19,9 +20,10 @@ const module CorrLimit:
     OWNER_SEGMENTS: usize = 262144
     MODULE_PATH_BYTES: usize = 4096
     SOURCE_CONSTANTS: usize = 256
+    SOURCE_ENUM_CHECKS: usize = 65536
 
 struct CorrTerm:
-    # "ident", "int", "bool", "unary", "binary", "if", "scope", "call", or "tuple".
+    # "ident", "int", "bool", "unary", "binary", "if", "scope", "field", "call", or "tuple".
     kind: sview
     operator: sview
     value: i64
@@ -36,6 +38,32 @@ struct CorrTerm:
 struct CorrPool:
     terms: mutable darray[CorrTerm]
     args: mutable darray[usize]
+
+struct CorrMatchDebug:
+    theorems: mutable usize
+    hypothesis_rejections: mutable usize
+    source_equalities: mutable usize
+    checked_call_equalities: mutable usize
+    hypothesis_equalities: mutable usize
+    rewritten_goals: mutable usize
+    conclusion_matches: mutable usize
+    obligation_facts: mutable usize
+    obligation_equalities: mutable usize
+    obligation_call_equalities: mutable usize
+    theorem_hypotheses: mutable usize
+    held_hypotheses: mutable usize
+    guarded_facts: mutable usize
+    guarded_candidates: mutable usize
+    guarded_checked: mutable usize
+    guarded_implications: mutable usize
+    guarded_equality_rhs: mutable usize
+    guarded_source_matches: mutable usize
+    guarded_site_matches: mutable usize
+    guarded_matches: mutable usize
+    guarded_rewrite_steps: mutable usize
+    guarded_rewrite_activations: mutable usize
+    guarded_rewrite_term_matches: mutable usize
+    unheld_scalar_type_calls: mutable usize
 
 def corr_pool_new() -> CorrPool:
     pool: mutable CorrPool = CorrPool{terms: [], args: []}
@@ -68,12 +96,9 @@ def corr_unary(pool: mutable CorrPool&, operator: sview, operand: usize) -> usiz
 
 def corr_binary(pool: mutable CorrPool&, operator: sview, left: usize, right: usize) -> usize:
     return 0 if left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
-    # Preserve source operand order while giving equivalent short-circuit Boolean conjunctions
-    # one left-associated term shape, including a checked helper's expanded result.
-    right_node: CorrTerm = pool.terms[right]
-    if operator == "and" and right_node.kind == "binary" and right_node.operator == "and":
-        prefix: usize = corr_binary(pool, operator, left, right_node.left)
-        return corr_binary(pool, operator, prefix, right_node.right)
+    # Keep the parsed association exactly. The package producer records helper-expanded results
+    # with their source tree shape, and the replayed theorem may relate that shape to another
+    # association. Reassociating here would make correspondence compare a different goal.
     size: usize = pool.terms[left].size + pool.terms[right].size + 1
     left_depth: usize = pool.terms[left].depth
     right_depth: usize = pool.terms[right].depth
@@ -104,6 +129,12 @@ def corr_scope(pool: mutable CorrPool&, base: usize, member: sview) -> usize:
     size: usize = pool.terms[base].size + 1
     depth: usize = pool.terms[base].depth + 1
     return corr_add(pool, "scope", "", 0, member, base, 0, 0, 0, size, depth)
+
+def corr_field(pool: mutable CorrPool&, base: usize, member: sview) -> usize:
+    return 0 if base == 0 or sview_len(member) == 0 or base >= pool.terms.count
+    size: usize = pool.terms[base].size + 1
+    depth: usize = pool.terms[base].depth + 1
+    return corr_add(pool, "field", "", 0, member, base, 0, 0, 0, size, depth)
 
 def corr_call_term(pool: mutable CorrPool&, callee: usize, arguments: darray[usize]&) -> usize:
     return 0 if callee == 0 or callee >= pool.terms.count
@@ -312,6 +343,8 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
         return node.value == expected.value and node.name == expected.name and corr_node_leaf(node)
     if expected.kind == "scope":
         return node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
+    if expected.kind == "field":
+        return node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     return false if node.value != 0 or node.name != ""
     if expected.kind == "unary":
         return node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
@@ -341,3 +374,57 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
         return false if argument.right != 0 or argument.auxiliary != 0 or argument.children_start != 0 or argument.children_count != 0
         return false if not corr_node_equal(nodes, children, argument.left, pool, pool.args[expected.args_start + index], depth + 1)
     return true
+
+# Rewrite only from source-derived equalities whose matching replayed theorem hypothesis has
+# already been checked. The caller filters `equalities`; this routine preserves argument order,
+# refuses conflicting rewrites, and bounds total traversal and term growth.
+def corr_rewrite_source_term(pool: mutable CorrPool&, term: usize, equalities: darray[usize]&, depth: usize, budget: mutable usize&, allow_root: bool) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count or budget >= CorrLimit::REWRITE_STEPS
+    budget <- budget + 1
+    if allow_root:
+        replacement: mutable usize = 0
+        for equality in equalities |pool, term, depth, budget, replacement|:
+            return 0 if equality == 0 or equality >= pool.terms.count
+            fact: CorrTerm = pool.terms[equality]
+            continue if fact.kind != "binary" or fact.operator != "==" or fact.left == 0 or fact.right == 0
+            if corr_equal(pool, term, fact.left, 0):
+                return 0 if replacement != 0 and not corr_equal(pool, replacement, fact.right, 0)
+                replacement <- fact.right
+        if replacement != 0 and not corr_equal(pool, term, replacement, 0):
+            return corr_rewrite_source_term(pool, replacement, equalities, depth + 1, budget, true)
+    node: CorrTerm = pool.terms[term]
+    left: mutable usize = node.left
+    right: mutable usize = node.right
+    changed: mutable bool = false
+    if node.left != 0:
+        left <- corr_rewrite_source_term(pool, node.left, equalities, depth + 1, budget, true)
+        return 0 if left == 0
+        changed <- true if left != node.left
+    if node.right != 0:
+        right <- corr_rewrite_source_term(pool, node.right, equalities, depth + 1, budget, true)
+        return 0 if right == 0
+        changed <- true if right != node.right
+    arguments: mutable darray[usize] = []
+    for index in 0..<node.args_count |index, pool, node, equalities, depth, budget, arguments, changed|:
+        original: usize = pool.args[node.args_start + index]
+        argument: usize = corr_rewrite_source_term(pool, original, equalities, depth + 1, budget, true)
+        return 0 if argument == 0
+        arguments.push(argument)
+        changed <- true if argument != original
+    return term if not changed
+    if node.kind == "unary":
+        return corr_unary(pool, node.operator, left)
+    if node.kind == "binary":
+        return corr_binary(pool, node.operator, left, right)
+    if node.kind == "scope":
+        return corr_scope(pool, left, node.name)
+    if node.kind == "field":
+        return corr_field(pool, left, node.name)
+    if node.kind == "call":
+        return corr_call_term(pool, left, &arguments)
+    if node.kind == "tuple":
+        return corr_node_with_children(pool, "tuple", node.name, &arguments)
+    if node.kind == "if":
+        return 0 if arguments.count != 1
+        return corr_if(pool, left, right, arguments[0])
+    return 0

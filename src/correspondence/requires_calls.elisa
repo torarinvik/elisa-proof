@@ -1,0 +1,175 @@
+# A contract may use a source function call only when its exact checked callee has a small
+# total-pure body. Calls are evaluated through the ordinary source walker so its requires and
+# ensures become obligations/facts; this gate restricts the callee to a terminating fragment.
+struct CorrRequiresCallCheck:
+    valid: bool
+    contains_call: bool
+
+def corr_requires_value_expr(expression: Ast::Expr, depth: usize, steps: mutable usize&) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS
+    steps <- steps + 1
+    match expression:
+        Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+            return true
+        Ast::Expr.Paren(inner, _):
+            return corr_requires_value_expr(inner, depth + 1, steps)
+        _:
+            return false
+
+def corr_requires_bool_expr(work: CorrWork&, expression: Ast::Expr, depth: usize, steps: mutable usize&, contains_call: mutable bool&) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS
+    steps <- steps + 1
+    match expression:
+        Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+            return true
+        Ast::Expr.Paren(inner, _):
+            return corr_requires_bool_expr(work, inner, depth + 1, steps, contains_call)
+        Ast::Expr.Unary(TokenKind.Not, operand, _):
+            return corr_requires_bool_expr(work, operand, depth + 1, steps, contains_call)
+        Ast::Expr.Binary(left, operator, right, _):
+            if operator == TokenKind.And or operator == TokenKind.Or:
+                return corr_requires_bool_expr(work, left, depth + 1, steps, contains_call) and corr_requires_bool_expr(work, right, depth + 1, steps, contains_call)
+            return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.Gt and operator != TokenKind.LtEq and operator != TokenKind.GtEq
+            return corr_requires_value_expr(left, depth + 1, steps) and corr_requires_value_expr(right, depth + 1, steps)
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            target: usize = corr_function_index_for_callee(work, callee)
+            return false if target >= work.functions.count or argument_names.count != 0 or not corr_requires_callee_is_total_bool(work, target)
+            match work.functions[target].declaration:
+                Ast::Decl.Func(_, params, _, _, _, _, _):
+                    return false if params.count != arguments.count
+                _:
+                    return false
+            contains_call <- true
+            for argument in arguments |depth, steps|:
+                return false if not corr_requires_value_expr(argument, depth + 1, steps)
+            return true
+        _:
+            return false
+
+def corr_requires_simple_total_bool(work: CorrWork&, expression: Ast::Expr, depth: usize, steps: mutable usize&) -> bool:
+    contains_call: mutable bool = false
+    return false if not corr_requires_bool_expr(work, expression, depth, steps, &contains_call)
+    return not contains_call
+
+def corr_requires_local_names(expression: Ast::Expr, parameters: darray[sview]&, allow_result: bool, depth: usize, steps: mutable usize&) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS
+    steps <- steps + 1
+    match expression:
+        Ast::Expr.BoolLit(_, _) | Ast::Expr.IntLit(_, _):
+            return true
+        Ast::Expr.Ident(name, _):
+            return true if name == "true" or name == "false" or (allow_result and name == "result")
+            return corr_name_listed(parameters, name)
+        Ast::Expr.Paren(inner, _):
+            return corr_requires_local_names(inner, parameters, allow_result, depth + 1, steps)
+        Ast::Expr.Unary(TokenKind.Not, operand, _):
+            return corr_requires_local_names(operand, parameters, allow_result, depth + 1, steps)
+        Ast::Expr.Binary(left, operator, right, _):
+            return false if operator != TokenKind.And and operator != TokenKind.Or and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.Gt and operator != TokenKind.LtEq and operator != TokenKind.GtEq
+            return corr_requires_local_names(left, parameters, allow_result, depth + 1, steps) and corr_requires_local_names(right, parameters, allow_result, depth + 1, steps)
+        _:
+            return false
+
+def corr_requires_callee_is_total_bool(work: CorrWork&, function_index: usize) -> bool:
+    return false if function_index >= work.functions.count
+    function: CorrFunction = work.functions[function_index]
+    return false if function.status != "checked" or not corr_function_identity_is_unique(work, function_index)
+    match function.declaration:
+        Ast::Decl.Func(_, params, return_type, body, effects, decorators, _):
+            return false if effects.count != 0 or decorators.count != 0
+            result_type: (name: sview, is_mutable: bool) = corr_type_name_owned(work, return_type, false)
+            return false if result_type.name != "bool" or result_type.is_mutable
+            for parameter in params |work|:
+                return false if parameter.is_mutable or parameter.has_default or parameter.is_affine
+                typed: (name: sview, is_mutable: bool) = corr_type_name_owned(work, parameter.type_expression, false)
+                return false if typed.is_mutable or (typed.name != "bool" and typed.name != "i64")
+            returned: mutable bool = false
+            ensures: mutable usize = 0
+            saw_ensure: mutable bool = false
+            steps: mutable usize = 0
+            parameter_names: mutable darray[sview] = []
+            for parameter in params |parameter_names|:
+                parameter_names.push(parameter.name)
+            for statement in body |work, returned, ensures, saw_ensure, steps|:
+                return false if returned
+                match statement:
+                    Ast::Stmt.Contract(kind, predicate, _):
+                        return false if kind != "ensure" and kind != "ensures" and kind != "requires"
+                        return false if kind == "requires" and saw_ensure
+                        return false if not corr_requires_simple_total_bool(work, predicate, 0, steps)
+                        return false if not corr_requires_local_names(predicate, parameter_names, kind != "requires", 0, steps)
+                        if kind == "ensure" or kind == "ensures":
+                            saw_ensure <- true
+                            ensures <- ensures + 1
+                    Ast::Stmt.Return(value, _):
+                        if value is returned_expression:
+                            return false if not corr_requires_simple_total_bool(work, returned_expression, 0, steps)
+                            return false if not corr_requires_local_names(returned_expression, parameter_names, false, 0, steps)
+                        else:
+                            return false
+                        returned <- true
+                    _:
+                        return false
+            return returned and ensures > 0
+        _:
+            return false
+
+def corr_requires_call_check(work: CorrWork&, expression: Ast::Expr, depth: usize, steps: mutable usize&, contains_call: mutable bool&) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS
+    steps <- steps + 1
+    match expression:
+        Ast::Expr.Call(callee, arguments, argument_names, _):
+            target: usize = corr_function_index_for_callee(work, callee)
+            return false if target >= work.functions.count or argument_names.count != 0 or not corr_requires_callee_is_total_bool(work, target)
+            match work.functions[target].declaration:
+                Ast::Decl.Func(_, params, _, _, _, _, _):
+                    return false if params.count != arguments.count
+                _:
+                    return false
+            contains_call <- true
+            for argument in arguments |work, depth, steps, contains_call|:
+                return false if not corr_requires_value_expr(argument, depth + 1, steps)
+            return true
+        Ast::Expr.Paren(inner, _):
+            return corr_requires_call_check(work, inner, depth + 1, steps, contains_call)
+        Ast::Expr.Unary(TokenKind.Not, operand, _):
+            return corr_requires_call_check(work, operand, depth + 1, steps, contains_call)
+        Ast::Expr.Binary(left, operator, right, _):
+            return false if operator != TokenKind.And and operator != TokenKind.Or and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.Gt and operator != TokenKind.LtEq and operator != TokenKind.GtEq
+            if operator == TokenKind.And or operator == TokenKind.Or:
+                return corr_requires_call_check(work, left, depth + 1, steps, contains_call) and corr_requires_call_check(work, right, depth + 1, steps, contains_call)
+            return corr_requires_no_call_value(left, depth + 1, steps) and corr_requires_no_call_value(right, depth + 1, steps)
+        Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+            return true
+        _:
+            return false
+
+def corr_requires_no_call_value(expression: Ast::Expr, depth: usize, steps: mutable usize&) -> bool:
+    return corr_requires_value_expr(expression, depth, steps)
+
+def corr_requires_expression_has_call(expression: Ast::Expr, depth: usize, steps: mutable usize&) -> (complete: bool, contains_call: bool):
+    return (false, false) if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS
+    steps <- steps + 1
+    match expression:
+        Ast::Expr.Call(_, _, _, _):
+            return (true, true)
+        Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+            return corr_requires_expression_has_call(inner, depth + 1, steps)
+        Ast::Expr.Binary(left, _, right, _):
+            first: (complete: bool, contains_call: bool) = corr_requires_expression_has_call(left, depth + 1, steps)
+            return first if not first.complete or first.contains_call
+            return corr_requires_expression_has_call(right, depth + 1, steps)
+        Ast::Expr.Scope(base, _, _) | Ast::Expr.Field(base, _, _):
+            return corr_requires_expression_has_call(base, depth + 1, steps)
+        _:
+            return (true, false)
+
+def corr_eval_requires(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, state: mutable CorrState&, line: u32) -> (reason: sview, value: usize):
+    detect_steps: mutable usize = 0
+    detected: (complete: bool, contains_call: bool) = corr_requires_expression_has_call(expression, 0, &detect_steps)
+    return ("", corr_eval_active(pool, work, expression, &state.names, &state.values, 0)) if not detected.complete or not detected.contains_call
+    steps: mutable usize = 0
+    contains_call: mutable bool = false
+    return ("contract-call", 0) if not corr_requires_call_check(work, expression, 0, &steps, &contains_call)
+    return ("", corr_eval_active(pool, work, expression, &state.names, &state.values, 0)) if not contains_call
+    return corr_expression_with_calls(pool, work, declarations, expression, state, line, 0)
