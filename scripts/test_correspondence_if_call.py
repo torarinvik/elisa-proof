@@ -67,4 +67,21 @@ assert {entry["name"]: (entry["status"], entry["reason"]) for entry in report["f
     "unmatched", "unproved-obligation"
 ), report
 
+wrong_owner = write("wrong_owner", positive.read_text().replace(
+    "if HelperPolicy::truth(value):", "if OtherPolicy::truth(value):") + """
+
+module OtherPolicy:
+    public:
+        def truth(value: i64) -> bool:
+            requires value >= 0
+            ensure result == true
+            return true
+""")
+report = correspond(bundle, wrong_owner, 1)
+assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
+owner_statuses = {(tuple(entry["owner"]), entry["name"]): (entry["status"], entry["reason"])
+                  for entry in report["functions"]}
+assert owner_statuses[((), "caller")] == ("unsupported", "callee-unchecked"), report
+assert owner_statuses[(("OtherPolicy",), "truth")][0] != "checked", report
+
 print("branch-condition helper calls match checked source summaries; changed summaries and unchecked facts refuse")
