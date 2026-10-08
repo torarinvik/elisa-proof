@@ -89,11 +89,11 @@ assert owner_statuses[(("OtherPolicy",), "truth")][0] != "checked", report
 conditional_result = write("conditional_result", positive.read_text().replace(
     "    else:\n        return true", "    else:\n        return false", 1))
 conditional_bundle = package(conditional_result)
-report = correspond(conditional_bundle, conditional_result, 1)
+report = correspond(conditional_bundle, conditional_result, 0)
 assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
 conditional_statuses = {(tuple(entry["owner"]), entry["name"]): (entry["status"], entry["reason"])
                         for entry in report["functions"]}
 assert conditional_statuses[(("HelperPolicy",), "truth")] == ("checked", None), report
-assert conditional_statuses[((), "caller")] == ("unmatched", "unproved-obligation"), report
+assert conditional_statuses[((), "caller")] == ("checked", None), report
 
-print("branch-condition helper calls resolve exact owners; changed/unavailable summaries refuse; untracked bool branch gap remains visible")
+print("branch-condition helper summaries close exact Boolean branches; changed/unavailable summaries and wrong-owner calls refuse")
