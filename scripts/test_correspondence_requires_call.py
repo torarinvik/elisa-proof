@@ -188,3 +188,32 @@ same_owner_duplicate = write("same_owner_duplicate", owner_text.replace(
 duplicate_report = correspond(owner_bundle, same_owner_duplicate)
 assert duplicate_report["package"]["status"] == "replayed", duplicate_report
 assert duplicate_report["source_admissible"] is False or duplicate_report["summary"]["coverage"] != "complete", duplicate_report
+
+# The requires adapter has no overload-resolution evidence in its call node. Even when the
+# source language can type-select an overload, the summary adapter must refuse this ambiguous
+# helper identity rather than choose a same-name declaration.
+overload_text = """module Helpers:
+    public:
+        def positive(value: i64) -> bool:
+            requires value > 0
+            ensure result == (value > 0)
+            return value > 0
+
+        def positive(value: bool) -> bool:
+            ensure result == value
+            return value
+
+module Callers:
+    public:
+        def guarded(value: i64) -> bool:
+            requires value > 0
+            requires Helpers::positive(value)
+            ensure result == (value > 0)
+            return value > 0
+"""
+overloaded = write("overloaded_helper", overload_text)
+overloaded_bundle = package(overloaded)
+overloaded_report = correspond(overloaded_bundle, overloaded)
+assert overloaded_report["package"]["status"] == "replayed", overloaded_report
+assert overloaded_report["source_admissible"] is True, overloaded_report
+assert function(overloaded_report, "guarded")["status"] != "checked", overloaded_report
