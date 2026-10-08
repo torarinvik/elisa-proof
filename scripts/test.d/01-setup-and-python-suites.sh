@@ -270,6 +270,7 @@ run_py_test test_replay_dependency_row.py
 python3 "$ROOT_DIR/scripts/tests/test_deterministic_call_qualified_replay.py"
 python3 "$ROOT_DIR/scripts/tests/test_deterministic_call_loop_replay.py"
 python3 "$ROOT_DIR/scripts/tests/test_replay_rebind_and_alias_holes.py"
+python3 "$ROOT_DIR/scripts/tests/test_replay_threaded_summary_holes.py"
 python3 "$ROOT_DIR/scripts/tests/test_replay_scope_and_context_holes.py"
 
 # Keep a true destruction case beside the two unknown-provenance regressions.

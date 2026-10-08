@@ -50,6 +50,8 @@ extend ElisaProof:
                     # the kernel can still reproduce the goal independently.
                     for mapped_argument in mapped_arguments |argument_values, caller_names, caller_values|:
                         argument_values.push(proof_substitute(mapped_argument, caller_names, caller_values))
+                    threading: ProofValueThreading = proof_value_thread_plan(functions, function_index, mapped_arguments, caller_names, caller_values, caller_parameters, facts, report)
+                    proof_value_thread_arguments(threading, &argument_values)
                     # A literal argument's summary is also stated over the literal itself, so facts
                     # such as `clamp(x, 0, n) >= 0` stay readable to the width and wrap gates.
                     summary_arguments: darray[Ast::Expr] = proof_copy_exprs(argument_values)
@@ -61,11 +63,11 @@ extend ElisaProof:
                     require_goal_ids: mutable darray[usize] = []
                     requires_start: usize = functions.requires_starts[function_index]
                     requires_count: usize = functions.requires_counts[function_index]
-                    for requires_index in 0..<requires_count |requires_ok, require_goal_ids, facts, parameter_names, argument_values, functions, requires_start, report, position, name, annotations|:
+                    for requires_index in 0..<requires_count |requires_ok, require_goal_ids, facts, parameter_names, argument_values, functions, requires_start, report, position, name, annotations, threading|:
                         # The arguments were already resolved in the caller's environment above,
                         # so instantiating the contract here lands directly on the terms the
                         # branch facts hold.
-                        required: Ast::Expr = proof_substitute(functions.all_requires[requires_start + requires_index], parameter_names, argument_values)
+                        required: Ast::Expr = proof_substitute(proof_value_thread_contract(functions.all_requires[requires_start + requires_index], threading, true), parameter_names, argument_values)
                         required_proven: bool = proof_certify_goal(facts, required, report, position.line, name, annotations)
                         require_goal_ids.push(report.goal_attempts.count - 1) if report.goal_attempts.count > 0
                         report.proof_obligation(required_proven)
@@ -194,14 +196,15 @@ extend ElisaProof:
                         # opaque one, and the same argument bounds that havoc: a callee reaches the
                         # caller only through references and globals, so a fact over a by-value
                         # scalar the caller's body never references survives this call too.
-                        proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_statement_lend_roots(expression, functions))
+                        proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_value_thread_lends(threading, proof_statement_lend_roots(expression, functions)))
+                    proof_value_thread_post(threading, facts, report, name, position)
                     proof_restore_literal_call_facts(literal_symbols, literal_widths, literal_values, facts, report, name, position) if literal_symbols.count > 0
                     ensures_start: usize = functions.ensure_starts[function_index]
                     ensures_count: usize = functions.ensure_counts[function_index]
                     result_names: mutable darray[sview] = ["result"]
                     result_values: mutable darray[Ast::Expr] = [result_value]
-                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, summary_arguments, literal_symbols, functions, ensures_start, result_value, result_names, result_values, report, name, position|:
-                        source_ensure: Ast::Expr = functions.all_ensures[ensures_start + ensure_index]
+                    for ensure_index in 0..<ensures_count |facts, parameter_names, argument_values, summary_arguments, literal_symbols, functions, ensures_start, result_value, result_names, result_values, report, name, position, threading, expression, caller_names, caller_values|:
+                        source_ensure: Ast::Expr = proof_value_thread_contract(functions.all_ensures[ensures_start + ensure_index], threading, false)
                         ensured: mutable Ast::Expr = proof_substitute(source_ensure, parameter_names, argument_values)
                         call_old_snapshot: mutable Ast::Expr = Ast::Expr.Absent
                         has_call_old: mutable bool = false
@@ -241,8 +244,10 @@ extend ElisaProof:
                                     return false
                             _:
                                 ensured <- proof_substitute(ensured, result_names, result_values)
-                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, result_value, require_goal_ids, ensure_index, has_call_old, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
-                        if literal_symbols.count > 0 and not has_call_old:
+                        proof_value_thread_record(threading, report, true)
+                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, proof_value_thread_summary_result(threading, result_value, expression, caller_names, caller_values), require_goal_ids, ensure_index, has_call_old, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
+                        proof_value_thread_record(threading, report, false)
+                        if literal_symbols.count > 0 and not has_call_old and not threading.active:
                             literal_ensured: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, summary_arguments), result_names, result_values)
                             proof_add_function_summary_fact(facts, report, literal_ensured, position.line, name, function_name, parameter_names, summary_arguments, result_value, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0) if not proof_expr_equal(literal_ensured, ensured)
                         proof_add_pure_call_witnesses(result_value, facts, functions, report, position.line, name, 0)

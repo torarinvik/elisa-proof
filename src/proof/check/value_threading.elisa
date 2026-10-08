@@ -1,0 +1,242 @@
+# Value-threading for exclusive `&` parameters. A call `f(&x)` (or its value spelling
+# `x <- f(x)`) whose callee takes `x` through a `mutable T&`/`lmut` parameter `p` is read as
+# `x <- f(x)`: the callee's contract is instantiated with `p[0]` before the call as x's current
+# value and `p[0]` after it as a fresh symbol S, x's binding moves to S, and nothing else about
+# the caller is havocked beyond what an ordinary call already havocs (globals, other lends).
+# Facts over x's old value stay: x's old symbol keeps denoting the value it had, the same rule a
+# self-referential update follows (proof_bind_unsigned_symbol).
+#
+# The call is threaded only when every one of these holds; otherwise it keeps the opaque path:
+#   - every reference parameter of the callee is a mutable one, each receiving a distinct
+#     unsigned local of the caller, by `&x`, `mutable x`, `lmut x` or plain `x`, that no other
+#     argument mentions, that is not a parameter, a reference local, or an escaping name;
+#   - the callee returns no reference and the lend is confined (no region parameter or stored
+#     borrow can keep the reference past the call);
+#   - neither the callee nor anything it can reach declares an `Unsafe` effect or calls a
+#     native (extern) function;
+#   - every contract mentions each threaded parameter only as `p[0]` or `old(p[0])`.
+extend ElisaProof:
+    private:
+        const PROOF_VALUE_THREAD_WALK_LIMIT: usize = 256
+
+        struct ProofValueThreading:
+            active: mutable bool
+            parameters: mutable darray[sview]
+            locals: mutable darray[sview]
+            pre_values: mutable darray[Ast::Expr]
+            post_symbols: mutable darray[sview]
+            widths: mutable darray[i64]
+            slots: mutable darray[usize]
+
+        def proof_value_threading_none() -> ProofValueThreading:
+            return ProofValueThreading{active: false, parameters: [], locals: [], pre_values: [], post_symbols: [], widths: [], slots: []}
+
+        def proof_value_thread_effects_safe(functions: ProofFunctionTable&, index: usize) -> bool:
+            return false if index >= functions.effect_starts.count or index >= functions.effect_counts.count
+            start: usize = functions.effect_starts[index]
+            for offset in 0..<functions.effect_counts[index] |offset, functions, start|:
+                return false if start + offset >= functions.all_effects.count
+                effect: sview = functions.all_effects[start + offset]
+                return false if sview_starts_with(effect, "Unsafe")
+            return true
+
+        # Every function the callee can reach declares no Unsafe effect and calls no extern.
+        def proof_value_thread_callee_safe(functions: ProofFunctionTable&, callee: usize) -> bool:
+            pending: mutable darray[usize] = [callee]
+            seen: mutable darray[usize] = []
+            while pending.count > 0 |pending, seen, functions|:
+                return false if seen.count >= PROOF_VALUE_THREAD_WALK_LIMIT
+                current: usize = pending[pending.count - 1]
+                pending.pop()
+                continue if any visited in seen where visited == current
+                seen.push(current)
+                return false if not proof_value_thread_effects_safe(functions, current)
+                return false if current >= functions.call_starts.count or current >= functions.call_counts.count
+                start: usize = functions.call_starts[current]
+                for offset in 0..<functions.call_counts[current] |offset, functions, start, pending|:
+                    slot: usize = start + offset
+                    return false if slot >= functions.all_call_targets.count or slot >= functions.all_calls.count
+                    target: usize = functions.all_call_targets[slot]
+                    if target < functions.names.count:
+                        pending.push(target)
+                    else:
+                        called: sview = functions.all_calls[slot]
+                        return false if any signature in functions.extern_signatures where signature.name == called
+            return true
+
+        # The argument's caller local when the slot can be threaded, "" otherwise.
+        def proof_value_thread_local(argument: Ast::Expr, caller_names: darray[sview]&, caller_parameters: darray[sview]&, report: ProofReport&) -> sview can[Memory.Allocate, Abort.Panic]:
+            lend: (known: bool, operand: Ast::Expr) = proof_explicit_lend_operand(argument)
+            operand: Ast::Expr = proof_strip_parens(lend.operand if lend.known else argument)
+            local_name: sview = proof_ident_name(operand)
+            return "" if local_name == "" or proof_name_is_reserved_internal(local_name)
+            return "" if not (any name in caller_names where name == local_name)
+            return "" if any name in caller_parameters where name == local_name
+            return "" if not (any name in report.value_binding_names where name == local_name)
+            return "" if any name in report.reference_local_names where name == local_name
+            return "" if any name in report.escaping_names where name == local_name
+            return local_name
+
+        # `p[0]` or a bare `p`: the referent of a scalar reference place, or "".
+        def proof_value_thread_place(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Index(object, index, _):
+                    match index:
+                        Ast::Expr.IntLit(offset, _):
+                            return proof_ident_name(object) if offset == 0
+                            return ""
+                        _:
+                            return ""
+                Ast::Expr.Ident(name, _):
+                    return name
+                _:
+                    return ""
+
+        # Read each threaded parameter's place as its exit symbol (or as the parameter, the entry
+        # value, when `pre`), and `old(place)` as the parameter. Any other mention is invalid.
+        def proof_value_thread_rewrite(expression: Ast::Expr, parameters: darray[sview]&, symbols: darray[sview]&, pre: bool, valid: mutable bool&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            mentioned: mutable bool = false
+            for parameter in parameters |expression, mentioned|:
+                mentioned <- true if proof_expr_mentions_name(expression, parameter)
+            return expression if not mentioned
+            if depth >= PROOF_VALUE_THREAD_WALK_LIMIT:
+                valid <- false
+                return expression
+            place: sview = proof_value_thread_place(expression)
+            for index in 0..<parameters.count |index, parameters, symbols, place, pre, expression|:
+                if parameters[index] == place and index < symbols.count:
+                    return Ast::Expr.Ident(place, Ast::expr_pos(expression)) if pre
+                    return Ast::Expr.Ident(symbols[index], Ast::expr_pos(expression))
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    if proof_ident_name(callee) == "old":
+                        if not pre and arguments.count == 1:
+                            entry: sview = proof_value_thread_place(arguments[0])
+                            return Ast::Expr.Ident(entry, position) if entry != "" and (any parameter in parameters where parameter == entry)
+                        valid <- false
+                        return expression
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten, parameters, symbols, pre, valid, depth|:
+                        rewritten.push(proof_value_thread_rewrite(argument, parameters, symbols, pre, valid, depth + 1))
+                    return Ast::Expr.Call(proof_value_thread_rewrite(callee, parameters, symbols, pre, valid, depth + 1), rewritten, argument_names, position)
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_value_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.Unary(operator, inner, position):
+                    return Ast::Expr.Unary(operator, proof_value_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_value_thread_rewrite(left, parameters, symbols, pre, valid, depth + 1), operator, proof_value_thread_rewrite(right, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    return Ast::Expr.If(proof_value_thread_rewrite(condition, parameters, symbols, pre, valid, depth + 1), proof_value_thread_rewrite(then_expression, parameters, symbols, pre, valid, depth + 1), proof_value_thread_rewrite(else_expression, parameters, symbols, pre, valid, depth + 1), position)
+                _:
+                    valid <- false
+                    return expression
+
+        def proof_value_thread_contract(expression: Ast::Expr, threading: ProofValueThreading&, pre: bool) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            return expression if not threading.active
+            valid: mutable bool = true
+            rewritten: Ast::Expr = proof_value_thread_rewrite(expression, threading.parameters, threading.post_symbols, pre, &valid, 0)
+            return rewritten if valid
+            return Ast::Expr.Invalid
+
+        def proof_value_thread_plan(functions: ProofFunctionTable&, function_index: usize, mapped_arguments: darray[Ast::Expr]&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, caller_parameters: darray[sview]&, facts: darray[Ast::Expr]&, report: mutable ProofReport&) -> ProofValueThreading can[Memory.Allocate, Abort.Panic]:
+            report.threaded_names.clear()
+            report.threaded_values.clear()
+            none: ProofValueThreading = proof_value_threading_none()
+            # Only a call whose caller moves the locals afterwards (value_thread_apply) threads.
+            return none if not report.value_thread_site
+            report.value_thread_site <- false
+            return none if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            return none if function_index >= functions.return_references.count or functions.return_references[function_index]
+            start: usize = functions.param_starts[function_index]
+            count: usize = functions.param_counts[function_index]
+            return none if count != mapped_arguments.count
+            # Nested calls would be checked inside this one and see a half-threaded state.
+            for argument in mapped_arguments:
+                return none if proof_expr_has_call(argument)
+            plan: mutable ProofValueThreading = proof_value_threading_none()
+            for slot in 0..<count |slot, functions, start, mapped_arguments, caller_names, caller_values, caller_parameters, facts, report, plan|:
+                param_slot: usize = start + slot
+                return none if param_slot >= functions.all_parameter_references.count or param_slot >= functions.all_parameter_mutable_references.count
+                continue if not functions.all_parameter_references[param_slot]
+                return none if not functions.all_parameter_mutable_references[param_slot]
+                local_name: sview = proof_value_thread_local(mapped_arguments[slot], caller_names, caller_parameters, report)
+                return none if local_name == "" or (any taken in plan.locals where taken == local_name)
+                for other in 0..<count |other, slot, mapped_arguments, local_name|:
+                    return none if other != slot and proof_expr_mentions_name(mapped_arguments[other], local_name)
+                return none if not proof_call_lend_is_confined(functions, function_index, slot)
+                pre_value: Ast::Expr = proof_substitute(Ast::Expr.Ident(local_name, Ast::expr_pos(mapped_arguments[slot])), caller_names, caller_values)
+                width: mutable i64 = proof_unsigned_marker_width_for_name(facts, proof_ident_name(pre_value))
+                width <- proof_unsigned_marker_width_for_name(facts, local_name) if width <= 0
+                return none if width <= 0
+                plan.parameters.push(functions.all_params[param_slot])
+                plan.locals.push(local_name)
+                plan.pre_values.push(pre_value)
+                plan.widths.push(width)
+                plan.slots.push(slot)
+            return none if plan.locals.count == 0 or not proof_value_thread_callee_safe(functions, function_index)
+            plan.active <- true
+            for _ in plan.locals |plan|:
+                plan.post_symbols.push("")
+            # Every contract must thread before any fresh symbol is spent.
+            requires_start: usize = functions.requires_starts[function_index]
+            for offset in 0..<functions.requires_counts[function_index] |offset, functions, requires_start, plan|:
+                return none if proof_value_thread_contract(functions.all_requires[requires_start + offset], plan, true) is Ast::Expr.Invalid
+            ensures_start: usize = functions.ensure_starts[function_index]
+            for offset in 0..<functions.ensure_counts[function_index] |offset, functions, ensures_start, plan|:
+                return none if proof_value_thread_contract(functions.all_ensures[ensures_start + offset], plan, false) is Ast::Expr.Invalid
+            for index in 0..<plan.locals.count |index, plan, report|:
+                symbol: sview = proof_rebind_symbol(report)
+                return none if symbol == ""
+                plan.post_symbols[index] <- symbol
+            return plan
+
+        # A threaded statement call has no result binding; its summary records the resolved call
+        # itself there, so replay can find the source call the summary instantiates.
+        def proof_value_thread_summary_result(threading: ProofValueThreading&, result_value: Ast::Expr, expression: Ast::Expr, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&) -> Ast::Expr:
+            return result_value if not threading.active or not (result_value is Ast::Expr.Absent)
+            return expression
+
+        # Threaded slots enter the contract with the local's current value, not its lend.
+        def proof_value_thread_arguments(threading: ProofValueThreading&, argument_values: mutable darray[Ast::Expr]&) -> void:
+            for index in 0..<threading.slots.count |index, threading, argument_values|:
+                argument_values[threading.slots[index]] <- threading.pre_values[index] if threading.slots[index] < argument_values.count
+
+        # Lends a threaded call performs on its threaded locals do not havoc their old values.
+        def proof_value_thread_lends(threading: ProofValueThreading&, lends: darray[sview]) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            return lends if not threading.active
+            kept: mutable darray[sview] = []
+            for lent in lends |kept, threading|:
+                kept.push(lent) if not (any local in threading.locals where local == lent)
+            return kept
+
+        # After the call's havoc: each exit symbol carries its local's unsigned width, and the
+        # callers learn which locals now name which symbols.
+        def proof_value_thread_post(threading: ProofValueThreading&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            return if not threading.active
+            for index in 0..<threading.locals.count |index, threading, facts, report, owner, position|:
+                symbol: sview = threading.post_symbols[index]
+                proof_add_unsigned_binding_facts(facts, report, symbol, threading.widths[index], position.line, owner, position)
+                report.threaded_symbols.push(symbol)
+                report.threaded_names.push(threading.locals[index])
+                report.threaded_values.push(Ast::Expr.Ident(symbol, position))
+
+        # The exit symbols ride on the summary traces recorded while `active` (bounds_and_facts).
+        def proof_value_thread_record(threading: ProofValueThreading&, report: mutable ProofReport&, active: bool) -> void:
+            report.summary_threaded_symbols.clear()
+            report.summary_threaded_symbols.extend(threading.post_symbols) if active and threading.active
+
+        # Callers move each threaded local to its exit symbol once the call's own value bookkeeping
+        # is done. Returns whether `target` (an assignment's destination, or "") was threaded.
+        def proof_value_thread_apply(names: darray[sview]&, values: mutable darray[Ast::Expr]&, report: mutable ProofReport&, target: sview) -> bool:
+            threaded_target: mutable bool = false
+            for index in 0..<report.threaded_names.count |index, names, values, report, target, threaded_target|:
+                local_name: sview = report.threaded_names[index]
+                threaded_target <- true if local_name == target
+                # The innermost binding of the name is the live one.
+                slot: mutable usize = names.count
+                for candidate in 0..<names.count |candidate, names, local_name, slot|:
+                    slot <- candidate if names[candidate] == local_name
+                values[slot] <- report.threaded_values[index] if slot < names.count and slot < values.count
+            report.threaded_names.clear()
+            report.threaded_values.clear()
+            return threaded_target
