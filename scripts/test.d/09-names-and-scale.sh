@@ -78,6 +78,7 @@ if [[ "$budget_goal_status" -ne 0 ]]; then
     printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
     exit 1
 fi
+python3 "$ROOT_DIR/scripts/test_focused_goal_states.py"
 
 run_json_report "$ROOT_DIR/examples/effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified; rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}; assert rows["exact_row"] == ["Memory.Allocate"]; assert rows["pure_callee"] is None'
 effect_containment_status=${PIPESTATUS[1]}
