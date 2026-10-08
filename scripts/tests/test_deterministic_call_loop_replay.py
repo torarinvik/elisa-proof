@@ -199,7 +199,9 @@ extend ElisaProof:
         # Exactly one source site: the replay acceptance condition.
         def test_loop_site_accepted(report: ProofReport&, owner: sview, call: Ast::Expr) -> bool:
             matches: mutable usize = 0
-            known: bool = proof_replay_deterministic_call_source_declarations(report.source_declarations, owner, 0, call, Ast::expr_pos(call).line, &matches, 0)
+            # This parsed-source probe has no admitted cast traces; calls retain their effects.
+            cast_sites: darray[Ast::Expr] = []
+            known: bool = proof_replay_deterministic_call_source_declarations(cast_sites, report.source_declarations, owner, 0, call, Ast::expr_pos(call).line, &matches, 0)
             return known and matches == 1
 
         # A function-summary call is anchored by its raw text at its exact span.

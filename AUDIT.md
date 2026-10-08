@@ -11459,3 +11459,13 @@ compatibility test uses one representative old report, not a corpus of archived 
 
 Evidence: `schema/elisa-proof-v1.json`, `schema/elisa-proof-v2.json`, and
 `scripts/test_agent_protocol_schema.py`.
+
+
+## 2026-10-08 — restore current reviewed performance-corpus provenance
+
+Repinned the reviewed performance corpus from a non-ancestor revision to current proof
+HEAD after checking all 23 listed source/oracle paths against their existing hashes and
+both committed and working-tree bytes. No workload, expected result, hash, validator or
+test was changed. All 13 corpus-manifest controls pass. Evidence:
+[`2026-10-08-corpus-repin.md`](docs/evidence/2026-10-08-corpus-repin.md).
+The full newest-compiler suite is still running; its initial stale-pin failure is retained.

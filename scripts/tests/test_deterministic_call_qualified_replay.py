@@ -84,7 +84,9 @@ extend ElisaProof:
             matches: mutable usize = 0
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
-            known: bool = proof_replay_deterministic_call_source_declarations(report.source_declarations, trace.name, owner_line, call, trace.line, &matches, 0)
+            cast_sites: mutable darray[Ast::Expr] = []
+            proof_replay_deterministic_validated_cast_sites(report, trace.name, &cast_sites)
+            known: bool = proof_replay_deterministic_call_source_declarations(cast_sites, report.source_declarations, trace.name, owner_line, call, trace.line, &matches, 0)
             return (known, matches)
 
         def test_deterministic_source_contains(report: ProofReport&, owner: sview, call: Ast::Expr) -> bool:

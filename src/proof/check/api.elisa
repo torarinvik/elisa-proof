@@ -301,18 +301,50 @@ extend ElisaProof:
 
         def proof_prepare_semantic_source(file: Ast::File&, report: mutable ProofReport&) -> bool can[Global.Read, Global.Write]:
             source_types: mutable Semantic::SymbolTable = Semantic::SymbolTable()
-            source_types <- Semantic::check_full_into(file, source_types, false, false, false, false, true, false, false, false, false, false, PROOF_SEMANTIC_DIAGNOSTIC_LIMIT, false, false)
+            source_types <- Semantic::check_full_into(file, source_types, false, false, false, false, true, false, false, false, false, false, PROOF_SEMANTIC_DIAGNOSTIC_LIMIT, true, false)
             return proof_prepare_semantic_source_checked(file, report, source_types)
 
         def proof_prepare_semantic_source_with_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> bool can[Global.Read, Global.Write]:
             source_types: mutable Semantic::SymbolTable = Semantic::SymbolTable()
-            source_types <- Semantic::check_full_into(file, source_types, false, false, false, false, true, false, false, false, false, false, PROOF_SEMANTIC_DIAGNOSTIC_LIMIT, false, false)
+            source_types <- Semantic::check_full_into(file, source_types, false, false, false, false, true, false, false, false, false, false, PROOF_SEMANTIC_DIAGNOSTIC_LIMIT, true, false)
             ready: bool = proof_prepare_semantic_source_checked(file, report, source_types)
             proof_copy_normalized_semantic_diagnostics(source_types.diagnostics, diagnostics)
             return ready
 
+        # These legacy compiler proof checks can be superseded only after the custom
+        # kernel discharges their exact obligations. They are not malformed-source errors.
+        def proof_semantic_diagnostic_is_deferred_proof(diagnostic: Semantic::Diagnostic) -> bool:
+            match diagnostic.kind:
+                Semantic::DiagnosticKind.EnsureNotProven:
+                    return diagnostic.detail != "violated"
+                Semantic::DiagnosticKind.AssertByUnproven:
+                    return true
+                Semantic::DiagnosticKind.MutualDecreasesCycle:
+                    return true
+                _:
+                    return false
+            return false
+
+        # Ordinary compilation keeps these definite traps as warnings for compatibility.
+        # Verification cannot admit them as discharged safety obligations.
+        def proof_semantic_diagnostic_refutes_arithmetic_safety(kind: Semantic::DiagnosticKind) -> bool:
+            return kind == Semantic::DiagnosticKind.DivisionByZero or kind == Semantic::DiagnosticKind.ModuloByZero or kind == Semantic::DiagnosticKind.OversizedShift or kind == Semantic::DiagnosticKind.NegativeShift
+
+        # Compatibility warnings do not discharge permission obligations.
+        def proof_semantic_diagnostic_requires_permission(kind: Semantic::DiagnosticKind) -> bool:
+            return kind == Semantic::DiagnosticKind.UngrantedPanic or kind == Semantic::DiagnosticKind.UngrantedEffectCall or kind == Semantic::DiagnosticKind.UngrantedPointerCast or kind == Semantic::DiagnosticKind.UngrantedBufferReinterpret or kind == Semantic::DiagnosticKind.UncheckedIndexUngranted or kind == Semantic::DiagnosticKind.MutableAliasUngranted or kind == Semantic::DiagnosticKind.UngrantedParallelFor
+
         def proof_prepare_semantic_source_checked(file: Ast::File&, report: mutable ProofReport&, source_types: Semantic::SymbolTable&) -> bool:
             for diagnostic in source_types.diagnostics:
+                if proof_semantic_diagnostic_refutes_arithmetic_safety(diagnostic.kind):
+                    proof_reset_report(report)
+                    proof_add_finding(report, "arithmetic-safety-refuted", diagnostic.line, "", "compiler identified a definite division, modulo, or shift safety failure; verification was skipped")
+                    report.findings[report.findings.count - 1].status <- "disproved"
+                    return false
+                if proof_semantic_diagnostic_requires_permission(diagnostic.kind):
+                    proof_reset_report(report)
+                    proof_add_finding(report, "semantic-permission-ungranted", diagnostic.line, "", "a required panic, effect, pointer, buffer, index, alias or parallel permission is missing; verification was skipped")
+                    return false
                 match diagnostic.kind:
                     Semantic::DiagnosticKind.ExpressionAnalysisDepthExceeded:
                         # The compiler has proved that part of this AST was not semantically
@@ -325,4 +357,11 @@ extend ElisaProof:
                         return false
                     _:
                         pass
+                if Semantic::diagnostic_severity(diagnostic) == 1 and not proof_semantic_diagnostic_is_deferred_proof(diagnostic):
+                    # A source judgment with a mandatory compiler error is not admissible,
+                    # even when another declaration has an independently provable goal.
+                    # Use caller-independent text: diagnostic views remain compiler-owned.
+                    proof_reset_report(report)
+                    proof_add_finding(report, "semantic-source-inadmissible", diagnostic.line, "", "compiler reported a mandatory semantic error; proof checking was skipped")
+                    return false
             return proof_prepare_source(file, report, source_types)

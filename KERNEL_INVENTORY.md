@@ -313,8 +313,15 @@ evaluation does not remove their existing source-correspondence limitation.
    `proof/replay`. The rows for `proof/linear` are a common-mode dependency on untrusted search
    code: a bug there affects the solver and the AST replay together. The kernel's own guard
    (`kernel_replay/safe_comparison_constants.elisa`) is independent, and every certificate also
-   passes kernel replay. A shared bug can therefore make replay reject but cannot make the
-   kernel accept. Moving these helpers into replay is tracked as a refactor, not a soundness fix.
+   passes kernel replay. A shared comparison evaluator cannot bypass that independent
+   arithmetic guard. This does not establish source correspondence for other shared helpers.
+   Moving a helper into replay by itself is a refactor, not independent assurance.
+
+The independent arithmetic guard above is not a proof of source correspondence for the
+source-adapter rows below. Threaded-summary validation shares callable spelling, reference-marker
+classification and depth-bounded parenthesis normalization with the producer. A bug in those helpers
+can affect source authentication and must be audited with source mutations and alias/lifetime
+controls. Their presence is a remaining common-mode trust dependency, not a verification claim.
 
 <!-- inventory:replay-external-calls -->
 | Function | Defined in | Tier |
@@ -328,6 +335,11 @@ evaluation does not remove their existing source-correspondence limitation.
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter; extracts callable spelling for threaded-summary source matching |
+| `proof_resource_is_reference_type` | `proof/resources/state_and_regions.elisa` | shared source adapter; syntactic reference marker classification |
+| `proof_resource_is_mutable_reference_type` | `proof/resources/state_and_regions.elisa` | shared source adapter; mutable/lmut reference marker classification |
+| `proof_strip_parens` | `proof/check/alias_stability.elisa` | shared source adapter; depth-bounded place/name normalization |
+| `proof_scalar_reference_parameter_type_in_declarations` | `proof/check/operator_witnesses.elisa` | shared source adapter; depth-bounded unique parameter type lookup for pop scalar snapshots; source identity and builtin semantics remain trust assumptions |
 | `proof_type_head_name` | `proof/check/flow_and_type_model.elisa` | source adapter; module/type head lookup, not callable contract resolution |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |

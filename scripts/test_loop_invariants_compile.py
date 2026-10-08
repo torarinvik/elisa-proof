@@ -279,6 +279,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline.trace_consumer_certificate_index <- rebind_consumer
     return 105 if not proof_replay_fact_trace_entry(&baseline, rebind_index)
     baseline.trace_consumer_certificate_index <- init_consumer
+    baseline_source_declarations: darray[Ast::Decl] = baseline.source_declarations
 
     # Altering only the trace site cannot preserve source provenance.
     init_original: ProofFactTrace = baseline.traces.records[init_index]
@@ -304,6 +305,8 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline.traces.records.push(forged_rebind_trace)
     baseline.trace_consumer_certificate_index <- rebind_consumer
     return 116 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
+    # Restore the report after rejecting this independent forged-trace control.
+    baseline.traces.records.pop()
 
     # The old RHS witness is invalid once the actual source assignment changes.
     stale_rebind_bytes: mutable darray[u8] = []
@@ -340,6 +343,8 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline.traces.records.push(forged_trace)
     baseline.trace_consumer_certificate_index <- init_consumer
     return 108 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
+    # Restore the report after rejecting this independent forged-trace control.
+    baseline.traces.records.pop()
 
     # Old initializer evidence must not transfer to changed source at the same binding site.
     stale_bytes: mutable darray[u8] = []
@@ -348,14 +353,16 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline.source_declarations <- stale_report.source_declarations
     return 109 if proof_replay_fact_trace_entry(&baseline, init_index)
 
-    # The initializer binding is source-true at loop entry whatever the invariant says: the
-    # mutable-local route checks the declaration and its liveness, not the invariant's text, so
-    # an edited invariant leaves it valid (the certificate's goal is checked separately).
+    # The loop-entry consumer must match a source invariant. Editing that invariant rejects
+    # the old certificate's use of this fact, even though the initializer equation remains true.
     unrelated_bytes: mutable darray[u8] = []
     unrelated_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report)
     baseline.source_declarations <- unrelated_report.source_declarations
-    return 110 if not proof_replay_fact_trace_entry(&baseline, init_index)
+    return 110 if proof_replay_fact_trace_entry(&baseline, init_index)
+    # Restoring the original source restores this genuine loop-entry fact and consumer.
+    baseline.source_declarations <- baseline_source_declarations
+    return 147 if not proof_replay_fact_trace_entry(&baseline, init_index)
 
     false_bytes: mutable darray[u8] = []
     false_report: mutable ProofReport = proof_empty_report()

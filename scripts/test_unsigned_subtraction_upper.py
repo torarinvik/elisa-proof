@@ -65,7 +65,11 @@ with tempfile.TemporaryDirectory() as directory:
     proved_block = run("--proof", str(proved_id), str(guarded))
     assert proved_block.returncode == 0 and "\nproof guarded_word_" in proved_block.stdout, proved_block.stdout
     open_block = run("--proof", str(open_id), str(unguarded))
-    assert open_block.returncode == 0 and "\nopen unguarded_word_" in open_block.stdout, open_block.stdout
+    assert open_block.returncode == 1 and "\nopen unguarded_word_" in open_block.stdout, open_block.stdout
+    open_goal = run("--goal", str(open_id), str(unguarded))
+    open_report = json.loads(open_goal.stdout)
+    assert open_goal.returncode == 1 and open_report["status"] == "unknown", open_report
+    assert open_report["goal"]["proven"] is False, open_report
     proved_path = Path(directory) / "proved.txt"
     proved_path.write_text(proved_block.stdout, encoding="utf-8")
     faithful = run("--check-proof", str(proved_path), str(guarded))

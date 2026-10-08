@@ -1,0 +1,172 @@
+# Independently reconstruct a scalar last-element snapshot. This route never admits the
+# pre-pop array equality as a fact about the later array state.
+extend ElisaProof:
+    private:
+        def proof_replay_pop_snapshot_name_clear(declarations: darray[Ast::Decl]&, target: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |declarations, target, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, _):
+                        return false if name == target or any parameter in parameters where parameter.name == target
+                        return false if proof_replay_source_body_declares(declarations, body, target)
+                    Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if name == target
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _):
+                        return false if name == target
+                    Ast::Decl.Module(name, nested, _):
+                        return false if name == target or not proof_replay_pop_snapshot_name_clear(nested, target, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_pop_snapshot_name_clear(nested, target, depth + 1)
+                    _:
+                        return false
+            return true
+
+        def proof_replay_pop_snapshot_element_type(expression: Ast::Expr, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_pop_snapshot_element_type(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_pop_snapshot_element_type(inner, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                Ast::Expr.Index(Ast::Expr.Ident(name, _), element, _):
+                    return element if name == "darray"
+                _:
+                    pass
+            return Ast::Expr.Invalid
+
+        def proof_replay_pop_snapshot_literal_fits(type_expression: Ast::Expr, value: i64) -> bool:
+            return false if value < 0
+            match type_expression:
+                Ast::Expr.Ident(name, _):
+                    return value <= 255 if name == "u8"
+                    return value <= 65535 if name == "u16"
+                    return value <= 4294967295 if name == "u32"
+                    return true if name == "u64"
+                _:
+                    pass
+            return false
+
+        def proof_replay_pop_snapshot_count(expression: Ast::Expr, receiver: sview) -> bool:
+            match expression:
+                Ast::Expr.Field(Ast::Expr.Ident(name, _), field, _):
+                    return name == receiver and field == "count"
+                _:
+                    return false
+
+        def proof_replay_pop_snapshot_nonempty(expression: Ast::Expr, receiver: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_replay_pop_snapshot_nonempty(left, receiver, depth + 1) or proof_replay_pop_snapshot_nonempty(right, receiver, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_pop_snapshot_nonempty(inner, receiver, depth + 1)
+                Ast::Expr.Binary(count, operator, Ast::Expr.IntLit(bound, _), _):
+                    return proof_replay_pop_snapshot_count(count, receiver) and ((operator == TokenKind.GtEq and bound >= 1) or (operator == TokenKind.Gt and bound >= 0))
+                Ast::Expr.Binary(Ast::Expr.IntLit(bound, _), operator, count, _):
+                    return proof_replay_pop_snapshot_count(count, receiver) and ((operator == TokenKind.LtEq and bound >= 1) or (operator == TokenKind.Lt and bound >= 0))
+                _:
+                    return false
+
+        def proof_replay_pop_snapshot_last(expression: Ast::Expr, receiver: sview) -> bool:
+            match expression:
+                Ast::Expr.Index(object, index, _):
+                    return false if proof_replay_ident_name(object) != receiver
+                    match index:
+                        Ast::Expr.Binary(count, TokenKind.Minus, offset, _):
+                            match offset:
+                                Ast::Expr.IntLit(value, _):
+                                    return value == 1 and proof_replay_pop_snapshot_count(count, receiver)
+                                _:
+                                    return false
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_replay_pop_snapshot_receiver(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Call(callee, arguments, names, _):
+                    return "" if arguments.count != 0 or names.count != 0
+                    match callee:
+                        Ast::Expr.Field(object, method, _):
+                            return proof_replay_ident_name(object) if method == "pop"
+                        _:
+                            pass
+                _:
+                    pass
+            return ""
+
+        def proof_replay_pop_snapshot_value(expression: Ast::Expr, receiver: sview, wanted: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_replay_pop_snapshot_value(left, receiver, wanted, depth + 1) or proof_replay_pop_snapshot_value(right, receiver, wanted, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_pop_snapshot_value(inner, receiver, wanted, depth + 1)
+                Ast::Expr.Binary(slot, TokenKind.EqEq, Ast::Expr.IntLit(value, _), _):
+                    return value == wanted and proof_replay_pop_snapshot_last(slot, receiver)
+                Ast::Expr.Binary(Ast::Expr.IntLit(value, _), TokenKind.EqEq, slot, _):
+                    return value == wanted and proof_replay_pop_snapshot_last(slot, receiver)
+                _:
+                    return false
+
+        def proof_replay_pop_snapshot_entry(report: ProofReport&, body: darray[Ast::Stmt]&, site: usize, receiver: sview, wanted: i64) -> bool:
+            nonempty: mutable bool = false
+            value_known: mutable bool = false
+            leading: mutable bool = true
+            for index in 0..<site |index, report, body, receiver, wanted, nonempty, value_known, leading|:
+                statement: Ast::Stmt = body[index]
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        if kind == "requires" and leading:
+                            nonempty <- nonempty or proof_replay_pop_snapshot_nonempty(expression, receiver, 0)
+                            value_known <- value_known or proof_replay_pop_snapshot_value(expression, receiver, wanted, 0)
+                        if kind == "ensure" or kind == "ensures":
+                            return false if proof_replay_entry_count_postcondition_written(report.source_declarations, expression, receiver, 0)
+                        elif kind != "requires":
+                            return false
+                        else:
+                            return false if proof_replay_source_statement_touches(report.source_declarations, statement, receiver, true, 0)
+                    _:
+                        return false
+            return nonempty and value_known
+
+        def proof_replay_pop_scalar_snapshot_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "proof-step" or trace.name == "" or trace.line == 0 or trace.line >= report.trace_owner_line
+            match trace.expression:
+                Ast::Expr.Binary(local_expression, TokenKind.EqEq, Ast::Expr.IntLit(wanted, _), _):
+                    local: sview = proof_replay_ident_name(local_expression)
+                    return false if local == "" or proof_internal_name_is_rebind(local)
+                    return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, local, 0)
+                    return false if proof_replay_local_binding_global_constant_named(report.source_declarations, local, 0)
+                    body: mutable darray[Ast::Stmt] = []
+                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    return false if not proof_replay_source_single_declaration(report.source_declarations, body, local)
+                    consumer: mutable bool = false
+                    for statement in body |local, report, consumer|:
+                        match statement:
+                            Ast::Stmt.Return(Ast::Expr.Ident(name, _), position):
+                                consumer <- true if name == local and position.line == report.trace_owner_line
+                            _:
+                                pass
+                    return false if not consumer
+                    for index in 0..<body.count |index, body, local, local_expression, wanted, report, trace|:
+                        match body[index]:
+                            Ast::Stmt.VarDecl(name, local_type, initializer, position):
+                                receiver: sview = proof_replay_pop_snapshot_receiver(initializer)
+                                continue if name != local or position.line != trace.line or receiver == ""
+                                continue if not proof_replay_local_binding_pos_matches(local_expression, position)
+                                return false if not proof_replay_pop_snapshot_literal_fits(local_type, wanted)
+                                primitive: sview = proof_replay_ident_name(local_type)
+                                return false if not proof_replay_pop_snapshot_name_clear(report.source_declarations, "pop", 0) or not proof_replay_pop_snapshot_name_clear(report.source_declarations, "darray", 0) or not proof_replay_pop_snapshot_name_clear(report.source_declarations, primitive, 0)
+                                parameter = proof_scalar_reference_parameter_type_in_declarations(report.source_declarations, trace.name, receiver, 0)
+                                return false if parameter.count != 1 or not proof_resource_is_reference_type(parameter.type_expression) or not proof_resource_is_mutable_reference_type(parameter.type_expression)
+                                return false if not proof_replay_expr_equal(proof_replay_pop_snapshot_element_type(parameter.type_expression, 0), local_type)
+                                return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, receiver)
+                                return false if not proof_replay_pop_snapshot_entry(report, body, index, receiver, wanted)
+                                return proof_replay_mutable_local_live(report, trace.name, body, index, local, report.trace_owner_line, false, false)
+                            _:
+                                pass
+                    return false
+                _:
+                    return false

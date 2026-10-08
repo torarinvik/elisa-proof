@@ -12,33 +12,46 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
     private_helpers = {
         (root / "src/proof/replay/source_binding_validation.elisa").resolve(): "source_binding_validation_test.elisa",
         (root / "src/proof/replay/source_binding_validation/immutable_bindings.elisa").resolve(): "immutable_bindings_test.elisa",
+        (root / "src/proof/replay/deterministic_call_sites.elisa").resolve(): "deterministic_call_sites_test.elisa",
     }
     includes = re.findall(r'^include "([^"]+)"$', replay_file.read_text(encoding="utf-8"), re.MULTILINE)
     if not includes:
         raise AssertionError(f"no replay modules found in {replay_file}")
 
-    expanded = []
     copied_helpers = set()
-    for include in includes:
-        original = (replay_file.parent / include).resolve()
+
+    def harness_include(original: Path) -> str:
+        if not original.is_file():
+            raise AssertionError(f"replay include does not exist: {original}")
         if original in private_helpers:
             source = original.read_text(encoding="utf-8")
             private_label = "    private:"
             if source.count(private_label) != 1:
                 raise AssertionError(f"expected one private section in {original}")
-            # These generated copies are used only by this standalone test executable. The real
-            # source remains private, and the test-only visibility change is never linked into
-            # either product binary.
+            # Only the standalone harness receives these public helper copies.
             generated = scratch / private_helpers[original]
             generated.write_text(source.replace(private_label, "    public:", 1), encoding="utf-8")
+            copied_helpers.add(generated.name)
             original = generated
-            copied_helpers.add(original.name)
-        if not original.is_file():
-            raise AssertionError(f"replay include does not exist: {original}")
-        expanded.append(f'include "{original.as_posix()}"')
+        elif original == (root / "src/proof/replay/source_call_coverage.elisa").resolve():
+            # This facade owns the transitive cast helper include. Rebase all its includes
+            # to their original locations while substituting the private helper copy.
+            source = original.read_text(encoding="utf-8")
+            source = re.sub(
+                r'^include "([^"]+)"$',
+                lambda match: harness_include((original.parent / match.group(1)).resolve()),
+                source,
+                flags=re.MULTILINE,
+            )
+            generated = scratch / "source_call_coverage_test.elisa"
+            generated.write_text(source, encoding="utf-8")
+            original = generated
+        return f'include "{original.as_posix()}"'
+
+    expanded = [harness_include((replay_file.parent / include).resolve()) for include in includes]
 
     if copied_helpers != set(private_helpers.values()):
-        raise AssertionError(f"replay source-binding helpers were not both included: {copied_helpers}")
+        raise AssertionError(f"replay source-binding helpers were not all included: {copied_helpers}")
     return "\n".join(expanded)
 
 

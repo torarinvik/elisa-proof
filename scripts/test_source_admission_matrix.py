@@ -108,11 +108,24 @@ def main():
                 process = run(*arguments)
                 assert process.returncode == 0, (source.name, name, process.stdout[:300])
 
-        # Positive: an admissible source with an unrelated open goal still serves a goal-scoped
-        # route. Inadmissibility, not incompleteness, is what the refusals below test.
+        # An admissible source with an unrelated open obligation remains incomplete. A replayed
+        # certificate is visible as evidence, but source completeness is required to publish proof.
         target = ROOT / "examples/tactic_repair_target.elisa"
         assert run("--tactics", ROOT / "examples/tactic_script_repair_target.json", target).returncode == 0
-        assert run("--goal", "1", target).returncode == 0 and run("--theorems", target).returncode == 0
+        # The tactic fixture's compound equality deliberately needs a tactic; it is not an
+        # automatic positive goal. Use a proven control plus an independent open obligation.
+        incomplete = directory / "admissible_open.elisa"
+        incomplete.write_bytes(BASE + b"\ndef independent_open(x: i64) -> i64:\n"
+                               b"    requires x == 2\n    ensure result == x + 1\n    return x\n")
+        overview = json.loads(run("--json", incomplete).stdout)
+        assert overview["summary"]["semantic_errors"] == 0 and overview["summary"]["unproven"] > 0, overview
+        scoped = run("--goal", GOAL, incomplete)
+        scoped_report = json.loads(scoped.stdout)
+        assert scoped.returncode == 1 and scoped_report["status"] == "unknown", scoped_report
+        assert scoped_report["goal"]["proven"] is False and scoped_report["goal"]["replay_status"] == "replayed", scoped_report
+        assert scoped_report["source"]["admissible"] is True and scoped_report["source"]["complete"] is False, scoped_report
+        admitted = run("--theorems", incomplete)
+        assert admitted.returncode == 0 and json.loads(admitted.stdout)["theorems"] == [], admitted.stdout
         partial = run("--repair-all", target)
         assert partial.returncode == 1 and json.loads(partial.stdout)["status"] in ("partial", "repaired")
 
