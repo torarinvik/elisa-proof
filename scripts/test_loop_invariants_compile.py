@@ -595,7 +595,6 @@ with tempfile.TemporaryDirectory(prefix="source-binding-package-") as directory:
         "replayed": len(package["theorems"]),
         "not_replayed": 0,
     }, replay_report["summary"]
-print(
-    f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
+print(f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
     f"({fixture_replay['gaps']} unrelated replay gaps); {provenance}; pinned frontend {PINNED_FRONTEND_REV}"
 )

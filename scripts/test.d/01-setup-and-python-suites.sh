@@ -187,6 +187,7 @@ run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
 run_py_test test_rejected_numeric_cast_operator.py
 run_py_test test_widening_cast.py
+run_py_test test_match_widening_source.py
 run_py_test test_cast_dispatch_soundness.py
 run_py_test test_call_result_width.py
 run_py_test test_adt_library.py
