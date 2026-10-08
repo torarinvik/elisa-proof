@@ -20,3 +20,38 @@ Acceptance remains open: unchanged deterministic census/refusal output and a
 complete measured run under the original budget, with parent and child RSS
 recorded. This source change alone does not establish the memory failure's full
 cause or repair, and does not qualify prover compatibility.
+
+## Diagnostic execution
+
+`scripts/run_census_bounded.py` runs the complete census with explicit workers,
+per-input timeout, aggregate RSS limit and wall-clock limit. It records parent
+and child peaks, owned input commands, the process split at the aggregate peak,
+real exit status and monitoring/census source hashes in `execution.json`.
+Limit termination returns 125 and never presents a partial census as complete.
+The normal census still checks binary hashes and source/compiler provenance.
+
+A two-worker diagnostic with the original 8 GiB cap, 120-second per-input limit
+and 1,800-second wall limit is in progress in
+`build/census-retention-diagnostic/`. Its result remains pending.
+
+## Input provenance guard
+
+The census now hashes its complete input set and transitive textual includes
+before and after execution. It refuses publication when either the input set or
+dependency identities differ, and publishes `input-identity.json` alongside the
+census with its digest in toolchain metadata. Missing dependencies are recorded
+so their later appearance also invalidates publication. This covers direct and
+brace include forms using byte-preserving paths and lexical resolution.
+
+The running diagnostic loaded the preceding census implementation and therefore
+does not exercise this new guard. It reads some harness includes from the mutable
+compiler checkout; its memory result cannot establish immutable compatibility.
+Endpoint comparison detects persistent changes, not edits that are reverted
+between samples. Qualification still requires an immutable dependency snapshot.
+Targeted acceptance passes with Python 3.14:
+`python3.14 scripts/test_refusal_census.py`. Existing result/exit lattice,
+provenance, deterministic-summary and timing checks pass. Added checks preserve
+full-versus-compact refusal summaries and missing/null findings; cover direct,
+brace, cyclic and missing dependencies; and invoke the real census main path to
+confirm dependency mutation exits 2 without publishing a census. Complete memory
+and immutable compatibility acceptance remain open.

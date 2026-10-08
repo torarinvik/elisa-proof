@@ -176,7 +176,87 @@ def subprocess_result_lattice_test():
             refusal_census.BINARY = old_binary
 
 
+def compact_report_test():
+    full = {
+        "status": "failed", "verification_state": "unknown",
+        "summary": {"proven": 1, "obligations": 2, "unused": [1] * 1000},
+        "replay": {"gaps": 0, "certificates": [1] * 1000},
+        "findings": [{"refusal_gate": "budget", "kind": "ensure-unproven",
+                      "message": "bounded", "trace": [1] * 1000},
+                     {"kind": None, "message": None}, {}],
+        "kernel": {"arena": [1] * 1000}, "certificates": [1] * 1000,
+    }
+    compact = refusal_census.census_report(full)
+    assert "kernel" not in compact and "certificates" not in compact
+    assert compact["summary"] == {"proven": 1, "obligations": 2}
+    assert compact["replay"] == {"gaps": 0}
+    assert "trace" not in compact["findings"][0]
+    assert compact["findings"][1] == {"kind": None, "message": None}
+    assert compact["findings"][2] == {}
+    for report in (full, compact):
+        entry = {"x": {"report": report, "seconds": 1, "error": None}}
+        summary = refusal_census.summarize(entry, 1, 0, "2026-10-08", None)
+        if report is full:
+            original = summary
+        else:
+            assert summary == original
+
+
+def input_closure_guard_test():
+    import contextlib
+    import io
+    from census_input_identity import include_argument, input_identity
+    assert include_argument('# include "a b.elisa"') == "a b.elisa"
+    assert include_argument("{$I 'a b.elisa'}") == "a b.elisa"
+    assert include_argument('{$include leaf.elisa}') == "leaf.elisa"
+    assert include_argument('include\t"leaf.elisa"') is None
+    assert include_argument('include "leaf.elisa" # comment') is None
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        (root / "examples").mkdir()
+        source = root / "examples/unit.elisa"
+        leaf = root / "leaf.elisa"
+        source.write_text('include "../leaf.elisa"\n')
+        leaf.write_text('{$include examples/unit.elisa}\n')  # cycle remains bounded
+        initial = input_identity([source])
+        assert len(initial["files"]) == 2
+        leaf.write_text('changed\n')
+        assert initial != input_identity([source])
+        leaf.unlink()
+        missing = input_identity([source])
+        assert "read_error" in missing["files"][str(leaf)]
+        leaf.write_text('restored\n')
+        assert missing != input_identity([source])
+        binary = root / "proof"
+        binary.write_text("#!/bin/sh\nexit 0\n")
+        binary.chmod(0o755)
+
+        def mutate(path, timeout):
+            leaf.write_text("changed during census\n")
+            return "unit.elisa", {"summary": {"proven": 0, "obligations": 0},
+                                  "findings": []}, 0, None
+
+        output = root / "output"
+        with patch.object(refusal_census, "ROOT", root), \
+             patch.object(refusal_census, "BINARY", binary), \
+             patch.object(refusal_census, "DOGFOOD_SOURCES", ()), \
+             patch.object(refusal_census, "toolchain_identity", return_value={}), \
+             patch.object(refusal_census, "run", side_effect=mutate), \
+             patch.object(sys, "argv", ["census", str(output), "--workers", "1"]), \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            try:
+                refusal_census.main()
+            except SystemExit as error:
+                assert error.code == 2
+            else:
+                raise AssertionError("changed dependency was published")
+        assert "included sources changed" in errors.getvalue()
+        assert not (output / "census.json").exists()
+
+
 provenance_guard_test()
 subprocess_result_lattice_test()
+compact_report_test()
+input_closure_guard_test()
 
 print("refusal census: deterministic counts, result/exit parity, dogfood inclusion, timings, and provenance guards")

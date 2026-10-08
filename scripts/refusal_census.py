@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from census_input_identity import input_identity
 from report_cache import effective_cpus
 from report_exit_status import expected_exit as report_expected_exit
 
@@ -317,6 +318,7 @@ def main():
 
     try:
         identity = toolchain_identity()
+        dataset_identity = input_identity(paths)
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
 
@@ -344,14 +346,22 @@ def main():
     run_date = datetime.now(timezone.utc).date().isoformat()
     try:
         final_identity = toolchain_identity()
+        final_paths = sorted((ROOT / "examples").glob("*.elisa")) + dogfood
+        final_dataset_identity = input_identity(final_paths)
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     if identity != final_identity:
         parser.error("proof binary, sources, or compiler changed during the census; refusing to publish mixed results")
+    if paths != final_paths or dataset_identity != final_dataset_identity:
+        parser.error("census inputs or included sources changed; refusing to publish mixed results")
+    identity["census_input_sha256"] = dataset_identity["sha256"]
     report = summarize(results, len(examples), len(dogfood), run_date, identity)
     measurement_report = measurements(results, run_date, identity)
     output_dir = arguments.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "input-identity.json").write_text(
+        json.dumps(dataset_identity, indent=1, sort_keys=True) + "\n"
+    )
     (output_dir / "census.json").write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
     (output_dir / "census.md").write_text(render_markdown(report))
     (output_dir / "measurements.json").write_text(json.dumps(measurement_report, indent=1, sort_keys=True) + "\n")
