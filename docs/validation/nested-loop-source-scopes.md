@@ -31,3 +31,23 @@ above uses subprocess `check=True` on both compilation and execution.
 Clean paired product build, complete original loop-exit positive/adversarial
 regression and uncached engine sweep are pending. Full compatibility and
 production promotion remain open.
+
+## Clean paired qualification
+
+Clean source `6478c65e`, generation `badfecbd72d748fa8b5ba6193cd64843`,
+builds in 42.99s at 3,105,632 KiB RSS under 8 GiB. Both manifests identify
+clean source and the same generation; actual binary hashes match
+(`build/nested-loop-source-product-identity.json`).
+
+The complete original `scripts/test_loop_exit_frame.py` passes, including assigned,
+element-written, lent, dynamic-cell and budget refusals. Positive evidence is 9/9
+proven and independently replayed with zero gaps. The previous collection-frame
+and capability-block fixtures still replay 80/80 and 15/15 respectively; exact
+reports are retained in `build/nested-loop-source-<fixture>.json`.
+
+The uncached engine sweep passes 73 reports / 4,246 obligations, zero semantic
+errors, diagnostics, gaps or trusted assumptions, in 1.68s at 150,176 KiB RSS
+under 3 GiB. Engine artifacts are in
+`../elisa-engine/build/validation/nested-loop-source-engine-reports/`, with
+`nested-loop-source-engine-inventory.json` and `nested-loop-source-engine-sweep.log`.
+Full compatibility and production promotion remain open.
