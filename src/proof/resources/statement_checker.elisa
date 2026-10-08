@@ -258,9 +258,21 @@ extend ElisaProof:
                             extent_slot: usize = proof_resource_lookup(state, local_name)
                             state.binding_extent[extent_slot] <- true if extent_slot < state.binding_extent.count
                         state.facts.clear() if shadowed or proof_resource_expr_has_call(initializer) or proof_resource_expr_has_move(initializer)
-                    Ast::Stmt.Assign(target, _, initializer, position):
+                    Ast::Stmt.Assign(target, operator, initializer, position):
                         target_name: sview = proof_resource_direct_binding_name(target)
                         target_slot: usize = proof_resource_lookup(state, target_name)
+                        # A first `name = value` declares `name` (inferred_bindings.elisa).
+                        # A later `=` to such a local that cannot write it shadows it instead.
+                        shadows_inferred: bool = operator == TokenKind.Assign and target_slot < state.binding_names.count and (any inferred in state.inferred_names where inferred == target_name) and not (target_slot < state.binding_writable.count and state.binding_writable[target_slot])
+                        if operator == TokenKind.Assign and target_name != "" and (target_slot >= state.binding_names.count or shadows_inferred):
+                            inferred_type: Ast::Expr = proof_resource_inferred_binding_type(initializer, state, report, function_name)
+                            if not (inferred_type is Ast::Expr.Absent):
+                                declaration: darray[Ast::Stmt] = [Ast::Stmt.VarDecl(target_name, inferred_type, initializer, position)]
+                                proof_resource_check_statements(declaration, state, report, function_name, functions)
+                                state.inferred_names.push(target_name)
+                                continue
+                            # An untyped shadow stays untracked, as every first `=` binding was.
+                            continue if shadows_inferred
                         target_is_scalar: bool = target_slot < state.binding_scalar.count and state.binding_scalar[target_slot]
                         if not proof_resource_is_discard_target(target) and not target_is_scalar and proof_resource_expr_returns_local_borrow(initializer, state, functions, report):
                             proof_resource_add_failing_obligation(report, "borrow-escape", position, function_name, "a newly created borrow is assigned across a binding boundary")
@@ -422,17 +434,20 @@ extend ElisaProof:
                         for_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &for_state)
                         proof_resource_mark_scope_inherited(state, &for_state)
-                        range_base: Ast::Expr = proof_loop_range_base(iterable)
-                        numeric_range: bool = match range_base:
-                            Ast::Expr.Binary(_, operator, _, _): operator == TokenKind.RangeLt or operator == TokenKind.RangeLe
-                            _: false
-                        for variable in variables |variable, for_state, numeric_range|:
-                            if variable != "":
-                                # Collection iteration retains the existing capability rules.
-                                # Header captures are lowered separately by the parser.
-                                # Range variables are scalar iteration values. An outer
-                                # namesake is shadowed, never borrowed or captured.
-                                outer_slot: usize = state.binding_names.count if numeric_range else proof_resource_lookup(state, variable)
+                        iterable_is_range: bool = proof_resource_iterable_is_range(iterable)
+                        for variable in variables |variable, for_state, iterable_is_range|:
+                            if variable != "" and iterable_is_range:
+                                # A range binder is a fresh scalar copy of each integer in the
+                                # range. Aliasing it to an outer binding of the same name made
+                                # `for value in 0..<n: assert value >= 0` read as a local borrow.
+                                proof_resource_add_binding_traced(&for_state, report, variable, false, false, false, for_state.binding_names.count, false, "", proof_resource_empty_place(), 0)
+                            elif variable != "":
+                                # A capture listed after `for … |capture|` shadows the outer
+                                # binding inside the loop body. Preserve its write capability:
+                                # mutable captures stay writable, while readonly captures keep
+                                # the readonly rule. Registering every capture as immutable made
+                                # legal writes to mutable accumulators look like prover gaps.
+                                outer_slot: usize = proof_resource_lookup(state, variable)
                                 capture_is_reference: bool = outer_slot < state.binding_reference.count and state.binding_reference[outer_slot]
                                 capture_is_mutable_reference: bool = outer_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[outer_slot]
                                 capture_is_writable: bool = proof_resource_binding_is_writable(state, outer_slot) if outer_slot < state.binding_names.count else false

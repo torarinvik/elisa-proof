@@ -162,6 +162,25 @@ extend ElisaProof:
                     return false if method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize"
                     return false if proof_replay_local_binding_cast_hook_present(declarations, 0)
                     return proof_replay_local_binding_stable_name(declarations, owner, owner_line, receiver, target)
+                # A conditional value is as stable as its arms and its guard: the kernel reads
+                # `c ? a : b` as one term, so the equation pins the same value the source does.
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, depth + 1)
+                    return proof_replay_local_binding_stable_initializer(then_expression, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(else_expression, target, declarations, owner, owner_line, depth + 1)
+                _:
+                    return false
+
+        # Comparisons of stable integer operands, joined by `and`, `or` and `not`.
+        def proof_replay_local_binding_stable_condition(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return proof_replay_local_binding_stable_condition(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_condition(right, target, declarations, owner, owner_line, depth + 1)
+                    return false if operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.EqEq and operator != TokenKind.BangEq
+                    return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, depth + 1)
                 _:
                     return false
 
@@ -322,7 +341,7 @@ extend ElisaProof:
         # Positional enum binders are source-backed only when the exact unique match arm has a
         # simple payload pattern, the scrutinee is an immutable enum parameter, and every earlier
         # source path is unable to allocate a fresh witness.
-        def proof_replay_local_binding_match_widening_cast_source(report: ProofReport&, trace: ProofFactTrace, target: sview, receiver: sview) -> bool:
+        def proof_replay_local_binding_match_widening_cast_source(report: ProofReport&, trace: ProofFactTrace, target: sview, receiver: sview, trace_method: sview) -> bool:
             return false if trace.name == "" or target == "" or receiver == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0
             function_body: mutable darray[Ast::Stmt] = []
             owner_matches: mutable usize = 0
@@ -331,10 +350,10 @@ extend ElisaProof:
             return false if proof_replay_local_binding_cast_hook_present(report.source_declarations, 0)
             candidate_matches: mutable usize = 0
             valid: mutable bool = false
-            for statement_index in 0..<function_body.count |statement_index, function_body, target, receiver, trace, report, candidate_matches, valid|:
+            for statement_index in 0..<function_body.count |statement_index, function_body, target, receiver, trace_method, trace, report, candidate_matches, valid|:
                 match function_body[statement_index]:
                     Ast::Stmt.Match(subject, arms, _):
-                        for arm_index in 0..<arms.count |arm_index, subject, arms, statement_index, function_body, target, receiver, trace, report, candidate_matches, valid|:
+                        for arm_index in 0..<arms.count |arm_index, subject, arms, statement_index, function_body, target, receiver, trace_method, trace, report, candidate_matches, valid|:
                             arm: Ast::MatchArm = arms[arm_index]
                             target_count: mutable usize = 0
                             target_type_expression: mutable Ast::Expr = Ast::Expr.Invalid
@@ -394,7 +413,7 @@ extend ElisaProof:
                             widening: bool = (source_unsigned > 0 and ((target_unsigned > 0 and target_unsigned >= source_unsigned) or (target_signed > 0 and target_signed > source_unsigned))) or (source_signed > 0 and target_signed > 0 and target_signed >= source_signed)
                             match target_initializer:
                                 Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(source_name, _), method, _), arguments, _, _):
-                                    valid <- arguments.count == 0 and source_name == target_source_name and method == target_type_name and widening
+                                    valid <- arguments.count == 0 and source_name == target_source_name and method == target_type_name and widening and (trace_method == "" or trace_method == method)
                                 _:
                                     valid <- false
                     _:
@@ -448,7 +467,12 @@ extend ElisaProof:
                     # The top-level declaration must be the only introduction of the target
                     # anywhere in the body; a nested redeclaration would make the fact name it.
                     return true if declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target)
-                    return proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver)
+                    return proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver, "")
+                # The producer may keep the cast spelled on a payload symbol (`wide == r.i64()`);
+                # the source declaration must then use the same conversion.
+                Ast::Expr.Binary(Ast::Expr.Ident(target, _), TokenKind.EqEq, Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), method, _), arguments, _, _), _):
+                    return false if arguments.count != 0 or target == "" or proof_internal_name_is_rebind(target) or not proof_internal_name_is_rebind(receiver)
+                    return proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver, method)
                 _:
                     return false
 

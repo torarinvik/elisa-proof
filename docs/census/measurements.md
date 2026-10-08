@@ -1,16 +1,16 @@
 # Refusal census measurements
 
-Per-input wall time from the census run on 2026-10-03 UTC. Timings are load-dependent and are intentionally excluded from the deterministic census.
+Per-input wall time from the census run on 2026-10-08 UTC. Timings are load-dependent and are intentionally excluded from the deterministic census.
 
 | Seconds | Input |
 | ---: | --- |
-| 120.22 | `kernel_comparison_runtime.elisa` |
-| 120.21 | `kernel_congruence_runtime.elisa` |
-| 120.20 | `kernel_proposition_admission_runtime.elisa` |
-| 120.19 | `kernel_projection_runtime.elisa` |
-| 80.52 | `kernel_effect_runtime.elisa` |
-| 57.58 | `kernel_sview_lifetimes_runtime.elisa` |
-| 50.68 | `tactic_runtime.elisa` |
-| 43.91 | `field_equality_runtime.elisa` |
-| 36.83 | `kernel_arena_runtime.elisa` |
-| 36.34 | `marker_dispatch_runtime.elisa` |
+| 600.70 | `required_reference_replay_runtime.elisa` |
+| 600.67 | `deterministic_call_trace_replay_runtime.elisa` |
+| 600.66 | `field_equality_runtime.elisa` |
+| 600.64 | `marker_dispatch_runtime.elisa` |
+| 600.62 | `lemma_summary_replay_runtime.elisa` |
+| 600.62 | `tactic_runtime.elisa` |
+| 421.82 | `effect_source_validation_parser_runtime.elisa` |
+| 329.81 | `rejected_bubble_sort.elisa` |
+| 206.26 | `extern_effect_rows_parser_runtime.elisa` |
+| 202.40 | `kernel_arena_runtime.elisa` |

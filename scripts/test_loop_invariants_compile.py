@@ -394,12 +394,14 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline.source_declarations <- stale_report.source_declarations
     return 109 if proof_replay_fact_trace_entry(&baseline, init_index)
 
-    # An unrelated invariant on the same consumer line cannot stand in for the source contract.
+    # The initializer binding is source-true at loop entry whatever the invariant says: the
+    # mutable-local route checks the declaration and its liveness, not the invariant's text, so
+    # an edited invariant leaves it valid (the certificate's goal is checked separately).
     unrelated_bytes: mutable darray[u8] = []
     unrelated_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report)
     baseline.source_declarations <- unrelated_report.source_declarations
-    return 110 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 110 if not proof_replay_fact_trace_entry(&baseline, init_index)
 
     false_bytes: mutable darray[u8] = []
     false_report: mutable ProofReport = proof_empty_report()

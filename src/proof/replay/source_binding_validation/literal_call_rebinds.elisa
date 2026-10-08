@@ -90,7 +90,8 @@ extend ElisaProof:
                         continue if not call_owner_matches
                         match source_call.call:
                             Ast::Expr.Call(_, arguments, argument_names, _):
-                                continue if arguments.count != summary.parameters_count or (argument_names.count != 0 and argument_names.count != arguments.count)
+                                continue if arguments.count > summary.parameters_count or (argument_names.count != 0 and argument_names.count != arguments.count)
+                                continue if arguments.count < summary.parameters_count and argument_names.count != 0
                                 matched_slots: mutable usize = 0
                                 for slot in 0..<summary.parameters_count |slot, arguments, argument_names, summary, report, candidate, symbol, literal, matched_slots|:
                                     binding_index: usize = candidate.summary_bindings_start + slot
@@ -112,6 +113,11 @@ extend ElisaProof:
                                         for argument_name in argument_names |argument_name, saw_named|:
                                             saw_named <- true if argument_name != ""
                                         return false if saw_named
+                                    if argument_names.count == 0 and argument_index >= arguments.count:
+                                        # An omitted trailing slot takes the callee's literal default.
+                                        default_value = proof_replay_summary_parameter_default(report, summary, slot)
+                                        matched_slots <- matched_slots + 1 if default_value.known and proof_replay_expr_equal(default_value.value, literal)
+                                        continue
                                     continue if argument_index >= arguments.count
                                     source_argument: Ast::Expr = arguments[argument_index]
                                     source_argument_matches: bool = proof_replay_expr_equal(source_argument, literal) or proof_replay_summary_call_global_constant_matches(report, candidate, source_argument, literal)
@@ -138,3 +144,85 @@ extend ElisaProof:
             return false if trace.dependency != "" or trace.premises_count != 0 or trace.kernel_premises_count != 0
             return false if trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
             return proof_replay_local_binding_literal_call_argument_source(report, trace)
+
+        # A call whose result nothing consumes may get no summary trace, but its precondition is
+        # still certified over the literal's symbol. Without a summary nothing ties the symbol to
+        # a callee parameter, so the definition is accepted only when no summary of the owner
+        # mentions the symbol at all, the symbol's position is exactly one source call in the
+        # owner's body, and that call has the literal as an argument at the literal's own span.
+        def proof_replay_literal_call_site_count(expression: Ast::Expr, position: Ast::Pos, literal: Ast::Expr, found: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, call_position):
+                    if proof_replay_source_position_equal(call_position, position):
+                        argument_matches: mutable usize = 0
+                        for argument in arguments |argument, literal, argument_matches|:
+                            argument_matches <- argument_matches + 1 if proof_replay_expr_equal(argument, literal) and proof_replay_local_binding_expr_positions_match(literal, argument)
+                        found <- found + 1 if argument_matches == 1
+                    proof_replay_literal_call_site_count(callee, position, literal, found, depth + 1)
+                    for argument in arguments |argument, position, literal, found, depth|:
+                        proof_replay_literal_call_site_count(argument, position, literal, found, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    proof_replay_literal_call_site_count(inner, position, literal, found, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_replay_literal_call_site_count(left, position, literal, found, depth + 1)
+                    proof_replay_literal_call_site_count(right, position, literal, found, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_replay_literal_call_site_count(object, position, literal, found, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    proof_replay_literal_call_site_count(condition, position, literal, found, depth + 1)
+                    proof_replay_literal_call_site_count(yes, position, literal, found, depth + 1)
+                    proof_replay_literal_call_site_count(no, position, literal, found, depth + 1)
+                _:
+                    pass
+
+        def proof_replay_literal_call_site_count_statements(statements: darray[Ast::Stmt]&, position: Ast::Pos, literal: Ast::Expr, found: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for statement in statements |position, literal, found, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, value, _) | Ast::Stmt.Expr(value, _) | Ast::Stmt.Contract(_, value, _):
+                        proof_replay_literal_call_site_count(value, position, literal, found, depth + 1)
+                    Ast::Stmt.Return(returned, _):
+                        if returned is value:
+                            proof_replay_literal_call_site_count(value, position, literal, found, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        proof_replay_literal_call_site_count(target, position, literal, found, depth + 1)
+                        proof_replay_literal_call_site_count(value, position, literal, found, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        proof_replay_literal_call_site_count(condition, position, literal, found, depth + 1)
+                        proof_replay_literal_call_site_count_statements(yes, position, literal, found, depth + 1)
+                        proof_replay_literal_call_site_count_statements(no, position, literal, found, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        proof_replay_literal_call_site_count(condition, position, literal, found, depth + 1)
+                        proof_replay_literal_call_site_count_statements(nested, position, literal, found, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        proof_replay_literal_call_site_count(iterable, position, literal, found, depth + 1)
+                        proof_replay_literal_call_site_count_statements(nested, position, literal, found, depth + 1)
+                    Ast::Stmt.Match(value, arms, _):
+                        proof_replay_literal_call_site_count(value, position, literal, found, depth + 1)
+                        for arm in arms |arm, position, literal, found, depth|:
+                            proof_replay_literal_call_site_count_statements(arm.body, position, literal, found, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_literal_call_site_count_statements(nested, position, literal, found, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_local_binding_literal_call_site_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.name == "" or trace.line == 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, _):
+                    return false if not proof_internal_name_is_rebind(symbol) or not proof_replay_literal_value(literal) or symbol_position.line != trace.line
+                    return false if not proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, literal)
+                    for candidate in report.traces.records |candidate, report, trace, symbol|:
+                        continue if candidate.kind != "function-summary" or candidate.name != trace.name
+                        return false if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
+                        for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, symbol|:
+                            return false if proof_expr_mentions_name(report.traces.summary_values[candidate.summary_bindings_start + offset], symbol)
+                        return false if proof_expr_mentions_name(candidate.expression, symbol)
+                    body: mutable darray[Ast::Stmt] = []
+                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    found: mutable usize = 0
+                    proof_replay_literal_call_site_count_statements(body, symbol_position, literal, &found, 0)
+                    return found == 1
+                _:
+                    return false

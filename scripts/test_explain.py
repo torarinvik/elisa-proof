@@ -34,9 +34,10 @@ assert status == 1 and text == SNAPSHOT, text
 status, text = run("--explain", "0", str(ROOT / "examples/literal_count.elisa"))
 assert status == 0 and "verdict: proven, replayed certificate 0\n" in text, text
 
-# An unchecked recursive summary can produce a certificate that independent replay refuses.
-# The human-facing verdict must expose that refusal, not the producer's provisional result.
-GAP = ROOT / "examples/rejected_lexicographic_decreases.elisa"
+# A producer certificate can rest on a premise independent replay has no source route for (here
+# a loop-exit fact about a captured loop result), leaving a replay gap. The human-facing
+# verdict must expose that refusal, not the producer's provisional result.
+GAP = ROOT / "examples/rejected_global_constant_loop_exit.elisa"
 status, raw = run("--json", str(GAP))
 report = json.loads(raw)
 assert status == 1 and report["replay"]["gaps"] > 0, report["replay"]

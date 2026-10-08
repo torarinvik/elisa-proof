@@ -367,7 +367,7 @@ def main() -> None:
             capture_output=True,
             text=True,
             cwd=ROOT,
-            timeout=300,
+            timeout=int(os.environ.get("ELISA_HARNESS_COMPILE_TIMEOUT", "300")),
         )
         if compiled.returncode:
             raise AssertionError(f"fresh Stage1 harness compile failed:\n{compiled.stdout}\n{compiled.stderr}")
