@@ -1,0 +1,88 @@
+# Reconstruct a scalar upper bound from both source branch arms. No arm-local
+# binding trace is promoted past its write; every reaching value has its own
+# source contract. Keep calls, arithmetic, loops and aliases outside this route.
+extend ElisaProof:
+    private:
+        def proof_replay_branch_value_bound(report: ProofReport&, owner: sview, value: Ast::Expr, type_name: sview, bound: i64, requirements: darray[Ast::Expr]&) -> bool:
+            match value:
+                Ast::Expr.IntLit(number, _):
+                    return false if number < 0 or number > bound
+                    width: i64 = proof_unsigned_type_width(Ast::Expr.Ident(type_name, Ast::expr_pos(value)), report.source_declarations, 0)
+                    return width >= 63 or (width > 0 and number <= proof_unsigned_width_max(width))
+                Ast::Expr.Ident(name, _):
+                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, owner, report.replay_owner_line, name)
+                    return false if not proof_replay_local_binding_immutable_integer_parameter(report.source_declarations, owner, report.replay_owner_line, name, 0)
+                    return false if proof_replay_local_binding_unsigned_parameter_type_name(report.source_declarations, owner, report.replay_owner_line, name, 0) != type_name
+                    for requirement in requirements |name, bound|:
+                        match requirement:
+                            Ast::Expr.Binary(Ast::Expr.Ident(input, _), operator, Ast::Expr.IntLit(limit, _), _):
+                                continue if input != name or limit < 0
+                                return true if operator == TokenKind.LtEq and limit <= bound
+                                return true if operator == TokenKind.Lt and limit > 0 and limit - 1 <= bound
+                            _:
+                                pass
+                    return false
+                _:
+                    return false
+
+        def proof_replay_branch_scalar_bound_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "branch-join" or trace.line == 0 or trace.line > report.trace_owner_line
+            return false if trace.dependency != "" or trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
+            target: mutable sview = ""
+            bound: mutable i64 = -1
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.LtEq, Ast::Expr.IntLit(limit, _), _):
+                    target <- name
+                    bound <- limit
+                _:
+                    return false
+            return false if bound < 0 or proof_source_expression_has_overloaded_operator(trace.expression, report.source_primitive_operator_mask, 0)
+            context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+            return false if not context.known or context.body.count > 4096
+            return false if not ElisaProofFrameSource::index_copy_environment(report.source_declarations)
+            return false if any formal in context.formals where formal == target
+            return false if not proof_replay_source_single_declaration(report.source_declarations, context.body, target)
+            requirements: mutable darray[Ast::Expr] = []
+            declared: mutable bool = false
+            joined: mutable bool = false
+            type_name: mutable sview = ""
+            initial: mutable Ast::Expr = Ast::Expr.Invalid
+            for statement in context.body |report, trace, target, bound, requirements, declared, joined, type_name, initial|:
+                match statement:
+                    Ast::Stmt.Contract(kind, proposition, _):
+                        return false if declared or joined
+                        requirements.push(proposition) if kind == "requires"
+                        return false if kind != "requires" and kind != "ensure" and kind != "ensures"
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        return false if declared or joined or name != target
+                        type_name <- proof_replay_local_binding_unsigned_type_name(type_expression, 0)
+                        return false if type_name == "" or not proof_replay_local_binding_mutable_integer_type(type_expression)
+                        type_work: mutable usize = 0
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, type_name, 0, &type_work)
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, "bool", 0, &type_work)
+                        initial <- initializer
+                        declared <- true
+                    Ast::Stmt.If(Ast::Expr.Ident(condition, _), yes, no, position):
+                        return false if not declared or joined or position.line != trace.line
+                        return false if yes.count > 1 or no.count > 1
+                        return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, condition)
+                        condition_matches: mutable usize = 0
+                        for index in 0..<context.formals.count |context, condition, condition_matches|:
+                            condition_matches <- condition_matches + 1 if context.formals[index] == condition and proof_ident_name(context.formal_types[index]) == "bool"
+                        return false if condition_matches != 1
+                        for arm in [yes, no] |report, trace, target, bound, requirements, type_name, initial|:
+                            reaching: mutable Ast::Expr = initial
+                            if arm.count == 1:
+                                match arm[0]:
+                                    Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, value, _):
+                                        return false if name != target or (operator != TokenKind.LArrow and operator != TokenKind.Assign)
+                                        reaching <- value
+                                    _:
+                                        return false
+                            return false if not proof_replay_branch_value_bound(report, trace.name, reaching, type_name, bound, requirements)
+                        joined <- true
+                    Ast::Stmt.Expr(Ast::Expr.Ident(name, _), _) | Ast::Stmt.Return(Ast::Expr.Ident(name, _), _):
+                        return false if not joined or name != target
+                    _:
+                        return false
+            joined

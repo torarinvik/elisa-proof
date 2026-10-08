@@ -304,6 +304,7 @@ run_py_test test_symbolic_quantifiers.py
 run_py_test test_index_copy_bounds.py
 run_py_test test_index_copy_bound_source.py
 run_py_test test_branch_join_premises.py
+run_py_test test_branch_scalar_bound_source.py
 run_py_test test_indexed_write_frame.py
 run_py_test test_byref_frame_forwarding.py
 run_py_test test_collection_frames.py
