@@ -71,6 +71,73 @@ for example, expected in POSITIVE.items():
     assert report["summary"]["coverage"] == "complete", report
     assert set(report["trust"]) == {"kernel_replay", "correspondence", "trusted", "not_established"}, report
 
+# A summary for a pure helper in the RHS of `or` is conditional on that branch. The current
+# correspondence checker preserves the source obligation but cannot normalize the source return
+# against the theorem's `result` term, so this remains an explicit unmatched gap.
+short_circuit_summary = write("short_circuit_summary", """def available(x: i64) -> bool:
+    ensure result == true
+    return true
+
+def caller() -> bool:
+    ensure result == true
+    return true or available(0)
+""")
+short_circuit_package = package(short_circuit_summary)
+expect(short_circuit_package, short_circuit_summary,
+       {"available": ("checked", None), "caller": ("unmatched", "unproved-obligation")}, 1)
+false_unevaluated_helper = write("false_unevaluated_helper", """def available(x: i64) -> bool:
+    ensure result == true
+    return false
+
+def caller() -> bool:
+    ensure result == true
+    return true or available(0)
+""")
+expect(short_circuit_package, false_unevaluated_helper,
+       {"available": ("unmatched", "unproved-obligation"),
+        "caller": ("unsupported", "callee-unchecked")}, 1)
+
+# Constant lookup follows the exact nested source owner. A sibling module with the same leaf name
+# cannot supply the nested constant, and changing the selected declaration changes the obligation.
+nested_constant_source = write("nested_constant", """module Layout:
+    LIMIT: i64 = 1
+
+module Policy:
+    const module Layout:
+        LIMIT: i64 = 16
+
+    def bounded(x: i64) -> i64:
+        requires x >= 0 and x <= Layout::LIMIT
+        ensure result >= 0 and result <= Layout::LIMIT
+        ensure result == x
+        return x
+""")
+nested_constant_package = package(nested_constant_source)
+expect(nested_constant_package, nested_constant_source, {"bounded": ("checked", None)}, 0)
+changed_nested_constant = write("changed_nested_constant", nested_constant_source.read_text().replace("LIMIT: i64 = 16", "LIMIT: i64 = 15"))
+expect(nested_constant_package, changed_nested_constant,
+       {"bounded": ("unmatched", "unproved-obligation")}, 1)
+
+variable_divisor = write("variable_divisor", """def quotient(value: i64, divisor: i64) -> i64:
+    requires divisor > 0
+    ensure result == value / divisor
+    return value / divisor
+""")
+expect(package(variable_divisor), variable_divisor,
+       {"quotient": ("unsupported", "contract")}, 1)
+positive_divisor = write("positive_divisor", """def quotient(value: i64) -> i64:
+    ensure result == value / 20
+    return value / 20
+""")
+expect(package(positive_divisor), positive_divisor, {"quotient": ("checked", None)}, 0)
+for name, divisor in (("zero_divisor", "0"), ("negative_divisor", "-1")):
+    refused_division = write(name, f"""def quotient(value: i64) -> i64:
+    ensure result == value / {divisor}
+    return value / {divisor}
+""")
+    expect(package(refused_division), refused_division,
+           {"quotient": ("unsupported", "contract")}, 1)
+
 # Mutations. Each package below replays in full; each source asks for something it does not prove.
 BRANCH = packages["branch_negation"]
 UNMATCHED = ("unmatched", "unproved-obligation")
