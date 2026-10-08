@@ -66,7 +66,7 @@ unchecked = write("unchecked", unchecked_source)
 report = correspond(bundle, unchecked, 1)
 assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
 assert {entry["name"]: (entry["status"], entry["reason"]) for entry in report["functions"]}["caller"] == (
-    "unmatched", "unproved-obligation"
+    "unsupported", "callee-unchecked"
 ), report
 
 wrong_owner = write("wrong_owner", positive.read_text().replace(
