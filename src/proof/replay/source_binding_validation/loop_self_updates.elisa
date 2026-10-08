@@ -1,0 +1,93 @@
+# A self-referential update of an integer local inside a loop body (`count <- count + 1`) takes a
+# fresh symbol `S == count + 1` (proof_bind_unsigned_symbol), and the loop's preservation check
+# consumes it at the loop header's line. In that certificate `count` denotes the local's value at
+# the start of the iteration (the producer havocs it at the header and states the invariant and
+# guard over it). Replay accepts the equation only when
+#   - the consumer is a preservation context (source guard and invariant facts are present);
+#   - exactly one loop statement of the owner sits on the consumer's line, at top level or as the
+#     single loop of a top-level capture block, and the equation's span pins exactly one plain
+#     assignment `x <- value` among that loop's top-level body statements;
+#   - the value mentions x and is otherwise stable (self_updates.elisa), and x is a once-declared
+#     integer local of the owner (or of that capture block), not a parameter or global constant;
+#   - neither the loop condition nor any statement before the assignment in the body may write x,
+#     other than an earlier resymbolized self-update, so `x` still names the iteration-start value;
+#   - no other binding or summary of the owner defines S differently (the shared rule).
+extend ElisaProof:
+    private:
+        # VALID when exactly one matching assignment is found in this loop's body, INVALID when
+        # one is found but a write of x precedes it, ABSENT otherwise.
+        def proof_replay_loop_self_update_in_loop(report: ProofReport&, owner: sview, condition: Ast::Expr, body: darray[Ast::Stmt]&, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&) -> usize:
+            found: mutable usize = ProofReplayLocalAlias::ABSENT
+            for index in 0..<body.count |index, body, report, owner, condition, binding, value, local_name, found|:
+                match body[index]:
+                    Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, assigned, statement_position):
+                        if (operator == TokenKind.Assign or operator == TokenKind.LArrow) and proof_replay_local_binding_pos_matches(binding, statement_position):
+                            here: mutable usize = ProofReplayLocalAlias::INVALID
+                            if proof_expr_mentions_name(assigned, name) and proof_replay_expr_equal(assigned, value) and proof_replay_self_update_value(report, assigned, name, owner, 0) and not proof_replay_source_expr_touches(report.source_declarations, condition, name, true, 0):
+                                clean: mutable bool = true
+                                for earlier in 0..<index |earlier, body, report, owner, name, clean|:
+                                    match body[earlier]:
+                                        Ast::Stmt.Contract(_, _, _):
+                                            pass
+                                        _:
+                                            if not proof_replay_self_update_resymbolized(report, owner, body[earlier], name):
+                                                clean <- false if proof_replay_source_statement_touches(report.source_declarations, body[earlier], name, true, 0)
+                                if clean:
+                                    local_name <- name
+                                    here <- ProofReplayLocalAlias::VALID
+                            found <- proof_replay_mutable_local_merge(found, here)
+                    _:
+                        pass
+            return found
+
+        # The loop statements of `statements` on `line`, at top level or as the single statement
+        # of a top-level capture block; `loop_scope` receives the statement list holding the loop.
+        def proof_replay_loop_self_update_site(report: ProofReport&, owner: sview, statements: darray[Ast::Stmt]&, line: u32, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, loops: mutable usize&, loop_scope: mutable darray[Ast::Stmt]&, nested: bool) -> usize:
+            found: mutable usize = ProofReplayLocalAlias::ABSENT
+            for statement in statements |report, owner, statements, line, binding, value, local_name, loops, loop_scope, nested, found|:
+                match statement:
+                    Ast::Stmt.While(condition, body, position):
+                        if position.line == line:
+                            loops <- loops + 1
+                            here: usize = proof_replay_loop_self_update_in_loop(report, owner, condition, body, binding, value, local_name)
+                            if here != ProofReplayLocalAlias::ABSENT:
+                                loop_scope.clear()
+                                loop_scope.extend(statements)
+                            found <- proof_replay_mutable_local_merge(found, here)
+                    Ast::Stmt.For(_, _, condition, body, position):
+                        if position.line == line:
+                            loops <- loops + 1
+                            here: usize = proof_replay_loop_self_update_in_loop(report, owner, condition, body, binding, value, local_name)
+                            if here != ProofReplayLocalAlias::ABSENT:
+                                loop_scope.clear()
+                                loop_scope.extend(statements)
+                            found <- proof_replay_mutable_local_merge(found, here)
+                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _) | Ast::Stmt.Return(Ast::Expr.Block(inner, _, _, _), _):
+                        if not nested:
+                            found <- proof_replay_mutable_local_merge(found, proof_replay_loop_self_update_site(report, owner, inner, line, binding, value, local_name, loops, loop_scope, true))
+                    _:
+                        pass
+            return found
+
+        def proof_replay_local_binding_loop_self_update_source(report: ProofReport&, trace: ProofFactTrace, preservation_context: bool) -> bool:
+            return false if not preservation_context or trace.name == "" or trace.line == 0 or report.trace_owner_line == 0
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, value, _):
+                    return false if not proof_internal_name_is_rebind(symbol) or symbol_position.line != trace.line
+                    return false if proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
+                    body: mutable darray[Ast::Stmt] = []
+                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    local_name: mutable sview = ""
+                    loops: mutable usize = 0
+                    loop_scope: mutable darray[Ast::Stmt] = []
+                    return false if proof_replay_loop_self_update_site(report, trace.name, body, report.trace_owner_line, trace.expression, value, &local_name, &loops, &loop_scope, false) != ProofReplayLocalAlias::VALID
+                    return false if loops != 1 or local_name == ""
+                    return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, local_name, 0)
+                    return false if proof_replay_local_binding_global_constant_named(report.source_declarations, local_name, 0)
+                    # Declared once in the loop's own block (a capture header), or else once at
+                    # the top level of the owner body.
+                    in_scope: bool = proof_replay_source_single_declaration(report.source_declarations, loop_scope, local_name) and proof_replay_mutable_local_declared(loop_scope, local_name)
+                    return false if not in_scope and not (proof_replay_source_single_declaration(report.source_declarations, body, local_name) and proof_replay_mutable_local_declared(body, local_name))
+                    return proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, value)
+                _:
+                    return false

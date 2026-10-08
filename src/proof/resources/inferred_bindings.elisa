@@ -1,0 +1,61 @@
+# A first `name = value` binding has no type node in the parser's Assign form. Without one the
+# resource checker recorded no binding for `name`, so a later use or call argument named an
+# unbound local and the resource certificate could not replay. Recover the declared type only
+# where the source states it outright, and otherwise leave the statement on the assignment path:
+#   - a direct call of a uniquely declared function takes that function's declared return type;
+#   - an element read `p[i]` of a parameter `p` of the current function, declared once, takes the
+#     element type of `p`'s `darray[T]` or `view[T]` type (through `&`, `mutable` and `lmut`).
+extend ElisaProof:
+    private:
+        const PROOF_RESOURCE_INFERRED_TYPE_DEPTH_LIMIT: usize = 64
+
+        def proof_resource_collection_element_type(expression: Ast::Expr, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Absent if depth >= PROOF_RESOURCE_INFERRED_TYPE_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_collection_element_type(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_resource_collection_element_type(inner, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return Ast::Expr.Absent
+                Ast::Expr.Index(head, element, _):
+                    head_name: sview = proof_ident_name(head)
+                    return element if head_name == "darray" or head_name == "view"
+                    return Ast::Expr.Absent
+                _:
+                    return Ast::Expr.Absent
+
+        def proof_resource_parameter_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_RESOURCE_INFERRED_TYPE_DEPTH_LIMIT
+            for declaration in declarations |function_name, parameter, found, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        if name == function_name:
+                            matches <- matches + 1
+                            found <- Ast::Expr.Absent
+                            for candidate in parameters |parameter, found|:
+                                found <- candidate.type_expression if candidate.name == parameter
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        proof_resource_parameter_type_find(body, function_name, parameter, found, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_resource_inferred_binding_type(initializer: Ast::Expr, state: ProofResourceState&, report: ProofReport&, function_name: sview) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            match initializer:
+                Ast::Expr.Paren(inner, _):
+                    return proof_resource_inferred_binding_type(inner, state, report, function_name)
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
+                    # A local callable shadows a same-spelled declaration.
+                    return Ast::Expr.Absent if proof_resource_lookup(state, callee) < state.binding_names.count
+                    declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee, 0)
+                    return Ast::Expr.Absent if declared.count != 1 or proof_ident_name(declared.type_expression) == "void"
+                    return declared.type_expression
+                Ast::Expr.Index(Ast::Expr.Ident(root, _), _, _):
+                    # The root must still resolve to the formal itself, not to a later local.
+                    return Ast::Expr.Absent if proof_resource_lookup(state, root) >= state.formal_count
+                    parameter_type: mutable Ast::Expr = Ast::Expr.Absent
+                    matches: mutable usize = 0
+                    proof_resource_parameter_type_find(report.source_declarations, function_name, root, &parameter_type, &matches, 0)
+                    return Ast::Expr.Absent if matches != 1
+                    return proof_resource_collection_element_type(parameter_type, 0)
+                _:
+                    return Ast::Expr.Absent
