@@ -27,3 +27,22 @@ index counts for calls that mutate report context during trace iteration.
 
 Clean paired build, original public positive/adversarial regression and uncached
 engine sweep are pending. Full compatibility and production promotion remain open.
+
+## Clean paired qualification
+
+Clean source `1e7435c6`, generation `d89f4022789143a7b5ff129454818149`,
+builds in 42.30s at 3,122,416 KiB RSS under 8 GiB. Both manifests identify
+clean source and one generation; actual binary hashes match
+(`build/pop-copy-source-product-identity.json`).
+
+The complete original `scripts/test_collection_pop_value.py` passes its positive
+fixture and all five original adversarial failure locations. Positive evidence is
+8/8 proven and independently replayed with zero gaps; exact report is in
+`build/pop-copy-source-product-report.json`.
+
+The uncached engine sweep retains all 73 reports / 4,246 independently replayed
+obligations with zero semantic errors, diagnostics, gaps or trusted assumptions,
+in 1.67s at 200,656 KiB RSS under 3 GiB. Engine artifacts are in
+`../elisa-engine/build/validation/pop-copy-source-engine-reports/`, with
+`pop-copy-source-engine-inventory.json` and `pop-copy-source-engine-sweep.log`.
+Full compatibility and production promotion remain open.
