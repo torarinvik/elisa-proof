@@ -50,6 +50,9 @@ using ElisaProof
 
 extend ElisaProof:
     public:
+        def proof_test_initializer_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            proof_replay_local_binding_mutable_local_source(report, trace, true)
+
         def proof_test_internal_name_is_rebind(name: sview) -> bool:
             return proof_internal_name_is_rebind(name)
 
@@ -395,13 +398,15 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 109 if proof_replay_fact_trace_entry(&baseline, init_index)
 
     # The initializer binding is source-true at loop entry whatever the invariant says: the
-    # mutable-local route checks the declaration and its liveness, not the invariant's text, so
-    # an edited invariant leaves it valid (the certificate's goal is checked separately).
+    # mutable-local source gate checks the declaration and its liveness. The old
+    # certificate is not an entry context for an edited invariant: its goal must
+    # match the actual source invariant. Check these two boundaries separately.
     unrelated_bytes: mutable darray[u8] = []
     unrelated_report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report)
     baseline.source_declarations <- unrelated_report.source_declarations
-    return 110 if not proof_replay_fact_trace_entry(&baseline, init_index)
+    return 110 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 120 if not proof_test_initializer_source(&baseline, baseline.traces.records[init_index])
 
     false_bytes: mutable darray[u8] = []
     false_report: mutable ProofReport = proof_empty_report()
