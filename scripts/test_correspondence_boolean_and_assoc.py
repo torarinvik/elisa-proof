@@ -58,6 +58,13 @@ assert [(item["name"], item["status"], item["reason"]) for item in report["funct
     ("caller", "unsupported", "callee-unchecked"),
 ], report
 
+reordered = write("reordered", positive.read_text().replace(
+    "HelperPolicy::combine(second, third)", "HelperPolicy::combine(third, second)"))
+report = correspond(bundle, reordered, 1)
+assert report["source_admissible"] is True and report["package"]["status"] == "replayed", report
+caller = next(item for item in report["functions"] if item["name"] == "caller")
+assert (caller["status"], caller["reason"]) == ("unmatched", "unproved-obligation"), report
+
 wrong_owner = write("wrong_owner", positive.read_text().replace(
     "HelperPolicy::combine(second, third)", "OtherPolicy::combine(second, third)") + """
 
