@@ -1,0 +1,77 @@
+# Locate a unique source loop and the lexical statement list containing it.
+# Callers still establish entry/preservation and binding liveness independently.
+extend ElisaProof:
+    private:
+        def proof_replay_loop_scope_walk(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 64
+            for statement in statements |statements, line, condition, loop_body, lexical_body, matches, work, depth|:
+                return false if work >= 4096
+                work <- work + 1
+                match statement:
+                    Ast::Stmt.While(test, inner, position) | Ast::Stmt.For(_, _, test, inner, position):
+                        if position.line == line:
+                            matches <- matches + 1
+                            condition <- test
+                            loop_body.clear()
+                            loop_body.extend(inner)
+                            lexical_body.clear()
+                            lexical_body.extend(statements)
+                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                    Ast::Stmt.If(_, yes, no, _):
+                        return false if not proof_replay_loop_scope_walk(yes, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        return false if not proof_replay_loop_scope_walk(no, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |line, condition, loop_body, lexical_body, matches, work, depth|:
+                            return false if not proof_replay_loop_scope_walk(arm.body, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                    Ast::Stmt.Block(kind, _, _, inner, _):
+                        # Proof-only blocks do not introduce executable loops.
+                        return false if kind != "assert_by" and not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _) | Ast::Stmt.Return(Ast::Expr.Block(inner, _, _, _), _) | Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(inner, _, _, _), _):
+                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_replay_loop_scope(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&) -> bool:
+            matches: mutable usize = 0
+            work: mutable usize = 0
+            return false if line == 0 or not proof_replay_loop_scope_walk(statements, line, condition, loop_body, lexical_body, &matches, &work, 0)
+            matches == 1
+
+        def proof_replay_nested_local_declarations(declarations: darray[Ast::Decl]&, statements: darray[Ast::Stmt]&, name: sview, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 64
+            for statement in statements |declarations, name, count, work, depth|:
+                return false if work >= 4096
+                work <- work + 1
+                match statement:
+                    Ast::Stmt.VarDecl(local, _, initializer, _):
+                        count <- count + 1 if local == name
+                        return false if proof_replay_source_expr_touches(declarations, initializer, name, false, 0)
+                    Ast::Stmt.While(condition, inner, _):
+                        return false if proof_replay_source_expr_touches(declarations, condition, name, false, 0)
+                        return false if not proof_replay_nested_local_declarations(declarations, inner, name, count, work, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, inner, _):
+                        return false if any variable in variables where variable == name
+                        return false if proof_replay_source_expr_touches(declarations, iterable, name, false, 0)
+                        return false if not proof_replay_nested_local_declarations(declarations, inner, name, count, work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if proof_replay_source_expr_touches(declarations, condition, name, false, 0)
+                        return false if not proof_replay_nested_local_declarations(declarations, yes, name, count, work, depth + 1)
+                        return false if not proof_replay_nested_local_declarations(declarations, no, name, count, work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        return false if proof_replay_source_expr_touches(declarations, subject, name, false, 0)
+                        for arm in arms |declarations, name, count, work, depth|:
+                            return false if proof_replay_source_pattern_binds(arm.pattern, name, 0) or proof_replay_source_expr_touches(declarations, arm.guard, name, false, 0)
+                            return false if not proof_replay_nested_local_declarations(declarations, arm.body, name, count, work, depth + 1)
+                    Ast::Stmt.Block(_, clause, binding, inner, _):
+                        return false if binding == name or any word in clause where word == name
+                        return false if not proof_replay_nested_local_declarations(declarations, inner, name, count, work, depth + 1)
+                    _:
+                        return false if proof_replay_source_statement_touches(declarations, statement, name, false, 0)
+            true
+
+        def proof_replay_nested_local_unique(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview) -> bool:
+            count: mutable usize = 0
+            work: mutable usize = 0
+            return false if name == "" or not proof_replay_nested_local_declarations(declarations, body, name, &count, &work, 0)
+            count == 1

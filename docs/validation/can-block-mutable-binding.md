@@ -29,3 +29,20 @@ no production source rewrite was required for that harness limitation.
 Clean paired build and the complete original positive/adversarial regression,
 plus the uncached engine proof sweep, are pending. Full compatibility and
 production promotion remain open.
+
+## Clean paired qualification
+
+Clean source `7d89ab5a`, generation `edc1bd983f0641d78752602beff17f99`,
+builds in 44.30s at 2,309,440 KiB RSS under 8 GiB. Both manifest/source
+identities and actual binary hashes match (`build/can-block-binding-product-identity.json`).
+The complete original `scripts/test_can_block_frame.py` passes both positive
+and adversarial fixtures. Positive evidence is now 15/15 certificates proven
+and independently replayed with zero gaps (`build/can-block-binding-product-report.json`).
+
+The uncached engine sweep retains all 73 reports / 4,246 independently replayed
+obligations with zero semantic errors, diagnostics, gaps or trusted assumptions.
+Reports and inventory are in `../elisa-engine/build/validation/can-block-binding-engine-reports/`
+and `can-block-binding-engine-inventory.json`; the bounded log is
+`can-block-binding-engine-sweep.log`. Full compatibility and production promotion
+remain open. The loop-exit, pop-value and other confirmed replay failures are
+separate pending repairs.
