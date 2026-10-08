@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPILER = Path(os.environ['ELISA_COMPILER_ROOT']).resolve()
+COMPILER = Path(os.environ.get('ELISA_COMPILER_ROOT', ROOT.parent / 'Elisa-compiler')).resolve()
 FRONTEND = ROOT / 'build/snapshot/Elisa-compiler'
 module = ast.parse((ROOT / 'scripts/test_loop_invariants_compile.py').read_text())
 template = next(ast.literal_eval(node.value) for node in module.body
