@@ -1,0 +1,91 @@
+# Independently reconstruct an immutable scalar consequence at its copy point.
+# This authorizes the copied guard only, never equality to a subsequently changed field.
+extend ElisaProof:
+    private:
+        def proof_replay_scalar_copy_type_unshadowed(declarations: darray[Ast::Decl]&, name: sview, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64
+            for declaration in declarations |name, depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Struct(candidate, _, _, _, _, _, _) | Ast::Decl.Enum(candidate, _, _, _, _) | Ast::Decl.Alias(candidate, _, _):
+                        return false if candidate == name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_scalar_copy_type_unshadowed(nested, name, depth + 1, work)
+                    _:
+                        pass
+            true
+
+        def proof_replay_scalar_copy_bound_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "proof-step" or trace.line == 0 or trace.line > report.trace_owner_line
+            return false if trace.dependency != "" or trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
+            match trace.expression:
+                Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), comparison, literal, _), _):
+                    return false if comparison != TokenKind.GtEq and comparison != TokenKind.Gt
+                    literal_value: mutable i64 = 0
+                    match literal:
+                        Ast::Expr.IntLit(value, _):
+                            return false if value < 0
+                            literal_value <- value
+                        _:
+                            return false
+                    context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+                    return false if not context.known or context.body.count > 4096
+                    return false if any formal in context.formals where formal == target
+                    return false if not proof_replay_source_single_declaration(report.source_declarations, context.body, target)
+                    copy_index: mutable usize = context.body.count
+                    source_value: mutable Ast::Expr = Ast::Expr.Invalid
+                    local_width: mutable i64 = 0
+                    for index in 0..<context.body.count |context, trace, target, target_position, copy_index, source_value, local_width|:
+                        match context.body[index]:
+                            Ast::Stmt.VarDecl(local, type_expression, initializer, position):
+                                if local == target:
+                                    return false if position.line != trace.line or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position)
+                                    return false if proof_replay_local_binding_mutable_integer_type(type_expression)
+                                    local_width <- proof_unsigned_type_width(type_expression, report.source_declarations, 0)
+                                    copy_index <- index
+                                    source_value <- initializer
+                            _:
+                                pass
+                    return false if copy_index == context.body.count or local_width <= 0
+                    root: mutable sview = ""
+                    match source_value:
+                        Ast::Expr.Field(Ast::Expr.Ident(receiver, _), _, _):
+                            root <- receiver
+                        _:
+                            return false
+                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, root)
+                    decoded = ElisaProofFrameSource::place(source_value, &context.formals)
+                    return false if not decoded.known
+                    typed = ElisaProofFrameSource::place_type(&report.source_declarations, trace.name, report.replay_owner_line, decoded.place)
+                    return false if not typed.known
+                    type_work: mutable usize = 0
+                    primitive_names: darray[sview] = ["u8", "u16", "u32", "u64", "usize"]
+                    for primitive in primitive_names |report, type_work|:
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, primitive, 0, &type_work)
+                    source_width: i64 = proof_unsigned_type_width(typed.type_expression, report.source_declarations, 0)
+                    return false if source_width <= 0 or source_width > local_width
+                    return false if source_width < 63 and literal_value > proof_unsigned_width_max(source_width)
+                    guard_found: mutable bool = false
+                    expected_guard: Ast::Expr = Ast::Expr.Binary(source_value, comparison, literal, Ast::expr_pos(source_value))
+                    return false if proof_source_expression_has_overloaded_operator(expected_guard, report.source_primitive_operator_mask, 0)
+                    for index in 0..<context.body.count |context, copy_index, target, guard_found, expected_guard|:
+                        if index > copy_index:
+                            return false if proof_replay_source_statement_touches(report.source_declarations, context.body[index], target, true, 0)
+                        if index >= copy_index:
+                            continue
+                        # Only an exact early-return guard may precede this copy.
+                        # Other statements require an explicit reaching-state proof.
+                        match context.body[index]:
+                            Ast::Stmt.If(condition, yes, no, _):
+                                return false if no.count != 0 or yes.count != 1 or not proof_replay_expr_equal(condition, expected_guard)
+                                match yes[0]:
+                                    Ast::Stmt.Return(_, _):
+                                        guard_found <- true
+                                    _:
+                                        return false
+                            _:
+                                return false
+                    return guard_found
+                _:
+                    return false
