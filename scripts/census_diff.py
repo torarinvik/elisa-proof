@@ -10,7 +10,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from refusal_census import DEFAULT_WORKERS, run as run_census
+from refusal_census import DEFAULT_WORKERS, DOGFOOD_SOURCES, run as run_census, toolchain_identity
+from census_input_identity import input_identity
 
 RETRY_TIMEOUT_SECONDS = 600
 PERFORMANCE_RECHECK_COUNT = 2
@@ -86,6 +87,30 @@ def retry_timing_outliers(baseline, current, retry=run_census):
             print(f"census timing recheck: {name}: {timings} -> median {median_seconds:.2f}s")
 
 
+def live_census(baseline, scratch):
+    """Keep the initial run and subsequent retries on one source/product tuple."""
+    def paths():
+        return sorted((ROOT / "examples").glob("*.elisa")) + [ROOT / name for name in DOGFOOD_SOURCES]
+
+    initial_paths = paths()
+    initial_inputs = input_identity(initial_paths)
+    initial_toolchain = toolchain_identity()
+    subprocess.run([sys.executable, str(ROOT / "scripts/refusal_census.py"), str(scratch)],
+                   check=True, stdout=subprocess.DEVNULL)
+    current = json.loads((Path(scratch) / "census.json").read_text())
+    recorded = current.get("toolchain", {})
+    if (any(recorded.get(key) != value for key, value in initial_toolchain.items())
+            or recorded.get("census_input_sha256") != initial_inputs["sha256"]):
+        raise RuntimeError("initial census provenance differs from comparison inputs")
+    attach_measurements(current, Path(scratch) / "measurements.json")
+    retry_newly_unreadable(baseline, current)
+    retry_timing_outliers(baseline, current)
+    if (initial_paths != paths() or initial_inputs != input_identity(paths())
+            or initial_toolchain != toolchain_identity()):
+        raise RuntimeError("census sources or proof product changed during retries")
+    return current
+
+
 def main():
     # Optional arguments: BASELINE CURRENT census files, compared without rerunning (used by the tests).
     baseline = json.loads(Path(sys.argv[1] if len(sys.argv) > 2 else ROOT / "docs/census/census.json").read_text())
@@ -96,12 +121,11 @@ def main():
         current = json.loads(Path(sys.argv[2]).read_text())
     else:
         with tempfile.TemporaryDirectory() as scratch:
-            subprocess.run([sys.executable, str(ROOT / "scripts/refusal_census.py"), scratch], check=True,
-                           stdout=subprocess.DEVNULL)
-            current = json.loads((Path(scratch) / "census.json").read_text())
-            attach_measurements(current, Path(scratch) / "measurements.json")
-            retry_newly_unreadable(baseline, current)
-            retry_timing_outliers(baseline, current)
+            try:
+                current = live_census(baseline, scratch)
+            except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+                print(f"census provenance failure: {error}", file=sys.stderr)
+                sys.exit(2)
     regressions, gains = [], []
     baseline_unreadable = set(baseline.get("unreadable", []))
     for name in current.get("unreadable", []):

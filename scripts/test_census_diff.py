@@ -136,3 +136,48 @@ for input_count, expected_workers in ((0, 1), (1, 1), (5, 2)):
     ) as executor:
         retry_newly_unreadable(BASE, limited, lambda path, timeout: (path.name, None, timeout, "timeout"))
         executor.assert_called_once_with(max_workers=expected_workers)
+
+
+# The live comparison guard includes post-census retries, not just the first run.
+from unittest.mock import patch
+import census_diff
+from census_input_identity import input_identity
+
+with tempfile.TemporaryDirectory() as temporary:
+    root = Path(temporary)
+    (root / "examples").mkdir()
+    source = root / "examples/a.elisa"
+    scratch = root / "scratch"
+    scratch.mkdir()
+    for mode in ("stable", "source", "product", "recorded"):
+        source.write_text("initial\n")
+        product = {"proof_binary_sha256": "original"}
+
+        def initial_run(*args, **kwargs):
+            current = copy.deepcopy(BASE)
+            current["toolchain"] = dict(product,
+                census_input_sha256=input_identity([source])["sha256"])
+            if mode == "recorded":
+                current["toolchain"]["census_input_sha256"] = "wrong-inputs"
+            (scratch / "census.json").write_text(json.dumps(current))
+
+        def retries(*args):
+            if mode == "source":
+                source.write_text("changed by retry\n")
+            if mode == "product":
+                product["proof_binary_sha256"] = "replacement"
+
+        with patch.object(census_diff, "ROOT", root), \
+             patch.object(census_diff, "DOGFOOD_SOURCES", ()), \
+             patch.object(census_diff, "toolchain_identity", side_effect=lambda: dict(product)), \
+             patch.object(census_diff.subprocess, "run", side_effect=initial_run), \
+             patch.object(census_diff, "retry_newly_unreadable", side_effect=retries), \
+             patch.object(census_diff, "retry_timing_outliers"):
+            try:
+                current = census_diff.live_census(BASE, scratch)
+            except RuntimeError as error:
+                assert mode != "stable", str(error)
+            else:
+                assert mode == "stable", f"accepted changed provenance: {mode}"
+                assert current["proven"] == BASE["proven"]
+print("census diff: live input/product provenance spans initial run and retries")

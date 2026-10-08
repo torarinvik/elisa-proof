@@ -55,3 +55,10 @@ full-versus-compact refusal summaries and missing/null findings; cover direct,
 brace, cyclic and missing dependencies; and invoke the real census main path to
 confirm dependency mutation exits 2 without publishing a census. Complete memory
 and immutable compatibility acceptance remain open.
+
+The live `census_diff` path now captures input and product identities before the
+initial run, checks the published census identity, and rechecks after unreadable
+and timing retries. Changed inputs/products refuse comparison with exit 2. The
+existing offline two-report comparison remains available without executing proofs.
+`python3.14 scripts/test_census_diff.py` passes original comparison controls and
+new stable, mutated-source, replacement-product and mismatched-record cases.
