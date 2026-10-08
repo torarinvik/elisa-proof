@@ -19,6 +19,27 @@ The first two harness attempts failed on an inline darray argument that this
 compiler backend declined as an aggregate expression. Explicit typed argument
 arrays resolve that fixture construction issue. Logs are retained in
 `build/unsigned-subtraction-controls*.log`; the passing run is `-values.log`.
-The focused harness is registered in the integrated feature matrix. Clean paired
-build, original CLI regressions, engine inventory and full compatibility remain
-pending. Production prover is unchanged.
+The focused harness is registered in the integrated feature matrix.
+
+## Clean product qualification
+
+Source `5077910ccff0f90dc78f3d2f2e754bea634bfd84` builds both products cleanly
+in 44.98s at 3,116,320 KiB peak RSS under the unchanged 8 GiB / 600s budget.
+Pair generation: `6eb829755ac2493783f34e2f0ed58c67`. Both manifest source
+identities and actual binary hashes were verified; evidence is
+`build/unsigned-subtraction-product-identity.json` and
+`build/unsigned-subtraction-paired-build.log(.json)`.
+
+The original `scripts/test_return_branch_path_fact.py` now passes through the
+actual CLI. An uncached engine sweep retains all 73 reports / 4,277 obligations,
+including the mesh-shape additions, with independent replay and zero diagnostics,
+gaps or trusted assumptions. Main engine evidence:
+`build/validation/unsigned-subtraction-engine-inventory.json` and reports folder.
+
+Three broader original scripts remain failed on both this pair and the prior
+`452ab663` pair: counterexample domains sees compiler diagnostic 324 where its
+fixture expects only 322; disjunction-domain expects refusal for a now-proved
+fixture; strict-order-disequality's positive fixture is refused. Before/after
+logs are retained in `build/unsigned-subtraction-*.py.log`. These require
+classification against their contracts, not discarded assertions. Full
+compatibility and production promotion remain open; production is unchanged.
