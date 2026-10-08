@@ -103,3 +103,25 @@ the changed source: 89.39 seconds / 1,595,872 KiB under 3 GiB. It retains
 shadowed constants, nested redeclarations, stale loop bindings through a derived
 step or reused memo, and wrong-call precondition refusals. Evidence: engine
 `build/validation/typed-cast-scope-context-controls.log`.
+
+## Clean paired products for the typed initializer repair
+
+Source `fdc96e2e` produces clean paired generation
+`a0ea428da32c4674aa411bb4d0243540` in 62.76 seconds / 2,118,640 KiB RSS.
+Both manifests identify clean source and the same generation; actual binary
+hashes match. Engine evidence: `typed-cast-clean-pair-identity.json` and
+`typed-cast-clean-pair-build.log`.
+
+The existing widening product controls pass, including all 36 positive
+certificates and the original rejected conversion controls. Exported portable
+replay also independently replays all 36 theorems, with zero not replayed.
+Portable replay alone does not establish external source authentication.
+Evidence: `typed-cast-product-widening-controls.log`,
+`typed-cast-widening-package.json`, `typed-cast-widening-portable-replay.json`.
+
+The uncached engine sweep retains 73 reports / 4,246 original obligations, all
+proved, certified and independently replayed, with zero errors, diagnostics,
+gaps or trusted assumptions (2.31 seconds / 216,304 KiB RSS). Exact reports
+and inventory: `typed-cast-engine-reports/`, `typed-cast-engine-inventory.json`.
+Full matrix qualification and the two accepted symbolic bubble goals remain
+open; this focused qualification does not promote the production prover.
