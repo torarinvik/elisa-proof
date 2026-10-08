@@ -10,9 +10,48 @@
 #     consumer's own line is a loop-entry check and is not entered.
 extend ElisaProof:
     private:
+        def proof_replay_entry_count_old_name_clear(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, body, _, _, _):
+                        return false if name == "old" or any parameter in parameters where parameter.name == "old"
+                        return false if proof_replay_source_body_declares(declarations, body, "old")
+                    Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if name == "old"
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_entry_count_old_name_clear(nested, depth + 1)
+                    _:
+                        pass
+            return true
+
+        # Recognize only the source old-count snapshot in a postcondition. Other calls,
+        # explicit lends, moves and unsupported forms keep the ordinary conservative scan.
+        def proof_replay_entry_count_postcondition_written(declarations: darray[Ast::Decl]&, expression: Ast::Expr, name: sview, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_entry_count_postcondition_written(declarations, left, name, depth + 1) or proof_replay_entry_count_postcondition_written(declarations, right, name, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_entry_count_postcondition_written(declarations, inner, name, depth + 1)
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, _):
+                    if callee == "old" and arguments.count == 1 and (argument_names.count == 0 or (argument_names.count == 1 and argument_names[0] == "")):
+                        match arguments[0]:
+                            Ast::Expr.Field(Ast::Expr.Ident(parameter, _), field, _):
+                                if parameter == name and field == "count":
+                                    return not proof_replay_entry_count_old_name_clear(declarations, 0)
+                            _:
+                                pass
+                    return proof_replay_source_expr_touches(declarations, expression, name, true, depth + 1)
+                _:
+                    return proof_replay_source_expr_touches(declarations, expression, name, true, depth + 1)
+
         def proof_replay_entry_count_written(declarations: darray[Ast::Decl]&, statement: Ast::Stmt, name: sview, depth: usize) -> bool:
             return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match statement:
+                Ast::Stmt.Contract(kind, expression, _):
+                    return proof_replay_entry_count_postcondition_written(declarations, expression, name, depth + 1) if kind == "ensure" or kind == "ensures"
+                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0)
                 Ast::Stmt.Assign(Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _), _, value, _):
                     return proof_replay_source_statement_touches(declarations, statement, name, true, 0) if root != name
                     return proof_replay_source_expr_touches(declarations, index, name, true, 0) or proof_replay_source_expr_touches(declarations, value, name, true, 0)

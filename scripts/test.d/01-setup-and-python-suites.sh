@@ -2,6 +2,7 @@
 # Part 1 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
 python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/scripts/test_keep_going.py"
+python3 "$ROOT_DIR/scripts/tests/test_keep_going_parts.py"
 python3 "$ROOT_DIR/scripts/test_clang_resolution.py"
 python3 "$ROOT_DIR/scripts/test_compiler_selection.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
@@ -146,6 +147,11 @@ run_py_test test_certificate_reuse.py
 run_py_test test_measurements.py
 run_py_test tests/test_disjunction_work_accounting.py
 run_py_test test_source_admission_matrix.py
+run_py_test test_direct_api_semantic_admission.py
+run_py_test test_required_permission_api_admission.py
+run_py_test test_required_permission_cli_admission.py
+run_py_test test_required_permission_extra_routes.py
+run_py_test test_arithmetic_semantic_admission.py
 run_py_test test_negated_conjunction_fallthrough.py
 run_py_test test_or_chain_loop_update.py
 run_py_test test_correlated_disjunction.py
@@ -155,6 +161,8 @@ run_py_test test_parameter_heavy_return_analysis.py
 run_py_test test_numeric_cast_operator.py
 run_py_test test_rejected_numeric_cast_operator.py
 run_py_test test_widening_cast.py
+run_py_test test_widening_initializer_replay.py
+run_py_test test_cast_call_position_collision.py
 run_py_test test_cast_dispatch_soundness.py
 run_py_test test_call_result_width.py
 run_py_test test_adt_library.py
@@ -165,6 +173,9 @@ run_py_test test_chained_pure_calls.py
 run_py_test test_pure_postcondition_calls.py
 run_py_test test_pure_contract_summary_replay.py
 run_py_test test_dispatcher_budget.py
+run_py_test test_qualified_initializer_replay.py
+run_py_test test_mutable_qualified_assignment_replay.py
+run_py_test test_loop_canonical_witness_replay.py
 run_py_test test_qualified_constants.py
 run_py_test test_variant_exclusion.py
 run_py_test test_signed_upper_bound.py
@@ -189,9 +200,12 @@ run_py_test test_engine_state.py
 run_py_test test_explain.py
 run_py_test test_long_difference_chain.py
 run_py_test test_can_block_frame.py
+run_py_test test_can_block_binding_replay.py
 run_py_test test_collection_push_count.py
+run_py_test test_entry_count_binding_replay.py
 run_py_test test_collection_pop.py
 run_py_test test_collection_pop_value.py
+run_py_test test_pop_scalar_snapshot_replay.py
 run_py_test test_census_diff.py
 run_py_test test_refusal_census.py
 run_py_test test_body_ensures.py
@@ -217,6 +231,7 @@ run_py_test test_signed_division_boundaries.py
 run_py_test test_unsigned_u8_shift_boundaries.py
 run_py_test test_loop_state_joins.py
 run_py_test test_captured_loop_constants.py
+run_py_test test_captured_loop_initializer_replay.py
 run_py_test test_indexed_boolean_denial.py
 run_py_test test_counterexample_domains.py
 run_py_test test_build_runtime_inputs.py
@@ -356,6 +371,8 @@ if [[ "$assert_by_loop_compile_status" -ne 0 ]]; then
     printf 'proof test matrix failed: assert-by loop identity harness did not compile\n' >&2
     exit 1
 fi
+ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_witness_identity.py" || exit 1
+ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_entry_source_identity.py" || exit 1
 ELISA_COMPILER_BIN="$SELF_HOST_COMPILER" python3 "$ROOT_DIR/scripts/test_loop_invariants_compile.py" || exit 1
 kernel_runtime_inputs=()
 kernel_runtime_obj="${ELISA_RUNTIME_OBJ:-}"

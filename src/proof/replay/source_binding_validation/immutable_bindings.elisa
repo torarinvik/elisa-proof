@@ -1,5 +1,6 @@
 # Replay local facts from unique, immutable scalar declarations. This module admits only
-# source-exact initializers and the separately checked value-preserving widening-cast equation.
+# source-exact or independently authenticated constant-substituted initializers and the
+# separately checked value-preserving widening-cast equation.
 extend ElisaProof:
     private:
         def proof_replay_local_binding_immutable_integer_parameter(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> bool:
@@ -133,6 +134,38 @@ extend ElisaProof:
                 Ast::Expr.If(condition, then_expression, else_expression, _):
                     return false if not proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, depth + 1)
                     return proof_replay_local_binding_stable_initializer(then_expression, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(else_expression, target, declarations, owner, owner_line, depth + 1)
+                _:
+                    return false
+
+        # Authenticate constant substitution without treating producer normalization as source.
+        # Every changed leaf needs an independently replayed source constant declaration.
+        def proof_replay_local_binding_authenticated_initializer(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, target: sview, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            return true if proof_replay_expr_equal(source, expected) and proof_replay_local_binding_stable_initializer(source, target, report.source_declarations, trace.name, report.replay_owner_line, depth)
+            match source:
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    return proof_replay_summary_call_global_constant_matches(report, trace, source, expected)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_binding_authenticated_initializer(report, trace, inner, expected, target, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
+                    match expected:
+                        Ast::Expr.Binary(expected_left, expected_operator, expected_right, _):
+                            return operator == expected_operator and proof_replay_local_binding_authenticated_initializer(report, trace, left, expected_left, target, depth + 1) and proof_replay_local_binding_authenticated_initializer(report, trace, right, expected_right, target, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.Unary(TokenKind.Minus, inner, _):
+                    match expected:
+                        Ast::Expr.Unary(TokenKind.Minus, expected_inner, _):
+                            return proof_replay_local_binding_authenticated_initializer(report, trace, inner, expected_inner, target, depth + 1)
+                        _:
+                            return false
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    match expected:
+                        Ast::Expr.If(expected_condition, expected_then, expected_else, _):
+                            return proof_replay_expr_equal(condition, expected_condition) and proof_replay_local_binding_stable_condition(condition, target, report.source_declarations, trace.name, report.replay_owner_line, depth + 1) and proof_replay_local_binding_authenticated_initializer(report, trace, then_expression, expected_then, target, depth + 1) and proof_replay_local_binding_authenticated_initializer(report, trace, else_expression, expected_else, target, depth + 1)
+                        _:
+                            return false
                 _:
                     return false
 
@@ -372,7 +405,10 @@ extend ElisaProof:
             return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line == 0 or trace.line == 0
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(target, _), TokenKind.EqEq, Ast::Expr.Ident(receiver, _), _):
-                    return false if target == "" or receiver == "" or target == receiver or proof_internal_name_is_rebind(target) or proof_internal_name_is_rebind(receiver)
+                    return false if target == "" or receiver == "" or target == receiver or proof_internal_name_is_rebind(target)
+                    # A pattern payload has a reserved branch symbol. Validate it through the
+                    # exact source match arm before considering ordinary parameter receivers.
+                    return proof_replay_local_binding_match_widening_cast_source(report, trace, target, receiver, "") if proof_internal_name_is_rebind(receiver)
                     function_body: mutable darray[Ast::Stmt] = []
                     owner_matches: mutable usize = 0
                     proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
@@ -432,7 +468,7 @@ extend ElisaProof:
                             Ast::Stmt.VarDecl(name, type_expression, initializer, position):
                                 if name == target:
                                     declarations <- declarations + 1
-                                    valid <- position.line == trace.line and position.line <= report.trace_owner_line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression) and proof_replay_expr_equal(initializer, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0) and proof_replay_local_binding_stable_initializer(initializer, target, report.source_declarations, trace.name, report.replay_owner_line, 0)
+                                    valid <- position.line == trace.line and position.line <= report.trace_owner_line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0) and proof_replay_local_binding_authenticated_initializer(report, trace, initializer, source_value, target, 0)
                             _:
                                 pass
                     return declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target)

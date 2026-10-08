@@ -55,12 +55,25 @@ forge("float-signed-zero",
       lambda p: ([cmp(p, "==", deadzone, lit(p, "0.0"))],
                  neg(p, cmp(p, "==", deadzone, append_node(p, "unary", "-", lit(p, "0.0"))))))
 # Ordering is not total: not (x < 0.0) does not give x >= 0.0, nor trichotomy.
-forge("float-negated-order",
-      lambda p: ([neg(p, cmp(p, "<", deadzone, lit(p, "0.0")))], cmp(p, ">=", deadzone, lit(p, "0.0"))))
+for operator, complement in (("<", ">="), ("<=", ">"), (">", "<="), (">=", "<")):
+    for reversed_operands in (False, True):
+        def negated_order(p):
+            literal = lit(p, "0.0")
+            left, right = (literal, deadzone) if reversed_operands else (deadzone, literal)
+            return [neg(p, cmp(p, operator, left, right))], cmp(p, complement, left, right)
+        forge(f"float-negated-order-{operator}-{reversed_operands}", negated_order)
 forge("float-trichotomy",
       lambda p: ([], either(p, cmp(p, "<", deadzone, lit(p, "0.0")),
                             either(p, cmp(p, "==", deadzone, lit(p, "0.0")),
                                    cmp(p, ">", deadzone, lit(p, "0.0"))))))
+# Converse order implies the negation even for IEEE floats: a true order excludes NaN.
+for operator, converse in (("<", "<="), ("<=", "<"), (">", ">="), (">=", ">")):
+    for reversed_operands in (False, True):
+        def ordered_negation(p):
+            literal = lit(p, "0.0")
+            left, right = (literal, deadzone) if reversed_operands else (deadzone, literal)
+            return [cmp(p, converse, right, left)], neg(p, cmp(p, operator, left, right))
+        forge(f"float-ordered-negation-{operator}-{reversed_operands}", ordered_negation, accepted=True)
 # Rounding: 16777217.0 and 16777216.0 are one f32, so x == a does not refute x == b.
 forge("float-literal-rounding",
       lambda p: ([cmp(p, "==", deadzone, lit(p, "16777217.0"))],

@@ -14,6 +14,7 @@ run_py_test test_integer_disjunction_denial.py
 run_py_test test_disjunctive_syllogism.py
 run_py_test test_false_left_search.py
 run_py_test test_extern_effect_containment.py
+run_py_test test_global_mutable_grants.py
 run_py_test test_quantifier_dispatch.py
 run_py_test test_quantifier_endpoint_sorts.py
 run_py_test test_local_call_result_binding.py
