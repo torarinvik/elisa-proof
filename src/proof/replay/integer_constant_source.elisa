@@ -1,0 +1,81 @@
+# Source admission for integer-classification witnesses on opaque high-bit constants.
+extend ElisaProof:
+    private:
+        def proof_replay_integer_constant_lookup(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, wanted: darray[sview]&, current: darray[sview]&, name: sview, line: u32, depth: usize) -> (visible: bool, valid: bool, matches: usize):
+            return (true, false, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            visible: mutable bool = false
+            valid: mutable bool = false
+            matches: mutable usize = 0
+            for declaration in declarations |all_declarations, wanted, current, name, line, depth, visible, valid, matches|:
+                match declaration:
+                    Ast::Decl.Const(candidate, type_expression, initializer, is_mutable, position):
+                        if candidate == name and proof_replay_global_constant_scope_equal(wanted, current):
+                            visible <- true
+                            matches <- matches + 1
+                            valid <- false
+                            type_name: sview = match type_expression:
+                                Ast::Expr.Ident(primitive, _): primitive
+                                _: ""
+                            type_work: mutable usize = 0
+                            builtin: bool = proof_replay_scalar_copy_type_unshadowed(all_declarations, type_name, 0, &type_work)
+                            if not is_mutable and builtin and position.line == line and (type_name == "u64" or type_name == "usize"):
+                                valid <- match initializer:
+                                    Ast::Expr.IntLit(value, _): value < 0
+                                    _: false
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(current, module_name)
+                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, next_scope, name, line, depth + 1)
+                        visible <- visible or child.visible
+                        valid <- child.valid if child.visible
+                        matches <- matches + child.matches
+                    Ast::Decl.Scoped(body, _):
+                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, current, name, line, depth + 1)
+                        visible <- visible or child.visible
+                        valid <- child.valid if child.visible
+                        matches <- matches + child.matches
+                    _:
+                        pass
+            (visible, valid, matches)
+
+        def proof_replay_integer_constant_owner(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, scope: darray[sview]&, trace: ProofFactTrace, name: sview, owner_line: u32, depth: usize) -> (matches: usize, candidates: usize):
+            return (0, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            matches: mutable usize = 0
+            candidates: mutable usize = 0
+            for declaration in declarations |all_declarations, scope, trace, name, owner_line, depth, matches, candidates|:
+                match declaration:
+                    Ast::Decl.Func(owner, parameters, _, body, _, _, position):
+                        if owner == trace.name and position.line == owner_line:
+                            matches <- matches + 1
+                            continue if any parameter in parameters where parameter.name == name
+                            continue if proof_replay_source_body_declares(all_declarations, body, name)
+                            root_scope: darray[sview] = []
+                            found = proof_replay_integer_constant_lookup(all_declarations, all_declarations, scope, root_scope, name, trace.line, 0)
+                            if not found.visible and scope.count > 0:
+                                found <- proof_replay_integer_constant_lookup(all_declarations, all_declarations, root_scope, root_scope, name, trace.line, 0)
+                            candidates <- candidates + 1 if found.valid and found.matches == 1
+                    Ast::Decl.Module(module_name, body, _):
+                        next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(scope, module_name)
+                        child = proof_replay_integer_constant_owner(body, all_declarations, next_scope, trace, name, owner_line, depth + 1)
+                        matches <- matches + child.matches
+                        candidates <- candidates + child.candidates
+                    Ast::Decl.Scoped(body, _):
+                        child = proof_replay_integer_constant_owner(body, all_declarations, scope, trace, name, owner_line, depth + 1)
+                        matches <- matches + child.matches
+                        candidates <- candidates + child.candidates
+                    _:
+                        pass
+            (matches, candidates)
+
+        def proof_replay_integer_constant_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "type-bound" or report.replay_owner_line == 0
+            canonical: bool = match trace.expression:
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, names, _): callee == "__elisa_primitive_integer_type" and arguments.count == 1 and names.count == 0
+                _: false
+            return false if not canonical
+            marker = proof_marker_argument(trace.expression, "__elisa_primitive_integer_type")
+            return false if not marker.known
+            name: sview = proof_ident_name(marker.term)
+            return false if name == ""
+            root_scope: darray[sview] = []
+            owned = proof_replay_integer_constant_owner(report.source_declarations, report.source_declarations, root_scope, trace, name, report.replay_owner_line, 0)
+            owned.matches == 1 and owned.candidates == 1

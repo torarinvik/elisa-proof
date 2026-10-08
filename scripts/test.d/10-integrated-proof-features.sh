@@ -12,6 +12,7 @@ run_py_test test_typed_integer_summary_disjunction.py
 run_py_test test_typestate_resource_transition.py
 run_py_test test_integer_disjunction_denial.py
 run_py_test test_literal_count_denial_compile.py
+run_py_test test_integer_constant_source_compile.py
 run_py_test test_disjunctive_syllogism.py
 run_py_test test_false_left_search.py
 run_py_test test_extern_effect_containment.py

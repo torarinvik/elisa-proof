@@ -26,6 +26,29 @@ receivers, out-of-range node and exhausted depth. These classification controls 
 not replace public arena validation or establish malformed arena admission.
 The test is registered in the integrated feature matrix.
 
-A clean paired product build, original integer/float denial regressions, all 73
-engine reports and complete compatibility remain pending. Production prover is
-unchanged; this focused repair is not full release qualification.
+Clean source `1cfbe9883e2c5bc4bfed25a31cb72ea98dfe5b42` paired generation
+`a039d7c5c187463bbe74f577b6cb92a4` builds in 72.78 seconds at 1,513,376 KiB
+peak RSS under 8 GiB. Both manifests identify clean source and matching generation;
+actual executable hashes match. Identity evidence is in
+`build/literal-count-product-identity.json`.
+
+The original fixture proves/replays 18/18 through the source-backed product. Its
+exported package replays 18/18 through the paired portable product; that route
+retains its reported adapter trust boundary and does not authenticate source.
+Reports are `build/literal-count-report.json`, `build/literal-count-package.json`
+and `build/literal-count-portable-replay.json`.
+
+Original `test_integer_disjunction_denial.py`, `test_float_integer_bounds.py` and
+`test_indexed_boolean_denial.py` all exit zero with this actual product. Each
+subprocess exit was independently checked. All 73 uncached engine reports retain
+4,246 obligations with independent replay, zero diagnostics/gaps/trusted
+assumptions in 4.02 seconds at 131,376 KiB under 3 GiB. Engine inventory is
+`../elisa-engine/build/validation/literal-count-engine-inventory.json`.
+
+Complete compatibility remains open. The separate immutable `9db21d8e` census
+also stopped under explicit two-worker concurrency at 8,415,840 KiB after
+1,651.92 seconds under the original 8 GiB limit. It remains incomplete; the
+next diagnostic needs per-input RSS evidence.
+Production prover is unchanged; this focused repair is not full release
+qualification. Bundle this qualification note with the next source integration;
+do not create a documentation-only commit.
