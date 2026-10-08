@@ -15,6 +15,7 @@ run_py_test test_literal_count_denial_compile.py
 run_py_test test_integer_constant_source_compile.py
 run_py_test test_unsigned_subtraction_counterexample_compile.py
 run_py_test test_unsigned_literal_width_replay_compile.py
+run_py_test test_dispatcher_target_count_compile.py
 run_py_test test_disjunctive_syllogism.py
 run_py_test test_false_left_search.py
 run_py_test test_extern_effect_containment.py
