@@ -34,3 +34,24 @@ the surrounding kernel validation still checks serialized AST/kernel corresponde
 Paired producer/replayer build, the full original collection-frame regression and
 uncached engine sweep remain pending. Production prover promotion and full
 compatibility remain open. No proof obligation or adversarial refusal was removed.
+
+## Clean paired product qualification
+
+Source `364edfdb`, clean paired generation `25ee696e9c19461d927d8ff024dbaaac`,
+builds in 54.08s at 1,989,536 KiB RSS under the original 8 GiB limit.
+Both manifests identify clean source and the same generation; actual binary hashes
+match their manifests (`build/indexed-copy-equality-product-identity.json`).
+The portable replayer is unchanged and reused with the new paired manifest.
+
+`ELISA_PROOF_BIN=<generation>/elisa-proof python3.14 scripts/test_collection_frames.py`
+passes the complete original regression and its alias, stale count, count-indexed
+and budget refusal checks. The original positive fixture is now 80/80 proven and
+80/80 independently replayed with zero gaps. Exact JSON is retained in
+`build/indexed-copy-equality-collection-frames.json`.
+
+The uncached engine sweep passes all 73 reports / 4,246 obligations with zero
+semantic errors, diagnostics, gaps or trusted assumptions, in 2.33s at 183,616 KiB
+RSS under 3 GiB. Engine artifacts are in
+`../elisa-engine/build/validation/indexed-copy-equality-engine-reports/`, with
+`indexed-copy-equality-engine-inventory.json` and `indexed-copy-equality-engine-sweep.log`.
+Full prover compatibility and production promotion remain open.
