@@ -257,6 +257,7 @@ run_py_test test_pure_unfolding.py
 run_py_test test_struct_invariants.py
 run_py_test test_correspondence_partial_coverage.py
 run_py_test test_correspondence.py
+run_py_test test_correspondence_exclusive_refusal.py
 run_py_test test_tactic_branch_regions.py
 run_py_test test_vector_index_arithmetic.py
 run_py_test test_adt_recursive_payload.py
