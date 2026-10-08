@@ -24,9 +24,10 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
         original = (replay_file.parent / include).resolve()
         if original in private_helpers:
             source = original.read_text(encoding="utf-8")
-            private_label = "    private:"
-            if source.count(private_label) != 1:
-                raise AssertionError(f"expected one private section in {original}")
+            private_count = len(re.findall(r"^    private:$", source, re.MULTILINE))
+            extension_count = len(re.findall(r"^extend ElisaProof:\n    private:$", source, re.MULTILINE))
+            if private_count == 0 or private_count != extension_count:
+                raise AssertionError(f"expected private ElisaProof extensions in {original}")
             # These generated copies are used only by this standalone test executable. The real
             # source remains private, and the test-only visibility change is never linked into
             # either product binary.
@@ -38,7 +39,7 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
                 source,
                 flags=re.MULTILINE,
             )
-            generated.write_text(source.replace(private_label, "    public:", 1), encoding="utf-8")
+            generated.write_text(re.sub(r"^    private:$", "    public:", source, flags=re.MULTILINE), encoding="utf-8")
             original = generated
             copied_helpers.add(original.name)
         if not original.is_file():
