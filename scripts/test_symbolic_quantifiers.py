@@ -166,6 +166,24 @@ if data:
           "a covering fact past the scan limit was used")
 check(elapsed < 60, f"budget fixture took {elapsed:.1f}s")
 
+# Keep the current-only contract independent of unused old-count ghosts.
+# A write outside the retained range must not poison its source context.
+current_only = WORK / "current_only_narrow.elisa"
+current_only.write_text("""def narrow(xs: mutable darray[i64]&, lo: usize, n: usize) -> bool:
+    requires n <= xs.count
+    requires lo < n
+    requires forall i in lo..<n: xs[i] <= 5
+    ensures forall i in (lo + 1)..<n: xs[i] <= 5
+    xs[lo] <- 9
+    return true
+""")
+current_report = report(current_only)
+check(current_report is not None, "current-only narrowing produced no report")
+if current_report:
+    check(current_report["status"] == "proved", "current-only narrowing did not prove")
+    check(current_report["replay"] == {"certificates": 4, "replayed": 4, "gaps": 0},
+          "current-only narrowing retained an unreplayable entry-count ghost")
+
 if failures:
     for failure in failures:
         print("FAIL:", failure)
