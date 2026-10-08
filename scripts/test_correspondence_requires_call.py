@@ -97,6 +97,116 @@ zero_argument_bundle = package(zero_argument)
 zero_argument_report = correspond(zero_argument_bundle, zero_argument)
 assert function(zero_argument_report, "caller")["status"] == "checked", zero_argument_report
 
+# Signed integer literals in helper actuals and helper predicates include the valid
+# i64::MIN spelling. A second, explicit negation of that value remains refused.
+negative_arguments = write("negative_integer_helper_arguments", """module SignedArguments:
+    public:
+        def is_minus_one(value: i64) -> bool:
+            ensure result == (value == -1)
+            return value == -1
+
+        def negative_caller() -> bool:
+            requires SignedArguments::is_minus_one(-1)
+            ensure result
+            return true
+
+        def minimum_safe(value: i64) -> bool:
+            ensure result == (value == -9223372036854775807)
+            return value == -9223372036854775807
+
+        def boundary_caller() -> bool:
+            requires SignedArguments::minimum_safe(-9223372036854775807)
+            ensure result
+            return true
+
+        def accepts_any(value: i64) -> bool:
+            ensure result
+            return true
+
+        def minimum_caller() -> bool:
+            requires SignedArguments::accepts_any(-9223372036854775808)
+            ensure result
+            return true
+
+        def minimum_i64_suffix_caller() -> bool:
+            requires SignedArguments::accepts_any(-9223372036854775808i64)
+            ensure result
+            return true
+""")
+negative_bundle = package(negative_arguments)
+negative_report = correspond(negative_bundle, negative_arguments)
+assert negative_report["source_admissible"] is True, negative_report
+assert function(negative_report, "negative_caller")["status"] == "checked", negative_report
+assert function(negative_report, "boundary_caller")["status"] == "checked", negative_report
+assert function(negative_report, "minimum_caller")["status"] == "checked", negative_report
+assert function(negative_report, "minimum_i64_suffix_caller")["status"] == "checked", negative_report
+
+changed_min_owner_text = negative_arguments.read_text().replace(
+    "module SignedArguments:", "module DifferentOwner:").replace("SignedArguments::", "DifferentOwner::")
+changed_min_owner = write("minimum_changed_source_owner", changed_min_owner_text)
+changed_min_owner_report = correspond(negative_bundle, changed_min_owner)
+assert changed_min_owner_report["source_admissible"] is True, changed_min_owner_report
+assert function(changed_min_owner_report, "minimum_caller")["status"] != "checked", changed_min_owner_report
+
+# The identical MIN token is accepted only when the uniquely resolved owner has an
+# immutable i64 formal at this exact argument slot. A same-leaf u64 owner cannot lend
+# its signature to the signed-i64 interpretation.
+wrong_min_owner = write("minimum_wrong_owner_sort", """module SignedI64:
+    public:
+        def accepts_any(value: i64) -> bool:
+            ensure result
+            return true
+
+module UnsignedOwner:
+    public:
+        def accepts_any(value: u64) -> bool:
+            ensure result
+            return true
+
+module SignedOwnerCaller:
+    public:
+        def wrong_sort_caller() -> bool:
+            requires UnsignedOwner::accepts_any(-9223372036854775808)
+            ensure result
+            return true
+""")
+wrong_min_owner_bundle = package(wrong_min_owner)
+wrong_min_owner_report = correspond(wrong_min_owner_bundle, wrong_min_owner)
+assert wrong_min_owner_report["source_admissible"] is True, wrong_min_owner_report
+assert function(wrong_min_owner_report, "wrong_sort_caller")["status"] != "checked", wrong_min_owner_report
+
+# An explicit unsigned suffix remains unsigned even when the surrounding helper is
+# signed. Source semantic errors also refuse the package if the language rejects it.
+wrong_min_suffix = write("minimum_unsigned_suffix", """module SignedSuffix:
+    public:
+        def accepts_any(value: i64) -> bool:
+            ensure result
+            return true
+
+        def wrong_suffix_caller() -> bool:
+            requires SignedSuffix::accepts_any(-9223372036854775808u64)
+            ensure result
+            return true
+""")
+wrong_min_suffix_bundle = package(wrong_min_suffix)
+wrong_min_suffix_report = correspond(wrong_min_suffix_bundle, wrong_min_suffix)
+assert wrong_min_suffix_report["source_admissible"] is False or function(wrong_min_suffix_report, "wrong_suffix_caller")["status"] != "checked", wrong_min_suffix_report
+
+overflowing = write("nested_minimum_negation", """module SignedOverflow:
+    public:
+        def accepts_any(value: i64) -> bool:
+            ensure result
+            return true
+
+        def overflowing_caller() -> bool:
+            requires SignedOverflow::accepts_any(-(-9223372036854775808))
+            ensure result
+            return true
+""")
+overflowing_bundle = package(overflowing)
+overflowing_report = correspond(overflowing_bundle, overflowing)
+assert overflowing_report["source_admissible"] is False or function(overflowing_report, "overflowing_caller")["status"] != "checked", overflowing_report
+
 # Named arguments and mixed positional/named labels are refused by this exact
 # positional-only summary adapter. General source walking still reports the
 # parsed function independently; it must never silently reorder actuals.

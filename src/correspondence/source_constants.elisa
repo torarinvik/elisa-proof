@@ -38,9 +38,52 @@ struct CorrSourceConstants:
     enum_types: mutable darray[CorrSourceEnumType]
     type_names: mutable darray[CorrSourceTypeName]
     enum_members: mutable darray[CorrSourceEnumMember]
+    annotations: mutable darray[Ast::EnumAnnotation]
 
 def corr_source_constants_empty() -> CorrSourceConstants:
-    return CorrSourceConstants{entries: [], owner_segments: [], enum_types: [], type_names: [], enum_members: []}
+    return CorrSourceConstants{entries: [], owner_segments: [], enum_types: [], type_names: [], enum_members: [], annotations: []}
+
+def corr_source_annotation_owner_matches(annotation: Ast::EnumAnnotation, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize) -> bool:
+    return false if owner_start > owner_segments.count or owner_count > owner_segments.count - owner_start
+    # Parser side-table rows without a module are still tied to this exact token offset; the
+    # caller separately binds that AST node to its unique active owner.
+    return true if sview_len(annotation.module) == 0
+    annotated_owner: mutable darray[sview] = []
+    return false if not corr_source_module_path(annotation.module, &annotated_owner) or annotated_owner.count != owner_count
+    for part in 0..<owner_count |part, annotated_owner, owner_segments, owner_start|:
+        return false if annotated_owner[part] != owner_segments[owner_start + part]
+    return true
+
+def corr_source_signed_min_literal_supported(index: CorrSourceConstants&, position: Ast::Pos, expected_type: sview, owner_segments: darray[sview]&, owner_start: usize, owner_count: usize) -> bool:
+    # The direct MIN spelling is accepted only at a source call site whose uniquely resolved
+    # formal is i64. Any source-side sort marker at this exact token must agree; u64 or malformed
+    # annotation rows fail closed. The caller also checks the canonical owner and argument slot.
+    return false if expected_type != "i64"
+    return false if owner_start > owner_segments.count or owner_count > owner_segments.count - owner_start
+    suffix_matches: mutable usize = 0
+    annotation_index: mutable usize = 0
+    while annotation_index < index.annotations.count:
+        annotation: Ast::EnumAnnotation = index.annotations[annotation_index]
+        if annotation.owner == "__proof_int_type" and annotation.line == position.line and annotation.offset == position.offset:
+            return false if not corr_source_annotation_owner_matches(annotation, owner_segments, owner_start, owner_count)
+            return false
+        if annotation.owner == "__proof_numeric_suffix" and annotation.line == position.line and annotation.offset == position.offset:
+            suffix_matches <- suffix_matches + 1
+            return false if not corr_source_annotation_owner_matches(annotation, owner_segments, owner_start, owner_count)
+            return false if annotation.name != "9223372036854775808i64"
+        if annotation.owner == "__numeric_literal_sort":
+            return false if index.annotations.count - annotation_index < 3
+            column: Ast::EnumAnnotation = index.annotations[annotation_index + 1]
+            spelling: Ast::EnumAnnotation = index.annotations[annotation_index + 2]
+            return false if column.owner != "__numeric_literal_sort_column" or spelling.owner != "__numeric_literal_sort_text"
+            return false if column.name != annotation.name or spelling.line != annotation.line or sview_len(spelling.name) == 0
+            if annotation.line == position.line and column.line == position.column:
+                return false
+            annotation_index <- annotation_index + 3
+        else:
+            return false if annotation.owner == "__numeric_literal_sort_column" or annotation.owner == "__numeric_literal_sort_text"
+            annotation_index <- annotation_index + 1
+    return suffix_matches <= 1
 
 def corr_source_enum_value(expression: Ast::Expr) -> (known: bool, value: i64):
     match expression:
@@ -465,6 +508,7 @@ def corr_eval_source_constants(pool: mutable CorrPool&, expression: Ast::Expr, n
             spelled <- "not" if operator == TokenKind.Not
             return 0 if sview_len(spelled) == 0
             value: usize = corr_eval_source_constants(pool, operand, names, values, index, owner_segments, owner_start, owner_count, depth + 1)
+            return 0 if spelled == "-" and value > 0 and value < pool.terms.count and pool.terms[value].kind == "int" and pool.terms[value].value == -9223372036854775807 - 1
             return corr_unary(pool, spelled, value)
         Ast::Expr.Binary(left, operator, right, _):
             spelled: sview = corr_binary_operator(operator)
