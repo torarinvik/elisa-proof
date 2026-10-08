@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -144,7 +145,9 @@ else:
 if [ "$1" = "-smr" ]; then printf 'Linux fixture 1\\n'; else printf 'Linux\\n'; fi
 """)
     environment = dict(
-        os.environ,
+        # This synthetic checkout owns every toolchain input. Qualification
+        # overrides must not substitute a real product into the mock build.
+        {key: value for key, value in os.environ.items() if not key.startswith("ELISA_")},
         HOME=str(base / "home"),
         ELISA_COMPILER_BIN=str(wrapper),
         ELISA_COMPILER_SRC=str(compiler),
@@ -262,6 +265,20 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
             Path(self.temporary.name) / "installed", installed_snapshot=True,
         )
         self.assertEqual(installed_case["compiler"]["stage"], "stage1")
+
+    def test_mock_build_ignores_external_toolchain_overrides(self) -> None:
+        with patch.dict(os.environ, {
+            "ELISA_STAGE1_BIN": "/missing/external-stage1",
+            "ELISA_STAGE1_ROOT": "/missing/external-root",
+            "ELISA_COMPILER_ROOT": "/missing/external-compiler",
+            "ELISA_RUNTIME_OBJ": "/missing/external-runtime.o",
+            "ELISA_PROOF_PRODUCTS": "all",
+            "ELISA_PROOF_OUTPUT": "/missing/external-output",
+        }):
+            manifest = run_stage1_build(
+                Path(self.temporary.name) / "poisoned", installed_snapshot=False,
+            )
+        self.assertEqual(manifest["compiler"]["stage"], "stage1")
 
 
 class PinnedRecipeListTests(unittest.TestCase):
