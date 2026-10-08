@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from refusal_census import run as run_census
+from refusal_census import DEFAULT_WORKERS, run as run_census
 
 RETRY_TIMEOUT_SECONDS = 600
 PERFORMANCE_RECHECK_COUNT = 2
@@ -32,8 +32,9 @@ def retry_newly_unreadable(baseline, current, retry=run_census):
     previously_unreadable = set(baseline.get("unreadable", []))
     retry_names = [name for name in current.get("unreadable", []) if name not in previously_unreadable]
     sources = [ROOT / name if name.startswith("src/") else ROOT / "examples" / name for name in retry_names]
-    # Independent proof runs: retry them all at once rather than one 600 s timeout after another.
-    with ThreadPoolExecutor(max_workers=max(1, len(sources))) as pool:
+    # Honor the census worker limit during retries too: one worker per input
+    # can otherwise saturate the host and turn transient timeouts into failures.
+    with ThreadPoolExecutor(max_workers=max(1, min(DEFAULT_WORKERS, len(sources)))) as pool:
         attempts = list(pool.map(lambda source: retry(source, RETRY_TIMEOUT_SECONDS), sources))
     for name, (_, data, seconds, _) in zip(retry_names, attempts):
         if data is None:

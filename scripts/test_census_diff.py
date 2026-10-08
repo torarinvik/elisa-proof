@@ -123,3 +123,16 @@ new_unreadable_result = diff(new_input_unreadable)
 assert new_unreadable_result.returncode == 1
 assert "new.elisa: newly unreadable input" in new_unreadable_result.stderr
 print("census diff: proof/obligation drops, new gates, new unreadables, persistent 2x slowdowns fail; gains pass")
+
+# Retries must honor the configured census worker budget, including empty work.
+from unittest.mock import patch
+import census_diff
+
+for input_count, expected_workers in ((0, 1), (1, 1), (5, 2)):
+    limited = copy.deepcopy(BASE)
+    limited["unreadable"] = [f"retry-{i}.elisa" for i in range(input_count)]
+    with patch.object(census_diff, "DEFAULT_WORKERS", 2), patch.object(
+        census_diff, "ThreadPoolExecutor", wraps=census_diff.ThreadPoolExecutor
+    ) as executor:
+        retry_newly_unreadable(BASE, limited, lambda path, timeout: (path.name, None, timeout, "timeout"))
+        executor.assert_called_once_with(max_workers=expected_workers)
