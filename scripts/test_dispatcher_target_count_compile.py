@@ -16,6 +16,32 @@ prefix = template.split('extend ElisaProof:', 1)[0]
 prefix = prefix.replace('../../Elisa-compiler/', str(FRONTEND) + '/').replace('../src/', str(ROOT / 'src') + '/')
 harness = prefix + r'''extend ElisaProof:
     public:
+        def replacement_gate(mode: usize) -> i64:
+            position: Ast::Pos = Ast::pos_at_line(1)
+            call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("callee", position), [], [], position)
+            expression: Ast::Expr = Ast::Expr.Binary(call, TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+            facts: mutable darray[Ast::Expr] = []
+            report: mutable ProofReport = proof_empty_report()
+            parameter_names: darray[sview] = []
+            arguments: darray[Ast::Expr] = []
+            requires_ids: darray[usize] = []
+            proof_add_function_summary_fact(&facts, &report, expression, 1, "owner", "callee", parameter_names, arguments, call, requires_ids, 0, false, Ast::Expr.Absent, 1)
+            return 40 if facts.count != 1 or report.traces.records.count != 1
+            report.kernel.budget_exhausted <- true if mode == 1
+            report.traces.summary_names.resize(0) if mode == 2
+            if mode == 3 or mode == 4:
+                original: ProofFactTrace = report.traces.records[0]
+                report.traces.records[0] <- ProofFactTrace{expression: original.expression, kernel_expression: original.kernel_expression, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: 18446744073709551615 if mode == 3 else original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: 18446744073709551615 if mode == 4 else original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
+            proof_rebind_call_summaries(&facts, &report, call, "bound", 1, "owner", position)
+            return 41 if facts.count != 1
+            if mode != 0:
+                return 42 if not proof_expr_equal(facts[0], expression) or report.traces.records.count != 1
+            else:
+                expected: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("bound", position), TokenKind.GtEq, Ast::Expr.IntLit(0, position), position)
+                return 43 if not proof_expr_equal(facts[0], expected) or report.traces.records.count != 2
+                return 44 if not proof_expr_equal(report.traces.records[0].expression, expression)
+            0
+
         def target_count_gate() -> i64:
             table: mutable ProofFunctionTable = proof_empty_functions()
             table.names <- ["a", "b", "c", "d", "e", "caller"]
@@ -95,6 +121,9 @@ harness = prefix + r'''extend ElisaProof:
             0
 
 def main() -> i64:
+    for mode in 0..<5:
+        replaced: i64 = replacement_gate(mode)
+        return replaced if replaced != 0
     direct: i64 = target_count_gate()
     return direct if direct != 0
     positive: i64 = dispatcher_gate(__POSITIVE__, true)

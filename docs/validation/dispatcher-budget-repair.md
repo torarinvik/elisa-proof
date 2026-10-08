@@ -42,3 +42,19 @@ snapshot revision check were retained.
 The new dispatcher harness is registered in the integrated proof feature suite.
 A clean paired product, original CLI acceptance and engine inventory remain open.
 This is not full compatibility qualification or production promotion.
+
+## Replacement admission and parallel-pool ranges
+
+Follow-up source controls establish that a refused kernel encoding leaves the
+original live summary and trace unchanged. A successful replacement keeps only
+the bound live premise while retaining the original trace. The rebind helper now
+checks both names and values pools and uses subtraction-based ranges for binding
+and requires pools, preventing endpoint overflow before indexing.
+
+The original guards fail the new missing-name-pool control (gate exit 42) in
+`build/dispatcher-replacement-before.log`; source was restored immediately after
+this diagnostic. The repaired guards pass all five direct admission/range cases
+and the existing dispatcher/summary/cast controls in 14.86 seconds at
+1,726,880 KiB RSS (`build/dispatcher-replacement-boundaries.log`). Forged maximum
+binding/require starts are refused; kernel exhaustion preserves the old premise.
+Clean paired and full compatibility qualification remain pending.
