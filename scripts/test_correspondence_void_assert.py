@@ -54,4 +54,15 @@ assert report["source_admissible"] is True and report["package"]["status"] == "r
 assert (report["functions"][0]["status"], report["functions"][0]["reason"]) == (
     "unsupported", "return-type"), report
 
-print("implicit void assertions check; changed assertions and inferred value returns refuse")
+early = write("early_void", """def early(flag: bool) -> void:
+    ensure flag == flag
+    if flag:
+        return
+""")
+early_bundle = package(early)
+report = correspond(early_bundle, early, 0)
+assert report["source_admissible"] is True and report["package"]["status"] == "replayed", report
+entry = report["functions"][0]
+assert entry["status"] == "checked" and entry["obligations"] >= 2 and entry["matched"] == entry["obligations"], report
+
+print("assert-only and early void ensures check; changed assertions and inferred value returns refuse")
