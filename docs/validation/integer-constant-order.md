@@ -37,6 +37,26 @@ initializer, duplicate owner, primitive alias and mutable declaration. Canonical
 controls cover zero/two arguments, named argument and parenthesized callee; wrong
 owner refuses. The regression is registered in the integrated feature matrix.
 
-Clean paired product, actual CLI negative/reserved-name controls, portable replay,
-73-report engine inventory and full compatibility remain required. Production
-prover is unchanged. This note does not claim broader qualification.
+## Paired product evidence
+
+Clean source `452ab663` produced paired generation
+`cf8be5a1dc95437b8365038b580ad967` in 53.42 seconds at 3,058,048 KiB RSS.
+Both manifests identify the clean source; actual executable hashes match them
+(`build/integer-constant-product-identity.json`). The actual original fixture
+replays 23/23 certificates and retains all four positive declarations. Original
+integer-disjunction, float/integer-bound and indexed-boolean controls pass.
+The reserved-marker declaration is refused with `proof-internal-name`.
+A minimal positive public package independently replays 3/3 certificates; portable
+adapter replay does not establish source authentication.
+
+The engine's uncached inventory retains 73 reports / 4,246 obligations, zero
+errors, diagnostics, gaps or trusted assumptions, with independent replay
+(2.11 seconds / 204,064 KiB; engine
+`build/validation/integer-constant-engine-inventory.json`).
+
+The original return-branch regression script still fails: its strict-negative
+finding has status `timeout`, while the script requires `disproved` or `unknown`.
+Both the preceding literal-count pair and this pair have that same status. This
+is an open producer-budget defect or classification issue, not a passing original
+regression. Full compatibility and shared/native qualification remain required;
+production prover is unchanged.

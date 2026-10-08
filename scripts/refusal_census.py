@@ -30,8 +30,31 @@ def input_key(path):
     return path.name if relative.startswith("examples/") else relative
 
 
+def census_report(data):
+    """Retain census fields after the complete report has passed validation.
+
+    Completed worker futures can wait behind a slow input. Do not let those
+    futures retain certificate arenas, traces or source graphs for every input.
+    Presence (including explicit null) of finding fields is preserved because
+    the refusal and diagnostic buckets distinguish missing fields from null.
+    """
+    result = {
+        "status": data["status"],
+        "verification_state": data["verification_state"],
+        "summary": {key: data["summary"][key] for key in ("proven", "obligations")},
+        "findings": [
+            {key: finding[key] for key in ("refusal_gate", "kind", "message") if key in finding}
+            for finding in data["findings"]
+        ],
+    }
+    replay = data.get("replay")
+    if isinstance(replay, dict) and "gaps" in replay:
+        result["replay"] = {"gaps": replay["gaps"]}
+    return result
+
+
 def run(path, timeout):
-    """Return a parsed report, elapsed seconds and a stable failure category."""
+    """Return a validated census projection, elapsed seconds and failure category."""
     started = time.monotonic()
     try:
         result = subprocess.run(
@@ -60,7 +83,7 @@ def run(path, timeout):
             isinstance(finding, dict) for finding in data["findings"]
         ):
             return data_key(path), None, time.monotonic() - started, "invalid-findings"
-        return data_key(path), data, time.monotonic() - started, None
+        return data_key(path), census_report(data), time.monotonic() - started, None
     except subprocess.TimeoutExpired:
         return data_key(path), None, time.monotonic() - started, "timeout"
     except OSError:
