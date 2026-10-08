@@ -15,7 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
-from census_input_identity import input_identity
+from census_input_identity import compiler_export_digest, input_identity
 from report_cache import effective_cpus
 from report_exit_status import expected_exit as report_expected_exit
 
@@ -29,6 +29,37 @@ DEFAULT_WORKERS = int(os.environ.get("ELISA_PROOF_CENSUS_JOBS", "0")) or effecti
 def input_key(path):
     relative = path.relative_to(ROOT).as_posix()
     return path.name if relative.startswith("examples/") else relative
+
+
+def census_source_path(path):
+    configured = os.environ.get("ELISA_PROOF_CENSUS_SOURCE_ROOT")
+    if not configured:
+        return path
+    try:
+        relative = path.relative_to(ROOT)
+    except ValueError:
+        raise RuntimeError(f"census input is outside the configured source root: {path}")
+    return Path(configured).resolve() / relative
+
+
+def validate_census_source_root():
+    configured = os.environ.get("ELISA_PROOF_CENSUS_SOURCE_ROOT")
+    if configured:
+        source_root = Path(configured).resolve()
+        for directory in ("src", "examples"):
+            if (not (source_root / directory).is_dir()
+                    or tree_sha256(source_root / directory) != tree_sha256(ROOT / directory)):
+                raise RuntimeError(f"census snapshot {directory} does not match current proof inputs")
+        manifest = json.loads(Path(str(BINARY) + ".manifest.json").read_text())
+        compiler = manifest.get("compiler", {})
+        revision = manifest.get("frontend", {}).get("revision")
+        compiler_root = source_root.parent / "Elisa-compiler"
+        expected = compiler.get("source_tree_sha256")
+        if (not revision or revision != compiler.get("source_revision")
+                or (compiler_root / ".rev").read_text().strip() != revision
+                or not isinstance(expected, str) or len(expected) != 64
+                or compiler_export_digest(compiler_root) != expected):
+            raise RuntimeError("census compiler snapshot does not match the proof product provenance")
 
 
 def census_report(data):
@@ -59,7 +90,7 @@ def run(path, timeout):
     started = time.monotonic()
     try:
         result = subprocess.run(
-            [str(BINARY), "--json", str(path)],
+            [str(BINARY), "--json", str(census_source_path(path))],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -318,7 +349,8 @@ def main():
 
     try:
         identity = toolchain_identity()
-        dataset_identity = input_identity(paths)
+        validate_census_source_root()
+        dataset_identity = input_identity([census_source_path(path) for path in paths])
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
 
@@ -347,7 +379,8 @@ def main():
     try:
         final_identity = toolchain_identity()
         final_paths = sorted((ROOT / "examples").glob("*.elisa")) + dogfood
-        final_dataset_identity = input_identity(final_paths)
+        validate_census_source_root()
+        final_dataset_identity = input_identity([census_source_path(path) for path in final_paths])
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     if identity != final_identity:

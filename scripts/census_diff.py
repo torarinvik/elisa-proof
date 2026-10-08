@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from refusal_census import DEFAULT_WORKERS, DOGFOOD_SOURCES, run as run_census, toolchain_identity
+from refusal_census import DEFAULT_WORKERS, DOGFOOD_SOURCES, run as run_census, toolchain_identity, census_source_path, validate_census_source_root
 from census_input_identity import input_identity
 
 RETRY_TIMEOUT_SECONDS = 600
@@ -93,7 +93,8 @@ def live_census(baseline, scratch):
         return sorted((ROOT / "examples").glob("*.elisa")) + [ROOT / name for name in DOGFOOD_SOURCES]
 
     initial_paths = paths()
-    initial_inputs = input_identity(initial_paths)
+    validate_census_source_root()
+    initial_inputs = input_identity([census_source_path(path) for path in initial_paths])
     initial_toolchain = toolchain_identity()
     subprocess.run([sys.executable, str(ROOT / "scripts/refusal_census.py"), str(scratch)],
                    check=True, stdout=subprocess.DEVNULL)
@@ -105,7 +106,8 @@ def live_census(baseline, scratch):
     attach_measurements(current, Path(scratch) / "measurements.json")
     retry_newly_unreadable(baseline, current)
     retry_timing_outliers(baseline, current)
-    if (initial_paths != paths() or initial_inputs != input_identity(paths())
+    validate_census_source_root()
+    if (initial_paths != paths() or initial_inputs != input_identity([census_source_path(path) for path in paths()])
             or initial_toolchain != toolchain_identity()):
         raise RuntimeError("census sources or proof product changed during retries")
     return current

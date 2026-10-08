@@ -62,3 +62,28 @@ and timing retries. Changed inputs/products refuse comparison with exit 2. The
 existing offline two-report comparison remains available without executing proofs.
 `python3.14 scripts/test_census_diff.py` passes original comparison controls and
 new stable, mutated-source, replacement-product and mismatched-record cases.
+
+The identity walk uses breadth-first traversal with the importer's depth limit
+of 64 and a fail-closed 65,536-file identity budget. Beyond-depth dependencies
+are marked without reading them; independently selected roots still contribute
+their bytes. Targeted checks cover deep chains, an independently selected deep
+root and refusal at the file budget. This bounds provenance traversal without
+turning an incomplete digest into accepted evidence.
+
+## Pinned source execution
+
+The bounded runner accepts `--source-root build/snapshot/elisa-proof`; direct
+census and diff runs use `ELISA_PROOF_CENSUS_SOURCE_ROOT`. Reports retain their
+original census keys while actual input paths resolve inside the source snapshot.
+Before and after execution, snapshot `src` and `examples` must match live proof
+inputs. The adjacent `Elisa-compiler` export must match the paired manifest's
+frontend revision and Stage1 source/stdlib digest; symlinked compiler sources
+are refused. The complete resolved input dependency identity is also retained.
+
+The actual paired snapshot passes source/export admission. Focused acceptance
+passes mapping and stale proof-source, example, compiler-byte, revision and
+symlink refusals. The initial fixture assertion failed only because macOS
+canonicalizes `/var` to `/private/var`; the fixture now uses resolved paths.
+Both census check scripts pass with checked independent exit statuses. A full
+snapshot-backed census remains pending; the running earlier diagnostic uses
+live inputs and does not establish this acceptance.

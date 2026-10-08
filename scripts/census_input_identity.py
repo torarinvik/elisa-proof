@@ -1,4 +1,5 @@
 """Hash census input bytes and the textual include dependencies the checker reads."""
+from collections import deque
 import hashlib
 import os
 from pathlib import Path
@@ -7,6 +8,8 @@ import re
 # Mirrors proof_include_path: ordinary directives require a literal space after
 # include and a double-quoted argument; brace directives are case insensitive.
 ORDINARY = re.compile(r'^#?\s*include +\s*"(.*)"$', re.ASCII)
+INCLUDE_DEPTH_LIMIT = 64
+DEPENDENCY_FILE_LIMIT = 65536
 BRACED = re.compile(r'^\{\$\s*(include|i)\s+(.+)\}$', re.IGNORECASE | re.ASCII)
 
 
@@ -30,14 +33,19 @@ def input_identity(paths):
     the proof import resolver, so includes through symlink directories resolve
     from the source argument's directory rather than the physical target's.
     """
-    pending = [Path(os.path.abspath(path)) for path in paths]
+    pending = deque((Path(os.path.abspath(path)), 0) for path in paths)
     visited = set()
     files = {}
     while pending:
-        path = pending.pop()
+        path, depth = pending.popleft()
         if path in visited:
             continue
+        if len(visited) >= DEPENDENCY_FILE_LIMIT:
+            raise RuntimeError("census dependency identity exceeds its file budget")
         visited.add(path)
+        if depth > INCLUDE_DEPTH_LIMIT:
+            files[str(path)] = {"include_depth_limit": INCLUDE_DEPTH_LIMIT}
+            continue
         try:
             contents = path.read_bytes()
         except OSError as error:
@@ -50,13 +58,42 @@ def input_identity(paths):
             argument = include_argument(line.decode("latin-1"))
             if argument is not None and "\0" not in argument:
                 raw_path = os.fsdecode(argument.encode("latin-1"))
-                pending.append(Path(os.path.abspath(path.parent / raw_path)))
+                pending.append((Path(os.path.abspath(path.parent / raw_path)), depth + 1))
     digest = hashlib.sha256()
     for path, identity in sorted(files.items()):
         digest.update(os.fsencode(path) + b"\0")
         if "sha256" in identity:
             digest.update(b"file\0" + identity["sha256"].encode())
-        else:
+        elif "read_error" in identity:
             digest.update(b"missing\0" + str(identity["read_error"]).encode())
+        else:
+            digest.update(b"depth-limit\0" + str(identity["include_depth_limit"]).encode())
         digest.update(b"\0")
     return {"sha256": digest.hexdigest(), "files": files}
+
+
+def compiler_export_digest(root):
+    """Use Stage1's source/stdlib digest format for a pinned compiler export."""
+    paths = []
+    for name in ("src", "elisacore_std"):
+        directory = root / name
+        if not directory.is_dir() or directory.is_symlink():
+            raise RuntimeError(f"compiler snapshot directory is missing or linked: {directory}")
+        for parent, directories, files in os.walk(directory):
+            for child in directories + files:
+                path = Path(parent) / child
+                if path.is_symlink():
+                    raise RuntimeError(f"compiler snapshot contains a symbolic link: {path}")
+            paths.extend(Path(parent) / filename for filename in files)
+    if not paths:
+        raise RuntimeError("compiler snapshot has no source files")
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        if not path.is_file():
+            raise RuntimeError(f"compiler snapshot contains a non-file: {path}")
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1 << 20), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()

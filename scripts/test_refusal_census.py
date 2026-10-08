@@ -218,6 +218,24 @@ def input_closure_guard_test():
         leaf = root / "leaf.elisa"
         source.write_text('include "../leaf.elisa"\n')
         leaf.write_text('{$include examples/unit.elisa}\n')  # cycle remains bounded
+        chain = root / "chain"
+        chain.mkdir()
+        for index in range(66):
+            (chain / f"{index}.elisa").write_text(f'include "{index + 1}.elisa"\n')
+        bounded = input_identity([chain / "0.elisa"])
+        assert bounded["files"][str(chain / "65.elisa")] == {"include_depth_limit": 64}
+        assert str(chain / "66.elisa") not in bounded["files"]
+        # All roots start at depth zero: a deep dependency independently selected
+        # as an input still contributes its bytes and dependencies to the identity.
+        with patch("census_input_identity.DEPENDENCY_FILE_LIMIT", 2):
+            try:
+                input_identity([chain / "0.elisa"])
+            except RuntimeError as error:
+                assert "file budget" in str(error)
+            else:
+                raise AssertionError("dependency file budget was ignored")
+        independent = input_identity([chain / "0.elisa", chain / "65.elisa"])
+        assert "sha256" in independent["files"][str(chain / "65.elisa")]
         initial = input_identity([source])
         assert len(initial["files"]) == 2
         leaf.write_text('changed\n')
@@ -254,9 +272,67 @@ def input_closure_guard_test():
         assert not (output / "census.json").exists()
 
 
+def snapshot_source_test():
+    import shutil
+    from types import SimpleNamespace
+    from census_input_identity import compiler_export_digest
+    with tempfile.TemporaryDirectory() as temporary:
+        base = Path(temporary).resolve()
+        live = base / "live"
+        snapshot = base / "export/elisa-proof"
+        compiler = snapshot.parent / "Elisa-compiler"
+        for name in ("src", "examples"):
+            (live / name).mkdir(parents=True)
+            (live / name / "unit.elisa").write_text("initial\n")
+        shutil.copytree(live, snapshot)
+        for name in ("src", "elisacore_std"):
+            (compiler / name).mkdir(parents=True)
+            (compiler / name / "unit.elisa").write_text("compiler source\n")
+        (compiler / ".rev").write_text("rev123\n")
+        binary = base / "proof"
+        manifest = {"frontend": {"revision": "rev123"},
+                    "compiler": {"source_revision": "rev123",
+                                 "source_tree_sha256": compiler_export_digest(compiler)}}
+        Path(str(binary) + ".manifest.json").write_text(json.dumps(manifest))
+        with patch.object(refusal_census, "ROOT", live), \
+             patch.object(refusal_census, "BINARY", binary), \
+             patch.dict(os.environ, {"ELISA_PROOF_CENSUS_SOURCE_ROOT": str(snapshot)}):
+            refusal_census.validate_census_source_root()
+            assert refusal_census.census_source_path(live / "examples/unit.elisa") == snapshot / "examples/unit.elisa"
+            report = {"status": "proved", "verification_state": "proved",
+                      "summary": {"proven": 1, "obligations": 1},
+                      "replay": {"gaps": 0}, "findings": []}
+            with patch.object(refusal_census.subprocess, "run",
+                              return_value=SimpleNamespace(stdout=json.dumps(report), returncode=0)) as execute:
+                key, data, _, error = refusal_census.run(live / "examples/unit.elisa", 10)
+                assert key == "unit.elisa" and data == report and error is None
+                assert execute.call_args.args[0][-1] == str(snapshot / "examples/unit.elisa")
+            for target in (snapshot / "src/unit.elisa", snapshot / "examples/unit.elisa",
+                           compiler / "src/unit.elisa", compiler / ".rev"):
+                original = target.read_bytes()
+                target.write_bytes(original + b"changed\n")
+                try:
+                    refusal_census.validate_census_source_root()
+                except RuntimeError:
+                    pass
+                else:
+                    raise AssertionError(f"changed snapshot was accepted: {target}")
+                finally:
+                    target.write_bytes(original)
+            link = compiler / "src/linked.elisa"
+            link.symlink_to(compiler / "src/unit.elisa")
+            try:
+                refusal_census.validate_census_source_root()
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("linked compiler source was accepted")
+
+
 provenance_guard_test()
 subprocess_result_lattice_test()
 compact_report_test()
 input_closure_guard_test()
+snapshot_source_test()
 
 print("refusal census: deterministic counts, result/exit parity, dogfood inclusion, timings, and provenance guards")

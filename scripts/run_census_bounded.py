@@ -46,6 +46,8 @@ def stop(process):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--source-root", type=Path,
+                        help="use matching proof src/examples beside a pinned compiler export")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--rss-kb", type=int, default=8388608)
     parser.add_argument("--seconds", type=int, default=1800)
@@ -66,8 +68,11 @@ def main():
     by_pid = {}
     reason = "completed"
     with (output / "execution.log").open("wb") as log:
+        environment = dict(os.environ)
+        if args.source_root:
+            environment["ELISA_PROOF_CENSUS_SOURCE_ROOT"] = str(args.source_root.resolve())
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
-                                   start_new_session=True)
+                                   start_new_session=True, env=environment)
         try:
             while process.poll() is None:
                 sample = sample_processes(process.pid)
@@ -102,6 +107,7 @@ def main():
             if process.poll() is None:
                 stop(process)
             evidence = {
+                "source_root": environment.get("ELISA_PROOF_CENSUS_SOURCE_ROOT"),
                 "command": command, "status": process.returncode, "reason": reason,
                 "elapsed_seconds": round(time.monotonic() - started, 2),
                 "limit_rss_kb": args.rss_kb, "limit_seconds": args.seconds,
