@@ -8146,11 +8146,13 @@ The newest public Elisa-compiler main and installed Stage1 were verified at
 recorded in `LOCAL_CONTINUATION.md`. This supersedes the f992 compiler revision in §23.27.35 and
 the older Stage1-pending wording in §23.27.1.
 
-The latest proof implementation source is commit `716bedba`; the r15 recovery-documentation
-checkpoint sits on top and does not change that candidate. It contains the P0 direct-API
-source-goal binding candidate plus P1 indexed/global-reference grant controls. Static checks pass,
-but neither candidate has a fresh proof product or Stage1 runtime qualification. The saved r10
-executable is from parent proof checkpoint `d82d5814`; it is historical test evidence, not the
-current branch product. The separate matched compiler authority profile owns the Stage1 CPU slot.
-After release, qualify P0 first, then the grant controls and fresh replay; do not relabel
-source-only checks or profile progress as proof-product validation.
+The latest proof implementation source is commit `716bedba`; the current recovery checkpoint also
+fixes the direct-API harness so expected findings and grant diagnostics are checked for each of its
+17 invalid sources, not just the last loop iteration. This is test-only and does not alter the
+implementation candidate. The source candidate contains P0 direct-API source-goal binding plus P1
+indexed/global-reference grant controls. Static checks pass, but neither candidate has a fresh
+proof product or Stage1 runtime qualification. The saved r10 executable is from parent proof
+checkpoint `d82d5814`; it is historical test evidence, not the current branch product. The separate
+matched compiler authority profile owns the Stage1 CPU slot. After release, qualify P0 first,
+then the grant controls and fresh replay; do not relabel source-only checks or profile progress as
+proof-product validation.
