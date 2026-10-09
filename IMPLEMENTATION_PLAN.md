@@ -8100,9 +8100,9 @@ Next high-return work remains ordered by admission risk and reuse:
 1. **P0 — Qualify direct-API source-goal binding.** Run the parameter-return positive/open and
    mutation controls on newest Stage1, prove source/invariant failures are rejected on all three
    routes, and independently replay every positive certificate.
-2. **P1 — Broaden mutable-global grants.** Add indexed-target and mutable-reference acquisition
-   controls across CLI and direct API, then compare Stage0 and Stage1 diagnostics and inferred
-   effects.
+2. **P1 — Broaden mutable-global grants.** Indexed-target and mutable-reference acquisition
+   controls are drafted for CLI and all direct API routes; run them on newest Stage1, assert exact
+   missing-axis diagnostics, then compare Stage0 and Stage1 diagnostics and inferred effects.
 3. **P1 — Resume the kernel failure ledger.** Pick the next source/replay correspondence defect
    and add adversarial source and certificate mutations before expanding the matrix.
 4. **P2 — Keep proof performance work behind trust gates.** The latest combined full-source timing
@@ -8111,3 +8111,21 @@ Next high-return work remains ordered by admission risk and reuse:
    matched, and the freshness wrapper added about 131–140 ms on two small inputs. This isolates
    wrapper cost, not proof-checking or compiler-wide performance. Resume broader profiling only
    with an isolated, provenance-matched run after the trust gates.
+
+### 23.27.42 Indexed-target and mutable-reference Global grant controls (2026-10-09)
+
+The proof-consumer regression candidate now covers bounded fixed-array reads and writes to a
+global mutable value, plus acquisition of a mutable scalar reference to global storage. Positive
+cases carry the narrow explicit expression grants (Global.Read, Global.Write, or both).
+Negative controls retain only the opposite axis and require the exact missing effect and global
+name, preventing unrelated parse/type failures from satisfying the tests. The CLI suite covers
+function and module JSON routes; the direct-API harness covers proof_check, diagnostics, and
+focused diagnostics and replays positive certificates.
+
+This remains an unrun candidate while the compiler authority profile owns the shared Stage1 slot.
+Static checks pass for the new fixtures and harness changes, but do not establish Elisa type
+correctness, runtime admission, or grant diagnostic behavior. After the P0 direct-API source-goal
+candidate is qualified, run scripts/test_global_mutable_grants.py and
+scripts/test_direct_api_semantic_admission.py with the newest public Stage1, then compare exact
+diagnostic/effect results against the pinned Stage0 baseline. Keep this P1 open until all three
+entry points pass and the Stage0/Stage1 delta is explained.

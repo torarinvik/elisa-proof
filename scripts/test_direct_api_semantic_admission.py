@@ -29,15 +29,24 @@ invalid += (
     "global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Write]:\n    can Global{Write}:\n        return api_counter\n",
     "global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Read]:\n    can Global{Read}:\n        api_counter <- 1\n",
 )
+invalid += (
+    "global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> i64 can[Global.Write]:\n    requires index < 1\n    can Global{Write}:\n        return api_values[index]\n",
+    "global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> void can[Global.Read]:\n    requires index < 1\n    can Global{Read}:\n        api_values[index] <- 1\n",
+    "global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        borrowed: mutable i64& = &api_counter\n        return borrowed.i64()\n",
+    "global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Write]:\n    can Global{Write}:\n        borrowed: mutable i64& = &api_counter\n        return borrowed.i64()\n",
+)
 constants = "const VALID_API_SOURCE: sview = " + json.dumps(valid) + "\n"
 constants += "const REFINEMENT_API_SOURCE: sview = " + json.dumps('type Positive = i64 where self >= 0\ndef checked(value: Positive) -> i64:\n    ensure result >= 0\n    return value\n') + "\n"
 constants += "const MUTUAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/mutual_structural_decreases.elisa").read_text().replace("structural_even", "checked")) + "\n"
 constants += "const UNKNOWN_API_SOURCE: sview = " + json.dumps("def checked(value: bool) -> bool:\n    ensure result == true\n    value\n") + "\n"
 constants += "const GLOBAL_READ_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        return api_counter\n") + "\n"
 constants += "const GLOBAL_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        api_counter <- 1\n") + "\n"
+constants += "const GLOBAL_INDEXED_READ_API_SOURCE: sview = " + json.dumps("global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> i64 can[Global.Read]:\n    requires index < 1\n    can Global{Read}:\n        return api_values[index]\n") + "\n"
+constants += "const GLOBAL_INDEXED_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> void can[Global.Write]:\n    requires index < 1\n    can Global{Write}:\n        api_values[index] <- 1\n") + "\n"
+constants += "const GLOBAL_MUTABLE_REFERENCE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read, Global.Write]:\n    can Global{Read,Write}:\n        borrowed: mutable i64& = &api_counter\n        return borrowed.i64()\n") + "\n"
 constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
-constants += "const INVALID_API_SOURCES: sview[11] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
+constants += "const INVALID_API_SOURCES: sview[15] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
 harness = prefix + constants + r'''
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
@@ -112,20 +121,30 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     report: mutable ProofReport = proof_empty_report()
     diagnostics: mutable darray[Semantic::Diagnostic] = []
     for route in 0..<3 |route, source, report, diagnostics|:
-        for index in 0..<11 |index, route, source, report, diagnostics|:
+        for index in 0..<15 |index, route, source, report, diagnostics|:
             (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 170 if report.certificates.count == 0 or report.proven == 0
             (api_probe(INVALID_API_SOURCES[index], &source, &report, &diagnostics, route) can Global{Read,Write})
             return 171 if report.certificates.count != 0 or report.goal_attempts.count != 0 or report.proven != 0
             return 172 if report.source_declarations.count != 0 or report.traces.records.count != 0 or report.kernel.nodes.count != 0
             expected_kind: sview = "semantic-source-inadmissible" if index < 3 or index >= 7 else "arithmetic-safety-refuted"
-            return 173 if not any finding in report.findings where finding.kind == expected_kind
-            if route != 0 and (index < 3 or index >= 7):
-                return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
+        return 173 if not any finding in report.findings where finding.kind == expected_kind
+        if route != 0 and (index < 3 or index >= 7):
+            return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
+        if route != 0 and index >= 11:
+            expected_global_effect: sview = "Global.Read" if index == 11 or index == 14 else "Global.Write"
+            expected_global_name: sview = "api_values" if index == 11 or index == 12 else "api_counter"
+            return 199 if not any diagnostic in diagnostics where diagnostic.expected == expected_global_effect and diagnostic.actual == expected_global_name and Semantic::diagnostic_severity(diagnostic) == 1
         (api_probe(GLOBAL_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 195 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_INDEXED_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 196 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_INDEXED_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 197 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_MUTABLE_REFERENCE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 198 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 175 if report.certificates.count == 0 or report.failed != 0 or report.replay_gaps != 0
         (api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
@@ -157,4 +176,4 @@ run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Direct API semantic admission: mandatory errors clear proof state on all three routes; valid reuse replays")
+print("Direct API semantic admission: source-goal identity, Global grants, and reused-state clearing pass on all three routes")

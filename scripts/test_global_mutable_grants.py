@@ -36,7 +36,8 @@ def run(fixture, target, route):
 
 for route in ("function", "module"):
     for name in ("read_counter", "write_counter", "copy_counter", "shadow_counter",
-                 "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read"):
+                 "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read",
+                 "indexed_read", "indexed_write", "mutable_reference_acquisition"):
         code, report = run("global_mutable_grants.elisa", name, route)
         assert code == 0 and report["status"] == "proved", context(route, name, report)
         assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
@@ -44,11 +45,24 @@ for route in ("function", "module"):
     for name in ("missing_read", "missing_write", "write_only_reads",
                  "read_only_writes", "read_only_update",
                  "read_before_local_shadow", "read_after_block_shadow", "forward_missing_read",
-                 "signature_only_read", "signature_only_write"):
+                 "signature_only_read", "signature_only_write", "indexed_read_write_only",
+                 "indexed_write_read_only", "mutable_reference_read_only",
+                 "mutable_reference_write_only"):
         code, report = run("rejected_global_mutable_grants.elisa", name, route)
         assert code != 0 and report["status"] != "proved", context(route, name, report)
         assert report["summary"]["semantic_errors"] > 0, context(route, name, report)
         assert not any(d.get("name") == name and d.get("verified")
                        for d in report["declaration_details"]), context(route, name, report)
+        required = {
+            "indexed_read_write_only": ("Global.Read", "permission_values"),
+            "indexed_write_read_only": ("Global.Write", "permission_values"),
+            "mutable_reference_read_only": ("Global.Write", "permission_counter"),
+            "mutable_reference_write_only": ("Global.Read", "permission_counter"),
+        }.get(name)
+        if required is not None:
+            effect, global_name = required
+            assert any(d.get("severity") == 1 and d.get("expected") == effect
+                       and d.get("actual") == global_name
+                       for d in report["semantic_diagnostics"]), context(route, name, report)
 
 print("Global grants cover reads/writes separately; both report routes reject missing/wrong grants")

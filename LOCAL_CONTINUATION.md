@@ -1,10 +1,10 @@
-# Local continuation checkpoint — updated 2026-10-09, r12
+# Local continuation checkpoint — updated 2026-10-09, r13
 
 Checkpointed on 2026-10-09 so work can continue on the Mac without the Vast instance.
 
 ## Proof assistant checkout
 
-The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are now committed as a local checkpoint; they have passed static checks but still need the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r12.bundle`; its verified checksum is recorded in the recovery continuation file.
+The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are now committed as a local checkpoint; they have passed static checks but still need the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r13.bundle`; its verified checksum is recorded in the recovery continuation file.
 
 The migration covers 1,066 effectful call sites across 89 source files. Seven counter increments that both read and write globals now require `Global{Read,Write}`. The native Stage1 compiler strict check of the final candidate passed with exit code 0 and zero diagnostics. Qualification details and per-file SHA-256 values are in [global-grant-scope-qualification-2026-10-09.json](docs/evidence/global-grant-scope-qualification-2026-10-09.json).
 
@@ -23,6 +23,9 @@ Source its `toolchain.env.sh` before using that historical pinned pair. For curr
 The direct-API source-goal binding changes in this checkpoint passed `git diff --check`, Python
 bytecode compilation, and the source-length checker. Their final native Stage1 qualification is
 pending: the compiler authority-candidate benchmark still owns the shared local compiler slot.
+The next Global grant coverage increment is also prepared but unqualified: fixed-array indexed
+reads/writes and mutable-reference acquisition have positive and exact missing-axis controls for
+CLI JSON and all direct API routes. Do not count these as passing until the Stage1 runs complete.
 The proof harness to resume is:
 
 ```sh
