@@ -8010,6 +8010,14 @@ The repository's default `ELISA_COMPILER_REV` now points to this same compiler c
 against public `main`. Ordinary builds and harnesses that read the checked-in pin therefore use
 the qualified latest source instead of silently falling back to f992.
 
+The first fresh strict executable build did not emit an object: the backend declined the two
+`Semantic::check_full_into` calls in `src/proof/check/api.elisa` at lines 304 and 309. The current
+working-tree candidate adds the final `carrier_surface = false` argument required by the pinned
+compiler API signature. This is a diagnosis-based repair candidate, not a verified fix; rerun the
+strict build from the isolated snapshot, then compile and run the focused mutation, CLI, and API
+controls. Failure diagnostics and resource measurements are retained in
+`docs/evidence/focused-source-binding-2026-10-09/fresh-proof-build.{log,exit}`.
+
 The parser-template compiler change is now integrated at Elisa-compiler commit
 `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Its matched three-sample `-O3` comparison on the
 generated 2,000-install, no-template input measured 25.229 s baseline versus 0.183 s candidate
