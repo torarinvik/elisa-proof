@@ -7969,9 +7969,10 @@ Prioritize the remaining work by trust impact and expected reuse:
    run strict source checking, fresh object/executable production, CLI and direct API rejection
    controls for missing Global grants, and independent certificate replay. Record exact source,
    compiler, runtime, solver, and output hashes. Do not admit products on permissive-mode results.
-3. **P1 — Keep Global.Read/Write enforcement regression coverage paired.** Preserve positive and
-   negative read/write cases for direct variables, shadowing, indexed targets, and mutable-reference
-   acquisition; compare Stage0 and Stage1 outcomes and inferred effects.
+3. **P1 — Broaden Global.Read/Write enforcement coverage.** The proof API now enforces these
+   grants across CLI and direct-API routes, with direct-variable, local-shadowing, and wrong-grant
+   controls passing. Add proof-consumer cases for indexed targets and mutable-reference acquisition;
+   compare Stage0 and Stage1 outcomes and inferred effects.
 4. **P1 — Resume the ordered kernel matrix from its failure ledger.** Select the next shared
    source/effect-correspondence or replay defect, then add focused adversarial mutations and rerun
    the dependent matrix gates.
@@ -8046,20 +8047,15 @@ uses the fixture's actual unrequested-function name. The grant shadowing fixture
 postcondition outside the current bounded source-inventory subset, so it tests lexical shadowing
 without claiming unsupported source-goal coverage.
 
-The direct-API regression now includes positive Global.Read and Global.Write controls plus four
+The direct-API regression includes positive Global.Read and Global.Write controls plus four
 missing/wrong-grant sources for each of `proof_check`, `proof_check_with_semantic_diagnostics`,
-and `proof_check_focused_with_semantic_diagnostics`. The native harness compile exposed missing
-caller-side Global grants: the API now correctly carries those effects through helper functions.
-The harness and its reused loop-test prefix now use explicit expression grants at the call sites,
-and Stage1 compiled the corrected harness. Its first runtime pass cleared the route-0 invalid
-grant controls, then stopped because the positive assertion incorrectly required zero proof
-obligations; valid global accesses produce two proven resource-safety obligations. The assertion
-now requires all obligations proven, zero replay gaps, and no findings. Rerun after the concurrent
-compiler qualification releases the local slot, then close this gate only after all three API
-routes pass.
+and `proof_check_focused_with_semantic_diagnostics`. The native harness and its reused loop-test
+prefix use explicit expression grants at their call sites. The final Stage1 run passed on all three
+API routes: mandatory semantic errors clear reused proof state, valid read/write sources discharge
+all obligations, and certificate replay has no gaps. This closes the direct-API Global grant gate.
 
-For the next proof work, keep these trust gates first: (1) finish direct-API grant rejection and
-positive controls; (2) extend source-goal binding with mutation controls across CLI and direct API;
-(3) preserve strict fresh-build provenance and independent replay. Resume the ordered kernel matrix
-after those pass. Defer further performance tuning until the proof admission baseline is qualified;
-the handler-index candidate remains in its separate compiler checkout.
+Next, extend source-goal binding with mutation controls across CLI and direct API, then broaden the
+strict proof-consumer matrix to indexed global targets and mutable-reference acquisition. Continue
+recording fresh-build provenance and independent replay. Resume the ordered kernel matrix after
+those trust boundaries pass. Defer further performance tuning until the proof admission baseline is
+qualified; the handler-index candidate remains in its separate compiler checkout.
