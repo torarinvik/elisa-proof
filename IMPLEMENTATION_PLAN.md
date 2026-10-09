@@ -8059,3 +8059,34 @@ strict proof-consumer matrix to indexed global targets and mutable-reference acq
 recording fresh-build provenance and independent replay. Resume the ordered kernel matrix after
 those trust boundaries pass. Defer further performance tuning until the proof admission baseline is
 qualified; the handler-index candidate remains in its separate compiler checkout.
+
+### 23.27.40 Parameter-return source-goal coverage on local Stage1 (2026-10-09)
+
+The bounded source-derived postcondition inventory now accepts a prefix of `requires` clauses,
+one `ensure`/`ensures`, and a direct return of a uniquely declared parameter. For `result == n`
+and `n == result`, it derives the substituted parameter equality and checks both the report's
+goal attempt and its replay certificate against the source literal and side ordering. A matching
+unproven attempt without a certificate remains a supported open goal; mismatched source goals and
+fabricated certificates are rejected. The inventory remains explicitly partial and bounded.
+
+Validation used the newest public Elisa Stage1, `8f2023ce8a7d52358b733a0e812ff46293d45f10`.
+The fresh strict proof product passes focused parameter-return success and open-goal controls,
+whole-source JSON admission, the native inventory mutation harness, Global.Read/Write CLI
+controls, and the three-route direct-API semantic-admission suite. Proven controls replay all
+certificates with zero gaps. The build manifest and test evidence are retained under
+`../vast-recovery-2026-10-09/proof-source-binding-parameter-20261009-r1/`.
+
+Next high-return work remains ordered by admission risk and reuse:
+
+1. **P0 — Extend source-goal identity controls through direct API entry points.** Add parameter-
+   return positive, open, source-mutation, attempt-forgery, and certificate-forgery cases for
+   `proof_check`, diagnostics, and focused diagnostics; require rejection before an accepted
+   report escapes and independently replay every positive certificate.
+2. **P1 — Broaden mutable-global grants.** Add indexed-target and mutable-reference acquisition
+   controls across CLI and direct API, then compare Stage0 and Stage1 diagnostics and inferred
+   effects.
+3. **P1 — Resume the kernel failure ledger.** Pick the next source/replay correspondence defect
+   and add adversarial source and certificate mutations before expanding the matrix.
+4. **P2 — Keep performance work behind the trust gates.** The latest combined six-run full-source
+   timing is observational only because proof object compilers overlapped the measurements; retain
+   no speed claim from those samples. Resume only with an isolated, provenance-matched run.
