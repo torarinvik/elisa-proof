@@ -8115,12 +8115,20 @@ Next high-return work remains ordered by admission risk and reuse:
 ### 23.27.42 Indexed-target and mutable-reference Global grant controls (2026-10-09)
 
 The proof-consumer regression candidate now covers bounded fixed-array reads and writes to a
-global mutable value, plus acquisition of a mutable scalar reference to global storage. Positive
-cases carry the narrow explicit expression grants (Global.Read, Global.Write, or both).
-Negative controls retain only the opposite axis and require the exact missing effect and global
-name, preventing unrelated parse/type failures from satisfying the tests. The CLI suite covers
-function and module JSON routes; the direct-API harness covers proof_check, diagnostics, and
-focused diagnostics and replays positive certificates.
+global mutable value, reading a second mutable global from an indexed assignment's subscript,
+and acquisition of a mutable scalar reference to global storage. Positive cases carry the narrow
+explicit expression grants (Global.Read, Global.Write, or both). Negative controls retain only
+the opposite axis and require the exact missing effect and global name, preventing unrelated
+parse/type failures from satisfying the tests. The CLI suite covers function and module JSON
+routes; the direct-API harness covers proof_check, diagnostics, and focused diagnostics and
+replays positive certificates. The global-subscript positive isolates semantic grant acceptance
+even if its dynamic-index proof obligation remains open.
+
+The Stage0 source comments in Elisa-compiler's check_global_permissions.elisa record that a
+mutable global read occurring only inside an indexed assignment target was under-inferred;
+Stage1's check_global_authority.elisa traverses the index expression separately. Treat the
+resulting Stage0/Stage1 effect difference as a specific parity item to measure and explain, not as
+a reason to weaken Stage1 admission.
 
 This remains an unrun candidate while the compiler authority profile owns the shared Stage1 slot.
 Static checks pass for the new fixtures and harness changes, but do not establish Elisa type

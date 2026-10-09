@@ -37,8 +37,14 @@ def run(fixture, target, route):
 for route in ("function", "module"):
     for name in ("read_counter", "write_counter", "copy_counter", "shadow_counter",
                  "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read",
-                 "indexed_read", "indexed_write", "mutable_reference_acquisition"):
+                 "indexed_read", "indexed_write", "indexed_write_reads_mutable_global_index",
+                 "mutable_reference_acquisition"):
         code, report = run("global_mutable_grants.elisa", name, route)
+        if name == "indexed_write_reads_mutable_global_index":
+            # This control isolates semantic grants even if the independent proof checker cannot
+            # yet close the dynamic-index safety obligation for a mutable global index.
+            assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
+            continue
         assert code == 0 and report["status"] == "proved", context(route, name, report)
         assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
 
@@ -46,7 +52,8 @@ for route in ("function", "module"):
                  "read_only_writes", "read_only_update",
                  "read_before_local_shadow", "read_after_block_shadow", "forward_missing_read",
                  "signature_only_read", "signature_only_write", "indexed_read_write_only",
-                 "indexed_write_read_only", "mutable_reference_read_only",
+                 "indexed_write_read_only", "indexed_target_missing_index_read",
+                 "indexed_target_missing_root_write", "mutable_reference_read_only",
                  "mutable_reference_write_only"):
         code, report = run("rejected_global_mutable_grants.elisa", name, route)
         assert code != 0 and report["status"] != "proved", context(route, name, report)
@@ -56,6 +63,8 @@ for route in ("function", "module"):
         required = {
             "indexed_read_write_only": ("Global.Read", "permission_values"),
             "indexed_write_read_only": ("Global.Write", "permission_values"),
+            "indexed_target_missing_index_read": ("Global.Read", "permission_index"),
+            "indexed_target_missing_root_write": ("Global.Write", "permission_values"),
             "mutable_reference_read_only": ("Global.Write", "permission_counter"),
             "mutable_reference_write_only": ("Global.Read", "permission_counter"),
         }.get(name)
