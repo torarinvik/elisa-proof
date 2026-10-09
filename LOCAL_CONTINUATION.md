@@ -1,12 +1,12 @@
-# Local continuation checkpoint — updated 2026-10-09, r16
+# Local continuation checkpoint — updated 2026-10-10, r17
 
 Checkpointed on 2026-10-09 so work can continue on the Mac without the Vast instance.
 
 ## Proof assistant checkout
 
-The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are committed locally; the harness now checks the expected finding and exact grant diagnostic for every invalid source rather than only the final loop case. Static checks pass, but the candidate still needs the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r16.bundle`; its verified checksum is recorded in the recovery continuation file.
+The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are committed locally; the harness now checks the expected finding and exact grant diagnostic for every invalid source rather than only the final loop case. Static checks pass, but the candidate still needs the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r17.bundle`; its verified checksum is recorded in the recovery continuation file.
 
-The latest proof implementation source is commit `716bedba`; the r16 checkpoint adds the direct-API harness correction without changing that source candidate. The candidate source and indexed/global-reference grant controls remain unqualified on Stage1. The installed newest Stage1 and matching runtime are already on this Mac, and the separate compiler authority profile is still using the local Stage1 CPU slot. SSH retries from this checkpoint received a closed connection from the original Vast endpoint and a refused connection from the replacement, so no additional remote files were recovered.
+The latest proof implementation source is commit `716bedba`; the r17 checkpoint adds profile-result documentation without changing that source candidate. The candidate source and indexed/global-reference grant controls remain unqualified on Stage1. The installed newest Stage1 and matching runtime are already on this Mac. The authority profile completed with 21/21 samples and three instrumented captures, but the candidate showed no robust speedup and remains disabled. The compiler coordinator's parser A/B seed now owns the serial Stage1 slot. One direct-API harness build was started after the authority agent's release message, then terminated as soon as the coordinator reserved the slot; it produced no test result. SSH retries from this checkpoint received a closed connection from the original Vast endpoint and a refused connection from the replacement, so no additional remote files were recovered.
 
 The migration covers 1,066 effectful call sites across 89 source files. Seven counter increments that both read and write globals now require `Global{Read,Write}`. The native Stage1 compiler strict check of the final candidate passed with exit code 0 and zero diagnostics. Qualification details and per-file SHA-256 values are in [global-grant-scope-qualification-2026-10-09.json](docs/evidence/global-grant-scope-qualification-2026-10-09.json).
 
@@ -24,7 +24,7 @@ Source its `toolchain.env.sh` before using that historical pinned pair. For curr
 
 The direct-API source-goal binding changes in this checkpoint passed `git diff --check`, Python
 bytecode compilation, and the source-length checker. Their final native Stage1 qualification is
-pending: the compiler authority-candidate benchmark still owns the shared local compiler slot.
+pending: the compiler coordinator's parser A/B seed owns the shared local compiler slot.
 The next Global grant coverage increment is also prepared but unqualified: fixed-array indexed
 reads/writes, a mutable-global index expression, and mutable-reference acquisition have positive
 and exact missing-axis controls for CLI JSON and all direct API routes. The dynamic global-index

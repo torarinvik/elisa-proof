@@ -8153,6 +8153,26 @@ implementation candidate. The source candidate contains P0 direct-API source-goa
 indexed/global-reference grant controls. Static checks pass, but neither candidate has a fresh
 proof product or Stage1 runtime qualification. The saved r10 executable is from parent proof
 checkpoint `d82d5814`; it is historical test evidence, not the current branch product. The separate
-matched compiler authority profile owns the Stage1 CPU slot. After release, qualify P0 first,
-then the grant controls and fresh replay; do not relabel source-only checks or profile progress as
-proof-product validation.
+matched authority profile is complete, while a separate parser A/B seed now owns the Stage1 CPU
+slot. A direct-API harness build briefly started after the profile agent's release message, then
+was terminated when the compiler coordinator reserved the serial window; it produced no test
+result. After the parser seed releases the slot, qualify P0 first, then the grant controls and fresh
+replay; do not relabel source-only checks or profile progress as proof-product validation.
+
+### 23.27.44 Matched authority profile result and current serial gate (2026-10-10)
+
+The compiler authority-invocation profile completed and passed all 21 headline rows, three
+warmups, and three instrumented captures. Source/product/toolchain fingerprints were unchanged
+and ordered normalized diagnostics matched. The same-product OFF-to-ON median changed from
+53.436 to 52.805 seconds wall time (1.18%) and 52.898 to 52.289 CPU seconds (1.15%). The ranges
+overlap, the ON mean is higher, and host load/timestamps were not recorded; this does not establish
+a robust speedup. Keep the candidate disabled and make no speedup claim. The exact source and
+profile evidence are archived under `../vast-recovery-2026-10-09/`; the compiler candidate commit
+is `61572df5`.
+
+The local Stage1 CPU slot is currently reserved for the compiler coordinator's parser A/B seed.
+Keep proof builds paused until its explicit release. Then run the direct-API source-goal and Global
+grant harnesses, build a fresh strict proof product from the latest public Stage1, and run the
+report-inventory, CLI-grant, and independent replay gates. The initial direct-API harness attempt
+was stopped as soon as this serial reservation was announced; its termination is not a test
+failure or pass.
