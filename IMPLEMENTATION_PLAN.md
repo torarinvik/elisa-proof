@@ -7975,10 +7975,11 @@ Prioritize the remaining work by trust impact and expected reuse:
 4. **P1 — Resume the ordered kernel matrix from its failure ledger.** Select the next shared
    source/effect-correspondence or replay defect, then add focused adversarial mutations and rerun
    the dependent matrix gates.
-5. **P2 — Qualify compiler performance experiments only after trust gates.** The parser-template
-   draft has alternating A/B measurements and matching negative controls, but candidate non-parser
-   phases are also substantially faster. Verify binary provenance and exact build options before
-   attributing any speedup or integrating it. Preserve the evidence as unqualified until then.
+5. **P2 — Extend compiler performance evidence after trust gates.** The parser-template change
+   now has a matched, provenance-recorded three-sample A/B with matching negative controls and
+   is integrated at compiler commit `8f2023ce`. It measures about 138x faster on the generated
+   2,000-install, no-template workload; retain that narrow scope and measure ordinary and
+   template-heavy inputs before drawing broader conclusions.
 
 The current local checkpoint and toolchain are recorded in
 `../vast-recovery-2026-10-09/LOCAL-COMPUTE-CONTINUATION-20261009.md`. The parser candidate is
@@ -7994,13 +7995,15 @@ accepting an empty inventory. Native harness and CLI regressions cover a support
 function, an unsupported unrelated function, an unsupported selected function, and forged
 attempt/certificate goals.
 
-This candidate is **not yet compiler-qualified**. Python syntax, shell syntax, and `git diff
---check` passed, but an attempted strict check compiled through the live sibling compiler tree
-and failed in that unrelated dirty checkout; it provides no result for this source. The log and
-scope explanation are archived under `docs/evidence/focused-source-binding-2026-10-09/`. Resume
-with `scripts/compiler_snapshot.sh` pinned to Elisa-compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`
-and its matching installed Stage1/runtime, then run strict source checking before fresh product
-builds and focused native tests.
+The candidate passes strict source checking with Elisa-compiler
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`: the isolated `build/snapshot` check exited 0 with
+zero diagnostics in 39.51 seconds and peaked at about 1.52 GiB RSS. Python syntax, shell syntax,
+and `git diff --check` also passed. This qualifies source checking only; fresh executable
+production, the native mutation harness, and focused CLI/API controls are still open. An earlier
+direct check resolved through the live sibling compiler tree and failed in that unrelated dirty
+checkout; it is retained as invalid evidence beside the passing run under
+`docs/evidence/focused-source-binding-2026-10-09/`. Use the isolated snapshot and matching
+Stage1/runtime for the remaining gates.
 
 The parser-template compiler change is now integrated at Elisa-compiler commit
 `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Its matched three-sample `-O3` comparison on the
