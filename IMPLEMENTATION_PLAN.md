@@ -8261,3 +8261,29 @@ claiming current performance. The separate install-index candidate `38ef465` als
 before measuring or adopting it. The install-index candidate currently owns the shared Stage1 slot;
 preserve the work and await explicit release before any proof build. P0 source-goal and Global grant
 runtime qualification remains the next proof-side action.
+
+### 23.27.48 Install-index A/B complete; preserve current-source qualification order (2026-10-10)
+
+The handler-install-index candidate completed one warmup and three randomized measured pairs on
+`handler_identity_2000_repeated_install.elisa` (2,000 handlers and 2,000 install clauses). Every
+pair exited successfully and baseline/candidate stdout and stderr hashes matched. Median wall time
+was 99.982 seconds for baseline and 98.263 seconds for candidate (1.72% lower); median child CPU
+was 98.925 and 96.815 seconds (2.13% lower). This is a small, workload-specific signal from one
+stress fixture, not a general compiler speed claim.
+
+The candidate source is `38ef4659e17e2b1a4112dc98b9b5c546de1638f2`, based on `b11e9121`, while
+the current public Elisa-compiler `main` and repository pin both remain
+`8f2023ce8a7d52358b733a0e812ff46293d45f10` (rechecked with `git ls-remote` on 2026-10-10).
+Elisa-core Stage0 `main` and `ELISA_STAGE0_REV` both remain
+`ef04267d736eae492c05a023182f6b08f74441a9`. The candidate therefore still needs to be ported to
+the current compiler source and requalified before adoption. Its portable source bundle restores
+at the exact candidate commit; the preserved source, products, inputs and raw paired results are
+recorded in the local recovery continuation.
+
+Keep the high-ROI sequence unchanged: first wait for the compiler coordinator's explicit Stage1
+release, build the proof from the newest pinned compiler, and qualify direct-API source-goal
+binding plus CLI/API Global.Read/Write enforcement. Then resume the ordered kernel failure ledger.
+Only after those trust gates should current-source performance candidates be compared. The
+coordinator reports a separate 40-pair template-registration rerun with matching expected exits and
+outputs, but its source lineage and Rust/Zig comparison are still being checked; treat its timings
+as preliminary until the candidate source and complete evidence are verified.
