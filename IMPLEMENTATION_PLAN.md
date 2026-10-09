@@ -8234,3 +8234,30 @@ coordinator has reserved the Stage1 slot for template-registration and install-i
 work. After explicit release, use the clean pinned compiler source snapshot at
 `8f2023ce8a7d52358b733a0e812ff46293d45f10` and run the fresh strict build, CLI controls, and
 three-route direct-API harness before closing P1.
+
+### 23.27.47 Template-registration candidate: strong workload-specific result, qualification open (2026-10-10)
+
+The saved seven-pair randomized template-registration comparison is available at
+`~/.codex/benchmark-results/elisa-template-registration/summary-ab-r1/analysis.json`. It compares
+the baseline Stage1 at compiler commit `b11e9121` with candidate commit `cd53c87b`, using products
+whose seed provenance, source-tree digests, runtime, and LLVM inputs all validate. Per-pair stdout
+and stderr hashes match on all five workloads. Median wall time fell 53.90% for 2,048 ordinary
+declarations with 16 installs, 14.04% for 128 templates/16 installs, 8.08% for 512 declarations/16
+installs, and 6.13% for 2,048 declarations/one install. The 2,048-declaration no-install control
+stayed within 0.13% wall time and retained its expected diagnostic. This is promising evidence for
+install-heavy parsing, not a general compiler speedup.
+
+The candidate change removes an unused `declarations` capture from the parser's effect-install
+loop. The measurements completed, but the runner currently marks the expected no-install exit code
+1 as a failure because its expected-status bookkeeping is incomplete. Keep the comparison
+unqualified until the runner records that control as an expected negative and the full parity gate
+reports terminal success. The comparison source commits `b11e9121` and `cd53c87b` both predate the
+current public main and repository pin `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Its seed
+bootstrap was current, but the measured compiler source was not; retain the numbers as historical
+workload evidence, rebase the one-line change onto `8f2023ce`, and repeat the matched comparison
+before adoption. Rebuild the handler-index candidate from the same current source/bootstrap before
+claiming current performance. The separate install-index candidate `38ef465` also has parent
+`b11e9121`, so a build using current Stage1 does not make its source current; port it to `8f2023ce`
+before measuring or adopting it. The install-index candidate currently owns the shared Stage1 slot;
+preserve the work and await explicit release before any proof build. P0 source-goal and Global grant
+runtime qualification remains the next proof-side action.
