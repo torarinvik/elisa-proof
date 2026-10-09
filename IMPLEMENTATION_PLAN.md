@@ -7939,3 +7939,47 @@ did not write an object. Preserve this as a separate untriaged backend issue; do
 cause from the global-grant diagnostics. Resume with strict proof-source effect migration, then
 the focused compiler reference/indexed-getter controls and proof consumer admission. Keep the
 broader matrix and performance tuning behind these trust-boundary gates.
+
+### 23.27.37 Local strict grant migration and high-ROI continuation (2026-10-09)
+
+This section supersedes the stale proof-consumer result in §23.27.36. Commit
+`fe36a433` migrated all 1,066 effectful call sites across 89 proof source files to explicit
+local grants: 973 `Global{Read,Write}`, 90 `Global.Read`, and 3 `Global.Write`. Seven
+read-modify-write counter scopes now explicitly carry both permissions. The exact committed
+source matches the candidate source hashes in
+`docs/evidence/global-grant-scope-qualification-2026-10-09.json`. Elisa Stage1
+`f99247d7657781209678d1cc3b6c00da489f92bb` strict semantic checking of
+`src/main.elisa` passes with zero diagnostics.
+
+This closes the proof source's strict effect-grant migration gate. It does not qualify a fresh
+proof executable, object emission, direct API admission, source-to-goal correspondence, or
+independent replay. The repository's checked-in proof executable is stale. Rebuild from this
+source with the pinned native compiler and runtime before using it for product or certificate
+tests. The earlier runtime-checks object-emission declines predate this migration and must be
+retested against the new strict source.
+
+Prioritize the remaining work by trust impact and expected reuse:
+
+1. **P0 — Bind accepted proof goals to current source across every entry point.** Extend the
+   existing source-derived postcondition check beyond its narrow literal-equality/return subset.
+   Exercise CLI, focused-function JSON, and direct API admission. Mutation controls must change a
+   source return/ensure while keeping the old goal and certificate and confirm rejection; supported
+   source must still verify and replay.
+2. **P0 — Rebuild and close the proof-consumer trust gate.** With the newest pinned Elisa compiler,
+   run strict source checking, fresh object/executable production, CLI and direct API rejection
+   controls for missing Global grants, and independent certificate replay. Record exact source,
+   compiler, runtime, solver, and output hashes. Do not admit products on permissive-mode results.
+3. **P1 — Keep Global.Read/Write enforcement regression coverage paired.** Preserve positive and
+   negative read/write cases for direct variables, shadowing, indexed targets, and mutable-reference
+   acquisition; compare Stage0 and Stage1 outcomes and inferred effects.
+4. **P1 — Resume the ordered kernel matrix from its failure ledger.** Select the next shared
+   source/effect-correspondence or replay defect, then add focused adversarial mutations and rerun
+   the dependent matrix gates.
+5. **P2 — Qualify compiler performance experiments only after trust gates.** The parser-template
+   draft has alternating A/B measurements and matching negative controls, but candidate non-parser
+   phases are also substantially faster. Verify binary provenance and exact build options before
+   attributing any speedup or integrating it. Preserve the evidence as unqualified until then.
+
+The current local checkpoint and toolchain are recorded in
+`../vast-recovery-2026-10-09/LOCAL-COMPUTE-CONTINUATION-20261009.md`. The parser candidate is
+a separate compiler worktree and is not part of the proof-source grant migration.
