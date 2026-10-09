@@ -8005,6 +8005,10 @@ checkout; it is retained as invalid evidence beside the passing run under
 `docs/evidence/focused-source-binding-2026-10-09/`. Use the isolated snapshot and matching
 Stage1/runtime for the remaining gates.
 
+The repository's default `ELISA_COMPILER_REV` now points to this same compiler commit, verified
+against public `main`. Ordinary builds and harnesses that read the checked-in pin therefore use
+the qualified latest source instead of silently falling back to f992.
+
 The parser-template compiler change is now integrated at Elisa-compiler commit
 `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Its matched three-sample `-O3` comparison on the
 generated 2,000-install, no-template input measured 25.229 s baseline versus 0.183 s candidate
