@@ -8258,9 +8258,9 @@ workload evidence, rebase the one-line change onto `8f2023ce`, and repeat the ma
 before adoption. Rebuild the handler-index candidate from the same current source/bootstrap before
 claiming current performance. The separate install-index candidate `38ef465` also has parent
 `b11e9121`, so a build using current Stage1 does not make its source current; port it to `8f2023ce`
-before measuring or adopting it. The install-index candidate currently owns the shared Stage1 slot;
-preserve the work and await explicit release before any proof build. P0 source-goal and Global grant
-runtime qualification remains the next proof-side action.
+before measuring or adopting it. At that checkpoint, the install-index candidate owned the shared
+Stage1 slot; section 23.27.48 records its completion and the subsequent template-registration hold.
+P0 source-goal and Global grant runtime qualification remains the next proof-side action.
 
 ### 23.27.48 Install-index A/B complete; preserve current-source qualification order (2026-10-10)
 
@@ -8285,5 +8285,9 @@ release, build the proof from the newest pinned compiler, and qualify direct-API
 binding plus CLI/API Global.Read/Write enforcement. Then resume the ordered kernel failure ledger.
 Only after those trust gates should current-source performance candidates be compared. The
 coordinator reports a separate 40-pair template-registration rerun with matching expected exits and
-outputs, but its source lineage and Rust/Zig comparison are still being checked; treat its timings
-as preliminary until the candidate source and complete evidence are verified.
+outputs, but its source lineage is still being checked. A first Rust/Zig frontend comparison also
+found a corpus defect: Elisa's `darray_sum` case uses `pass` as an identifier, but `pass` is reserved
+in Elisa, so every trial for that case fails during parsing. Exclude that case from timing claims;
+correct the fixture and rerun the cross-language comparison before relying on it. Treat all reported
+template-registration timings as preliminary until the source commit and complete evidence are
+verified. Keep proof builds paused until the compiler coordinator explicitly releases Stage1.
