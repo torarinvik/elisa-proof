@@ -134,10 +134,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             return 173 if not any finding in report.findings where finding.kind == expected_kind
             if route != 0 and (index < 3 or index >= 7):
                 return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
-            if route != 0 and index >= 11:
-                expected_global_effect: sview = "Global.Read" if index == 11 or index == 14 or index == 15 else "Global.Write"
-                expected_global_name: sview = "api_values" if index == 11 or index == 12 or index == 16 else ("api_index" if index == 15 else "api_counter")
-                return 199 if not any diagnostic in diagnostics where diagnostic.expected == expected_global_effect and diagnostic.actual == expected_global_name and Semantic::diagnostic_severity(diagnostic) == 1
+            if route != 0 and index >= 7:
+                expected_global_effect: sview = "Global.Read" if index == 7 or index == 9 or index == 11 or index == 14 or index == 15 else "Global.Write"
+                expected_global_actual: sview = "api_values" if index == 11 or index == 12 or index == 16 else ("api_index" if index == 15 else "api_counter")
+                return 199 if not any diagnostic in diagnostics where diagnostic.expected == expected_global_effect and diagnostic.actual == expected_global_actual and Semantic::diagnostic_severity(diagnostic) == 1
         (api_probe(GLOBAL_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})

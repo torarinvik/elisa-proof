@@ -8216,3 +8216,21 @@ The r22 recovery note records that four of five paired parser A/B cases were com
 and template-registry source bundles and seed products are already archived locally. The original
 Vast `/root/work` directory remains an unverified recovery boundary; all identified local proof
 and compiler work is present on this machine.
+
+### 23.27.46 Require exact Global grant diagnostics in every negative control (2026-10-10)
+
+Review of the unqualified grant harnesses found that scalar CLI negatives and scalar direct-API
+negatives could pass on any semantic error. Indexed and mutable-reference controls already checked
+the exact missing axis and global name. The tests now require the expected `Global.Read` or
+`Global.Write` diagnostic and its exact global for every direct access, including lexical-shadow
+cases and signature-only effect declarations. The forwarded-read case checks the missing
+`Global.Read` call grant and the exact callee identity. The direct-API harness now checks exact
+effect/global pairs across all ten scalar, indexed, and mutable-reference denial cases on the
+diagnostics-returning routes; `proof_check` still independently checks rejection and state clearing.
+
+Python syntax, the source-length check, and whitespace validation pass. Dynamic qualification is
+pending: the stale proof executable is rejected by the provenance guard, and the compiler
+coordinator has reserved the Stage1 slot for template-registration and install-index compiler
+work. After explicit release, use the clean pinned compiler source snapshot at
+`8f2023ce8a7d52358b733a0e812ff46293d45f10` and run the fresh strict build, CLI controls, and
+three-route direct-API harness before closing P1.

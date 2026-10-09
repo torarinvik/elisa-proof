@@ -98,6 +98,16 @@ for route in ("function", "module"):
         assert not any(d.get("name") == name and d.get("verified")
                        for d in report["declaration_details"]), context(route, name, report)
         required = {
+            "missing_read": ("Global.Read", "permission_counter"),
+            "missing_write": ("Global.Write", "permission_counter"),
+            "write_only_reads": ("Global.Read", "permission_counter"),
+            "read_only_writes": ("Global.Write", "permission_counter"),
+            "read_only_update": ("Global.Write", "permission_counter"),
+            "read_before_local_shadow": ("Global.Read", "permission_counter"),
+            "read_after_block_shadow": ("Global.Read", "permission_counter"),
+            "forward_missing_read": ("Global.Read", "Global"),
+            "signature_only_read": ("Global.Read", "permission_counter"),
+            "signature_only_write": ("Global.Write", "permission_counter"),
             "indexed_read_write_only": ("Global.Read", "permission_values"),
             "indexed_write_read_only": ("Global.Write", "permission_values"),
             "indexed_target_missing_index_read": ("Global.Read", "permission_index"),
@@ -106,9 +116,10 @@ for route in ("function", "module"):
             "mutable_reference_write_only": ("Global.Read", "permission_counter"),
         }.get(name)
         if required is not None:
-            effect, global_name = required
+            effect, actual = required
             assert any(d.get("severity") == 1 and d.get("expected") == effect
-                       and d.get("actual") == global_name
+                       and d.get("actual") == actual
+                       and (name != "forward_missing_read" or d.get("name") == "read_counter")
                        for d in report["semantic_diagnostics"]), context(route, name, report)
 
 print("Global grants cover reads/writes separately; both report routes reject missing/wrong grants")
