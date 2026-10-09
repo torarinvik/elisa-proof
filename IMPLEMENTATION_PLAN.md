@@ -7983,3 +7983,30 @@ Prioritize the remaining work by trust impact and expected reuse:
 The current local checkpoint and toolchain are recorded in
 `../vast-recovery-2026-10-09/LOCAL-COMPUTE-CONTINUATION-20261009.md`. The parser candidate is
 a separate compiler worktree and is not part of the proof-source grant migration.
+
+### 23.27.38 Focused source-goal admission checkpoint (2026-10-09)
+
+Commit `7bc3895c` checkpoints a focused source-goal admission candidate. For focused reports,
+the shared invariant now requires each supported source ensure to have exactly one distinct,
+replayed goal matching the source-derived postcondition; assert-by inventory is limited to
+scheduled functions. The CLI reports unsupported focused obligations instead of silently
+accepting an empty inventory. Native harness and CLI regressions cover a supported selected
+function, an unsupported unrelated function, an unsupported selected function, and forged
+attempt/certificate goals.
+
+This candidate is **not yet compiler-qualified**. Python syntax, shell syntax, and `git diff
+--check` passed, but an attempted strict check compiled through the live sibling compiler tree
+and failed in that unrelated dirty checkout; it provides no result for this source. The log and
+scope explanation are archived under `docs/evidence/focused-source-binding-2026-10-09/`. Resume
+with `scripts/compiler_snapshot.sh` pinned to Elisa-compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`
+and its matching installed Stage1/runtime, then run strict source checking before fresh product
+builds and focused native tests.
+
+The parser-template compiler change is now integrated at Elisa-compiler commit
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`. Its matched three-sample `-O3` comparison on the
+generated 2,000-install, no-template input measured 25.229 s baseline versus 0.183 s candidate
+median wall time, with matching output/diagnostics and three matched negative controls. This
+qualifies the result for that workload only; it is not a compiler-wide multiplier. The exact
+input, commands, hashes, logs, and controls are in
+`../local-compiler-optimization-20261009/parser-effect-template-working/docs/parser_effect_template_performance.md`
+and its `evidence/parser-template/ab-2000-installs-matched-o3/` directory.
