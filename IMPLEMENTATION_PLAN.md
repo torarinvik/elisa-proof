@@ -7190,7 +7190,7 @@ That objective is not yet achieved or established by the present evidence.
 
 | Item | Verified status | Remaining gate |
 | --- | --- | --- |
-| Build provenance | Public Elisa-compiler main is `f99247d7657781209678d1cc3b6c00da489f92bb`, on compiler source baseline `62eb050543b1aaa5fdd5a34abc9d2a085e403b9d`; current Elisa-core main is `ef04267d736eae492c05a023182f6b08f74441a9`. The proof pins now name those exact revisions. A clean native Stage0 for the new core revision was built on macOS ARM64; the matching Stage1/runtime build and fresh qualification are pending. The previous 30-case grant gate used Stage0 core `735118cbe842f6b53be91fecd2ec7c90b294ee15`, Stage1 SHA-256 `74c6e8d9a12b112f8915bcc5ee89b9cc23d06601837b0d88c602f00dad9f731b`, and runtime SHA-256 `d456d5357e72807fcec4eec9438856aed3d4482041d415d3947eb33e8079dde7`; its exact tuple is historical evidence only. | Build the latest pinned Stage1/runtime pair locally, run the global-permission matrix on that pair, then qualify the proof consumer. Keep the indexed-reference candidate out: its Stage1 seed completed, but it accepts an invalid indexed `i64` to mutable `i32` reference conversion and still declines canonical Store/Deque calls. A seed build alone does not qualify the proof assistant. |
+| Build provenance | Public Elisa-compiler main was rechecked directly on 2026-10-09 at `8f2023ce8a7d52358b733a0e812ff46293d45f10`; Elisa-core main and `ELISA_STAGE0_REV` are `ef04267d736eae492c05a023182f6b08f74441a9`. The installed ARM64 Stage1 is `~/.elisac/stage1/bin/elisac-stage1` (SHA-256 `2faf57f2dca6914d3f500c6b4532fb993349208ff556459de0a6af025688c644`) with runtime SHA-256 `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`; its source snapshot is at `8f2023ce`. A fresh proof executable and qualification archive exist for proof commit `d82d5814`, not current proof candidate `716bedba`; no product has been built from the latter. The former f992 toolchain and 30-case grant tuple are historical evidence. | After the active compiler profile releases the slot, build and qualify current proof source with the newest pinned Stage1/runtime: strict source check, object/executable production, CLI and direct-API grant/source-binding controls, and independent replay. Recheck compiler/core main immediately before building. For Stage0 parity, use core `ef042...` with compiler Stage1 `8f2023...`; preserve exact diagnostics and inferred-effect differences. Keep the indexed-reference candidate out: its Stage1 seed accepted an invalid indexed `i64` to mutable `i32` reference conversion and still declined canonical Store/Deque calls. A seed build alone does not qualify the proof assistant. |
 | Global mutable grants | The expanded compiler global_permissions_smoke now passes 30 canonical local-authority cases, including mutable-reference acquisition; Stage0 and Stage1 rows agree on the recorded tuple. The gate is integrated on public main. | The latest compiler candidate still needs the fresh gate, and proof-consumer qualification remains false. Keep P0 open until -emit check -O0 proves unauthorized inputs are rejected before CLI and direct-API certificate admission, then validate source/effect correspondence and replay. |
 | Loop witness identity | Proof commit `024e1847` rejects a competing renamed local witness; focused native and rebind controls passed. | This does not reconstruct a fresh-name ordinal when competing original traces are removed. Control 110 was an outdated positive expectation for an edited source invariant with its old consumer; the revised native control rejects the edit and replays after restoration. Full harness qualification remains open. |
 | Widening replay | Commit `a25f0915` integrates the repair. An isolated newest-compiler pair passed all 36 certificates, initializer mutation controls, standalone export/replay, custom-cast dispatch, exact-span unknown-call collision and loop witness controls. | The integrated current tree rebuild and complete matrix are running; focused qualification does not close broader source/replay failures. |
@@ -8137,3 +8137,20 @@ candidate is qualified, run scripts/test_global_mutable_grants.py and
 scripts/test_direct_api_semantic_admission.py with the newest public Stage1, then compare exact
 diagnostic/effect results against the pinned Stage0 baseline. Keep this P1 open until all three
 entry points pass and the Stage0/Stage1 delta is explained.
+
+### 23.27.43 Current local compiler pin and qualification boundary (2026-10-09)
+
+The newest public Elisa-compiler main and installed Stage1 were verified at
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`; Elisa-core main and `ELISA_STAGE0_REV` are
+`ef04267d736eae492c05a023182f6b08f74441a9`. The installed Stage1 binary and runtime hashes are
+recorded in `LOCAL_CONTINUATION.md`. This supersedes the f992 compiler revision in §23.27.35 and
+the older Stage1-pending wording in §23.27.1.
+
+The latest proof implementation source is commit `716bedba`; the r15 recovery-documentation
+checkpoint sits on top and does not change that candidate. It contains the P0 direct-API
+source-goal binding candidate plus P1 indexed/global-reference grant controls. Static checks pass,
+but neither candidate has a fresh proof product or Stage1 runtime qualification. The saved r10
+executable is from parent proof checkpoint `d82d5814`; it is historical test evidence, not the
+current branch product. The separate matched compiler authority profile owns the Stage1 CPU slot.
+After release, qualify P0 first, then the grant controls and fresh replay; do not relabel
+source-only checks or profile progress as proof-product validation.

@@ -1,10 +1,12 @@
-# Local continuation checkpoint — updated 2026-10-09, r14
+# Local continuation checkpoint — updated 2026-10-09, r15
 
 Checkpointed on 2026-10-09 so work can continue on the Mac without the Vast instance.
 
 ## Proof assistant checkout
 
-The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are now committed as a local checkpoint; they have passed static checks but still need the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r14.bundle`; its verified checksum is recorded in the recovery continuation file.
+The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are now committed as a local checkpoint; they have passed static checks but still need the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r15.bundle`; its verified checksum is recorded in the recovery continuation file.
+
+The latest proof implementation source is commit `716bedba`; this r15 documentation checkpoint records its state without changing that code. The candidate source and indexed/global-reference grant controls remain unqualified on Stage1. The installed newest Stage1 and matching runtime are already on this Mac, and the separate compiler authority profile is still using the local Stage1 CPU slot. SSH retries from this checkpoint received a closed connection from the original Vast endpoint and a refused connection from the replacement, so no additional remote files were recovered.
 
 The migration covers 1,066 effectful call sites across 89 source files. Seven counter increments that both read and write globals now require `Global{Read,Write}`. The native Stage1 compiler strict check of the final candidate passed with exit code 0 and zero diagnostics. Qualification details and per-file SHA-256 values are in [global-grant-scope-qualification-2026-10-09.json](docs/evidence/global-grant-scope-qualification-2026-10-09.json).
 
@@ -42,7 +44,7 @@ profile is active; compiler coordination is in Codex thread `01a121db-9e44-7451-
 
 The verified recovery folder is `/Users/torarinvikbjarko/Documents/Coding Projects/Elisa Projects/vast-recovery-2026-10-09/`. `BACKUP-VERIFIED.json` records 78,421 files, 27 symlinks, and zero mismatches. The full recovery archive and handoff supplement have recorded SHA-256 values. The 1.7 GB local continuation checkpoint is also hash-verified. These archives cover the replacement Vast instance at `141.195.21.72:47559`.
 
-The original instance at `38.49.42.120:53652` has separate `/root/work` data whose transfer was never confirmed. The latest local SSH probes reset on the original endpoint and were refused by the replacement. Keep the original instance's disk intact if it may contain work absent from the verified local archives; do not destroy or recycle it until that tree is recovered or confirmed unnecessary.
+The original instance at `38.49.42.120:53652` has separate `/root/work` data whose transfer was never confirmed. The latest local SSH probe was closed by the original endpoint; the replacement at `141.195.21.72:47559` refused the connection. Keep the original instance's disk intact if it may contain work absent from the verified local archives; do not destroy or recycle it until that tree is recovered or confirmed unnecessary.
 
 The 20:32 full local continuation archive covers the compiler and associated-type snapshots captured then. A newer uncommitted parser candidate in `../local-compiler-optimization-20261009/parser-effect-template-working` was created afterward and is captured separately in [PARSER-TEMPLATE-LOCAL-CHECKPOINT.json](../vast-recovery-2026-10-09/PARSER-TEMPLATE-LOCAL-CHECKPOINT.json) and `../vast-recovery-2026-10-09/parser-template-local-checkpoint-20261009.tar.gz`. That supplement includes the candidate source, fixtures, evidence, Stage1 product, and matching runtime.
 
