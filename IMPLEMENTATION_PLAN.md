@@ -8176,3 +8176,43 @@ grant harnesses, build a fresh strict proof product from the latest public Stage
 report-inventory, CLI-grant, and independent replay gates. The initial direct-API harness attempt
 was stopped as soon as this serial reservation was announced; its termination is not a test
 failure or pass.
+
+### 23.27.45 Local continuation: qualify trust gates before performance work (2026-10-10)
+
+The recovery checkpoint is r22. The proof checkout is portable and clean at `e470255d`; the
+unqualified source candidate at `716bedba` adds direct-API source-goal binding and broader
+Global.Read/Write checks. The newest public Elisa-compiler and Elisa-core main revisions were
+rechecked as `8f2023ce8a7d52358b733a0e812ff46293d45f10` and
+`ef04267d736eae492c05a023182f6b08f74441a9`, matching the repository pins. Do not claim the
+candidate is qualified: it has static checks only and no matching fresh product/runtime run.
+
+The highest-return order is:
+
+1. **P0 — Qualify source-goal binding and semantic admission together.** Once the shared Stage1
+   slot is released, build one strict proof product from the pinned newest compiler. Run the
+   direct-API source-goal mutation suite and the Global grant CLI/API suites against that exact
+   product; require zero replay gaps on positive cases and exact rejection diagnostics on
+   mutations. Record the product manifest and compiler/runtime identities.
+2. **P1 — Close the mutable-global boundary.** Include indexed reads/writes, index-expression
+   reads, and mutable-reference acquisition. Compare Stage0/Stage1 inferred effects and
+   diagnostics, explain every delta, and independently replay accepted certificates.
+3. **P1 — Resume the kernel failure ledger.** Choose one source/replay correspondence gap from
+   the audit, add adversarial source and certificate mutations, and close that defect before
+   broadening the matrix.
+4. **P2 — Spend performance time only on reproducible wins.** Finish the reserved five-case
+   parser A/B run, then qualify the handler-index and template-registry candidates with matched
+   workloads, correctness controls, and unchanged provenance. Keep seed-only or overlapping
+   timings observational; do not weaken trust gates to improve benchmark throughput.
+
+As a reliability guard, `scripts/test_global_mutable_grants.py` now checks the adjacent build
+manifest, exact `src/` tree digest, and pinned Elisa compiler revision before
+launching a case. This prevents a stale `build/elisa-proof` from being mistaken for evidence. The
+guard was checked against the known stale local binary and correctly refused it before execution.
+The current binary cannot qualify the new candidate; rebuild only after the compiler coordinator
+explicitly releases the shared Stage1 slot.
+
+The r22 recovery note records that four of five paired parser A/B cases were complete and the
+2,000-handler repeated-install stress case was starting; no release had arrived. The handler-index
+and template-registry source bundles and seed products are already archived locally. The original
+Vast `/root/work` directory remains an unverified recovery boundary; all identified local proof
+and compiler work is present on this machine.

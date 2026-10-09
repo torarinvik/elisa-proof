@@ -5,10 +5,47 @@ from pathlib import Path
 import subprocess
 import tempfile
 
+from perf_build_provenance import read_build_manifest, source_tree_identity
+
 ROOT = Path(__file__).resolve().parents[1]
 BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+
 if not __debug__:
     raise SystemExit("run without Python -O: assertions must remain enabled")
+
+
+def require_current_proof_binary():
+    """Refuse to turn stale verifier output into evidence for the current grant checker."""
+    try:
+        manifest = read_build_manifest(Path(BIN), "Global grants test proof")
+        proof = manifest.get("proof")
+        frontend = manifest.get("frontend")
+        compiler = manifest.get("compiler")
+        if (not isinstance(proof, dict) or not isinstance(frontend, dict)
+                or not isinstance(compiler, dict)):
+            raise RuntimeError("build manifest is missing proof, frontend, or compiler provenance")
+        current_source = source_tree_identity(ROOT / "src")
+        if proof.get("source_tree_sha256") != current_source:
+            raise RuntimeError("binary was built from a different proof source tree")
+        pinned_revision = (ROOT / "ELISA_COMPILER_REV").read_text(encoding="ascii").strip()
+        if compiler.get("stage") != "stage1" or compiler.get("source_dirty") is not False:
+            raise RuntimeError("binary was not built with a clean Elisa Stage1 compiler")
+        stage1_revision = compiler.get("stage1_revision") or compiler.get("source_revision")
+        if (frontend.get("revision") != pinned_revision
+                or stage1_revision != pinned_revision):
+            raise RuntimeError(
+                f"binary uses Elisa compiler {stage1_revision} "
+                f"(frontend {frontend.get('revision')}), current pin is {pinned_revision}"
+            )
+    except (OSError, UnicodeError, subprocess.SubprocessError, RuntimeError) as error:
+        raise SystemExit(
+            f"Global grants test refused an unqualified proof binary: {error}. "
+            "Rebuild with scripts/build.sh using the pinned newest Elisa compiler."
+        ) from error
+
+
+require_current_proof_binary()
+
 
 def context(route, name, report):
     fields = ("status", "summary", "semantic_diagnostics", "findings", "replay")
