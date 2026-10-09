@@ -7987,13 +7987,14 @@ a separate compiler worktree and is not part of the proof-source grant migration
 
 ### 23.27.38 Focused source-goal admission checkpoint (2026-10-09)
 
-Commit `7bc3895c` checkpoints a focused source-goal admission candidate. For focused reports,
+Commit `7bc3895c` checkpoints a focused source-goal admission candidate. Commit `ccfb92aa` adds
+a source-return mutation while retaining the original goal attempt and certificate. For focused reports,
 the shared invariant now requires each supported source ensure to have exactly one distinct,
 replayed goal matching the source-derived postcondition; assert-by inventory is limited to
 scheduled functions. The CLI reports unsupported focused obligations instead of silently
 accepting an empty inventory. Native harness and CLI regressions cover a supported selected
-function, an unsupported unrelated function, an unsupported selected function, and forged
-attempt/certificate goals.
+function, an unsupported unrelated function, an unsupported selected function, source-return
+drift, and forged attempt/certificate goals.
 
 The candidate passes strict source checking with Elisa-compiler
 `8f2023ce8a7d52358b733a0e812ff46293d45f10`: the isolated `build/snapshot` check exited 0 with
