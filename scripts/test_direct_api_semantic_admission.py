@@ -37,6 +37,19 @@ invalid += (
     "global mutable api_values: i64[1] = [0]\nglobal mutable api_index: usize = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        if api_index < 1:\n            api_values[api_index] <- 1\n",
     "global mutable api_values: i64[1] = [0]\nglobal mutable api_index: usize = 0\ndef checked() -> void can[Global.Read]:\n    can Global{Read}:\n        if api_index < 1:\n            api_values[api_index] <- 1\n",
 )
+global_grant_expectations = (
+    ("Global.Read", "api_counter"),
+    ("Global.Write", "api_counter"),
+    ("Global.Read", "api_counter"),
+    ("Global.Write", "api_counter"),
+    ("Global.Read", "api_values"),
+    ("Global.Write", "api_values"),
+    ("Global.Write", "api_counter"),
+    ("Global.Read", "api_counter"),
+    ("Global.Read", "api_index"),
+    ("Global.Write", "api_values"),
+)
+assert len(invalid) == 17 and len(global_grant_expectations) == len(invalid) - 7
 constants = "const VALID_API_SOURCE: sview = " + json.dumps(valid) + "\n"
 constants += "const REFINEMENT_API_SOURCE: sview = " + json.dumps('type Positive = i64 where self >= 0\ndef checked(value: Positive) -> i64:\n    ensure result >= 0\n    return value\n') + "\n"
 constants += "const MUTUAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/mutual_structural_decreases.elisa").read_text().replace("structural_even", "checked")) + "\n"
@@ -50,6 +63,8 @@ constants += "const GLOBAL_MUTABLE_INDEX_API_SOURCE: sview = " + json.dumps("glo
 constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const INVALID_API_SOURCES: sview[17] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
+constants += "const INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS: sview[10] = [" + ", ".join(map(json.dumps, (effect for effect, _ in global_grant_expectations))) + "]\n"
+constants += "const INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS: sview[10] = [" + ", ".join(map(json.dumps, (global_name for _, global_name in global_grant_expectations))) + "]\n"
 harness = prefix + constants + r'''
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
@@ -135,8 +150,9 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             if route != 0 and (index < 3 or index >= 7):
                 return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
             if route != 0 and index >= 7:
-                expected_global_effect: sview = "Global.Read" if index == 7 or index == 9 or index == 11 or index == 14 or index == 15 else "Global.Write"
-                expected_global_actual: sview = "api_values" if index == 11 or index == 12 or index == 16 else ("api_index" if index == 15 else "api_counter")
+                grant_index: usize = index - 7
+                expected_global_effect: sview = INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS[grant_index]
+                expected_global_actual: sview = INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS[grant_index]
                 return 199 if not any diagnostic in diagnostics where diagnostic.expected == expected_global_effect and diagnostic.actual == expected_global_actual and Semantic::diagnostic_severity(diagnostic) == 1
         (api_probe(GLOBAL_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
