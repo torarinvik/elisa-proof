@@ -100,22 +100,22 @@ def proof_test_parse_and_replay(source_text: sview, source: mutable darray[u8]&,
     for index in 0..<sview_len(source_text) |index, source_text, source|:
         source.push(sview_at(source_text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
-    proof_check(file, report)
-    proof_replay_certificates(report)
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
+    (proof_replay_certificates(report) can Global{Read,Write})
 
 def proof_test_parse_declarations(source_text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(source_text) |index, source_text, source|:
         source.push(sview_at(source_text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
 def proof_test_local_binding_initializer_source(source_text: sview, owner: sview, target: sview, expect_valid: bool) -> bool can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_declarations(source_text, &source, &report)
+    (proof_test_parse_declarations(source_text, &source, &report) can Global{Read,Write})
     owner_line: mutable u32 = 0
     for declaration in report.source_declarations |owner, owner_line|:
         match declaration:
@@ -152,7 +152,7 @@ def proof_test_local_binding_initializer_source(source_text: sview, owner: sview
 def proof_test_local_binding_spoofed_position_rejected(source_text: sview, owner: sview, target: sview) -> bool can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_declarations(source_text, &source, &report)
+    (proof_test_parse_declarations(source_text, &source, &report) can Global{Read,Write})
     owner_line: mutable u32 = 0
     for declaration in report.source_declarations |owner, owner_line|:
         match declaration:
@@ -181,7 +181,7 @@ def proof_test_local_binding_spoofed_position_rejected(source_text: sview, owner
 def proof_test_local_binding_statement_sink_rejected(source_text: sview, owner: sview, sink_kind: sview) -> bool can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_declarations(source_text, &source, &report)
+    (proof_test_parse_declarations(source_text, &source, &report) can Global{Read,Write})
     owner_line: mutable u32 = 0
     for declaration in report.source_declarations |owner, owner_line|:
         match declaration:
@@ -251,7 +251,7 @@ def proof_test_has_loop_refusal(report: ProofReport&, function_name: sview, sour
 def main() -> i64 can Memory.Allocate, Abort.Panic:
     baseline_bytes: mutable darray[u8] = []
     baseline: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(BASELINE_SOURCE, &baseline_bytes, &baseline)
+    (proof_test_parse_and_replay(BASELINE_SOURCE, &baseline_bytes, &baseline) can Global{Read,Write})
     bounded = proof_test_loop_goals(baseline, "bounded_counter", 9)
     return 101 if bounded.count != 2 or not bounded.all_replayed
     plain = proof_test_loop_goals(baseline, "countdown", 19)
@@ -311,7 +311,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     # The old RHS witness is invalid once the actual source assignment changes.
     stale_rebind_bytes: mutable darray[u8] = []
     stale_rebind_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(STALE_REBIND_SOURCE, &stale_rebind_bytes, &stale_rebind_report)
+    (proof_test_parse_and_replay(STALE_REBIND_SOURCE, &stale_rebind_bytes, &stale_rebind_report) can Global{Read,Write})
     baseline.source_declarations <- stale_rebind_report.source_declarations
     return 117 if proof_replay_fact_trace_entry(&baseline, rebind_index)
 
@@ -319,7 +319,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     # ambiguous even though a local declaration and assignment occur at the expected lines.
     shadowed_parameter_bytes: mutable darray[u8] = []
     shadowed_parameter_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_declarations(SHADOWED_PARAMETER_SOURCE, &shadowed_parameter_bytes, &shadowed_parameter_report)
+    (proof_test_parse_declarations(SHADOWED_PARAMETER_SOURCE, &shadowed_parameter_bytes, &shadowed_parameter_report) can Global{Read,Write})
     baseline.source_declarations <- shadowed_parameter_report.source_declarations
     baseline.trace_consumer_certificate_index <- init_consumer
     return 118 if proof_replay_fact_trace_entry(&baseline, init_index)
@@ -327,7 +327,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 118 if proof_replay_fact_trace_entry(&baseline, rebind_index)
     shadowed_global_bytes: mutable darray[u8] = []
     shadowed_global_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_declarations(SHADOWED_GLOBAL_SOURCE, &shadowed_global_bytes, &shadowed_global_report)
+    (proof_test_parse_declarations(SHADOWED_GLOBAL_SOURCE, &shadowed_global_bytes, &shadowed_global_report) can Global{Read,Write})
     baseline.source_declarations <- shadowed_global_report.source_declarations
     baseline.trace_consumer_certificate_index <- init_consumer
     return 119 if proof_replay_fact_trace_entry(&baseline, init_index)
@@ -349,7 +349,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     # Old initializer evidence must not transfer to changed source at the same binding site.
     stale_bytes: mutable darray[u8] = []
     stale_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(STALE_INITIALIZER_SOURCE, &stale_bytes, &stale_report)
+    (proof_test_parse_and_replay(STALE_INITIALIZER_SOURCE, &stale_bytes, &stale_report) can Global{Read,Write})
     baseline.source_declarations <- stale_report.source_declarations
     return 109 if proof_replay_fact_trace_entry(&baseline, init_index)
 
@@ -357,7 +357,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     # the old certificate's use of this fact, even though the initializer equation remains true.
     unrelated_bytes: mutable darray[u8] = []
     unrelated_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report)
+    (proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report) can Global{Read,Write})
     baseline.source_declarations <- unrelated_report.source_declarations
     return 110 if proof_replay_fact_trace_entry(&baseline, init_index)
     # Restoring the original source restores this genuine loop-entry fact and consumer.
@@ -366,24 +366,24 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
 
     false_bytes: mutable darray[u8] = []
     false_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(FALSE_INVARIANT_SOURCE, &false_bytes, &false_report)
+    (proof_test_parse_and_replay(FALSE_INVARIANT_SOURCE, &false_bytes, &false_report) can Global{Read,Write})
     return 111 if not proof_test_has_loop_refusal(false_report, "bounded_counter", 9)
 
     overrun_bytes: mutable darray[u8] = []
     overrun_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(OVERRUN_SOURCE, &overrun_bytes, &overrun_report)
+    (proof_test_parse_and_replay(OVERRUN_SOURCE, &overrun_bytes, &overrun_report) can Global{Read,Write})
     return 112 if not proof_test_has_loop_refusal(overrun_report, "bounded_counter", 9)
 
     # Fresh parsing and independent replay must reproduce both loop obligations.
     fresh_bytes: mutable darray[u8] = []
     fresh_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(BASELINE_SOURCE, &fresh_bytes, &fresh_report)
+    (proof_test_parse_and_replay(BASELINE_SOURCE, &fresh_bytes, &fresh_report) can Global{Read,Write})
     fresh = proof_test_loop_goals(fresh_report, "bounded_counter", 9)
     return 113 if fresh.count != 2 or not fresh.all_replayed
 
     widening_bytes: mutable darray[u8] = []
     widening_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(WIDENING_SOURCE, &widening_bytes, &widening_report)
+    (proof_test_parse_and_replay(WIDENING_SOURCE, &widening_bytes, &widening_report) can Global{Read,Write})
     cast_gate_checks: mutable usize = 0
     for certificate_index in 0..<widening_report.certificates.count |certificate_index, widening_report, cast_gate_checks|:
         certificate: ProofGoalCertificate = widening_report.certificates[certificate_index]
@@ -406,7 +406,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
 
     shadowed_bytes: mutable darray[u8] = []
     shadowed_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(SHADOWED_LOCAL_SOURCE, &shadowed_bytes, &shadowed_report)
+    (proof_test_parse_and_replay(SHADOWED_LOCAL_SOURCE, &shadowed_bytes, &shadowed_report) can Global{Read,Write})
     return TEST_SHADOW_GATE_ERROR if not proof_test_local_binding_initializer_source(SHADOWED_LOCAL_SOURCE, "shadowed_local", "copy", false)
 
     return TEST_CUSTOM_CAST_GATE_ERROR if not proof_test_local_binding_initializer_source(CUSTOM_CAST_SOURCE, "custom_cast_does_not_keep_source_bound", "converted", false)
@@ -427,7 +427,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return TEST_BINDING_NESTED_BUILTIN_ERROR if not proof_test_local_binding_initializer_source(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy", true)
     nested_bytes: mutable darray[u8] = []
     nested_report: mutable ProofReport = proof_empty_report()
-    proof_test_parse_and_replay(NESTED_BUILTIN_SOURCE, &nested_bytes, &nested_report)
+    (proof_test_parse_and_replay(NESTED_BUILTIN_SOURCE, &nested_bytes, &nested_report) can Global{Read,Write})
     nested_goals = proof_test_loop_goals(nested_report, "nested_builtin_binding", 5)
     return TEST_BINDING_POSITIVE_CONTROL_ERROR if nested_goals.count != 1 or not nested_goals.all_replayed
     return TEST_LOCAL_BINDING_GATE_ACCEPTED

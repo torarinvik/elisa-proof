@@ -41,7 +41,7 @@ assert positive["replay"]["gaps"] == 0
 assert positive["replay"]["certificates"] == positive["replay"]["replayed"] > 0
 details = {item["name"]: item for item in positive["declaration_details"] if item["kind"] == "function"}
 assert details["focused_source_binding_target"]["verified"] is True, details
-assert details["unrequested_unsupported"]["verification_reason"] == "not-requested", details
+assert details["focused_source_binding_unrequested"]["verification_reason"] == "not-requested", details
 
 unsupported_run, unsupported = run("focused_source_binding_unrequested")
 assert unsupported_run.returncode == 1 and unsupported["status"] == "failed", unsupported

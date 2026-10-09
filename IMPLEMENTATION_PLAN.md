@@ -8026,3 +8026,40 @@ qualifies the result for that workload only; it is not a compiler-wide multiplie
 input, commands, hashes, logs, and controls are in
 `../local-compiler-optimization-20261009/parser-effect-template-working/docs/parser_effect_template_performance.md`
 and its `evidence/parser-template/ab-2000-installs-matched-o3/` directory.
+
+
+### 23.27.39 Local Global.Read/Write proof-boundary enforcement (2026-10-09)
+
+The current proof API candidate now enables `enforce_mutable_global_grants` in both
+`Semantic::check_full_into` calls and wraps those calls in explicit expression-level
+`can Global{Read,Write}` grants. This applies to `proof_check`, the diagnostics API, and the
+focused diagnostics API. The latest pinned Elisa compiler, Stage1
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`, produced a fresh strict proof executable; the latest
+binary SHA-256 is `114d20727814db1fbf55d056accabf84213213b554692c84660022fefd55ba4b`. The linker warned
+that the runtime object targets macOS 28 while the executable target is macOS 27, but linking
+succeeded.
+
+The fresh executable passes `scripts/test_global_mutable_grants.py` across function and module
+JSON routes, including separate read/write positives and missing/wrong-grant negatives. The
+focused source-binding runtime mutation harness and CLI test also pass. The CLI expectation now
+uses the fixture's actual unrequested-function name. The grant shadowing fixture omits a
+postcondition outside the current bounded source-inventory subset, so it tests lexical shadowing
+without claiming unsupported source-goal coverage.
+
+The direct-API regression now includes positive Global.Read and Global.Write controls plus four
+missing/wrong-grant sources for each of `proof_check`, `proof_check_with_semantic_diagnostics`,
+and `proof_check_focused_with_semantic_diagnostics`. The native harness compile exposed missing
+caller-side Global grants: the API now correctly carries those effects through helper functions.
+The harness and its reused loop-test prefix now use explicit expression grants at the call sites,
+and Stage1 compiled the corrected harness. Its first runtime pass cleared the route-0 invalid
+grant controls, then stopped because the positive assertion incorrectly required zero proof
+obligations; valid global accesses produce two proven resource-safety obligations. The assertion
+now requires all obligations proven, zero replay gaps, and no findings. Rerun after the concurrent
+compiler qualification releases the local slot, then close this gate only after all three API
+routes pass.
+
+For the next proof work, keep these trust gates first: (1) finish direct-API grant rejection and
+positive controls; (2) extend source-goal binding with mutation controls across CLI and direct API;
+(3) preserve strict fresh-build provenance and independent replay. Resume the ordered kernel matrix
+after those pass. Defer further performance tuning until the proof admission baseline is qualified;
+the handler-index candidate remains in its separate compiler checkout.

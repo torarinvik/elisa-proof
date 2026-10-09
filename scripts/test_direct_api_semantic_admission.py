@@ -23,56 +23,68 @@ invalid += tuple(valid + "\n" + source for source in (
     "def trap() -> i64:\n    value: i64 = 1\n    return value << 64\n",
     "def trap() -> i64:\n    value: i64 = 1\n    return value << -2\n",
 ))
+invalid += (
+    "global mutable api_counter: i64 = 0\ndef checked() -> i64:\n    return api_counter\n",
+    "global mutable api_counter: i64 = 0\ndef checked() -> void:\n    api_counter <- 1\n",
+    "global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Write]:\n    can Global{Write}:\n        return api_counter\n",
+    "global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Read]:\n    can Global{Read}:\n        api_counter <- 1\n",
+)
 constants = "const VALID_API_SOURCE: sview = " + json.dumps(valid) + "\n"
 constants += "const REFINEMENT_API_SOURCE: sview = " + json.dumps('type Positive = i64 where self >= 0\ndef checked(value: Positive) -> i64:\n    ensure result >= 0\n    return value\n') + "\n"
 constants += "const MUTUAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/mutual_structural_decreases.elisa").read_text().replace("structural_even", "checked")) + "\n"
 constants += "const UNKNOWN_API_SOURCE: sview = " + json.dumps("def checked(value: bool) -> bool:\n    ensure result == true\n    value\n") + "\n"
-constants += "const INVALID_API_SOURCES: sview[7] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
+constants += "const GLOBAL_READ_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        return api_counter\n") + "\n"
+constants += "const GLOBAL_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        api_counter <- 1\n") + "\n"
+constants += "const INVALID_API_SOURCES: sview[11] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
 harness = prefix + constants + r'''
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
     source.push(0)
-    file: mutable Ast::File = frontend_parse(&source[0])
+    file: mutable Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     # Match the CLI's source-owned refinement preparation before calling the core API.
     refusals: mutable ProofReport = proof_empty_report()
     refined: mutable darray[sview] = []
     proof_add_refinement_signature_contracts(&file, &refusals, &refined)
     diagnostics.clear()
     if route == 0:
-        proof_check(file, report)
+        (proof_check(file, report) can Global{Read,Write})
     elif route == 1:
-        proof_check_with_semantic_diagnostics(file, report, diagnostics)
+        (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
     else:
-        proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, "checked")
-    proof_replay_certificates(report)
+        (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, "checked") can Global{Read,Write})
+    (proof_replay_certificates(report) can Global{Read,Write})
 
 def main() -> i64 can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
     diagnostics: mutable darray[Semantic::Diagnostic] = []
     for route in 0..<3 |route, source, report, diagnostics|:
-        for index in 0..<7 |index, route, source, report, diagnostics|:
-            api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route)
+        for index in 0..<11 |index, route, source, report, diagnostics|:
+            (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 170 if report.certificates.count == 0 or report.proven == 0
-            api_probe(INVALID_API_SOURCES[index], &source, &report, &diagnostics, route)
+            (api_probe(INVALID_API_SOURCES[index], &source, &report, &diagnostics, route) can Global{Read,Write})
             return 171 if report.certificates.count != 0 or report.goal_attempts.count != 0 or report.proven != 0
             return 172 if report.source_declarations.count != 0 or report.traces.records.count != 0 or report.kernel.nodes.count != 0
-            expected_kind: sview = "semantic-source-inadmissible" if index < 3 else "arithmetic-safety-refuted"
+            expected_kind: sview = "semantic-source-inadmissible" if index < 3 or index >= 7 else "arithmetic-safety-refuted"
             return 173 if not any finding in report.findings where finding.kind == expected_kind
-            if route != 0 and index < 3:
+            if route != 0 and (index < 3 or index >= 7):
                 return 174 if not any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1
-        api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route)
+        (api_probe(GLOBAL_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 195 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 175 if report.certificates.count == 0 or report.failed != 0 or report.replay_gaps != 0
-        api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route)
+        (api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 190 if report.certificates.count == 0
         return 191 if report.proven == 0
         return 192 if report.failed != 0
         return 193 if report.replay_gaps != 0
-        api_probe(MUTUAL_API_SOURCE, &source, &report, &diagnostics, route)
+        (api_probe(MUTUAL_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 177 if report.failed != 0 or report.structural.verified_names.count == 0 or report.replay_gaps != 0
-        api_probe(UNKNOWN_API_SOURCE, &source, &report, &diagnostics, route)
+        (api_probe(UNKNOWN_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 178 if report.failed == 0 and report.proven == report.obligations
     return 0
 '''
