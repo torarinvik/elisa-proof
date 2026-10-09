@@ -8291,3 +8291,42 @@ in Elisa, so every trial for that case fails during parsing. Exclude that case f
 correct the fixture and rerun the cross-language comparison before relying on it. Treat all reported
 template-registration timings as preliminary until the source commit and complete evidence are
 verified. Keep proof builds paused until the compiler coordinator explicitly releases Stage1.
+
+### 23.27.49 Local compute checkpoint and completed serial evidence (2026-10-10)
+
+Checkpoint r29 preserves the dirty compiler checkout, active candidate worktrees and their
+uncommitted files, the parser-template evidence folder, and all three indexed-field native
+qualification rounds. The proof tree remains clean at `fb6a839c`; r28 retains its portable source,
+newest public compiler pin `8f2023ce`, installed Stage1, and strict proof product. This plan entry
+is documentation-only; the proof implementation is unchanged from `fb6a839c`. The default
+`Elisa-compiler` checkout at `b11e9121` is six commits behind `origin/main`; its seven-file diff is
+saved as a patch and must not be mistaken for the newest compiler source.
+
+The corrected public-8f serial frontend and object matrices both completed 240 compiler rows with
+zero failures. They compare different stage/optimization pipelines, so their timings do not
+establish broad compiler superiority. The matching parser-install A/B completed five cases and
+seven measured pairs per case with equal exits and stdout/stderr hashes. Repeated installation of
+2,000 handlers was 1.067x faster at the median; 2,000 ordinary installs were 0.994x, and the other
+cases ranged from 0.975x to 1.014x. Handler parity passed. This is a narrow stress-workload signal,
+not a general speedup. The baseline seed timing is excluded because a brief overlap contaminated
+that sample. Run and summary identities and the raw local artifact paths are recorded in r29.
+
+The native-r3 indexed-field candidate passed its recorded smoke gate; r1/r2 failures are retained
+alongside it. The callback-result index and logical-shard digest drafts have uncommitted files, and
+no tests ran after those edits. Do not treat either draft as qualified. The compiler coordinator
+held builds and edits during checkpoint creation; subsequent work can use local compute and must
+continue from isolated saved worktrees.
+
+The next high-return action remains proof qualification on the newest pinned compiler: rebuild the
+strict proof product, run direct-API source-goal mutation tests and Global.Read/Write CLI/API cases,
+check exact denial diagnostics, and independently replay accepted certificates. The global
+fixed-array `indexed_read` positive still fails closed with `expression-unsupported`; preserve it as
+a regression target and authenticate any new declaration-derived type or bound facts at replay.
+Then close one audited kernel trace gap with adversarial mutations. Resume compiler performance
+comparisons only after these trust gates, using matched current-source products and the saved serial
+controls.
+
+The last read-only SSH probes returned connection refused for copied-instance
+`141.195.21.72:47559` and connection closed for original `38.49.42.120:53652`. All located source,
+benchmark results and evidence are now preserved locally in r28/r29; remote-only `/root/work` state
+remains unverified.
