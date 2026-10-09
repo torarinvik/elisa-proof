@@ -192,6 +192,9 @@ extend ElisaProof:
             return false if not proof_report_source_postcondition_inventory_consistent(report)
             if report.focused_function != "":
                 return false if not proof_report_focused_source_obligations_covered(report)
+            else:
+                source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(report.source_declarations)
+                return false if not proof_source_literal_ensure_coverage(source_literal_ensures, report)
             return proof_report_proven_attempts_consistent(report)
 
         def proof_source_parameter_name_count(parameters: darray[Ast::ParamDecl]&, name: sview) -> usize:
@@ -312,24 +315,38 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_source_literal_ensure_expected_coverage(expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool), report: ProofReport&) -> bool:
+        def proof_source_literal_ensure_expected_coverage_with_replay(expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool), report: ProofReport&, require_replayed: bool) -> bool:
             return false if expected.name == ""
             matching: mutable usize = 0
             for attempt in report.goal_attempts |expected, matching, report|:
                 if attempt.name == expected.name and attempt.rule == "goal" and proof_source_literal_ensure_goal_matches(attempt.goal, expected):
                     if attempt.proven and attempt.has_certificate and attempt.certificate_index < report.certificates.count:
                         certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
-                        matching <- matching + 1 if certificate.replayed and proof_source_literal_ensure_goal_matches(certificate.goal, expected)
+                        matching <- matching + 1 if (not require_replayed or certificate.replayed) and proof_source_literal_ensure_goal_matches(certificate.goal, expected)
                     else:
                         matching <- matching + 1 if not attempt.proven and not attempt.has_certificate
             return matching == 1
+
+        def proof_source_literal_ensure_expected_coverage(expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool), report: ProofReport&) -> bool:
+            return proof_source_literal_ensure_expected_coverage_with_replay(expected, report, true)
+
+        # Direct checking APIs bind the generated attempt and certificate before returning.
+        # Replay remains a separate public operation, so this pre-return gate checks identity
+        # without pretending that an unreplayed certificate is trusted.
+        def proof_source_literal_ensure_expected_binding(expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool), report: ProofReport&) -> bool:
+            return proof_source_literal_ensure_expected_coverage_with_replay(expected, report, false)
 
         def proof_source_literal_ensure_coverage(inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
             for expected in inventory |report|:
                 return false if not proof_source_literal_ensure_expected_coverage(expected, report)
             return true
 
-        def proof_report_focused_source_literal_ensure_coverage_walk(declarations: darray[Ast::Decl]&, scope_supported: bool, report: ProofReport&) -> bool:
+        def proof_source_literal_ensure_binding_coverage(inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, report: ProofReport&) -> bool:
+            for expected in inventory |report|:
+                return false if not proof_source_literal_ensure_expected_binding(expected, report)
+            return true
+
+        def proof_report_focused_source_literal_ensure_coverage_walk(declarations: darray[Ast::Decl]&, scope_supported: bool, report: ProofReport&, require_replayed: bool) -> bool:
             for declaration in declarations |scope_supported, report|:
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, position):
@@ -338,15 +355,18 @@ extend ElisaProof:
                             return false if not candidate.known or not scope_supported
                             return false if proof_source_literal_ensure_count(report.source_declarations, candidate.name) != 1
                             expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool) = (candidate.name, candidate.contract_line, candidate.contract_value, candidate.returned_value, candidate.returned_parameter, candidate.result_on_left, candidate.equality_postcondition)
-                            return false if not proof_source_literal_ensure_expected_coverage(expected, report)
+                            return false if not proof_source_literal_ensure_expected_coverage_with_replay(expected, report, require_replayed)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_report_focused_source_literal_ensure_coverage_walk(nested, false, report)
+                        return false if not proof_report_focused_source_literal_ensure_coverage_walk(nested, false, report, require_replayed)
                     _:
                         pass
             return true
 
         def proof_report_focused_source_literal_ensures_consistent(report: ProofReport&) -> bool:
-            return proof_report_focused_source_literal_ensure_coverage_walk(report.source_declarations, true, report)
+            return proof_report_focused_source_literal_ensure_coverage_walk(report.source_declarations, true, report, true)
+
+        def proof_report_focused_source_literal_ensures_bound(report: ProofReport&) -> bool:
+            return proof_report_focused_source_literal_ensure_coverage_walk(report.source_declarations, true, report, false)
 
         def proof_report_focused_source_obligations_covered(report: ProofReport&) -> bool:
             return false if report.focused_function == ""

@@ -8076,17 +8076,38 @@ controls, and the three-route direct-API semantic-admission suite. Proven contro
 certificates with zero gaps. The build manifest and test evidence are retained under
 `../vast-recovery-2026-10-09/proof-source-binding-parameter-20261009-r1/`.
 
+### 23.27.41 Direct-API source-goal binding candidate on local Stage1 (2026-10-09)
+
+The current proof-source candidate extends source-goal binding to all three public direct API
+routes. Each API derives the bounded source inventory before semantic preparation, then requires
+one matching goal attempt and, for proven attempts, a matching certificate claim before returning.
+Whole-source reports now apply the same source-literal ensure coverage invariant as focused reports.
+The CLI reuses the direct API's source-inventory finding rather than reporting a duplicate, and
+marks that finding unsupported when the bounded source walk encounters an unsupported marker.
+The regression harness covers parameter-return success and open goals, source mutation, forged
+attempts, and forged certificate claims across `proof_check`, diagnostics, and focused diagnostics.
+
+This is a saved implementation candidate, not yet a qualified result. Static validation passes:
+`git diff --check`, Python bytecode compilation for the changed harnesses, and
+`scripts/check_source_length.py`. The corrected Stage1 native harness has not been rerun because a
+separate compiler authority-profile run currently owns the local compiler slot. Do not mark P0
+complete until that harness, the report-inventory runtime controls, and the fresh-product replay
+gates pass under the newest public Stage1. The code and exact continuation state are committed in
+the local checkpoint branch; no speed claim follows from this source change.
+
 Next high-return work remains ordered by admission risk and reuse:
 
-1. **P0 — Extend source-goal identity controls through direct API entry points.** Add parameter-
-   return positive, open, source-mutation, attempt-forgery, and certificate-forgery cases for
-   `proof_check`, diagnostics, and focused diagnostics; require rejection before an accepted
-   report escapes and independently replay every positive certificate.
+1. **P0 — Qualify direct-API source-goal binding.** Run the parameter-return positive/open and
+   mutation controls on newest Stage1, prove source/invariant failures are rejected on all three
+   routes, and independently replay every positive certificate.
 2. **P1 — Broaden mutable-global grants.** Add indexed-target and mutable-reference acquisition
    controls across CLI and direct API, then compare Stage0 and Stage1 diagnostics and inferred
    effects.
 3. **P1 — Resume the kernel failure ledger.** Pick the next source/replay correspondence defect
    and add adversarial source and certificate mutations before expanding the matrix.
-4. **P2 — Keep performance work behind the trust gates.** The latest combined six-run full-source
-   timing is observational only because proof object compilers overlapped the measurements; retain
-   no speed claim from those samples. Resume only with an isolated, provenance-matched run.
+4. **P2 — Keep proof performance work behind trust gates.** The latest combined full-source timing
+   remains observational because proof object compilers overlapped the samples. A separate
+   compiler-wrapper decomposition run is complete: all 50 samples passed, hashes and provenance
+   matched, and the freshness wrapper added about 131–140 ms on two small inputs. This isolates
+   wrapper cost, not proof-checking or compiler-wide performance. Resume broader profiling only
+   with an isolated, provenance-matched run after the trust gates.

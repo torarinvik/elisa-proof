@@ -143,7 +143,7 @@ def main() -> None:
         finding for finding in nested_literal["findings"]
         if finding["kind"] == "source-obligation-inventory"
     ]
-    assert nested_inventory_findings
+    assert len(nested_inventory_findings) == 1, nested_inventory_findings
     assert nested_inventory_findings[0]["status"] == "unsupported"
     assert nested_literal["verification_state"] == "unsupported"
 
