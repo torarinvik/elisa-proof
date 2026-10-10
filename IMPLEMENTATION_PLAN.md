@@ -8917,10 +8917,20 @@ weaken the checker to make legacy fixtures pass.
 inferred closure has `fn() -> i64 can[Unsafe]`. Diagnose the source annotation or effect inference
 after the gate releases; this is not explained by Global grants. Together with the previously
 recorded driver-acceptance, compile-time, and dictionary-differential failures, fourteen checks
-have failed so far. The rest of the full suite remains active and may reveal more. Keep the
-compiler candidate frozen and the proof pin unchanged until the final result and tuple postflight.
+had failed at that point.
+
+The live run then added three failures. `loop_smoke.sh` stops compiling its source because
+`frontend_parser_parse_file` and `Semantic.check` require explicit `Global{Read,Write}` grants
+(alongside their existing `Unsafe`, `Atomics`, and other effect grants). `scope_binding_smoke.sh`
+reports 80 of 83 cases passing; its three global array, dictionary, and reference cases stop in
+Stage0 on missing Global.Read/Global.Write grants before their scope assertions run. These are
+additional fixtures to migrate while preserving the grant rule. `runtime drift guard (elisacore_std
+in sync)` also failed, but `run_all.sh` has not retained a per-check log or diagnostic for it yet;
+inspect the runner's captured result after the suite exits. Seventeen checks have failed so far,
+and the rest of the suite remains active. Keep the compiler candidate frozen and proof pin
+unchanged until the final result and tuple postflight.
 
 After the run completes, fix only the concrete causes: add scoped grants to valid fixtures and
 their helper contracts, resolve the closure effect mismatch, then reproduce the two dictionary
-declines with diagnostics. Rerun each affected check and the full gate on the same Stage1/runtime
-tuple before building or qualifying proof products.
+declines with diagnostics, and diagnose the runtime drift guard. Rerun each affected check and the
+full gate on the same Stage1/runtime tuple before building or qualifying proof products.
