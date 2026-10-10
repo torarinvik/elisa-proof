@@ -210,9 +210,22 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
             target: usize = corr_function_index_for_callee(work, callee_expression)
             return ("callee-unresolved", 0) if target >= work.functions.count
             return ("callee-unchecked", 0) if work.functions[target].status != "checked"
+            params: darray[Ast::ParamDecl] = []
+            match work.functions[target].declaration:
+                Ast::Decl.Func(_, declared_params, _, _, _, _, _):
+                    params = declared_params
+                _:
+                    return ("callee-unresolved", 0)
+            return ("arity", 0) if params.count != arguments.count
             actuals: mutable darray[usize] = []
-            for argument in arguments |pool, state, actuals|:
-                actual: (reason: sview, value: usize) = corr_expression_with_calls(pool, work, declarations, argument, state, line, depth + 1)
+            for argument_index in 0..<arguments.count |argument_index, arguments, params, pool, work, state, actuals|:
+                allow_signed_min: bool = corr_requires_signed_min_actual(work, params[argument_index], arguments[argument_index])
+                match arguments[argument_index]:
+                    Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+                        return ("argument-type", 0) if value == -9223372036854775807 - 1 and not allow_signed_min
+                    _:
+                        pass
+                actual: (reason: sview, value: usize) = corr_expression_with_calls(pool, work, declarations, arguments[argument_index], state, line, depth + 1, allow_signed_min)
                 return (actual.reason, 0) if sview_len(actual.reason) > 0
                 return ("argument", 0) if actual.value == 0
                 actuals.push(actual.value)
@@ -266,7 +279,7 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                     return ("callee-unresolved", 0)
         _:
             return ("call", 0)
-def corr_expression_with_calls(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, state: mutable CorrState&, line: u32, depth: usize) -> (reason: sview, value: usize):
+def corr_expression_with_calls(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, state: mutable CorrState&, line: u32, depth: usize, allow_signed_min: bool = false) -> (reason: sview, value: usize):
     return ("nesting", 0) if depth > CorrLimit::TERM_DEPTH
     match expression:
         Ast::Expr.Call(_, _, _, _):
@@ -274,10 +287,13 @@ def corr_expression_with_calls(pool: mutable CorrPool&, work: mutable CorrWork&,
             return ("", constant) if constant != 0
             return corr_apply_call(pool, work, declarations, expression, state, line, depth + 1)
         Ast::Expr.Paren(inner, _):
-            return corr_expression_with_calls(pool, work, declarations, inner, state, line, depth + 1)
+            return corr_expression_with_calls(pool, work, declarations, inner, state, line, depth + 1, allow_signed_min)
+        Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+            return ("assertion-expression", 0) if not allow_signed_min or value != -9223372036854775807 - 1
+            return ("", corr_signed_min_literal(pool))
         Ast::Expr.Unary(operator, operand, _):
             return ("assertion-expression", 0) if operator != TokenKind.Not
-            evaluated: (reason: sview, value: usize) = corr_expression_with_calls(pool, work, declarations, operand, state, line, depth + 1)
+            evaluated: (reason: sview, value: usize) = corr_expression_with_calls(pool, work, declarations, operand, state, line, depth + 1, false)
             return (evaluated.reason, 0) if sview_len(evaluated.reason) > 0
             return ("assertion-expression", 0) if evaluated.value == 0
             return ("", corr_unary(pool, "not", evaluated.value))
@@ -563,8 +579,8 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
                 match statement:
                     Ast::Stmt.Contract(kind, predicate, _):
                         if kind == "requires":
-                            required: usize = corr_eval_active(pool, work, predicate, &state.names, &state.values, 0)
-                            return "contract" if required == 0 or not corr_assume(pool, &state, required, true, 0)
+                            required: (reason: sview, value: usize) = corr_eval_requires(pool, work, declarations, predicate, &state, work.functions[function_index].line)
+                            return "contract" if sview_len(required.reason) > 0 or required.value == 0 or not corr_assume(pool, &state, required.value, true, 0)
                         elif kind == "ensure" or kind == "ensures":
                             return "contract" if corr_eval_active(pool, work, predicate, &validation_names, &validation_values, 0) == 0
                             work.ensures.push(predicate)

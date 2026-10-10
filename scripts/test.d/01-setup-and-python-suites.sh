@@ -273,6 +273,8 @@ run_py_test test_struct_invariants.py
 run_py_test test_correspondence_partial_coverage.py
 run_py_test test_correspondence.py
 run_py_test test_correspondence_if_call.py
+run_py_test test_correspondence_requires_call.py
+run_py_test test_correspondence_module_owners.py
 run_py_test test_correspondence_exclusive_refusal.py
 run_py_test test_correspondence_boolean_and_assoc.py
 run_py_test test_correspondence_void_assert.py
