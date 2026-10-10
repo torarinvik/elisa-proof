@@ -152,6 +152,26 @@ def api_parameter_goal_probe(text: sview, source: mutable darray[u8]&, report: m
         forged_goal: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(8, contract_position), TokenKind.EqEq, Ast::Expr.IntLit(7, contract_position), contract_position)
         report.certificates[source_attempt.certificate_index] <- ProofGoalCertificate{goal: forged_goal, facts_start: original_certificate.facts_start, facts_count: original_certificate.facts_count, kernel_goal: original_certificate.kernel_goal, kernel_facts_start: original_certificate.kernel_facts_start, kernel_facts_count: original_certificate.kernel_facts_count, line: original_certificate.line, name: original_certificate.name, rule: original_certificate.rule, replayed: original_certificate.replayed}
 
+def api_refinement_precondition_mutation_probe(source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> bool can Memory.Allocate, Abort.Panic:
+    (api_probe(REFINEMENT_API_SOURCE, source, report, diagnostics, 1) can Global{Read,Write})
+    return false if report.failed != 0 or report.replay_gaps != 0
+    alias_changed: mutable bool = false
+    for index in 0..<report.source_declarations.count |index, report, alias_changed|:
+        match report.source_declarations[index]:
+            Ast::Decl.Alias(name, target, position):
+                match target:
+                    Ast::Expr.Refinement(base, _, refinement_position):
+                        forged_predicate: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("self", refinement_position), TokenKind.Lt, Ast::Expr.IntLit(0, refinement_position), refinement_position)
+                        report.source_declarations[index] <- Ast::Decl.Alias(name, Ast::Expr.Refinement(base, forged_predicate, refinement_position), position)
+                        alias_changed <- true
+                    _:
+                        pass
+            _:
+                pass
+    return false if not alias_changed
+    (proof_replay_certificates(report) can Global{Read,Write})
+    return report.replay_gaps > 0
+
 def main() -> i64 can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
@@ -223,10 +243,11 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             (api_parameter_goal_probe(PARAMETER_RETURN_API_SOURCE, &source, &report, &diagnostics, route, tamper) can Global{Read,Write})
             return 204 if report.goal_attempts.count == 0 or report.certificates.count == 0
             return 205 if proof_report_source_admission_invariants_consistent(report)
+    return 218 if not api_refinement_precondition_mutation_probe(&source, &report, &diagnostics)
     return 0
 '''
 run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Direct API semantic admission: source-goal identity, Global grants, and reused-state clearing pass on all three routes")
+print("Direct API semantic admission: source-goal identity, Global grants, source-bound refinements, and reused-state clearing pass")

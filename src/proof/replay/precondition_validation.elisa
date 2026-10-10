@@ -1,0 +1,126 @@
+# Entry preconditions are source assumptions, not report-supplied axioms. Replay accepts one only
+# when it is present in the owning function's leading `requires` clauses or follows from a
+# uniquely resolved parameter refinement in the retained source declarations.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT: usize = 127
+
+        def proof_replay_precondition_find_owner(declarations: darray[Ast::Decl]&, name: sview, line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for declaration in declarations |name, line, matches, parameters, body, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, candidate_parameters, _, candidate_body, _, _, position):
+                        if candidate == name and position.line == line:
+                            matches <- matches + 1
+                            parameters <- candidate_parameters
+                            body <- candidate_body
+                    Ast::Decl.Module(_, nested, _):
+                        proof_replay_precondition_find_owner(nested, name, line, matches, parameters, body, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        proof_replay_precondition_find_owner(nested, name, line, matches, parameters, body, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_precondition_type_alias_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |name, depth, count|:
+                match declaration:
+                    Ast::Decl.Alias(candidate, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Module(_, nested, _):
+                        count <- count + proof_replay_precondition_type_alias_count(nested, name, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        count <- count + proof_replay_precondition_type_alias_count(nested, name, depth + 1)
+                    _:
+                        pass
+                return 2 if count > 1
+            return count
+
+        def proof_replay_precondition_type_alias_target(declarations: darray[Ast::Decl]&, name: sview, target: mutable Ast::Expr&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            for declaration in declarations |name, target, depth|:
+                match declaration:
+                    Ast::Decl.Alias(candidate, candidate_target, _):
+                        if candidate == name:
+                            target <- candidate_target
+                            return true
+                    Ast::Decl.Module(_, nested, _):
+                        return true if proof_replay_precondition_type_alias_target(nested, name, target, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_precondition_type_alias_target(nested, name, target, depth + 1)
+                    _:
+                        pass
+            return false
+
+        def proof_replay_precondition_refinement_capture(predicate: Ast::Expr, parameters: darray[Ast::ParamDecl]&) -> bool:
+            return true if proof_expr_mentions_name(predicate, "result")
+            for parameter in parameters |predicate|:
+                return true if parameter.name != "self" and proof_expr_mentions_name(predicate, parameter.name)
+            return false
+
+        def proof_replay_precondition_refinement_matches(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, parameters: darray[Ast::ParamDecl]&, parameter_name: sview, required: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            match type_expression:
+                Ast::Expr.Refinement(base, predicate, _):
+                    if not proof_replay_precondition_refinement_capture(predicate, parameters):
+                        subject: Ast::Expr = Ast::Expr.Ident(parameter_name, Ast::expr_pos(predicate))
+                        substituted: Ast::Expr = proof_replay_substitute(predicate, "self", subject)
+                        return true if not proof_replay_expr_is_invalid(substituted) and proof_replay_expr_equal(substituted, required)
+                    return proof_replay_precondition_refinement_matches(base, declarations, parameters, parameter_name, required, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_precondition_refinement_matches(inner, declarations, parameters, parameter_name, required, depth + 1)
+                Ast::Expr.Ident(alias_name, _):
+                    return false if proof_replay_precondition_type_alias_count(declarations, alias_name, 0) != 1
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return false if not proof_replay_precondition_type_alias_target(declarations, alias_name, &target, 0)
+                    return proof_replay_precondition_refinement_matches(target, declarations, parameters, parameter_name, required, depth + 1)
+                _:
+                    return false
+            return false
+
+        def proof_replay_precondition_body_contract_matches(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]) -> bool:
+            leading: mutable bool = true
+            for statement in body |leading, report, trace|:
+                match statement:
+                    Ast::Stmt.Contract(kind, requirement, _):
+                        if kind == "requires":
+                            return false if not leading
+                            return true if proof_replay_expr_equal(requirement, trace.expression)
+                            # Global immutable literals are substituted before entry facts are
+                            # recorded. Rebuild that normalization only from source-validated
+                            # constant facts owned by this exact function; mutable or shadowed
+                            # names have no such witness.
+                            names: mutable darray[sview] = []
+                            values: mutable darray[Ast::Expr] = []
+                            for candidate in report.traces.records |names, values, report, trace|:
+                                continue if candidate.name != trace.name or candidate.owner_line != trace.line
+                                continue if candidate.kind != "global-constant"
+                                continue if not proof_replay_global_constant_fact_is_valid(report, candidate)
+                                match candidate.expression:
+                                    Ast::Expr.Binary(Ast::Expr.Ident(constant_name, _), TokenKind.EqEq, constant_value, _):
+                                        names.push(constant_name)
+                                        values.push(constant_value)
+                                    _:
+                                        pass
+                            normalized: Ast::Expr = proof_replay_substitute_many(requirement, names, values)
+                            return true if not proof_replay_expr_is_invalid(normalized) and proof_replay_expr_equal(normalized, trace.expression)
+                            continue
+                        else:
+                            leading <- false
+                    _:
+                        leading <- false
+            return false
+
+        def proof_replay_precondition_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
+            return false if report.replay_owner_line != 0 and report.replay_owner_line != trace.line
+            matches: mutable usize = 0
+            parameters: mutable darray[Ast::ParamDecl] = []
+            body: mutable darray[Ast::Stmt] = []
+            proof_replay_precondition_find_owner(report.source_declarations, trace.name, trace.line, &matches, &parameters, &body, 0)
+            return false if matches != 1
+            return true if proof_replay_precondition_body_contract_matches(report, trace, body)
+            for parameter in parameters |report, trace, parameters|:
+                return true if parameter.name != "" and proof_replay_precondition_refinement_matches(parameter.type_expression, report.source_declarations, parameters, parameter.name, trace.expression, 0)
+            return false

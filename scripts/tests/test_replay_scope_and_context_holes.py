@@ -12,6 +12,8 @@ accepted.
 - A local binding reached as the premise of a derived proof step is subject to the same
   liveness rule as a certificate's own fact, and a verdict memoized for one certificate is not
   reused for another.
+- An entry-precondition trace is accepted only while it matches a leading source requires clause
+  or a parameter refinement; changing the source contract invalidates its dependent certificate.
 - A call summary's precondition goal must have been proven at that call, not merely be a goal
   with the same text proven at another call.
 """
@@ -89,7 +91,7 @@ SOURCE_TEXT = (
     "\n"  # 57
     "def pos(x: i64) -> i64:\n"  # 58
     "    requires x > 0\n"  # 59
-    "    ensure result == x\n"  # 60
+    "    ensure result > 0\n"  # 60
     "    return x\n"  # 61
     "\n"  # 62
     "def caller(n: i64) -> i64:\n"  # 63
@@ -236,6 +238,33 @@ extend ElisaProof:
             workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
             return proof_replay_function_summary_is_valid(report, trace, dependency_stack, 0, active_certificates, &workspace)
 
+        def test_scope_precondition_index(report: ProofReport&, owner: sview, owner_line: u32) -> usize:
+            for index in 0..<report.traces.records.count |index, report, owner, owner_line|:
+                trace: ProofFactTrace = report.traces.records[index]
+                return index if trace.kind == "precondition" and trace.name == owner and trace.line == owner_line
+            return report.traces.records.count
+
+        def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32) -> bool:
+            for index in 0..<report.source_declarations.count |index, report, owner, owner_line|:
+                match report.source_declarations[index]:
+                    Ast::Decl.Func(name, parameters, return_type, body, annotations, attributes, position):
+                        continue if name != owner or position.line != owner_line
+                        mutated_body: mutable darray[Ast::Stmt] = body
+                        changed: mutable bool = false
+                        for statement_index in 0..<mutated_body.count |statement_index, mutated_body, changed|:
+                            match mutated_body[statement_index]:
+                                Ast::Stmt.Contract("requires", _, contract_position):
+                                    forged: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", contract_position), TokenKind.Lt, Ast::Expr.IntLit(0, contract_position), contract_position)
+                                    mutated_body[statement_index] <- Ast::Stmt.Contract("requires", forged, contract_position)
+                                    changed <- true
+                                _:
+                                    pass
+                        report.source_declarations[index] <- Ast::Decl.Func(name, parameters, return_type, mutated_body, annotations, attributes, position)
+                        return changed
+                    _:
+                        pass
+            return false
+
 using Ast
 using ElisaProof
 
@@ -323,6 +352,17 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     report.traces.summary_require_goal_ids[summary_trace.summary_requires_start] <- earlier_attempt
     stop <- test_scope_forged(test_scope_summary_valid(&report, summary_trace, 63, 67), 64, &forged)
     return stop if stop != 0
+
+    # Entry assumptions must be bound to a leading source requires or a retained type refinement.
+    precondition_index: usize = test_scope_precondition_index(report, "pos", 58)
+    return 17 if precondition_index >= report.traces.records.count
+    precondition_trace: ProofFactTrace = report.traces.records[precondition_index]
+    test_scope_context(&report, 58, 60, 0)
+    return 18 if not proof_replay_boundary_trace_shape_valid(report, precondition_trace)
+    return 19 if not test_scope_mutate_precondition(&report, "pos", 58)
+    return 20 if proof_replay_boundary_trace_shape_valid(report, precondition_trace)
+    proof_replay_certificates(&report)
+    return 21 if report.replay_gaps == 0
     return 128 + forged if SCOPE_MODE == 1
     return 0
 '''
@@ -362,7 +402,7 @@ def main() -> None:
             return
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("replay scope/context holes: shadowed constants, nested redeclarations, a stale loop binding behind a derived step or a reused memo, and a precondition proven at another call fail; honest facts replay")
+    print("replay scope/context holes: source-bound entry preconditions, shadowed constants, nested redeclarations, stale loop bindings, and call-specific preconditions replay safely")
 
 
 if __name__ == "__main__":
