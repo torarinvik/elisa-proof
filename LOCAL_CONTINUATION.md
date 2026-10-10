@@ -122,7 +122,7 @@ does not recover or rule out files unique to the original `/root/work` tree.
 
 ## Fixed-array literal replay candidate (unqualified)
 
-The working tree has an uncommitted candidate in `src/proof/replay/type_bound_validation.elisa`
+The branch has a committed candidate in `src/proof/replay/type_bound_validation.elisa`
 and `src/proof/replay/global_mutable_array_validation.elisa`. It matches the exact index
 expression against a unique same-line source subscript and now unwraps `&`, `lmut`, and `mutable`
 around a source-declared fixed-array type. The standalone direct-API mutation control is
@@ -133,7 +133,17 @@ Qualification is pending. Product generation `f705f90a243f48498138d0c0fe5510fa` 
 reference-type unwrapping change, so `scripts/test_fixed_array_constant_indices.py` still showed
 one replay gap on that older product. The first direct-API harness attempt failed before its
 assertions: the compiler backend declined the oversized generated `main` at `main@524` on a
-match statement. The mutation check was moved to a smaller standalone harness, but it has not yet
-been compiled. The compiler coordinator requested no further Stage1 builds until the next slot is
-assigned. Do not treat this candidate as passing until the standalone mutation test and refreshed
-CLI product controls pass.
+match statement. The smaller expanded harness later compiled once and stopped at private helper
+access before execution; the exact failure is recorded below. The compiler coordinator requested
+no further Stage1 builds until a new slot is assigned. Do not treat this candidate as passing until
+the repaired standalone mutation test and refreshed CLI product controls pass.
+
+The expanded direct-API harness was run once against fresh Stage1
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`; static pins and Stage1 freshness passed. Compilation
+stopped before execution because the generated harness called private `proof_replay_expr_equal`.
+The exact process, preflight, log, and exit status are saved in
+`../vast-recovery-2026-10-09/fixed-array-direct-api-qualification-20261010-r1-run/`. The harness
+support now makes a test-only public copy of `differences_and_facts.elisa`; production visibility
+and the trace equality assertion remain unchanged. This source-only repair is unqualified. Do not
+run Stage1 until the compiler coordinator grants a new slot after authority r4, then freeze the
+updated runner/support hashes and manifest before one retry.

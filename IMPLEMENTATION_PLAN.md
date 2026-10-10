@@ -8461,3 +8461,29 @@ the helper contains positives for direct, parenthesized, and nested literal inde
 bound refusal. After the authority gate completes, build current proof/replay products and run the
 standalone mutation harness and fixed-array CLI regression before any performance qualification.
 Both the authority optimization and the replay fix retain their own independent result gates.
+
+### 23.27.55 Fixed-array direct-API run stopped at harness compilation (2026-10-10)
+
+The coordinator assigned the bounded direct-API slot to the same source candidate: proof HEAD
+`a33fa216a120f22092d89f6175549c478e309bc9` is `c1d06e52` plus a documentation-only queue update;
+`src/` and `scripts/` were identical across those commits. The frozen manifest and runner hashes
+were checked, the pinned Stage1 binary passed its freshness check, and no compiler process was
+active before launch. The harness was compiled exactly once with Stage1 `8f2023ce8a7d52358b733a0e812ff46293d45f10`.
+
+The run stopped at compilation, before the executable or any semantic assertion ran. The generated
+harness called private `ElisaProof.proof_replay_expr_equal` at line 290, and Stage1 correctly
+rejected access across the module boundary (exit 1). This is a test-harness admission failure; it
+neither qualifies nor refutes the fixed-array replay implementation. Preserve the full log,
+preflight, process record, and exit status under
+`../vast-recovery-2026-10-09/fixed-array-direct-api-qualification-20261010-r1-run/`.
+
+The source-only harness repair now copies `differences_and_facts.elisa` into the temporary test
+workspace and exposes its private helpers only in that generated test copy. The exact trace identity
+assertion remains unchanged, and production helper visibility stays private. The harness support
+asserts that every selected private helper file was copied. Static checks and a new manifest must
+pin this repair before another run. The compiler coordinator has since assigned the sole Stage1
+slot to authority r4; do not compile or retry the fixed-array harness until a new slot is explicitly
+granted.
+Once queued again, run the repaired standalone direct-API harness once and stop on its first
+failure. Only after it passes should the candidate move to matched fresh proof/replay products,
+CLI controls, and independent replay validation.

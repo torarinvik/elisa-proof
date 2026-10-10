@@ -10,6 +10,7 @@ import tempfile
 def _test_replay_includes(root: Path, scratch: Path) -> str:
     replay_file = root / "src/proof/replay.elisa"
     private_helpers = {
+        (root / "src/proof/replay/differences_and_facts.elisa").resolve(): "differences_and_facts_test.elisa",
         (root / "src/proof/replay/source_binding_validation.elisa").resolve(): "source_binding_validation_test.elisa",
         (root / "src/proof/replay/source_binding_validation/immutable_bindings.elisa").resolve(): "immutable_bindings_test.elisa",
         (root / "src/proof/replay/deterministic_call_sites.elisa").resolve(): "deterministic_call_sites_test.elisa",
