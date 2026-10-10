@@ -1,0 +1,50 @@
+extend ElisaProofFrameSource:
+    private:
+        def contract_primitive(name: sview) -> bool:
+            return name == "bool" or name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize"
+
+        def contract_scalar_type(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return contract_primitive(name)
+                _:
+                    return false
+
+        # Until independently resolved operator implementations are available,
+        # imported/implementation scopes and shadowed primitive names are unknown.
+        def contract_environment(declarations: darray[Ast::Decl]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64
+            for declaration in declarations |depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Import(_, _) | Ast::Decl.Scoped(_, _):
+                        return false
+                    Ast::Decl.Module(_, nested, _):
+                        return false if not contract_environment(&nested, depth + 1, work)
+                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return false if contract_primitive(name) or name == "darray"
+                    _:
+                        pass
+            return true
+
+        def scalar_contract(expression: Ast::Expr, formals: darray[sview]&, types: darray[Ast::Expr]&, return_type: Ast::Expr, allow_result: bool, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64 or work >= 4096 or formals.count != types.count
+            work <- work + 1
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    for index in 0..<formals.count |index, formals, types, name|:
+                        return contract_scalar_type(types[index]) if formals[index] == name
+                    return allow_result and name == "result" and contract_scalar_type(return_type)
+                Ast::Expr.Paren(inner, _):
+                    return scalar_contract(inner, formals, types, return_type, allow_result, depth + 1, work)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator != TokenKind.Not
+                    return scalar_contract(inner, formals, types, return_type, allow_result, depth + 1, work)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
+                    return scalar_contract(left, formals, types, return_type, allow_result, depth + 1, work) and scalar_contract(right, formals, types, return_type, allow_result, depth + 1, work)
+                _:
+                    return false

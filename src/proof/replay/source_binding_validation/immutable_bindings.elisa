@@ -1,3 +1,4 @@
+include "./value_block_immutable_bindings.elisa"
 # Replay local facts from unique, immutable scalar declarations. This module admits only
 # source-exact or independently authenticated constant-substituted initializers and the
 # separately checked value-preserving widening-cast equation.
@@ -38,6 +39,8 @@ extend ElisaProof:
 
         def proof_replay_local_binding_stable_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview) -> bool:
             return false if name == "" or name == target
+            if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0):
+                return proof_replay_local_binding_prior_immutable_local(declarations, owner, owner_line, name, target)
             return false if not proof_replay_local_binding_parameter_source_unshadowed(declarations, owner, owner_line, name)
             return false if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
             return true if proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
@@ -90,6 +93,35 @@ extend ElisaProof:
                 _:
                     return proof_replay_local_binding_integer_type_name(expression, 0)
 
+        # Reading a prior immutable scalar reads its captured value, regardless
+        # of how it was computed. This does not substitute its initializer or
+        # assert any equation about a call. Require unique direct declarations
+        # in the same owner and source order; parameter shadowing is refused by
+        # the caller. Forward references and cycles cannot pass this order.
+        def proof_replay_local_binding_prior_immutable_local(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, name: sview, target: sview) -> bool:
+            body: mutable darray[Ast::Stmt] = []
+            owners: mutable usize = 0
+            proof_replay_local_binding_find_owner(declarations, owner, owner_line, &body, &owners, 0)
+            return false if owners != 1
+            source_count: mutable usize = 0
+            target_count: mutable usize = 0
+            source_index: mutable usize = body.count
+            target_index: mutable usize = 0
+            valid: mutable bool = false
+            for index in 0..<body.count |index, body, name, target, source_count, target_count, source_index, target_index, valid|:
+                match body[index]:
+                    Ast::Stmt.VarDecl(local, type_expression, _, _):
+                        if local == name:
+                            source_count <- source_count + 1
+                            source_index <- index
+                            valid <- proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression)
+                        if local == target:
+                            target_count <- target_count + 1
+                            target_index <- index
+                    _:
+                        pass
+            return source_count == 1 and target_count == 1 and source_index < target_index and valid
+
         # Replay has no resolved cast-dispatch witness in local-binding traces. If any ordinary
         # or extern `__cast__` could occur in the imported unit, keep method-shaped numeric calls
         # opaque here; selector spelling alone cannot establish builtin conversion semantics.
@@ -124,16 +156,13 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
                     return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_conditional_value(then_value, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_conditional_value(else_value, target, declarations, owner, owner_line, depth + 1)
                 Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(receiver, _), method, _), arguments, _, _):
                     return false if arguments.count != 0
                     return false if method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize"
                     return false if proof_replay_local_binding_cast_hook_present(declarations, 0)
                     return proof_replay_local_binding_stable_name(declarations, owner, owner_line, receiver, target)
-                # A conditional value is as stable as its arms and its guard: the kernel reads
-                # `c ? a : b` as one term, so the equation pins the same value the source does.
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return false if not proof_replay_local_binding_stable_condition(condition, target, declarations, owner, owner_line, depth + 1)
-                    return proof_replay_local_binding_stable_initializer(then_expression, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(else_expression, target, declarations, owner, owner_line, depth + 1)
                 _:
                     return false
 
@@ -170,16 +199,32 @@ extend ElisaProof:
                     return false
 
         # Comparisons of stable integer operands, joined by `and`, `or` and `not`.
+        # A conditional equation is source-exact only when its predicate and
+        # both arms read stable integer inputs, including prior immutable
+        # captures. The caller separately refuses overloaded primitive operators.
+        def proof_replay_local_binding_conditional_value(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "" or name == target
+                    if not proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0):
+                        return proof_replay_local_binding_prior_immutable_local(declarations, owner, owner_line, name, target)
+                _:
+                    pass
+            return proof_replay_local_binding_stable_initializer(expression, target, declarations, owner, owner_line, depth + 1)
+
         def proof_replay_local_binding_stable_condition(expression: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match expression:
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
                     return proof_replay_local_binding_stable_condition(inner, target, declarations, owner, owner_line, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
                         return proof_replay_local_binding_stable_condition(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_condition(right, target, declarations, owner, owner_line, depth + 1)
-                    return false if operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.EqEq and operator != TokenKind.BangEq
-                    return proof_replay_local_binding_stable_initializer(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_stable_initializer(right, target, declarations, owner, owner_line, depth + 1)
+                    return false if not proof_is_comparison(operator)
+                    return proof_replay_local_binding_conditional_value(left, target, declarations, owner, owner_line, depth + 1) and proof_replay_local_binding_conditional_value(right, target, declarations, owner, owner_line, depth + 1)
                 _:
                     return false
 
@@ -471,6 +516,6 @@ extend ElisaProof:
                                     valid <- position.line == trace.line and position.line <= report.trace_owner_line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_local_binding_integer_type(type_expression, 0) and not proof_replay_local_binding_mutable_integer_type(type_expression) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0) and proof_replay_local_binding_authenticated_initializer(report, trace, initializer, source_value, target, 0)
                             _:
                                 pass
-                    return declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target)
+                    return declarations == 1 and valid and proof_replay_source_single_declaration(report.source_declarations, function_body, target) or proof_replay_value_block_immutable_binding(report, trace)
                 _:
                     return false

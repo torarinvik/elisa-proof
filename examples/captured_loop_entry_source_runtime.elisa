@@ -1,0 +1,112 @@
+# Elisa Proof command-line facade. Compiler imports and proof modules stay at the boundary;
+# application I/O, rendering, repair, and CLI orchestration live in focused source modules.
+include "../build/snapshot/Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
+include "../build/snapshot/Elisa-compiler/elisacore_std/collections.elisa"
+include "../build/snapshot/Elisa-compiler/elisacore_std/elisacore_runtime_strings.elisa"
+include "../build/snapshot/Elisa-compiler/src/semantic/semantic.elisa"
+include "../build/snapshot/Elisa-compiler/elisacore_std/elisacore_json.elisa"
+using Json
+
+include "../src/app/json_boundary.elisa"
+
+include "../src/proof/kernel_core.elisa"
+include "../src/proof/operator_impl_model.elisa"
+include "../src/proof/model/enum_index.elisa"
+include "../src/proof/model/findings.elisa"
+include "../src/proof/model.elisa"
+include "../src/proof/model/lemma_table.elisa"
+include "../src/proof/model/report_invariants.elisa"
+include "../src/proof/certificate_admission.elisa"
+include "../src/proof/kernel.elisa"
+include "../src/proof/kernel_intern.elisa"
+include "../src/proof/expr.elisa"
+include "../src/proof/linear.elisa"
+include "../src/proof/resources.elisa"
+include "../src/proof/kernel_replay.elisa"
+include "../src/proof/check.elisa"
+include "../src/proof/replay.elisa"
+
+include "../src/proof/tactics.elisa"
+
+using Ast
+using Semantic
+using ElisaProof
+
+# Tests the source predicate directly; these deliberately minimal records do
+# not claim complete kernel certificates or source authentication by transport.
+extend ElisaProof:
+    public:
+        def captured_entry_source_control(mode: u8) -> bool can[Memory.Allocate, Abort.Panic]:
+            source: u8& = "def sentinel(pick: usize) -> usize:\n    ensure result <= 32\n    for slot in 0..<32 |best: usize = 32| -> best:\n        invariant best <= 32\n        best <- slot if slot == pick\n"
+            tokens: darray[Lexer::Token] = frontend_tokenize(source, source)
+            file: Ast::File = frontend_parser_parse_file(source, tokens)
+            return false if file.errors.count != 0
+            context = ElisaProofFrameSource::owner(&file.top_decls, "sentinel", 1)
+            return false if not context.known
+            for statement in context.body |file, context, mode|:
+                match statement:
+                    Ast::Stmt.Return(returned, _):
+                        if returned is expression:
+                            match expression:
+                                Ast::Expr.Block(statements, _, _, _):
+                                    return false if statements.count != 2
+                                    match statements[0]:
+                                        Ast::Stmt.VarDecl(target, _, initializer, position):
+                                            match statements[1]:
+                                                Ast::Stmt.For(_, _, _, body, loop_position):
+                                                    for member in body |file, context, mode, target, initializer, position, loop_position|:
+                                                        match member:
+                                                            Ast::Stmt.Contract("invariant", invariant, _):
+                                                                report: mutable ProofReport = proof_empty_report()
+                                                                report.source_declarations.extend(file.top_decls)
+                                                                report.replay_owner_line <- 1
+                                                                report.trace_owner_line <- loop_position.line
+                                                                report.trace_consumer_certificate_index <- 1
+                                                                value: mutable Ast::Expr = initializer
+                                                                value <- Ast::Expr.IntLit(33, position) if mode == 1
+                                                                binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(target, position), TokenKind.EqEq, value, position)
+                                                                trace: ProofFactTrace = ProofFactTrace{expression: binding, kernel_expression: 0, kind: "local-binding", line: position.line, name: "sentinel", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
+                                                                goal: mutable Ast::Expr = invariant
+                                                                if mode == 2:
+                                                                    match invariant:
+                                                                        Ast::Expr.Binary(left, operator, right, goal_position):
+                                                                            changed: Ast::Pos = Ast::Pos{line: goal_position.line, column: goal_position.column, offset: goal_position.offset + 1, end_line: goal_position.end_line, end_column: goal_position.end_column, end_offset: goal_position.end_offset}
+                                                                            goal <- Ast::Expr.Binary(left, operator, right, changed)
+                                                                        _:
+                                                                            return false
+                                                                if mode == 3:
+                                                                    for source_statement in context.body |goal, target, position|:
+                                                                        match source_statement:
+                                                                            Ast::Stmt.Contract("ensure", ensure, _):
+                                                                                names: darray[sview] = ["result"]
+                                                                                values: darray[Ast::Expr] = [Ast::Expr.Ident(target, position)]
+                                                                                goal <- proof_substitute(ensure, names, values)
+                                                                            _:
+                                                                                pass
+                                                                fact_count: mutable usize = 0
+                                                                if mode == 4:
+                                                                    loop_trace: ProofFactTrace = ProofFactTrace{expression: invariant, kernel_expression: 0, kind: "loop-invariant", line: loop_position.line, name: "sentinel", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
+                                                                    report.traces.records.push(loop_trace)
+                                                                    report.traces.origin_indices.push(0)
+                                                                    fact_count <- 1
+                                                                report.source_declarations.push(file.top_decls[0]) if mode == 5
+                                                                report.source_declarations.push(Ast::Decl.Alias("usize", Ast::Expr.Ident("Counter", position), position)) if mode == 6
+                                                                report.certificates.push(ProofGoalCertificate{goal: goal, facts_start: 0, facts_count: fact_count, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: loop_position.line, name: "sentinel", rule: "goal", replayed: false})
+                                                                return proof_replay_captured_loop_entry_source(&report, trace)
+                                                            _:
+                                                                pass
+                                                _:
+                                                    return false
+                                        _:
+                                            return false
+                                _:
+                                    pass
+                    _:
+                        pass
+            return false
+
+def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+    return 1 if not captured_entry_source_control(0)
+    for mode in 1..<7 |mode|:
+        return mode.i64() + 1 if captured_entry_source_control(mode.u8())
+    return 0

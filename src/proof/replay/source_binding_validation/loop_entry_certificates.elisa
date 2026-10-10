@@ -10,6 +10,55 @@
 # loop too, because its entry and preservation are checked by their own certificates.
 extend ElisaProof:
     private:
+        # Signed locals may be expanded to their initializer in an entry goal.
+        # Reconstruct that expansion from an effect-free source prefix only;
+        # unsigned locals keep their names and their separately replayed bindings.
+        def proof_replay_loop_entry_expanded_goal(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, invariant: Ast::Expr) -> bool:
+            names: mutable darray[sview] = []
+            values: mutable darray[Ast::Expr] = []
+            found: mutable bool = false
+            return false if body.count > 4096 or not ElisaProofFrameSource::index_copy_environment(report.source_declarations)
+            for statement in body |report, trace, certificate, body, names, values, found|:
+                position: Ast::Pos = proof_replay_statement_position(statement)
+                if position.line == certificate.line:
+                    match statement:
+                        Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _):
+                            found <- true
+                            break
+                        _:
+                            return false
+                return false if position.line > certificate.line
+                match statement:
+                    Ast::Stmt.Contract(kind, _, _):
+                        return false if kind != "requires" and kind != "ensure" and kind != "ensures"
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        return false if not proof_replay_local_binding_integer_type(type_expression, 0)
+                        type_name: sview = proof_replay_local_binding_reference_integer_name(type_expression, 0)
+                        return false if type_name == "" or not proof_replay_source_single_declaration(report.source_declarations, body, name)
+                        return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
+                        work: mutable usize = 0
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, type_name, 0, &work)
+                        pure: mutable bool = proof_replay_local_binding_stable_initializer(initializer, name, report.source_declarations, trace.name, report.replay_owner_line, 0)
+                        match initializer:
+                            Ast::Expr.Index(Ast::Expr.Ident(receiver, _), Ast::Expr.IntLit(at, _), _):
+                                return false if at < 0 or not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, receiver)
+                                context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+                                matches: mutable usize = 0
+                                for index in 0..<context.formals.count |context, receiver, type_name, matches|:
+                                    matches <- matches + 1 if context.formals[index] == receiver and proof_replay_index_copy_element(context.formal_types[index], 0) == type_name
+                                pure <- matches == 1
+                            _:
+                                pass
+                        return false if not pure or proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
+                        if proof_replay_local_binding_unsigned_type_name(type_expression, 0) == "":
+                            names.push(name)
+                            values.push(initializer)
+                    _:
+                        return false
+            return false if not found or names.count == 0
+            expanded: Ast::Expr = proof_replay_substitute_many(invariant, names, values)
+            proof_replay_summary_call_argument_equal(report, trace, expanded, certificate.goal, 0)
+
         def proof_replay_loop_entry_invariants(statements: darray[Ast::Stmt]&, line: u32, invariants: mutable darray[Ast::Expr]&, loops: mutable usize&, nested: bool) -> void:
             for statement in statements |line, invariants, loops, nested|:
                 match statement:
@@ -45,10 +94,15 @@ extend ElisaProof:
                     return false
             body: mutable darray[Ast::Stmt] = []
             return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
-            invariants: mutable darray[Ast::Expr] = []
-            loops: mutable usize = 0
-            proof_replay_loop_entry_invariants(body, certificate.line, &invariants, &loops, false)
-            return false if loops != 1
-            for invariant in invariants |report, trace, certificate|:
-                return true if proof_replay_summary_call_argument_equal(report, trace, invariant, certificate.goal, 0)
-            return false
+            condition: mutable Ast::Expr = Ast::Expr.Invalid
+            loop_body: mutable darray[Ast::Stmt] = []
+            lexical_body: mutable darray[Ast::Stmt] = []
+            return false if not proof_replay_loop_scope(body, certificate.line, &condition, &loop_body, &lexical_body)
+            for statement in loop_body |report, trace, certificate, lexical_body|:
+                match statement:
+                    Ast::Stmt.Contract("invariant", invariant, _):
+                        return true if proof_replay_summary_call_argument_equal(report, trace, invariant, certificate.goal, 0)
+                        return true if proof_replay_loop_entry_expanded_goal(report, trace, certificate, lexical_body, invariant)
+                    _:
+                        pass
+            false

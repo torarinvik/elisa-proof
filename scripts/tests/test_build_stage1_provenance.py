@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -58,6 +59,11 @@ def make_compiler(root: Path, *, installed_snapshot: bool) -> tuple[str, Path]:
         path = root / recipe
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# fixture: {recipe}\n")
+    (root / "scripts/stage1_provenance.py").write_text(
+        "BUILD_RECIPES = ('scripts/elisac_stage1.sh', "
+        "'scripts/elisac_stage1_seed.sh', 'scripts/build_runtime_object.sh', "
+        "'scripts/write_profiler_hook_fallbacks.sh')\n"
+    )
     revision = commit(root, "frontend baseline")
     product = root / "bin/elisac-stage1"
     product.parent.mkdir()
@@ -86,8 +92,8 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
                       compiler / "build/runtime", tools):
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
-                 "link_flags.sh", "platform.sh", "runtime_inputs.sh", "build_manifest.py", "compiler_environment.py",
-                 "verify_product_pair.py"):
+                 "link_flags.sh", "platform.sh", "build_manifest.py", "compiler_environment.py",
+                 "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")
     (compiler / "elisacore_std/prelude.elisa").write_text("pinned stdlib\n")
@@ -100,6 +106,11 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
     (compiler / "build/runtime/elisacore_runtime.o").write_bytes(b"runtime object")
     wrapper = compiler / "scripts/elisac_stage1.sh"
     executable(wrapper, "#!/bin/sh\nexec \"$(dirname \"$0\")/../bin/elisac-stage1\" \"$@\"\n")
+    (compiler / "scripts/stage1_provenance.py").write_text(
+        "BUILD_RECIPES = ('scripts/elisac_stage1.sh', "
+        "'scripts/elisac_stage1_seed.sh', 'scripts/build_runtime_object.sh', "
+        "'scripts/write_profiler_hook_fallbacks.sh')\n"
+    )
     revision = commit(compiler, "Stage1 build fixture")
     product = compiler / "bin/elisac-stage1"
     product.parent.mkdir()
@@ -134,7 +145,9 @@ else:
 if [ "$1" = "-smr" ]; then printf 'Linux fixture 1\\n'; else printf 'Linux\\n'; fi
 """)
     environment = dict(
-        os.environ,
+        # This synthetic checkout owns every toolchain input. Qualification
+        # overrides must not substitute a real product into the mock build.
+        {key: value for key, value in os.environ.items() if not key.startswith("ELISA_")},
         HOME=str(base / "home"),
         ELISA_COMPILER_BIN=str(wrapper),
         ELISA_COMPILER_SRC=str(compiler),
@@ -252,6 +265,20 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
             Path(self.temporary.name) / "installed", installed_snapshot=True,
         )
         self.assertEqual(installed_case["compiler"]["stage"], "stage1")
+
+    def test_mock_build_ignores_external_toolchain_overrides(self) -> None:
+        with patch.dict(os.environ, {
+            "ELISA_STAGE1_BIN": "/missing/external-stage1",
+            "ELISA_STAGE1_ROOT": "/missing/external-root",
+            "ELISA_COMPILER_ROOT": "/missing/external-compiler",
+            "ELISA_RUNTIME_OBJ": "/missing/external-runtime.o",
+            "ELISA_PROOF_PRODUCTS": "all",
+            "ELISA_PROOF_OUTPUT": "/missing/external-output",
+        }):
+            manifest = run_stage1_build(
+                Path(self.temporary.name) / "poisoned", installed_snapshot=False,
+            )
+        self.assertEqual(manifest["compiler"]["stage"], "stage1")
 
 
 class PinnedRecipeListTests(unittest.TestCase):

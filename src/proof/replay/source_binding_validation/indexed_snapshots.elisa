@@ -1,0 +1,141 @@
+# An indexed snapshot equals its source place only while that place cannot
+# change. Reconstruct the entire suffix from the original owner, including
+# both branches; calls, writes, loops and unknown statements refuse replay.
+extend ElisaProofFrameSource:
+    private:
+        def snapshot_array_element(expression: Ast::Expr, depth: usize) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= 64
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _):
+                    return snapshot_array_element(inner, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident("darray", _), element, _):
+                    return (contract_scalar_type(element), element)
+                Ast::Expr.Index(element, _, _):
+                    return (contract_scalar_type(element), element)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def snapshot_place_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, name: sview, line: u32, formals: darray[sview]&) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            mapped = place(expression, formals)
+            return (false, Ast::Expr.Invalid) if not mapped.known
+            return place_type(declarations, name, line, mapped.place)
+
+        def snapshot_integer_index(expression: Ast::Expr, names: darray[sview]&, types: darray[Ast::Expr]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64 or work >= 4096 or names.count != types.count
+            work <- work + 1
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.Ident(local, _):
+                    for index in 0..<names.count |index, names, types, local|:
+                        if names[index] == local:
+                            match types[index]:
+                                Ast::Expr.Ident(type_name, _):
+                                    return contract_primitive(type_name) and type_name != "bool"
+                                _:
+                                    return false
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _):
+                    return snapshot_integer_index(inner, names, types, depth + 1, work)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
+                    return snapshot_integer_index(left, names, types, depth + 1, work) and snapshot_integer_index(right, names, types, depth + 1, work)
+                _:
+                    return false
+
+        def snapshot_scalar_read(expression: Ast::Expr, declarations: darray[Ast::Decl]&, name: sview, line: u32, formals: darray[sview]&, names: darray[sview]&, types: darray[Ast::Expr]&, depth: usize, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64 or work >= 4096 or names.count != types.count
+            work <- work + 1
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(local, _):
+                    for index in 0..<names.count |index, names, types, local|:
+                        return contract_scalar_type(types[index]) if names[index] == local
+                    return false
+                Ast::Expr.Field(_, _, _):
+                    resolved = snapshot_place_type(expression, declarations, name, line, formals)
+                    return resolved.known and contract_scalar_type(resolved.type_expression)
+                Ast::Expr.Index(base, index, _):
+                    resolved = snapshot_place_type(base, declarations, name, line, formals)
+                    return false if not resolved.known or not snapshot_array_element(resolved.type_expression, 0).known
+                    return snapshot_integer_index(index, names, types, depth + 1, work)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _):
+                    return snapshot_scalar_read(inner, declarations, name, line, formals, names, types, depth + 1, work)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
+                    return snapshot_scalar_read(left, declarations, name, line, formals, names, types, depth + 1, work) and snapshot_scalar_read(right, declarations, name, line, formals, names, types, depth + 1, work)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return snapshot_scalar_read(condition, declarations, name, line, formals, names, types, depth + 1, work) and snapshot_scalar_read(then_value, declarations, name, line, formals, names, types, depth + 1, work) and snapshot_scalar_read(else_value, declarations, name, line, formals, names, types, depth + 1, work)
+                _:
+                    return false
+
+        def snapshot_suffix(body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, name: sview, line: u32, formals: darray[sview]&, names: mutable darray[sview]&, types: mutable darray[Ast::Expr]&, depth: usize, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= 64
+            for statement in body |declarations, name, line, formals, names, types, depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match statement:
+                    Ast::Stmt.VarDecl(local, declared_type, initializer, _):
+                        return false if not contract_scalar_type(declared_type) or any existing in names where existing == local
+                        return false if not snapshot_scalar_read(initializer, declarations, name, line, formals, names, types, depth + 1, work)
+                        names.push(local)
+                        types.push(declared_type)
+                    Ast::Stmt.Return(value, _):
+                        if value is expression:
+                            return false if not snapshot_scalar_read(expression, declarations, name, line, formals, names, types, depth + 1, work)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return false if not snapshot_scalar_read(condition, declarations, name, line, formals, names, types, depth + 1, work)
+                        for arm in [then_body, else_body] |declarations, name, line, formals, names, types, depth, work|:
+                            arm_names: mutable darray[sview] = []
+                            arm_types: mutable darray[Ast::Expr] = []
+                            arm_names.extend(names)
+                            arm_types.extend(types)
+                            return false if not snapshot_suffix(arm, declarations, name, line, formals, &arm_names, &arm_types, depth + 1, work)
+                    _:
+                        return false
+            return true
+
+    public:
+        def indexed_snapshot_stable(declarations: darray[Ast::Decl]&, name: sview, line: u32, target: sview, declared_type: Ast::Expr, initializer: Ast::Expr) -> bool can[Memory.Allocate, Abort.Panic]:
+            context = owner(declarations, name, line)
+            return false if not context.known or not contract_scalar_type(declared_type)
+            environment_work: mutable usize = 0
+            return false if not contract_environment(declarations, 0, &environment_work)
+            match initializer:
+                Ast::Expr.Index(base, index, _):
+                    resolved = snapshot_place_type(base, declarations, name, line, &context.formals)
+                    return false if not resolved.known
+                    element = snapshot_array_element(resolved.type_expression, 0)
+                    return false if not element.known
+                    match element.element:
+                        Ast::Expr.Ident(element_name, _):
+                            match declared_type:
+                                Ast::Expr.Ident(local_type_name, _):
+                                    return false if element_name != local_type_name
+                                _:
+                                    return false
+                        _:
+                            return false
+                    return false if not snapshot_integer_index(index, &context.formals, &context.formal_types, 0, &environment_work)
+                _:
+                    return false
+            names: mutable darray[sview] = []
+            types: mutable darray[Ast::Expr] = []
+            suffix: mutable darray[Ast::Stmt] = []
+            names.extend(context.formals)
+            types.extend(context.formal_types)
+            found: mutable bool = false
+            for statement in context.body |target, names, types, suffix, found|:
+                if found:
+                    suffix.push(statement)
+                else:
+                    match statement:
+                        Ast::Stmt.VarDecl(local, type_expression, _, _):
+                            return false if any existing in names where existing == local
+                            names.push(local)
+                            types.push(type_expression)
+                            found <- true if local == target
+                        _:
+                            pass
+            return found and snapshot_suffix(&suffix, declarations, name, line, &context.formals, &names, &types, 0, &environment_work)

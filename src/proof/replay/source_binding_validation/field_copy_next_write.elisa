@@ -1,0 +1,68 @@
+# A scalar field copy still equals the field while its immediately following
+# pure indexed assignment evaluates the index, before the assignment writes.
+extend ElisaProof:
+    private:
+        def proof_replay_field_copy_next_write_body(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, target: sview, source_value: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64 or body.count > 4096
+            for index in 0..<body.count |index, report, trace, certificate, body, target, source_value, depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match body[index]:
+                    Ast::Stmt.VarDecl(local, type_expression, initializer, position):
+                        continue if local != target or position.line != trace.line or index + 1 >= body.count
+                        continue if proof_replay_local_binding_unsigned_type_name(type_expression, 0) == ""
+                        continue if not proof_replay_local_binding_pos_matches(trace.expression, position)
+                        continue if not proof_replay_expr_equal(initializer, source_value)
+                        continue if proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
+                        local_width: i64 = proof_unsigned_type_width(type_expression, report.source_declarations, 0)
+                        width_facts: mutable darray[Ast::Expr] = []
+                        for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, width_facts|:
+                            origin: usize = report.traces.origin_indices[certificate.facts_start + fact_index]
+                            continue if origin >= report.traces.records.count
+                            source_trace: ProofFactTrace = report.traces.records[origin]
+                            width_facts.push(report.certificate_facts[certificate.facts_start + fact_index]) if source_trace.kind == "type-bound" and source_trace.name == trace.name
+                        source_width: i64 = proof_unsigned_place_marker_width(width_facts, source_value)
+                        continue if local_width <= 0 or source_width <= 0 or source_width > local_width
+                        match body[index + 1]:
+                            Ast::Stmt.Assign(Ast::Expr.Index(object, Ast::Expr.Ident(used, _), access_position), TokenKind.LArrow, value, _):
+                                continue if used != target or access_position.line != certificate.line
+                                continue if proof_expr_has_call(object) or proof_expr_has_call(value) or proof_expr_has_move(object) or proof_expr_has_move(value)
+                                continue if proof_source_expression_has_overloaded_operator(object, report.source_primitive_operator_mask, 0) or proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
+                                continue if proof_replay_source_expr_touches(report.source_declarations, object, target, true, 0) or proof_replay_source_expr_touches(report.source_declarations, value, target, true, 0)
+                                local_symbol: Ast::Expr = Ast::Expr.Ident(target, position)
+                                expected: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, access_position), TokenKind.LtEq, local_symbol, access_position) if certificate.rule == "index-lower" else Ast::Expr.Binary(local_symbol, TokenKind.Lt, Ast::Expr.Field(object, "count", access_position), access_position)
+                                return true if proof_replay_expr_equal(expected, certificate.goal)
+                            _:
+                                pass
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, nested, target, source_value, depth + 1, work)
+                    Ast::Stmt.If(_, yes, no, _):
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, yes, target, source_value, depth + 1, work)
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, no, target, source_value, depth + 1, work)
+                    _:
+                        pass
+            return false
+
+        def proof_replay_field_copy_next_write_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line or (certificate.rule != "index-lower" and certificate.rule != "index-upper")
+            return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+            return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    root: mutable sview = ""
+                    match source_value:
+                        Ast::Expr.Field(Ast::Expr.Ident(receiver, _), _, _):
+                            root <- receiver
+                        _:
+                            return false
+                    return false if target == "" or proof_internal_name_is_rebind(target) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), Ast::expr_pos(trace.expression))
+                    context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+                    return false if not context.known or any formal in context.formals where formal == target
+                    return false if not any formal in context.formals where formal == root
+                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, root)
+                    work: mutable usize = 0
+                    return proof_replay_field_copy_next_write_body(report, trace, certificate, context.body, target, source_value, 0, &work)
+                _:
+                    return false

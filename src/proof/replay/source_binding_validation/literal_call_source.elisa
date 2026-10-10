@@ -1,0 +1,59 @@
+# A failed precondition suppresses all postcondition summaries, but passing a
+# source literal still defines its fresh parameter symbol. Authenticate that
+# definition without using the callee's postconditions or assuming its requires.
+extend ElisaProof:
+    private:
+        def proof_replay_literal_source_slot(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, literal: Ast::Expr) -> bool:
+            match call:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if any label in argument_names where label != ""
+                    slots: mutable usize = 0
+                    for summary in report.executables.summaries |report, trace, callee, arguments, literal, slots|:
+                        candidate: ProofFactTrace = ProofFactTrace{expression: trace.expression, kernel_expression: 0, kind: "local-binding", line: trace.line, name: trace.name, dependency: summary.name, premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: summary.line}
+                        continue if not proof_replay_summary_owner_matches_call(report, candidate, summary, callee)
+                        return false if arguments.count != summary.parameters_count or summary.parameters_start > report.executables.parameters.count or summary.parameters_count > report.executables.parameters.count - summary.parameters_start
+                        for slot in 0..<arguments.count |report, summary, arguments, literal, slots|:
+                            argument: Ast::Expr = arguments[slot]
+                            continue if not proof_replay_expr_equal(argument, literal) or not proof_replay_local_binding_expr_positions_match(argument, literal)
+                            formal: sview = report.executables.parameters[summary.parameters_start + slot]
+                            type_name: sview = proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, summary.name, summary.line, formal, 0)
+                            continue if type_name != "i8" and type_name != "i16" and type_name != "i32" and type_name != "i64"
+                            width: i64 = 8 if type_name == "i8" else (16 if type_name == "i16" else (32 if type_name == "i32" else 64))
+                            fits: bool = proof_replay_literal_source_fits(literal, width)
+                            slots <- slots + 1 if fits
+                    return slots == 1
+                _:
+                    return false
+
+        def proof_replay_literal_direct_call_source(report: ProofReport&, trace: ProofFactTrace, position: Ast::Pos, literal: Ast::Expr) -> bool:
+            body: mutable darray[Ast::Stmt] = []
+            owners: mutable usize = 0
+            proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &owners, 0)
+            return false if owners != 1 or trace.line != position.line
+            matches: mutable usize = 0
+            for statement in body |report, trace, position, literal, matches|:
+                call: Ast::Expr = proof_replay_literal_statement_call(statement)
+                continue if not proof_replay_source_position_equal(Ast::expr_pos(call), position)
+                matches <- matches + 1 if proof_replay_literal_source_slot(report, trace, call, literal)
+            return matches == 1
+
+        def proof_replay_literal_statement_call(statement: Ast::Stmt) -> Ast::Expr:
+            match statement:
+                Ast::Stmt.Return(value, _):
+                    return expression if value is expression
+                Ast::Stmt.VarDecl(_, _, initializer, _):
+                    return initializer
+                Ast::Stmt.Expr(expression, _):
+                    return expression
+                _:
+                    pass
+            return Ast::Expr.Invalid
+
+        def proof_replay_literal_source_fits(literal: Ast::Expr, width: i64) -> bool:
+            match literal:
+                Ast::Expr.IntLit(value, _):
+                    return value >= 0 and (width == 64 or value < (1 << (width - 1)))
+                Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(value, _), _):
+                    return value >= 0 and (width == 64 or value <= (1 << (width - 1)))
+                _:
+                    return false

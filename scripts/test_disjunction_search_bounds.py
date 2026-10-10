@@ -159,9 +159,8 @@ assert any(
     for finding in nine_failures["findings"]
 ), nine_failures["findings"]
 
-# The repeated-call source reaches a live local-binding trace that the source boundary does not
-# yet authenticate. The producer must refuse that claim rather than leave a replay gap or certify
-# a fact with unproven reaching-definition provenance.
+# Repeated-call locals now have independently authenticated source bindings.
+# Keep their full replay and live-fact workload alongside the refusal/search-cap controls.
 domain = subprocess.run(
     [
         BINARY,
@@ -174,14 +173,13 @@ domain = subprocess.run(
     timeout=180,
 )
 domain_report = json.loads(domain.stdout)
-assert domain.returncode == 1 and domain_report["status"] == "failed", domain_report["findings"]
+assert domain.returncode == 0 and domain_report["status"] == "proved", domain_report["findings"]
 assert domain_report["summary"]["semantic_errors"] == 0, domain_report["summary"]
-assert domain_report["verification_state"] == "unknown", domain_report["verification_state"]
+assert domain_report["verification_state"] == "proved", domain_report["verification_state"]
 assert domain_report["replay"]["gaps"] == 0, domain_report["replay"]
 assert domain_report["replay"]["certificates"] == domain_report["replay"]["replayed"]
 assert not domain_report["trust"]["trusted_assumptions"]
-assert any(f["kind"] == "ensure-unproven" and f["status"] == "unknown"
-           for f in domain_report["findings"]), domain_report["findings"]
+assert domain_report["findings"] == [], domain_report["findings"]
 
 # A later refuted alternative can still be established by the independent
 # disjunctive-syllogism rule after the bounded entailment scan stops.
@@ -207,7 +205,7 @@ def contradiction(value: bool, q: bool, r: bool) -> bool:
 code, contradictory = run(contradiction)
 assert code == 0 and contradictory["status"] == "proved", contradictory["findings"]
 
-print("disjunction search: late premises replay, and unauthenticated local-alias claims fail closed without replay gaps")
+print("disjunction search: late premises replay, and authenticated local aliases replay while false/search-cap claims remain refused")
 
 # Preserve this unrelated multiline positive assertion unchanged and run it after the high-fact
 # controls, so its known source/replay mismatch cannot mask the later bounded-search regressions.

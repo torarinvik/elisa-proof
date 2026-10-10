@@ -78,6 +78,7 @@ if [[ "$budget_goal_status" -ne 0 ]]; then
     printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
     exit 1
 fi
+python3 "$ROOT_DIR/scripts/test_focused_goal_states.py"
 
 run_json_report "$ROOT_DIR/examples/effect_containment.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["replay"]["gaps"] == 0; certified = {g["name"] for g in report["goals"] if g["rule"] == "effect-containment"}; assert {"wider_row", "union_row", "exact_row", "no_calls", "calls_rowless"} <= certified; rows = {d["name"]: d["effects"] for d in report["declaration_details"] if d["kind"] == "function"}; assert rows["exact_row"] == ["Memory.Allocate"]; assert rows["pure_callee"] is None'
 effect_containment_status=${PIPESTATUS[1]}
@@ -166,8 +167,9 @@ if [[ "$collection_builtin_extent_status" -ne 0 ]]; then
 fi
 
 set +e
-# Compiler 8e08cd33 Stage1 reports AutoRegionStoreEscape (kind code 620) for this escaping local-reference call.
-run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; semantic = [(d["kind_code"], d["line"], d["name"]) for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert semantic == [(620, 15, "grow")], semantic; assert report["summary"]["semantic_errors"] == 1; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "body-unverified"'
+# Require the source escape diagnostic by meaning; its enum code may change.
+# The pushed-lend caller retains the source-error of its invalid callee.
+run_json_report "$ROOT_DIR/examples/rejected_collection_builtin_extent.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; semantic = [d for d in report.get("semantic_diagnostics", []) if d["severity"] == 1]; assert [(d["line"], d["name"]) for d in semantic] == [(15, "grow")], semantic; assert semantic[0]["message"].startswith("call may store a reference to function-local storage into longer-lived storage through argument 2;"), semantic; assert type(semantic[0]["kind_code"]) is int and semantic[0]["kind_code"] >= 0; assert report["summary"]["semantic_errors"] == 1; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert report["trust"]["trusted_assumptions"] == []; assert {f["kind"] for f in report["findings"]} == {"borrow-call-summary-unsupported", "ensure-unproven", "index-upper-unproven"}; reasons = {d["name"]: d["verification_reason"] for d in report["declaration_details"] if d["kind"] == "function"}; assert reasons["a_lend_still_escapes"] == "body-unverified"; assert reasons["a_push_in_the_body_still_writes"] == "body-unverified"; assert reasons["a_push_still_changes_the_count"] == "body-unverified"; assert reasons["a_pushed_lend_still_escapes"] == "source-error"'
 rejected_collection_builtin_extent_status=${PIPESTATUS[1]}
 set -e
 if [[ "$rejected_collection_builtin_extent_status" -ne 0 ]]; then

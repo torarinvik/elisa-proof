@@ -1,4 +1,7 @@
 # R-004 report/declaration inventory completeness and non-proved partial outcomes.
+"${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/report-branch-accounting" \
+    "$standalone_probe_dir/report-branch-accounting.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
+"$standalone_probe_dir/report-branch-accounting"
 "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/report-invariants" \
     "$standalone_probe_dir/report-invariants.o" "$ROOT_DIR/build/profile_hooks.o" "${kernel_runtime_inputs[@]}"
 "${CLANG:-clang}" "${ELISA_DEAD_STRIP_LINK[@]}" -o "$standalone_probe_dir/focused-source-binding" \

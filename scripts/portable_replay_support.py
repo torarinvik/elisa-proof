@@ -47,7 +47,7 @@ TRUST = {"kernel": "checked", "package_reader": "trusted", "hypotheses": "adapte
          "source_correspondence": "adapter", "fingerprints": "identity-hint",
          "source_authenticated": False}
 SCALAR_KINDS = {
-    "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
+    "frame-field", "absent", "bool", "char", "effect", "effect-call", "effect-containment", "effect-row",
     "field-init", "float", "opaque-float-literal", "ident", "int", "resource-bind", "resource-call", "resource-call-arg",
     "resource-call-formal", "resource-call-lend", "resource-call-region", "resource-call-result",
     "resource-disjoint", "resource-join-move", "resource-move", "resource-region-alloc",
@@ -101,6 +101,12 @@ def identity(nodes, children, root, depth=0):
     elif kind in HEAD_CHILDREN or kind in CHILDREN:
         start, count = node["children_start"], node["children_count"]
         parts = ([node["left"]] if kind in HEAD_CHILDREN else []) + children[start:start + count]
+    elif kind in ("frame-place", "frame-policy"):
+        text += ":%d" % node["auxiliary"]
+        if kind == "frame-policy":
+            text += ":%d" % node["right"]
+        start, count = node["children_start"], node["children_count"]
+        parts = ([node["left"]] if kind == "frame-policy" else []) + children[start:start + count]
     elif kind == "quantifier":
         text += ":%d" % node["auxiliary"]
         parts = [node["left"], node["right"]]

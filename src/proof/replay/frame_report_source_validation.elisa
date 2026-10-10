@@ -1,0 +1,50 @@
+extend ElisaProof:
+    private:
+        def proof_frame_mirror_matches(expression: Ast::Expr, position: Ast::Pos) -> bool:
+            match expression:
+                Ast::Expr.BoolLit(value, actual):
+                    return value and actual.line == position.line and actual.column == position.column and actual.end_line == position.end_line and actual.end_column == position.end_column and actual.offset == position.offset and actual.end_offset == position.end_offset
+                _:
+                    return false
+
+        # Original source determines cardinality, occurrence and predicate. This
+        # validates failed events too; it never marks a certificate replayed.
+        def proof_direct_frame_report_matches_source(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            inventory = ElisaProofFrameSource::direct_events(declarations, name, line, tokens, source, source_length)
+            return false if not inventory.known
+            ordinal: mutable usize = 0
+            proven_count: mutable usize = 0
+            next_attempt: mutable usize = 0
+            next_certificate: mutable usize = 0
+            for entry in report.obligation_inventory |entry, report, inventory, ordinal, proven_count, next_attempt, next_certificate, declarations, name, line, tokens, source, source_length|:
+                if entry.source_name == name and entry.source_line == line and (entry.source_kind == "changes" or entry.source_kind == "preserves" or entry.source_kind == "allow" or entry.source_kind == "preserve"):
+                    return false if ordinal >= inventory.events.count or entry.source_obligation_index != ordinal or entry.attempts_count != 1 or entry.attempts_start >= report.goal_attempts.count
+                    return false if entry.attempts_start < next_attempt
+                    next_attempt <- entry.attempts_start + 1
+                    event = inventory.events[ordinal]
+                    return false if entry.source_kind != event.kind
+                    attempt = report.goal_attempts[entry.attempts_start]
+                    rule: sview = "frame-allow" if event.kind == "allow" else "frame-preserve" if event.kind == "preserve" else "frame-spec"
+                    return false if attempt.name != name or attempt.line != event.position.line or attempt.rule != rule or attempt.budget_exhausted or attempt.facts_count != 0 or attempt.kernel_facts_count != 0 or not proof_frame_mirror_matches(attempt.goal, event.position)
+                    return false if attempt.facts_start > report.certificate_facts.count or attempt.kernel_facts_start > report.kernel.certificate_facts.count
+                    proven: bool = ElisaProofFrameSource::direct_event_replays(declarations, name, line, ordinal, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, [], attempt.kernel_goal)
+                    return false if entry.proven != proven or attempt.proven != proven or attempt.has_certificate != proven
+                    if proven:
+                        return false if attempt.certificate_index >= report.certificates.count
+                        return false if attempt.certificate_index < next_certificate
+                        next_certificate <- attempt.certificate_index + 1
+                        certificate = report.certificates[attempt.certificate_index]
+                        return false if not proof_replay_attempt_matches_certificate(report, &report.goal_attempts[entry.attempts_start], certificate, attempt.certificate_index)
+                        return false if certificate.kernel_goal != attempt.kernel_goal or certificate.name != name or certificate.line != event.position.line or certificate.rule != rule or certificate.facts_count != 0 or certificate.kernel_facts_count != 0 or not proof_frame_mirror_matches(certificate.goal, event.position)
+                        proven_count <- proven_count + 1
+                    ordinal <- ordinal + 1
+            return false if ordinal != inventory.events.count
+            # Reject extra unattached family records rather than checking only the
+            # subset selected by producer-owned obligation annotations.
+            attempts: mutable usize = 0
+            certificates: mutable usize = 0
+            for attempt in report.goal_attempts |attempts, name|:
+                attempts <- attempts + 1 if attempt.name == name and (attempt.rule == "frame-spec" or attempt.rule == "frame-allow" or attempt.rule == "frame-preserve")
+            for certificate in report.certificates |certificates, name|:
+                certificates <- certificates + 1 if certificate.name == name and (certificate.rule == "frame-spec" or certificate.rule == "frame-allow" or certificate.rule == "frame-preserve")
+            return attempts == ordinal and certificates == proven_count

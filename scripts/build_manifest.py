@@ -21,6 +21,7 @@ import sys
 import tarfile
 import uuid
 from compiler_environment import select_compiler_environment
+from compiler_recipe_inputs import committed_recipe_paths
 
 MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)

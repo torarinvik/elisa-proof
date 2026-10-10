@@ -1,0 +1,32 @@
+"""Admission accounting failures stay distinct from ordinary open proof goals."""
+import json
+import os
+from pathlib import Path
+import subprocess
+
+ROOT = Path(__file__).resolve().parents[1]
+BINARY = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
+for name, expected_exit, expected_reason in (
+        ("source_context_scope", 0, ""),
+        ("tactic_repair_target", 1, ""),
+        ("contract_placement", 0, ""),
+        ("condition_call_positions", 0, "")):
+    for route in ("--json", "--summary-json"):
+        result = subprocess.run([BINARY, route, str(ROOT / "examples" / (name + ".elisa"))],
+                                capture_output=True, text=True, timeout=60)
+        report = json.loads(result.stdout)
+        assert result.returncode == expected_exit, (name, route, report["status"])
+        assert report["admission_invariant_failure"] == expected_reason, (name, route)
+        if name == "contract_placement":
+            assert report["status"] == "proved" and report["summary"]["obligations"] == 31
+            assert report["summary"]["proven"] == 31 and report["trust"]["kernel_replayed_certificates"] == 31
+        if name == "condition_call_positions":
+            assert report["summary"]["obligations"] == 30 and report["trust"]["kernel_replayed_certificates"] == 30
+            if route == "--json":
+                frames = [(goal["name"], goal["rule"]) for goal in report["goals"] if goal["rule"].startswith("frame-")]
+                assert frames == [(name, rule) for name in ("bump", "measure", "bare_call", "negated_call", "compared_call", "short_circuit_left", "arithmetic_call", "guarded_index") for rule in ("frame-spec", "frame-allow")]
+        if expected_reason:
+            assert report["status"] == "failed" and report["verification_state"] == "unknown"
+            assert report["summary"]["proven"] == report["summary"]["obligations"]
+            assert report["summary"]["finding_count"] == 0
+    print(name, "admission accounting: " + (expected_reason or "consistent"))

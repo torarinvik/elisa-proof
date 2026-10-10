@@ -60,8 +60,9 @@ def run_outside_closure_build_control(base: Path) -> None:
                       proof / "src", proof / "examples", proof / "scripts", tools):
         directory.mkdir(parents=True, exist_ok=True)
 
-    for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh", "platform.sh", "runtime_inputs.sh",
-                 "build_manifest.py", "compiler_environment.py", "verify_product_pair.py"):
+    for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh", "platform.sh",
+                 "build_manifest.py", "compiler_environment.py", "verify_product_pair.py",
+                 "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     # Add a fixture-only barrier in the copied publisher. This lets the test kill the
     # complete build process group at a real publication boundary without adding a

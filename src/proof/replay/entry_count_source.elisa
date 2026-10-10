@@ -1,0 +1,93 @@
+# An old-count symbol is equal to the current count only while its receiver is untouched.
+extend ElisaProofFrameSource:
+    private:
+        def entry_count_darray(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 32
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _):
+                    return entry_count_darray(inner, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident("darray", _), element, _):
+                    return contract_scalar_type(element)
+                _:
+                    return false
+
+        def entry_count_old(expression: Ast::Expr, receiver: sview, depth: usize) -> bool:
+            return false if depth >= 64
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Ident("old", _), arguments, labels, _):
+                    return false if arguments.count != 1 or labels.count > 1
+                    return false if labels.count == 1 and labels[0] != ""
+                    match arguments[0]:
+                        Ast::Expr.Field(Ast::Expr.Ident(object, _), "count", _):
+                            return object == receiver
+                        _:
+                            return false
+                Ast::Expr.Binary(left, _, right, _):
+                    return entry_count_old(left, receiver, depth + 1) or entry_count_old(right, receiver, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return entry_count_old(inner, receiver, depth + 1)
+                _:
+                    return false
+
+    public:
+        def entry_count_source(declarations: darray[Ast::Decl]&, name: sview, line: u32, expression: Ast::Expr) -> (known: bool, receiver: sview):
+            work: mutable usize = 0
+            return (false, "") if not contract_environment(declarations, 0, &work)
+            context = owner(declarations, name, line)
+            return (false, "") if not context.known or context.body.count > 4096
+            receiver: mutable sview = ""
+            match expression:
+                Ast::Expr.Field(Ast::Expr.Ident(object, position), "count", _):
+                    return (false, "") if position.line != context.position.line or position.column != context.position.column or position.offset != context.position.offset
+                    return (false, "") if position.end_line != context.position.end_line or position.end_column != context.position.end_column or position.end_offset != context.position.end_offset
+                    receiver <- object
+                _:
+                    return (false, "")
+            matches: mutable usize = 0
+            for index in 0..<context.formals.count |context, receiver, matches|:
+                matches <- matches + 1 if context.formals[index] == receiver and entry_count_darray(context.formal_types[index], 0)
+            return (false, "") if matches != 1
+            old_found: mutable bool = false
+            for statement in context.body |receiver, old_found|:
+                match statement:
+                    Ast::Stmt.Contract("ensures", required, _) | Ast::Stmt.Contract("ensure", required, _):
+                        old_found <- true if entry_count_old(required, receiver, 0)
+                    _:
+                        pass
+            return (old_found, receiver)
+
+extend ElisaProof:
+    private:
+        def proof_replay_entry_count_binding(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "local-binding" or trace.line != report.replay_owner_line
+            symbol: mutable sview = ""
+            source_value: mutable Ast::Expr = Ast::Expr.Invalid
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.EqEq, value, _):
+                    return false if not proof_internal_name_is_rebind(name) or position.line != trace.line
+                    symbol <- name
+                    source_value <- value
+                _:
+                    return false
+            return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, symbol, 0)
+            definitions: mutable usize = 0
+            for candidate in report.traces.records |trace, symbol, definitions|:
+                continue if candidate.kind != "local-binding" or candidate.name != trace.name
+                match candidate.expression:
+                    Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, _, _):
+                        definitions <- definitions + 1 if name == symbol
+                    _:
+                        pass
+            return false if definitions != 1
+            source = ElisaProofFrameSource::entry_count_source(&report.source_declarations, trace.name, report.replay_owner_line, source_value)
+            return false if not source.known
+            body: mutable darray[Ast::Stmt] = []
+            return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+            for statement in body |report, source, symbol|:
+                match statement:
+                    Ast::Stmt.Contract(_, _, _):
+                        pass
+                    _:
+                        return false if proof_replay_source_statement_touches(report.source_declarations, statement, source.receiver, true, 0)
+                        return false if proof_replay_source_statement_touches(report.source_declarations, statement, symbol, true, 0)
+            return not proof_replay_source_body_declares(report.source_declarations, body, source.receiver) and not proof_replay_source_body_declares(report.source_declarations, body, symbol)

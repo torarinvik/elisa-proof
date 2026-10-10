@@ -52,9 +52,9 @@ extend ElisaProof:
                         Ast::Expr.IntLit(_, _):
                             return (true, head)
                         _:
-                            # `bool[M::N]` is a fixed array only over a scalar head and a
-                            # uniquely declared constant; anything else may be a generic type.
-                            return (true, head) if proof_fixed_array_primitive_head(head_name) and proof_fixed_extent_constant(argument, declarations).known
+                            # `T[M::N]` requires a concrete primitive/record element and
+                            # a uniquely declared extent; arbitrary generic heads refuse.
+                            return (true, head) if proof_fixed_array_source_head(head, declarations) and proof_fixed_extent_constant(argument, declarations).known
                             return (false, Ast::Expr.Invalid)
                 Ast::Expr.IndexN(head, arguments, _):
                     head_name: sview = proof_ident_name(head)
@@ -227,9 +227,13 @@ extend ElisaProof:
             marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_report_builtin_operator_impl_exists(report, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)
             proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
 
-        def proof_add_untrusted_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
+        def proof_add_untrusted_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos, builtin_enum_eq: bool = false) -> void:
+            if not builtin_enum_eq:
+                proof_add_type_bound_fact(facts, report, proof_untrusted_operator_marker(root, "All", position), position.line, report.type_bounds.owner)
+                return
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
             for protocol in protocols |facts, report, root, position|:
+                continue if builtin_enum_eq and protocol == "Eq"
                 marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
                 proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
 
@@ -278,17 +282,20 @@ extend ElisaProof:
             element_is_container: bool = proof_container_element_type(element, report.source_declarations, 0).known
             element_is_named: bool = proof_type_head_name(element, report.source_declarations, 0) != ""
             return if not element_is_builtin and not element_is_container and not element_is_named
-            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            for protocol in protocols |facts, report, root, protocol, position, element_is_builtin|:
-                marker: Ast::Expr = proof_index_operator_marker(root, protocol, position, element_is_builtin)
-                proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
+            # One fact preserves the same complete indexed protocol set.
+            marker: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position) if element_is_builtin else proof_untrusted_operator_marker(root, "Index.All", position)
+            proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
 
         def proof_add_builtin_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
             concrete: sview = (proof_builtin_operator_type_name(type_expression, report.source_declarations, 0) can Global.Read)
             return if concrete == ""
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            for protocol in protocols |facts, report, root, concrete, position|:
-                proof_add_operator_witness_for_concrete(facts, report, root, concrete, protocol, position)
+            overrides: bool = any protocol in protocols where proof_report_builtin_operator_impl_exists(report, concrete, protocol)
+            if not overrides:
+                proof_add_type_bound_fact(facts, report, proof_builtin_operator_marker(root, "All", position), position.line, report.type_bounds.owner)
+            else:
+                for protocol in protocols |facts, report, root, concrete, position|:
+                    proof_add_operator_witness_for_concrete(facts, report, root, concrete, protocol, position)
             proof_add_builtin_index_witness(facts, report, root, position)
 
         def proof_add_scalar_type_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
@@ -331,7 +338,8 @@ extend ElisaProof:
                 (proof_add_builtin_operator_witnesses(facts, report, root, type_expression, position) can Global.Read)
                 return
             named_type: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
-            proof_add_untrusted_operator_witnesses(facts, report, root, position) if named_type != ""
+            builtin_enum_eq: bool = proof_plain_enum_builtin_equality_type(type_expression, "", report) != ""
+            proof_add_untrusted_operator_witnesses(facts, report, root, position, builtin_enum_eq) if named_type != ""
             element_depth: i64 = proof_scalar_element_depth(type_expression, report.source_declarations, 0)
             container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
             if container.known:

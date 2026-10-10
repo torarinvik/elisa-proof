@@ -1,0 +1,60 @@
+extend ElisaProofFrameSource:
+    private:
+        def mutation_operator(operator: TokenKind) -> bool:
+            return when operator:
+                TokenKind.LArrow | TokenKind.PlusEq | TokenKind.MinusEq | TokenKind.StarEq | TokenKind.SlashEq | TokenKind.PercentEq | TokenKind.CaretEq | TokenKind.PipeEq | TokenKind.AmpEq | TokenKind.LShiftEq | TokenKind.RShiftEq | TokenKind.QAssign -> true
+                _ -> false
+
+        def same_position(left: Ast::Pos, right: Ast::Pos) -> bool:
+            return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
+
+    public:
+        # Direct function-body mutations only. Nested control flow, aliases,
+        # indexed targets and mapped callee writes require separate source checks.
+        def direct_write(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos) -> (known: bool, place: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
+            empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
+            context = owner(declarations, name, line)
+            return (false, empty) if not context.known or context.body.count > 4096 or position.line == 0
+            matches: mutable usize = 0
+            actual: mutable ElisaProofKernelFramePolicy::Place = empty
+            for statement in context.body |context, position, matches, actual|:
+                match statement:
+                    Ast::Stmt.Assign(target, operator, _, source_position):
+                        if same_position(position, source_position):
+                            return (false, empty) if not mutation_operator(operator) or matches != 0
+                            decoded = place(target, &context.formals)
+                            return (false, empty) if not decoded.known
+                            actual <- decoded.place
+                            matches <- matches + 1
+                    _:
+                        pass
+            return (false, empty) if matches != 1
+            root: sview = context.formals[actual.parameter]
+            # Refuse a local binder with the formal's spelling anywhere in this
+            # scope. No producer alias/shadow table is used as authority.
+            for statement in context.body |root|:
+                match statement:
+                    Ast::Stmt.VarDecl(binding, _, _, _):
+                        return (false, empty) if binding == root
+                    Ast::Stmt.Assign(target, operator, _, _):
+                        if operator == TokenKind.Assign:
+                            match target:
+                                Ast::Expr.Ident(binding, _):
+                                    return (false, empty) if binding == root
+                                _:
+                                    pass
+                    _:
+                        pass
+            return (true, actual)
+
+        def direct_write_matches(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if root >= nodes.count
+            node = nodes[root]
+            return false if not ElisaProofKernelFramePolicy::arena_shape(node) or node.kind != "frame-policy" or node.operator != "write" or node.name != name or node.left >= root
+            context = owner(declarations, name, line)
+            return false if not context.known or context.formals.count != node.auxiliary
+            actual = direct_write(declarations, name, line, position)
+            return false if not actual.known
+            certified = ElisaProofKernelFramePolicy::decode_place(nodes, children, node.left, node.auxiliary)
+            return false if not certified.known
+            return actual.place.parameter == certified.place.parameter and actual.place.depth == certified.place.depth and actual.place.field == certified.place.field and actual.place.field2 == certified.place.field2 and actual.place.field3 == certified.place.field3

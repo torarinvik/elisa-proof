@@ -1,6 +1,6 @@
-"""A call to a verified callee whose only departure from purity is a precondition keeps its
-summary across a later call. Callees with effects, a mutable global read, a mutable borrow
-argument, or a call to such a callee keep nothing. A long chain stays within the witness budget."""
+"""Immutable scalar call snapshots keep their bounds across later calls.
+Effects, mutable global reads and borrows cannot strengthen those bounds.
+A long chain stays within the witness budget."""
 import json
 import os
 from pathlib import Path
@@ -19,6 +19,10 @@ def run(path):
 data = run(ROOT / "examples/deterministic_call_chain.elisa")
 assert data["summary"]["proven"] == 16 and data["summary"]["failed"] == 0 and data["findings"] == [], data["summary"]
 assert data["replay"]["gaps"] == 0 and data["replay"]["replayed"] == 16
+
+data = run(ROOT / "examples/captured_call_chain_effects.elisa")
+assert data["status"] == "proved" and data["summary"]["proven"] == 33
+assert data["replay"]["gaps"] == 0 and data["findings"] == [], data["replay"]
 
 data = run(ROOT / "examples/rejected_deterministic_call_chain.elisa")
 assert data["summary"]["failed"] == 4 and data["replay"]["gaps"] == 0
@@ -41,7 +45,7 @@ with tempfile.TemporaryDirectory() as directory:
 assert data["replay"]["gaps"] == 0 and data["summary"]["proven"] > 0, data["summary"]
 assert {f["kind"] for f in data["findings"]} <= {"control-flow-analysis-budget"}, data["findings"]
 
-print("deterministic call chain: precondition-only callees keep summaries; effects, globals, borrows refused")
+print("deterministic call chain: immutable captures survive effects, globals and borrows; tighter bounds refused")
 
 # BACKLOG B-04: the "c4 scalar witness" probe, a kept summary beside a widened u8 argument.
 data = run(ROOT / "examples/widened_call_result.elisa")

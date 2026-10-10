@@ -1,0 +1,104 @@
+# Authenticate immutable scalar equations inside direct declaration value blocks.
+extend ElisaProof:
+    private:
+        def proof_replay_value_block_unique_local(report: ProofReport&, body: darray[Ast::Stmt]&, statements: darray[Ast::Stmt]&, outer_position: Ast::Pos, local: sview, owner: sview) -> bool:
+            return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, owner, report.replay_owner_line, local, 0)
+            return false if not proof_replay_source_single_declaration(report.source_declarations, statements, local)
+            outside: mutable darray[Ast::Stmt] = []
+            for statement in body |outside|:
+                position: Ast::Pos = proof_statement_position(statement)
+                outside.push(statement) if position.offset != outer_position.offset or position.line != outer_position.line
+            return not proof_replay_source_body_declares(report.source_declarations, outside, local)
+
+        def proof_replay_value_block_immutable_binding(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.line == 0 or trace.line > report.trace_owner_line
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    body: mutable darray[Ast::Stmt] = []
+                    matches: mutable usize = 0
+                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &matches, 0)
+                    return false if matches != 1
+                    for statement in body:
+                        match statement:
+                            Ast::Stmt.VarDecl(outer, outer_type, Ast::Expr.Block(statements, yielded, _, _), outer_position):
+                                yielded_local: mutable bool = false
+                                for inner in statements:
+                                    match inner:
+                                        Ast::Stmt.VarDecl(local, local_type, initializer, position):
+                                            immutable: bool = proof_replay_local_binding_integer_type(local_type, 0) and not proof_replay_local_binding_mutable_integer_type(local_type)
+                                            stable: bool = proof_replay_local_binding_stable_initializer(initializer, local, report.source_declarations, trace.name, report.replay_owner_line, 0)
+                                            if local == target and proof_replay_value_block_unique_local(report, body, statements, outer_position, local, trace.name) and immutable and stable and position.line == trace.line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position) and proof_replay_expr_equal(initializer, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0):
+                                                return true
+                                            yielded_local <- true if immutable and proof_ident_name(yielded) == local and proof_expr_equal(local_type, outer_type)
+                                        _:
+                                            pass
+                                if outer == target and yielded_local and proof_replay_source_single_declaration(report.source_declarations, body, target) and proof_replay_value_block_unique_local(report, body, statements, outer_position, proof_ident_name(yielded), trace.name) and proof_replay_local_binding_integer_type(outer_type, 0) and not proof_replay_local_binding_mutable_integer_type(outer_type) and outer_position.line == trace.line and proof_replay_local_binding_pos_matches(trace.expression, outer_position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), outer_position) and proof_replay_expr_equal(yielded, source_value):
+                                    return true
+                            _:
+                                pass
+                _:
+                    pass
+            return false
+
+        # A single scalar capture write from a fresh immutable literal local.
+        # Authenticate its reaching source assignment, not an arbitrary old equation.
+        def proof_replay_value_block_capture_write(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.line == 0 or trace.line > report.trace_owner_line
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    body: mutable darray[Ast::Stmt] = []
+                    matches: mutable usize = 0
+                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &matches, 0)
+                    return false if matches != 1 or body.count > 64 or proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0)
+                    declared: mutable usize = 0
+                    target_type: mutable Ast::Expr = Ast::Expr.Invalid
+                    declaration_line: mutable u32 = 0
+                    for statement in body |declared, target_type|:
+                        match statement:
+                            Ast::Stmt.VarDecl(local, type_expression, _, position):
+                                if local == target:
+                                    declared <- declared + 1
+                                    target_type <- type_expression
+                                    declaration_line <- position.line
+                            _:
+                                pass
+                    return false if declared != 1 or not proof_replay_local_binding_mutable_integer_type(target_type)
+                    target_scalar_type: mutable Ast::Expr = target_type
+                    match target_type:
+                        Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                            target_scalar_type <- inner
+                        _:
+                            return false
+                    for statement in body:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(statements, yielded, captures, _), block_position):
+                                continue if statements.count != 2 or declaration_line >= block_position.line or not (any captured in captures where captured == target)
+                                match statements[0]:
+                                    Ast::Stmt.VarDecl(local, local_type, Ast::Expr.IntLit(_, _), _):
+                                        continue if not proof_replay_local_binding_integer_type(local_type, 0) or proof_replay_local_binding_mutable_integer_type(local_type) or proof_replay_local_binding_integer_type_name(local_type, 0) != proof_replay_local_binding_integer_type_name(target_scalar_type, 0) or proof_ident_name(yielded) != local or proof_ident_name(source_value) != local
+                                        continue if not proof_replay_value_block_unique_local(report, body, statements, block_position, local, trace.name)
+                                        match statements[1]:
+                                            Ast::Stmt.Assign(Ast::Expr.Ident(written, _), TokenKind.LArrow, Ast::Expr.Ident(read, _), position):
+                                                continue if written != target or read != local or position.line != trace.line or not proof_replay_local_binding_pos_matches(trace.expression, position) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position)
+                                                safe: mutable bool = true
+                                                for other in body |safe|:
+                                                    other_position: Ast::Pos = proof_statement_position(other)
+                                                    continue if other_position.offset == block_position.offset and other_position.line == block_position.line
+                                                    match other:
+                                                        Ast::Stmt.VarDecl(declaration, _, initializer, _):
+                                                            if declaration == target:
+                                                                safe <- false if proof_replay_source_expr_touches(report.source_declarations, initializer, target, false, 0)
+                                                                continue
+                                                        _:
+                                                            pass
+                                                    safe <- false if proof_replay_source_statement_touches(report.source_declarations, other, target, false, 0)
+                                                return safe
+                                            _:
+                                                pass
+                                    _:
+                                        pass
+                            _:
+                                pass
+                _:
+                    pass
+            return false

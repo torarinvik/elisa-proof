@@ -17,7 +17,12 @@ REPLAY = Path(os.environ.get("ELISA_PROOF_REPLAY_BIN", ROOT / "build/elisa-proof
 COMPILER = os.environ.get("ELISA_COMPILER_BIN", "")
 FIXTURE = ROOT / "examples/loop_invariants_compile.elisa"
 COMPILER_ROOT = Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler"))
-PINNED_FRONTEND_REV = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
+# Match compiler_snapshot.sh: a compatibility run may explicitly select a
+# revision without changing the repository's qualified default pin.
+PINNED_FRONTEND_REV = (os.environ.get("ELISA_COMPILER_REV", "").strip()
+                       or (ROOT / "ELISA_COMPILER_REV").read_text().strip())
+if re.fullmatch(r"[0-9a-f]{40}", PINNED_FRONTEND_REV) is None:
+    raise SystemExit("compiler revision must be a full lowercase commit SHA")
 
 REPLAY_HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
 include "../../Elisa-compiler/elisacore_std/collections.elisa"
@@ -45,6 +50,12 @@ using ElisaProof
 
 extend ElisaProof:
     public:
+        def proof_test_initializer_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            proof_replay_local_binding_mutable_local_source(report, trace, true)
+
+        def proof_test_internal_name_is_rebind(name: sview) -> bool:
+            return proof_internal_name_is_rebind(name)
+
         def proof_test_local_binding_source_gate(report: mutable ProofReport&, certificate_index: usize, trace_index: usize) -> i64:
             return TEST_LOCAL_BINDING_GATE_INVALID_INDEX if certificate_index >= report.certificates.count or trace_index >= report.traces.records.count
             certificate: ProofGoalCertificate = report.certificates[certificate_index]
@@ -57,10 +68,45 @@ extend ElisaProof:
             report.trace_consumer_certificate_index <- certificate_index + 1
             immutable_source: bool = proof_replay_local_binding_immutable_declaration_source(report, trace)
             widening_source: bool = proof_replay_local_binding_widening_cast_declaration_source(report, trace)
-            return TEST_LOCAL_BINDING_GATE_MISSING_SOURCE if not immutable_source and not widening_source
+            typed_return_source: bool = proof_replay_local_binding_typed_return_constant_source(report, trace)
+            return TEST_LOCAL_BINDING_GATE_MISSING_SOURCE if not immutable_source and not widening_source and not typed_return_source
             return TEST_LOCAL_BINDING_GATE_SOURCE_REJECTED if not proof_replay_local_binding_source_valid(report, trace)
             return TEST_LOCAL_BINDING_GATE_FACT_NOT_LIVE if not proof_replay_local_binding_fact_live(report, trace)
             return TEST_LOCAL_BINDING_GATE_ACCEPTED
+
+        def proof_test_typed_return_binding_gate(report: mutable ProofReport&, returned: Ast::Expr, position: Ast::Pos, owner_line: u32, expect_valid: bool) -> bool:
+            symbol: Ast::Expr = Ast::Expr.Ident("__elisa_rebind_0", position)
+            binding: Ast::Expr = Ast::Expr.Binary(symbol, TokenKind.EqEq, returned, position)
+            trace: ProofFactTrace = ProofFactTrace{expression: binding, kernel_expression: 0, kind: "local-binding", line: position.line, name: "typed_constant_return", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
+            report.replay_owner_line <- owner_line
+            report.trace_owner_line <- position.line
+            accepted: bool = proof_replay_local_binding_typed_return_constant_source(report, trace)
+            return accepted == expect_valid
+
+        def proof_test_typed_return_constant_source(source_text: sview, value: i64, expect_valid: bool) -> bool can Memory.Allocate, Abort.Panic:
+            source: mutable darray[u8] = []
+            report: mutable ProofReport = proof_empty_report()
+            proof_test_parse_declarations(source_text, &source, &report)
+            owner_line: mutable u32 = 0
+            for declaration in report.source_declarations |owner_line|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, position):
+                        owner_line <- position.line if name == "typed_constant_return"
+                    _:
+                        pass
+            body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            proof_replay_local_binding_find_owner(report.source_declarations, "typed_constant_return", owner_line, &body, &owner_matches, 0)
+            return false if owner_line == 0 or owner_matches != 1
+            for statement in body |report, value, expect_valid, owner_line|:
+                match statement:
+                    Ast::Stmt.Return(returned, position):
+                        return proof_test_typed_return_binding_gate(report, returned, position, owner_line, expect_valid) if value == -1
+                        forged: Ast::Expr = Ast::Expr.IntLit(value, Ast::expr_pos(returned))
+                        return proof_test_typed_return_binding_gate(report, forged, position, owner_line, expect_valid)
+                    _:
+                        pass
+            return false
 
 const BASELINE_SOURCE: sview = __BASELINE_SOURCE__
 const WIDENING_SOURCE: sview = __WIDENING_SOURCE__
@@ -70,6 +116,7 @@ const OVERLOADED_OPERATOR_SOURCE: sview = __OVERLOADED_OPERATOR_SOURCE__
 const BINDING_SINK_SOURCE: sview = __BINDING_SINK_SOURCE__
 const NESTED_BUILTIN_SOURCE: sview = __NESTED_BUILTIN_SOURCE__
 const SIMPLE_LOCAL_BINDING_SOURCE: sview = __SIMPLE_LOCAL_BINDING_SOURCE__
+const TYPED_RETURN_SOURCE: sview = __TYPED_RETURN_SOURCE__
 const TEST_CAST_GATE_ERROR_BASE: i64 = 119
 const TEST_CAST_GATE_COUNT_ERROR: i64 = 118
 const TEST_SHADOW_GATE_ERROR: i64 = 122
@@ -78,7 +125,9 @@ const TEST_OVERLOADED_OPERATOR_GATE_ERROR: i64 = 126
 const TEST_BINDING_SINK_MATRIX_ERROR: i64 = 128
 const TEST_BINDING_POSITIVE_CONTROL_ERROR: i64 = 129
 const TEST_BINDING_NESTED_BUILTIN_ERROR: i64 = 130
-const TEST_CONSUMER_CERTIFICATE_ERROR: i64 = 131
+const TEST_TYPED_RETURN_GATE_ERROR: i64 = 131
+const TEST_TYPED_RETURN_FORGERY_ERROR: i64 = 132
+const TEST_CONSUMER_CERTIFICATE_ERROR: i64 = 133
 const TEST_BINDING_POSITION_SHIFT: u32 = 1
 const TEST_BINDING_FALLBACK_VALUE: i64 = 0
 const TEST_LOCAL_BINDING_GATE_INVALID_INDEX: i64 = 1
@@ -430,6 +479,30 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     (proof_test_parse_and_replay(NESTED_BUILTIN_SOURCE, &nested_bytes, &nested_report) can Global{Read,Write})
     nested_goals = proof_test_loop_goals(nested_report, "nested_builtin_binding", 5)
     return TEST_BINDING_POSITIVE_CONTROL_ERROR if nested_goals.count != 1 or not nested_goals.all_replayed
+    typed_bytes: mutable darray[u8] = []
+    typed_report: mutable ProofReport = proof_empty_report()
+    proof_test_parse_and_replay(TYPED_RETURN_SOURCE, &typed_bytes, &typed_report)
+    typed_checks: mutable usize = 0
+    for certificate_index in 0..<typed_report.certificates.count |certificate_index, typed_report, typed_checks|:
+        certificate: ProofGoalCertificate = typed_report.certificates[certificate_index]
+        continue if certificate.name != "typed_constant_return"
+        continue if certificate.facts_start > typed_report.traces.origin_indices.count or certificate.facts_count > typed_report.traces.origin_indices.count - certificate.facts_start
+        for fact_offset in 0..<certificate.facts_count |fact_offset, certificate, certificate_index, typed_report, typed_checks|:
+            trace_index: usize = typed_report.traces.origin_indices[certificate.facts_start + fact_offset]
+            continue if trace_index >= typed_report.traces.records.count
+            trace: ProofFactTrace = typed_report.traces.records[trace_index]
+            continue if trace.kind != "local-binding"
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, _, _):
+                    continue if not ElisaProof::proof_test_internal_name_is_rebind(symbol)
+                    gate: i64 = ElisaProof::proof_test_local_binding_source_gate(&typed_report, certificate_index, trace_index)
+                    return TEST_TYPED_RETURN_GATE_ERROR + gate if gate != TEST_LOCAL_BINDING_GATE_ACCEPTED
+                    typed_checks <- typed_checks + 1
+                _:
+                    pass
+    return TEST_TYPED_RETURN_GATE_ERROR if typed_checks == 0
+    return TEST_TYPED_RETURN_FORGERY_ERROR if not proof_test_typed_return_constant_source(TYPED_RETURN_SOURCE, -1, true)
+    return TEST_TYPED_RETURN_FORGERY_ERROR if proof_test_typed_return_constant_source(TYPED_RETURN_SOURCE, 7, true)
     return TEST_LOCAL_BINDING_GATE_ACCEPTED
 '''
 
@@ -524,7 +597,6 @@ with tempfile.TemporaryDirectory(prefix="source-binding-package-") as directory:
         "replayed": len(package["theorems"]),
         "not_replayed": 0,
     }, replay_report["summary"]
-print(
-    f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
+print(f"loop invariants: targeted source-bound replay controls passed; fixture={fixture_status} "
     f"({fixture_replay['gaps']} unrelated replay gaps); {provenance}; pinned frontend {PINNED_FRONTEND_REV}"
 )

@@ -1,0 +1,97 @@
+# Reconstruct receiver-free equality at an immutable typed indexed copy.
+# Collection writes may invalidate the copy equation, but not this scalar consequence.
+extend ElisaProof:
+    private:
+        def proof_replay_index_copy_contract_contains(proposition: Ast::Expr, expected: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= 64
+            return true if proof_replay_expr_equal(proposition, expected)
+            match proposition:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_replay_index_copy_contract_contains(left, expected, depth + 1) or proof_replay_index_copy_contract_contains(right, expected, depth + 1)
+                _:
+                    return false
+
+        def proof_replay_index_copy_equality_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "proof-step" or trace.line == 0 or trace.line > report.trace_owner_line
+            return false if trace.dependency != "" or trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
+            bound: mutable sview = ""
+            target: mutable sview = ""
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(left, _), TokenKind.EqEq, Ast::Expr.Ident(right, _), _):
+                    target <- left
+                    bound <- right
+                _:
+                    return false
+            context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
+            return false if not context.known or context.body.count > 4096
+            return false if not ElisaProofFrameSource::index_copy_environment(report.source_declarations)
+            return false if not proof_replay_source_single_declaration(report.source_declarations, context.body, target)
+            return false if any formal in context.formals where formal == target
+            return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, bound)
+            return false if not proof_replay_local_binding_immutable_integer_parameter(report.source_declarations, trace.name, report.replay_owner_line, bound, 0)
+            copy_index: mutable usize = context.body.count
+            receiver: mutable sview = ""
+            index_name: mutable sview = ""
+            element: mutable sview = ""
+            for index in 0..<context.body.count |context, trace, target, copy_index, receiver, index_name, element|:
+                match context.body[index]:
+                    Ast::Stmt.VarDecl(local, Ast::Expr.Ident(local_type, _), Ast::Expr.Index(Ast::Expr.Ident(source, _), Ast::Expr.Ident(at, _), _), position):
+                        if local == target:
+                            return false if position.line != trace.line
+                            copy_index <- index
+                            receiver <- source
+                            index_name <- at
+                            element <- local_type
+                    _:
+                        pass
+            return false if copy_index == context.body.count or receiver == "" or index_name == ""
+            return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, receiver)
+            return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, index_name)
+            return false if not proof_replay_local_binding_immutable_integer_parameter(report.source_declarations, trace.name, report.replay_owner_line, index_name, 0)
+            primitive_names: darray[sview] = ["i8", "i16", "i32", "i64", "isize", "u8", "u16", "u32", "u64", "usize", "darray"]
+            type_work: mutable usize = 0
+            for primitive in primitive_names |report, type_work|:
+                return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, primitive, 0, &type_work)
+            return false if not (any primitive in primitive_names where primitive == element and primitive != "darray")
+            matches: mutable usize = 0
+            for index in 0..<context.formals.count |context, receiver, element, matches|:
+                matches <- matches + 1 if context.formals[index] == receiver and proof_replay_index_copy_element(context.formal_types[index], 0) == element
+            return false if matches != 1
+            bound_type_matches: mutable usize = 0
+            for index in 0..<context.formals.count |context, bound, element, bound_type_matches|:
+                bound_type_matches <- bound_type_matches + 1 if context.formals[index] == bound and proof_ident_name(context.formal_types[index]) == element
+            return false if bound_type_matches != 1
+            local_expression: mutable Ast::Expr = Ast::Expr.Invalid
+            copied: mutable Ast::Expr = Ast::Expr.Invalid
+            for index in 0..<context.body.count |context, copy_index, bound, target, local_expression, copied|:
+                match context.body[index]:
+                    Ast::Stmt.VarDecl(local, _, initializer, position):
+                        if index == copy_index:
+                            copied <- initializer
+                            local_expression <- Ast::Expr.Ident(local, position)
+                    _:
+                        pass
+            formal_expression: mutable Ast::Expr = Ast::Expr.Invalid
+            match trace.expression:
+                Ast::Expr.Binary(left, _, right, _):
+                    return false if not proof_replay_expr_equal(left, local_expression)
+                    formal_expression <- right
+                _:
+                    return false
+            equality: Ast::Expr = Ast::Expr.Binary(copied, TokenKind.EqEq, formal_expression, Ast::expr_pos(copied))
+            equality_found: mutable bool = false
+            for index in 0..<copy_index |context, equality, equality_found|:
+                match context.body[index]:
+                    Ast::Stmt.Contract("requires", proposition, _):
+                        equality_found <- true if proof_replay_index_copy_contract_contains(proposition, equality, 0)
+                    Ast::Stmt.Contract("ensure", _, _) | Ast::Stmt.Contract("ensures", _, _):
+                        pass
+                    _:
+                        return false
+            return false if not equality_found
+            for index in 0..<context.body.count |context, copy_index, target, bound, index_name, report|:
+                continue if index <= copy_index
+                return false if proof_replay_source_statement_touches(report.source_declarations, context.body[index], target, true, 0)
+                return false if proof_replay_source_statement_touches(report.source_declarations, context.body[index], bound, true, 0)
+                return false if proof_replay_source_statement_touches(report.source_declarations, context.body[index], index_name, true, 0)
+            not proof_source_expression_has_overloaded_operator(equality, report.source_primitive_operator_mask, 0)

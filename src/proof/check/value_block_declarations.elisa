@@ -1,0 +1,64 @@
+# Execute declaration initializers in private scope, exporting their result and
+# outer effects while expiring temporary names.
+extend ElisaProof:
+    private:
+        def proof_check_value_block_declaration(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool:
+            block: (known: bool, statements: darray[Ast::Stmt], local_name: sview, type_expression: Ast::Expr, value: Ast::Expr, position: Ast::Pos) = proof_declared_value_block(statement)
+            return false if not block.known or proof_block_shadows(block.statements, names) or any outer in names where outer == block.local_name
+            outer_count: usize = names.count
+            block_names: mutable darray[sview] = proof_copy_names(names)
+            block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            block_fixed_names: mutable darray[Ast::Expr] = proof_copy_exprs(fixed_names)
+            block_fixed_extents: mutable darray[i64] = []
+            block_fixed_extents.extend(fixed_extents)
+            body: mutable darray[Ast::Stmt] = []
+            body.extend(block.statements)
+            body.push(Ast::Stmt.VarDecl(block.local_name, block.type_expression, block.value, block.position)) if not proof_block_identity_rebind(block.statements, block.local_name, block.type_expression, block.value)
+            block_flow: mutable ProofFlow = proof_empty_flow()
+            proof_check_returns(body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, &block_fixed_names, &block_fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &block_flow)
+            flow.valid <- flow.valid and block_flow.valid
+            flow.normal <- block_flow.normal
+            flow.breaks <- flow.breaks or block_flow.breaks
+            flow.continues <- flow.continues or block_flow.continues
+            proof_append_continue_states(flow, block_flow)
+            return true if not block_flow.normal
+            expired: mutable darray[sview] = []
+            result_slot: mutable usize = block_names.count
+            for index in outer_count..<block_names.count |expired, result_slot|:
+                if block_names[index] == block.local_name:
+                    result_slot <- index
+                else:
+                    expired.push(block_names[index])
+            # Eliminate expired immutable scalar names through their equations.
+            # Record each consequence with its original premises for replay.
+            source_facts: darray[Ast::Expr] = proof_copy_exprs(block_facts)
+            export_budget: mutable usize = 4096
+            for fact in source_facts |block_facts, export_budget|:
+                break if export_budget == 0
+                transformed: mutable Ast::Expr = fact
+                for equation in source_facts |transformed, export_budget|:
+                    break if export_budget == 0
+                    export_budget <- export_budget - 1
+                    match equation:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            local: sview = proof_ident_name(left)
+                            if local != "" and (any expired_name in expired where expired_name == local) and not proof_expr_mentions_name(right, local):
+                                replacement: (changed: bool, value: Ast::Expr) = proof_tactic_replace(transformed, left, right)
+                                transformed <- replacement.value if replacement.changed
+                        _:
+                            pass
+                if not proof_expr_equal(fact, transformed) and not (any existing in block_facts where proof_expr_equal(existing, transformed)) and not (any local in expired where proof_expr_mentions_name(transformed, local)):
+                    annotations_for_export: darray[Ast::EnumAnnotation] = []
+                    if proof_goal(source_facts, transformed, annotations_for_export):
+                        proof_add_derived_fact_from(block_facts, report, transformed, source_facts, "proof-step", Ast::expr_pos(block.value).line, name)
+            for index in 0..<values.count |values|:
+                value: Ast::Expr = block_values[index] if index < block_values.count else Ast::Expr.Invalid
+                values[index] <- Ast::Expr.Invalid if any local in expired where proof_expr_mentions_name(value, local) else value
+            facts.clear()
+            for fact in block_facts |facts|:
+                facts.push(fact) if not (any local in expired where proof_expr_mentions_name(fact, local))
+            names.push(block.local_name)
+            result: Ast::Expr = block_values[result_slot] if result_slot < block_values.count else Ast::Expr.Invalid
+            values.push(Ast::Expr.Invalid if any local in expired where proof_expr_mentions_name(result, local) else result)
+            return true

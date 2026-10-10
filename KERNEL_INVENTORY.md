@@ -90,6 +90,9 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `structural-argument` | structural | `operator` in {same, strict}, `name`/`secondary_name` = formal/actual, `value`/`auxiliary` = sizes | `check/flow_and_type_model.elisa` |
 | `structural-edge` | structural | `name`/`secondary_name` = caller/callee, children = arguments | `check/flow_and_type_model.elisa` |
 | `structural-safety` | structural | `name` = SCC root, children = edges, `secondary_name` = `structural-v1` | `check/flow_and_type_model.elisa` |
+| `frame-field` | frame policy | nonempty field label; other fields zero/empty | frame policy runtime probes; source producer pending |
+| `frame-place` | frame policy | versioned parameter ordinal and up to three backward field children | frame policy runtime probes; source producer pending |
+| `frame-policy` | frame policy | versioned spec/allow/write/preserve operation, actual place, bounded partitioned policy children and owner label | frame policy runtime probes; source producer pending |
 <!-- /inventory:node-kinds -->
 
 ## Typing binding kinds
@@ -153,6 +156,8 @@ kernel root, or replay dispatch are sound.
 | `proof_add_resource_goal_attempt` | `proof/certificate_admission.elisa` | resource-safety trace |
 | `proof_add_effect_goal_attempt` | `proof/certificate_admission.elisa` | effect-containment trace |
 | `proof_add_structural_goal_attempt` | `proof/certificate_admission.elisa` | structural-safety trace |
+| `proof_record_direct_frame_events` | `proof/replay/frame_report_recording.elisa` | source frame events; production dispatch not enabled |
+| `proof_emit_prepared_frame_events` | `proof/check/frame_producer_recording.elisa` | prepared source frame events |
 <!-- /inventory:certificate-producers -->
 
 ## Fact trace kinds
@@ -160,10 +165,12 @@ kernel root, or replay dispatch are sound.
 Each fact a certificate uses must be bound to a `ProofFactTrace` whose kernel expression is
 structurally equal to the fact.
 
-Boundary kinds are **trusted source facts**. They are sound only because the named producer in
-`check/` emits them for exactly the source construct in the table. Replay checks only their
-shape: `proof_replay_boundary_trace_shape_valid` requires no dependency and no premises, so a
-summary trace cannot be relabelled as one.
+Boundary kinds describe source facts emitted by the named producer in `check/`.
+`proof_replay_boundary_trace_shape_valid` requires no dependency and no premises, so a
+summary trace cannot be relabelled as one. Selected kinds also have source validators in
+`replay/boundary_trace_shapes.elisa`, including constants, enum facts, match exhaustiveness
+and deterministic calls. These validators narrow the producer trust boundary; they do not
+establish independent source correspondence for every boundary fact.
 
 <!-- inventory:boundary-trace-kinds -->
 | Kind | Producer | Source construct |
@@ -184,6 +191,7 @@ summary trace cannot be relabelled as one.
 | `local-binding` | `check/symbol_and_move_state.elisa` | `name == value` for an immutable local |
 | `collection-push` | `check/collection_push.elisa` | after `v.push(x)` on a mutable darray reference parameter: `v.count == T + 1`, `v[T] == x` and `v[v.count - 1] == x`, the pre-push count T an unsigned 64-bit scalar at most 2^63 - 2 |
 | `collection-pop` | `check/collection_pop.elisa` | after a statement `v.pop()` on a mutable darray reference parameter: `1 <= S` (the builtin traps on an empty array) and `v.count == S - 1`, S the pre-pop count |
+| `collection-pop-value` | `check/collection_pop.elisa`, `replay/pop_value_source.elisa` | literal captured scalar from a source-exact first builtin pop on a mutable darray reference; replay independently requires last-slot equality, nonempty guard, matching element type, no user pop function and stable local suffix |
 | `entry-count` | `check/collection_push.elisa` | the entry symbol E behind `old(v.count)` is an unsigned 64-bit scalar |
 | `indexed-write` | `check/indexed_writes.elisa` | `v[i] == x` for the stored cell after an indexed write `v[i] <- x`, on a scalar element whose stored value's reads survive the write |
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
@@ -333,6 +341,7 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_closed_formula_at_width` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_closed_formula_width_uniform` | `proof/linear/closed_width_formulas.elisa` | untrusted search (shared) |
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_quantifier_kind` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter; extracts callable spelling for threaded-summary source matching |
@@ -345,14 +354,24 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
 | `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
-| `proof_count_named_aggregates` | `proof/check/enum_value_types.elisa` | source adapter |
+| `proof_closed_integer_arithmetic` | `proof/linear/fixed_width_arithmetic_integrated_helpers.elisa` | untrusted search (shared) |
+| `proof_count_named_aggregates` | `proof/check/enum_value_types.elisa` | source adapter; aggregate identity lookup |
 | `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
-| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter |
-| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter |
-| `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | report model |
-| `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter |
-| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter |
-| `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter |
+| `proof_is_comparison` | `proof/expr/constant_arithmetic.elisa` | source adapter |
+| `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
+| `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
+| `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | source adapter; builtin operator override guard |
+| `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; signed machine width |
+| `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
+| `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
+| `proof_add_latest_goal_finding` | `proof/model/report_recording.elisa` | report model |
+| `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
+| `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
+| `proof_expr_has_move` | `proof/expr/constant_arithmetic.elisa` | source adapter; depth-bounded move syntax scan fails closed |
+| `proof_statement_position` | `proof/check/runtime_support_and_calls.elisa` | source adapter; statement span projection |
+| `proof_expression_is_terminal` | `proof/check/runtime_support_and_calls.elisa` | source adapter; reserved raise/panic expression classification |
+| `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some

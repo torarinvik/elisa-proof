@@ -1,0 +1,150 @@
+# Independently authenticate literal facts about a value captured by builtin pop.
+extend ElisaProofFrameSource:
+    private:
+        def pop_names_clear(declarations: darray[Ast::Decl]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= 64
+            for declaration in declarations |depth, work|:
+                return false if work >= 4096
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return false if name == "pop"
+                    Ast::Decl.Module(_, nested, _):
+                        return false if not pop_names_clear(nested, depth + 1, work)
+                    _:
+                        pass
+            return true
+
+        def pop_mutable_reference(expression: Ast::Expr, mutable_seen: bool, reference_seen: bool, depth: usize) -> bool:
+            return false if depth >= 16
+            match expression:
+                Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return not mutable_seen and pop_mutable_reference(inner, true, reference_seen, depth + 1)
+                Ast::Expr.Unary(TokenKind.Ampersand, inner, _):
+                    return not reference_seen and pop_mutable_reference(inner, mutable_seen, true, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return pop_mutable_reference(inner, mutable_seen, reference_seen, depth + 1)
+                Ast::Expr.Index(_, _, _):
+                    return mutable_seen and reference_seen
+                _:
+                    return false
+
+        def pop_element(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= 16
+            match expression:
+                Ast::Expr.Unary(TokenKind.Mutable, inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _) | Ast::Expr.Paren(inner, _):
+                    return pop_element(inner, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident("darray", _), Ast::Expr.Ident(name, _), _):
+                    return name if contract_primitive(name) and name != "bool"
+                _:
+                    pass
+            return ""
+
+        def pop_count(expression: Ast::Expr, receiver: sview) -> bool:
+            match expression:
+                Ast::Expr.Field(Ast::Expr.Ident(object, _), "count", _):
+                    return object == receiver
+                _:
+                    return false
+
+        def pop_one(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return value == 1
+                _:
+                    return false
+
+        def pop_last_index(expression: Ast::Expr, receiver: sview) -> bool:
+            match expression:
+                Ast::Expr.Binary(count, operator, one, _):
+                    return operator == TokenKind.Minus and pop_one(one) and pop_count(count, receiver)
+                _:
+                    return false
+
+        def pop_last(expression: Ast::Expr, receiver: sview) -> bool:
+            match expression:
+                Ast::Expr.Index(Ast::Expr.Ident(object, _), index, _):
+                    return object == receiver and pop_last_index(index, receiver)
+                _:
+                    return false
+
+        def pop_requires(expression: Ast::Expr, receiver: sview, value: i64, guard: mutable bool&, slot: mutable bool&, depth: usize) -> void:
+            return if depth >= 32
+            match expression:
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    pop_requires(left, receiver, value, guard, slot, depth + 1)
+                    pop_requires(right, receiver, value, guard, slot, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.GtEq, Ast::Expr.IntLit(minimum, _), _):
+                    guard <- true if minimum >= 1 and pop_count(left, receiver)
+                Ast::Expr.Binary(left, TokenKind.EqEq, Ast::Expr.IntLit(literal, _), _):
+                    slot <- true if literal == value and pop_last(left, receiver)
+                _:
+                    pass
+
+    public:
+        def pop_value_source(declarations: darray[Ast::Decl]&, owner_name: sview, owner_line: u32, line: u32, expression: Ast::Expr) -> bool can[Memory.Allocate, Abort.Panic]:
+            work: mutable usize = 0
+            return false if not contract_environment(declarations, 0, &work)
+            work <- 0
+            return false if not pop_names_clear(declarations, 0, &work)
+            context = owner(declarations, owner_name, owner_line)
+            return false if not context.known or context.body.count > 4096
+            target: mutable sview = ""
+            value: mutable i64 = 0
+            target_position: mutable Ast::Pos = Ast::pos_at_line(0)
+            match expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.EqEq, Ast::Expr.IntLit(literal, _), _):
+                    target <- name
+                    value <- literal
+                    target_position <- position
+                _:
+                    return false
+            return false if target == "" or any formal in context.formals where formal == target
+            receiver: mutable sview = ""
+            found: mutable bool = false
+            for statement in context.body |context, target, target_position, line, receiver, found|:
+                if not found:
+                    match statement:
+                        Ast::Stmt.Contract(_, _, _):
+                            pass
+                        Ast::Stmt.VarDecl(local, Ast::Expr.Ident(type_name, _), Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(object, _), "pop", _), arguments, labels, _), position):
+                            return false if local != target or position.line != line or arguments.count != 0 or labels.count != 0
+                            return false if target_position.line != position.line or target_position.column != position.column or target_position.offset != position.offset
+                            return false if target_position.end_line != position.end_line or target_position.end_column != position.end_column or target_position.end_offset != position.end_offset
+                            matches: mutable usize = 0
+                            for index in 0..<context.formals.count |context, object, type_name, matches|:
+                                if context.formals[index] == object:
+                                    matches <- matches + 1 if pop_element(context.formal_types[index], 0) == type_name and pop_mutable_reference(context.formal_types[index], false, false, 0)
+                            return false if matches != 1
+                            receiver <- object
+                            found <- true
+                        _:
+                            return false
+                else:
+                    match statement:
+                        Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(object, _), "pop", _), arguments, labels, _), _):
+                            return false if object != receiver or arguments.count != 0 or labels.count != 0
+                        Ast::Stmt.Return(Ast::Expr.Ident(local, _), _):
+                            return false if local != target
+                        _:
+                            return false
+            return false if not found
+            guard: mutable bool = false
+            slot: mutable bool = false
+            for statement in context.body |receiver, value, guard, slot|:
+                match statement:
+                    Ast::Stmt.Contract("requires", required, _):
+                        pop_requires(required, receiver, value, &guard, &slot, 0)
+                    _:
+                        pass
+            return guard and slot
+
+# Slot restatement can already have derived this literal before the pop-specific
+# trace is emitted. Authenticate that receiver-free consequence from source too;
+# never admit its historical slot equation as a current collection fact.
+extend ElisaProof:
+    private:
+        def proof_replay_pop_copy_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "proof-step" or trace.line == 0 or trace.line > report.trace_owner_line
+            return false if trace.dependency != "" or trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
+            ElisaProofFrameSource::pop_value_source(&report.source_declarations, trace.name, report.replay_owner_line, trace.line, trace.expression)

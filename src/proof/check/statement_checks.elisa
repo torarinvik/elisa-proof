@@ -1,3 +1,7 @@
+include "./value_block_assignments.elisa"
+include "./value_block_declarations.elisa"
+include "./index_safety_substitution.elisa"
+
 extend ElisaProof:
     private:
         def proof_check_index_safety(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
@@ -6,7 +10,7 @@ extend ElisaProof:
             # so a direct guarded index can emit its distinct checked-get certificate.
             match expression:
                 Ast::Expr.GetElse(guarded, recovery, position):
-                    substituted_guarded: Ast::Expr = proof_substitute(guarded, names, values)
+                    substituted_guarded: Ast::Expr = proof_substitute_index_safety(guarded, names, values, fixed_names, fixed_extents, 0)
                     preserved: Ast::Expr = Ast::Expr.GetElse(substituted_guarded, recovery, position)
                     (proof_check_index_safety_value(preserved, facts, fixed_names, fixed_extents, report, name, annotations, position.line, functions) can Global{Read,Write})
                 Ast::Expr.Catch(guarded, arms, position):
@@ -356,9 +360,14 @@ extend ElisaProof:
             body_writes: mutable darray[sview] = []
             proof_collect_assignment_roots(body, &body_writes)
             proof_collect_aliased_names(body, functions, &body_writes, false, report.value_collection_names)
+            # A reference capture copies the reference, not its referent. A body
+            # with only witnessed scalar writes and no executable calls/transfers
+            # cannot mutate an untouched parameter through another path.
+            scalar_only_body: bool = not proof_body_has_call(body, report.source_primitive_operator_mask) and all written in body_writes where proof_scalar_witnessed(block_facts, written)
             writeback: mutable darray[sview] = []
-            for capture in captures |writeback, body_writes, statement_facts|:
+            for capture in captures |writeback, body_writes, statement_facts, scalar_only_body, names, frame_parameters, name, functions|:
                 continue if not (any existing in body_writes where existing == capture) and proof_scalar_witnessed(statement_facts, capture)
+                continue if scalar_only_body and not (any existing in body_writes where existing == capture) and proof_current_parameter(names, frame_parameters, capture) and proof_mutable_reference_parameter(name, capture, functions)
                 proof_push_aliased(writeback, capture)
             for existing in body_writes |writeback|:
                 proof_push_aliased(writeback, existing)
@@ -456,6 +465,10 @@ extend ElisaProof:
                     block_end_facts: mutable darray[Ast::Expr] = []
                     block_end_flow: mutable ProofFlow = proof_empty_flow()
                     (proof_check_captured_block(captured_block.body, captured_block.captures, captured_block.position, false, no_entry_facts, no_entry_facts, 0, names, values, facts, &block_end_names, &block_end_values, &block_end_facts, &block_end_flow, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, flow) can Global{Read,Write})
+                    continue
+                if proof_check_value_block_declaration(statement, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow):
+                    continue
+                if proof_check_value_block_assignment(statement, names, values, facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, flow):
                     continue
                 value_block: (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) = proof_return_value_block(statement)
                 if value_block.known:

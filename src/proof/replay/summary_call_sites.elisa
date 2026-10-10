@@ -295,6 +295,74 @@ extend ElisaProof:
         def proof_replay_summary_direct_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
             return proof_replay_summary_direct_call_source_site_at(report, trace, call, 0)
 
+        # A sole return in one arm and an empty other arm cannot bind the
+        # later result local. Only the continuing path reaches that call.
+        def proof_replay_summary_early_return_arm(body: darray[Ast::Stmt]&) -> bool:
+            return false if body.count != 1
+            match body[0]:
+                Ast::Stmt.Return(_, _):
+                    return true
+                _:
+                    return false
+
+        def proof_replay_summary_local_call_statement(body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |local_name, binding_position, expected_call, matches, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, initializer, position):
+                        return true if position.line > binding_position.line
+                        if name == local_name:
+                            match initializer:
+                                Ast::Expr.Call(_, _, _, _):
+                                    matches <- 1 if proof_replay_call_source_position_equal(initializer, expected_call)
+                                Ast::Expr.Paren(inner, _):
+                                    matches <- 1 if proof_replay_call_source_position_equal(inner, expected_call)
+                                _:
+                                    matches <- 0
+                    Ast::Stmt.Assign(target, operator, value, position):
+                        return true if position.line > binding_position.line
+                        if proof_replay_ident_name(target) == local_name:
+                            match value:
+                                Ast::Expr.Call(_, _, _, _) if operator == TokenKind.Assign or operator == TokenKind.LArrow:
+                                    matches <- 1 if proof_replay_call_source_position_equal(value, expected_call)
+                                Ast::Expr.Paren(inner, _) if operator == TokenKind.Assign or operator == TokenKind.LArrow:
+                                    matches <- 1 if proof_replay_call_source_position_equal(inner, expected_call)
+                                _:
+                                    matches <- 0
+                    Ast::Stmt.If(_, yes, no, position):
+                        return true if position.line > binding_position.line
+                        if position.line < binding_position.line:
+                            continue if (yes.count == 0 and proof_replay_summary_early_return_arm(no)) or (no.count == 0 and proof_replay_summary_early_return_arm(yes))
+                        return false if not proof_replay_summary_local_call_statement(yes, local_name, binding_position, expected_call, matches, depth + 1)
+                        return false if not proof_replay_summary_local_call_statement(no, local_name, binding_position, expected_call, matches, depth + 1)
+                    Ast::Stmt.Match(_, arms, position):
+                        return true if position.line > binding_position.line
+                        for arm in arms |arm, local_name, binding_position, expected_call, matches, depth|:
+                            return false if not proof_replay_summary_local_call_statement(arm.body, local_name, binding_position, expected_call, matches, depth + 1)
+                    Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Block(_, _, _, _, position):
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Return(value, position):
+                        # These statements do not rebind the local. A later statement ends this
+                        # linear source window; an earlier/same-line return is ambiguous and
+                        # must not authenticate a result local.
+                        if position.line == binding_position.line:
+                            return proof_replay_source_local_use(value, local_name, binding_position, 0) and matches == 1
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Expr(_, position):
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Break(_, position) | Ast::Stmt.Continue(_, position):
+                        # A transfer before the call site makes simple sequential binding
+                        # reconstruction incomplete. Do not skip it as harmless syntax.
+                        return true if position.line > binding_position.line
+                        return false
+                    Ast::Stmt.Contract(_, _, _):
+                        pass
+                    _:
+                        return false
+            return true
         # A summary equation names the call's actuals as they read at the call, so its call is
         # anchored by its raw text at its exact span in the owner's body, never by a value the
         # names held at an earlier point (that substituted comparison is for deterministic-call
@@ -303,7 +371,9 @@ extend ElisaProof:
             return false if Ast::expr_pos(call).line == 0
             body: mutable darray[Ast::Stmt] = []
             return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
-            return proof_replay_deterministic_call_source_contains_statements(body, call, 0)
+            return true if proof_replay_deterministic_call_source_contains_statements(body, call, 0)
+            bare = proof_replay_same_module_bare_call(report, trace, call)
+            return bare.known and proof_replay_deterministic_call_source_contains_statements(body, bare.call, 0)
 
         def proof_replay_summary_direct_call_source_site_at(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize) -> bool:
             return proof_replay_summary_raw_call_source_site(report, trace, call) or proof_replay_deterministic_call_source_site(report, trace, call) or proof_replay_summary_call_same_source_site(report, trace, call, rebind_depth) or proof_replay_summary_requires_call_source_site(report, trace, call)

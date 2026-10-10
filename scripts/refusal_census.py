@@ -15,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+from census_input_identity import compiler_export_digest, input_identity
 from report_cache import effective_cpus
 from report_exit_status import expected_exit as report_expected_exit
 
@@ -30,12 +31,66 @@ def input_key(path):
     return path.name if relative.startswith("examples/") else relative
 
 
+def census_source_path(path):
+    configured = os.environ.get("ELISA_PROOF_CENSUS_SOURCE_ROOT")
+    if not configured:
+        return path
+    try:
+        relative = path.relative_to(ROOT)
+    except ValueError:
+        raise RuntimeError(f"census input is outside the configured source root: {path}")
+    return Path(configured).resolve() / relative
+
+
+def validate_census_source_root():
+    configured = os.environ.get("ELISA_PROOF_CENSUS_SOURCE_ROOT")
+    if configured:
+        source_root = Path(configured).resolve()
+        for directory in ("src", "examples"):
+            if (not (source_root / directory).is_dir()
+                    or tree_sha256(source_root / directory) != tree_sha256(ROOT / directory)):
+                raise RuntimeError(f"census snapshot {directory} does not match current proof inputs")
+        manifest = json.loads(Path(str(BINARY) + ".manifest.json").read_text())
+        compiler = manifest.get("compiler", {})
+        revision = manifest.get("frontend", {}).get("revision")
+        compiler_root = source_root.parent / "Elisa-compiler"
+        expected = compiler.get("source_tree_sha256")
+        if (not revision or revision != compiler.get("source_revision")
+                or (compiler_root / ".rev").read_text().strip() != revision
+                or not isinstance(expected, str) or len(expected) != 64
+                or compiler_export_digest(compiler_root) != expected):
+            raise RuntimeError("census compiler snapshot does not match the proof product provenance")
+
+
+def census_report(data):
+    """Retain census fields after the complete report has passed validation.
+
+    Completed worker futures can wait behind a slow input. Do not let those
+    futures retain certificate arenas, traces or source graphs for every input.
+    Presence (including explicit null) of finding fields is preserved because
+    the refusal and diagnostic buckets distinguish missing fields from null.
+    """
+    result = {
+        "status": data["status"],
+        "verification_state": data["verification_state"],
+        "summary": {key: data["summary"][key] for key in ("proven", "obligations")},
+        "findings": [
+            {key: finding[key] for key in ("refusal_gate", "kind", "message") if key in finding}
+            for finding in data["findings"]
+        ],
+    }
+    replay = data.get("replay")
+    if isinstance(replay, dict) and "gaps" in replay:
+        result["replay"] = {"gaps": replay["gaps"]}
+    return result
+
+
 def run(path, timeout):
-    """Return a parsed report, elapsed seconds and a stable failure category."""
+    """Return a validated census projection, elapsed seconds and failure category."""
     started = time.monotonic()
     try:
         result = subprocess.run(
-            [str(BINARY), "--json", str(path)],
+            [str(BINARY), "--json", str(census_source_path(path))],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -44,13 +99,17 @@ def run(path, timeout):
             data = json.loads(result.stdout)
         except json.JSONDecodeError:
             return data_key(path), None, time.monotonic() - started, "invalid-json"
+        returncode = result.returncode
+        # Parsing creates a separate object graph. Release stdout/stderr before
+        # validation and projection rather than keeping both copies in the worker.
+        del result
         if not isinstance(data, dict) or not isinstance(data.get("summary"), dict):
             return data_key(path), None, time.monotonic() - started, "invalid-report"
         try:
             expected_exit = report_expected_exit(data)
         except ValueError:
             return data_key(path), None, time.monotonic() - started, "invalid-result-lattice"
-        if result.returncode != expected_exit:
+        if returncode != expected_exit:
             return data_key(path), None, time.monotonic() - started, "exit-status-mismatch"
         summary = data["summary"]
         if (type(summary.get("proven")) is not int or type(summary.get("obligations")) is not int
@@ -60,7 +119,7 @@ def run(path, timeout):
             isinstance(finding, dict) for finding in data["findings"]
         ):
             return data_key(path), None, time.monotonic() - started, "invalid-findings"
-        return data_key(path), data, time.monotonic() - started, None
+        return data_key(path), census_report(data), time.monotonic() - started, None
     except subprocess.TimeoutExpired:
         return data_key(path), None, time.monotonic() - started, "timeout"
     except OSError:
@@ -174,7 +233,9 @@ def toolchain_identity():
     frontend = manifest.get("frontend", {})
     proof = manifest.get("proof", {})
     binary = manifest.get("binary", {})
-    expected_revision = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
+    expected_revision = os.environ.get("ELISA_COMPILER_REV", "").strip()
+    if not expected_revision:
+        expected_revision = (ROOT / "ELISA_COMPILER_REV").read_text().strip()
     compiler_revision = compiler.get("source_revision")
     frontend_revision = frontend.get("revision")
     current_source_digest = tree_sha256(ROOT / "src")
@@ -288,6 +349,8 @@ def main():
 
     try:
         identity = toolchain_identity()
+        validate_census_source_root()
+        dataset_identity = input_identity([census_source_path(path) for path in paths])
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
 
@@ -315,14 +378,23 @@ def main():
     run_date = datetime.now(timezone.utc).date().isoformat()
     try:
         final_identity = toolchain_identity()
+        final_paths = sorted((ROOT / "examples").glob("*.elisa")) + dogfood
+        validate_census_source_root()
+        final_dataset_identity = input_identity([census_source_path(path) for path in final_paths])
     except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
         parser.error(str(error))
     if identity != final_identity:
         parser.error("proof binary, sources, or compiler changed during the census; refusing to publish mixed results")
+    if paths != final_paths or dataset_identity != final_dataset_identity:
+        parser.error("census inputs or included sources changed; refusing to publish mixed results")
+    identity["census_input_sha256"] = dataset_identity["sha256"]
     report = summarize(results, len(examples), len(dogfood), run_date, identity)
     measurement_report = measurements(results, run_date, identity)
     output_dir = arguments.output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "input-identity.json").write_text(
+        json.dumps(dataset_identity, indent=1, sort_keys=True) + "\n"
+    )
     (output_dir / "census.json").write_text(json.dumps(report, indent=1, sort_keys=True) + "\n")
     (output_dir / "census.md").write_text(render_markdown(report))
     (output_dir / "measurements.json").write_text(json.dumps(measurement_report, indent=1, sort_keys=True) + "\n")
