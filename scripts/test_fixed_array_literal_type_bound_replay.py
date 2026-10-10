@@ -3,6 +3,7 @@ import ast
 import json
 import os
 from pathlib import Path
+import re
 from source_binding_harness_support import run_source_binding_replay_harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,7 @@ fixture_source = (ROOT / "examples/fixed_array_constant_indices.elisa").read_tex
 constants = "const FIXED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(fixture_source) + "\n"
 parenthesized_source = fixture_source.replace("return values[1]", "return (values)[1]", 1)
 nested_source = fixture_source.replace("return values[1]", "return [values[1]][0]", 1)
+assert parenthesized_source != fixture_source and nested_source != fixture_source
 constants += "const PARENTHESIZED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(parenthesized_source) + "\n"
 constants += "const NESTED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(nested_source) + "\n"
 harness = prefix + constants + r'''
@@ -67,6 +69,15 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 0
 '''
 
+ast_nodes = (ROOT / "build/snapshot/Elisa-compiler/src/parser/ast_nodes.elisa").read_text()
+expression_nodes = ast_nodes.split("    enum Expr is Node:", 1)[1].split("    enum Stmt is Node:", 1)[0]
+ast_variants = set(re.findall(r"^        ([A-Z][A-Za-z0-9_]*)\b", expression_nodes, re.MULTILINE))
+type_bound_source = (ROOT / "src/proof/replay/type_bound_validation.elisa").read_text()
+index_use_visitor = type_bound_source.split("def proof_replay_type_bound_index_use(", 1)[1].split("def proof_replay_type_bound_index_use_body(", 1)[0]
+visited_variants = set(re.findall(r"Ast::Expr\.([A-Z][A-Za-z0-9_]*)", index_use_visitor))
+unvisited = sorted(ast_variants - visited_variants)
+if unvisited:
+    raise AssertionError(f"type-bound source-use visitor misses pinned AST expression variants: {unvisited}")
 run_source_binding_replay_harness(
     ROOT,
     ROOT / "examples/loop_invariants_compile.elisa",
@@ -74,4 +85,4 @@ run_source_binding_replay_harness(
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(),
     harness,
 )
-print("Fixed-array literal replay: direct API authenticates direct, parenthesized and nested values[1] uses, and rejects a forged 2 bound")
+print(f"Fixed-array literal replay: authenticated direct/parenthesized/nested uses, rejected forged bound, visited all {len(ast_variants)} AST expression variants")
