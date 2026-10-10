@@ -243,7 +243,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             (api_parameter_goal_probe(PARAMETER_RETURN_API_SOURCE, &source, &report, &diagnostics, route, tamper) can Global{Read,Write})
             return 204 if report.goal_attempts.count == 0 or report.certificates.count == 0
             return 205 if proof_report_source_admission_invariants_consistent(report)
-    return 218 if not api_refinement_precondition_mutation_probe(&source, &report, &diagnostics)
+    return 218 if not (api_refinement_precondition_mutation_probe(&source, &report, &diagnostics) can Global{Read,Write})
     return 0
 '''
 run_source_binding_replay_harness(

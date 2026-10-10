@@ -8368,10 +8368,19 @@ by their final segment. Adversarial coverage mutates the serialized qualified pr
 and the retained source clause, and requires the boundary validator to reject both. The direct API
 harness also mutates a refinement alias and requires a replay gap.
 
-Python syntax and whitespace checks pass, but no Elisa build or runtime replay gate has run for
-this change yet. The current public Elisa compiler is still `8f2023ce8a7d52358b733a0e812ff46293d45f10`
-(`git ls-remote origin/main`); its shared Stage1 slot is reserved for the active self-compile A/B.
-After the coordinator releases that slot, rebuild the strict O2 product and run the direct-API
-mutation harness, scope/context replay harness, Global grant suite, pure-contract replay suite,
-qualified-constant suite, and refinement-alias positives. Keep any unsupported normalization
-fail-closed and record regressions before resuming compiler performance comparisons.
+The fresh strict O2 build succeeded on pinned public-main compiler
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`. The scope/context harness passed with both leading
+`requires` clauses exercised, including an honest qualified-constant fact, a forged trace, and a
+mutated source clause. The direct API semantic-admission harness passed its refinement-alias
+mutation across the API routes. The build product SHA-256 is
+`b4b4b1267130ae99ac170d140717394266d76015a6b0102478069d0d2f5f6e8d`; its manifest SHA-256 is
+`573b404681fa0b2354a3b66a1f955b0474bd325215bcaf0df89d9e1c0d55e3cd`. The manifest records the
+exact source-tree digest but marks the proof worktree dirty because the boundary-dispatch fix and
+test-scaffold updates had not yet been committed when this product was built. Rebuild after that
+checkpoint for a clean manifest. The linker also warned that the Stage1 object targets macOS 28
+while the product links for macOS 27; both generated test harnesses compiled and ran on this host.
+
+The coordinator has the Stage1 slot back after this bounded trust gate. Still run the product
+Global grant, pure-contract, qualified-constant, and refinement-alias CLI suites against the clean
+checkpoint product before returning to matched compiler performance trials. Keep unsupported
+normalization fail-closed and preserve exact denial diagnostics.

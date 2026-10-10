@@ -106,9 +106,10 @@ SOURCE_TEXT = (
     "        const TOP: i64 = 10\n"  # 71
     "\n"  # 72
     "def bounded(x: i64) -> i64:\n"  # 73
-    "    requires x <= Caps::TOP\n"  # 74
-    "    ensure result <= 10\n"  # 75
-    "    return x\n"  # 76
+    "    requires x >= 0\n"  # 74
+    "    requires x <= Caps::TOP\n"  # 75
+    "    ensure result <= 10\n"  # 76
+    "    return x\n"  # 77
 )
 
 HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
@@ -215,10 +216,10 @@ extend ElisaProof:
             return report.traces.records.count
 
         # `P` derived from the single premise `P`.
-        def test_scope_step_valid(report: mutable ProofReport&, step: ProofFactTrace, owner: sview, workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
+        def test_scope_step_valid(report: mutable ProofReport&, step: ProofFactTrace, owner: sview, workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool can[Global.Read, Global.Write]:
             dependency_stack: darray[sview] = [owner]
             active_certificates: darray[usize] = []
-            return proof_replay_fact_trace_is_valid_with_stack(report, step, owner, 0, dependency_stack, active_certificates, workspace)
+            return (proof_replay_fact_trace_is_valid_with_stack(report, step, owner, 0, dependency_stack, active_certificates, workspace) can Global{Read,Write})
 
         def test_scope_summary_index(report: ProofReport&, owner: sview, line: u32, dependency: sview) -> usize:
             for index in 0..<report.traces.records.count |index, report, owner, line, dependency|:
@@ -241,31 +242,37 @@ extend ElisaProof:
                 return index if attempt.name == owner and attempt.line == line and attempt.proven and attempt.has_certificate and proof_replay_expr_equal(attempt.goal, goal)
             return report.goal_attempts.count
 
-        def test_scope_summary_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner_line: u32, consumer_line: u32) -> bool:
+        def test_scope_summary_valid(report: mutable ProofReport&, trace: ProofFactTrace, owner_line: u32, consumer_line: u32) -> bool can[Global.Read, Global.Write]:
             test_scope_context(report, owner_line, consumer_line, 0)
             dependency_stack: darray[sview] = [trace.name]
             active_certificates: darray[usize] = []
             workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
-            return proof_replay_function_summary_is_valid(report, trace, dependency_stack, 0, active_certificates, &workspace)
+            return (proof_replay_function_summary_is_valid(report, trace, dependency_stack, 0, active_certificates, &workspace) can Global{Read,Write})
 
-        def test_scope_precondition_index(report: ProofReport&, owner: sview, owner_line: u32) -> usize:
+        def test_scope_precondition_index(report: ProofReport&, owner: sview, owner_line: u32, ordinal: usize) -> usize:
+            found: mutable usize = 0
             for index in 0..<report.traces.records.count |index, report, owner, owner_line|:
                 trace: ProofFactTrace = report.traces.records[index]
-                return index if trace.kind == "precondition" and trace.name == owner and trace.line == owner_line
+                if trace.kind == "precondition" and trace.name == owner and trace.line == owner_line:
+                    return index if found == ordinal
+                    found <- found + 1
             return report.traces.records.count
 
-        def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32, forged: Ast::Expr) -> bool:
+        def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32, ordinal: usize, forged: Ast::Expr) -> bool:
             for index in 0..<report.source_declarations.count |index, report, owner, owner_line|:
                 match report.source_declarations[index]:
                     Ast::Decl.Func(name, parameters, return_type, body, annotations, attributes, position):
                         continue if name != owner or position.line != owner_line
                         mutated_body: mutable darray[Ast::Stmt] = body
                         changed: mutable bool = false
-                        for statement_index in 0..<mutated_body.count |statement_index, mutated_body, changed|:
+                        required_index: mutable usize = 0
+                        for statement_index in 0..<mutated_body.count |statement_index, mutated_body, changed, required_index, ordinal, forged|:
                             match mutated_body[statement_index]:
                                 Ast::Stmt.Contract("requires", _, contract_position):
-                                    mutated_body[statement_index] <- Ast::Stmt.Contract("requires", forged, contract_position)
-                                    changed <- true
+                                    if required_index == ordinal:
+                                        mutated_body[statement_index] <- Ast::Stmt.Contract("requires", forged, contract_position)
+                                        changed <- true
+                                    required_index <- required_index + 1
                                 _:
                                     pass
                         report.source_declarations[index] <- Ast::Decl.Func(name, parameters, return_type, mutated_body, annotations, attributes, position)
@@ -288,16 +295,16 @@ def test_scope_forged(accepted: bool, bit: i64, forged: mutable i64&) -> i64:
     forged <- forged + bit if (forged / bit) % 2 == 0
     return 0
 
-def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     text: sview = "SOURCE_TEXT_PLACEHOLDER"
     source: mutable darray[u8] = []
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     report: mutable ProofReport = proof_empty_report()
-    proof_check(file, &report)
-    proof_replay_certificates(&report)
+    (proof_check(file, &report) can Global{Read,Write})
+    (proof_replay_certificates(&report) can Global{Read,Write})
     forged: mutable i64 = 0
     stop: mutable i64 = 0
 
@@ -342,51 +349,55 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     step: ProofFactTrace = ProofFactTrace{expression: binding.expression, kernel_expression: 0, kind: "proof-step", line: 53, name: "bounded_counter", dependency: "", premises_start: premises_start, premises_count: 1, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
     shared: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
     test_scope_context(&report, 51, 53, entry_certificate)
-    return 10 if not test_scope_step_valid(&report, step, "bounded_counter", &shared)
+    return 10 if not (test_scope_step_valid(&report, step, "bounded_counter", &shared) can Global{Read,Write})
     fresh: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
     test_scope_context(&report, 51, 53, preservation_certificate)
-    stop <- test_scope_forged(test_scope_step_valid(&report, step, "bounded_counter", &fresh), 16, &forged)
+    stop <- test_scope_forged((test_scope_step_valid(&report, step, "bounded_counter", &fresh) can Global{Read,Write}), 16, &forged)
     return stop if stop != 0
     # The verdict memoized for the entry certificate must not answer for the preservation one.
-    stop <- test_scope_forged(test_scope_step_valid(&report, step, "bounded_counter", &shared), 32, &forged)
+    stop <- test_scope_forged((test_scope_step_valid(&report, step, "bounded_counter", &shared) can Global{Read,Write}), 32, &forged)
     return stop if stop != 0
 
     # A precondition proven at the line-65 call does not discharge the line-66 call's.
     summary_index: usize = test_scope_summary_index(&report, "caller", 66, "pos")
     return 11 if summary_index >= report.traces.records.count
     summary_trace: ProofFactTrace = report.traces.records[summary_index]
-    return 12 if not test_scope_summary_valid(&report, summary_trace, 63, 67)
+    return 12 if not (test_scope_summary_valid(&report, summary_trace, 63, 67) can Global{Read,Write})
     earlier_attempt: usize = test_scope_attempt(&report, "caller", 65, report.traces.summary_require_goal_ids[summary_trace.summary_requires_start])
     return 13 if earlier_attempt >= report.goal_attempts.count
     report.traces.summary_require_goal_ids[summary_trace.summary_requires_start] <- earlier_attempt
-    stop <- test_scope_forged(test_scope_summary_valid(&report, summary_trace, 63, 67), 64, &forged)
+    stop <- test_scope_forged((test_scope_summary_valid(&report, summary_trace, 63, 67) can Global{Read,Write}), 64, &forged)
     return stop if stop != 0
 
     # Entry assumptions must be bound to a leading source requires or a retained type refinement.
-    qualified_precondition_index: usize = test_scope_precondition_index(report, "bounded", 73)
-    return 17 if qualified_precondition_index >= report.traces.records.count
+    bounded_first_index: usize = test_scope_precondition_index(report, "bounded", 73, 0)
+    return 17 if bounded_first_index >= report.traces.records.count
+    test_scope_context(&report, 73, 77, 0)
+    return 18 if not (proof_replay_fact_trace_entry(&report, bounded_first_index) can Global{Read,Write})
+    qualified_precondition_index: usize = test_scope_precondition_index(report, "bounded", 73, 1)
+    return 19 if qualified_precondition_index >= report.traces.records.count
     qualified_precondition_trace: ProofFactTrace = report.traces.records[qualified_precondition_index]
-    test_scope_context(&report, 73, 76, 0)
-    return 18 if not proof_replay_boundary_trace_shape_valid(report, qualified_precondition_trace)
-    qualified_position: Ast::Pos = Ast::pos_at_line(74)
+    test_scope_context(&report, 73, 77, 0)
+    return 20 if not (proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write})
+    qualified_position: Ast::Pos = Ast::pos_at_line(75)
     forged_qualified: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", qualified_position), TokenKind.Lt, Ast::Expr.Scope(Ast::Expr.Ident("Caps", qualified_position), "TOP", qualified_position), qualified_position)
     report.traces.records[qualified_precondition_index] <- test_scope_trace(forged_qualified, qualified_precondition_trace.kind, qualified_precondition_trace.line, qualified_precondition_trace.name, qualified_precondition_trace.owner_line)
-    return 19 if proof_replay_boundary_trace_shape_valid(report, report.traces.records[qualified_precondition_index])
+    return 21 if (proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write})
     report.traces.records[qualified_precondition_index] <- qualified_precondition_trace
-    return 20 if not test_scope_mutate_precondition(&report, "bounded", 73, forged_qualified)
-    return 21 if proof_replay_boundary_trace_shape_valid(report, qualified_precondition_trace)
+    return 22 if not test_scope_mutate_precondition(&report, "bounded", 73, 1, forged_qualified)
+    return 23 if (proof_replay_fact_trace_entry(&report, qualified_precondition_index) can Global{Read,Write})
 
-    precondition_index: usize = test_scope_precondition_index(report, "pos", 58)
-    return 22 if precondition_index >= report.traces.records.count
+    precondition_index: usize = test_scope_precondition_index(report, "pos", 58, 0)
+    return 24 if precondition_index >= report.traces.records.count
     precondition_trace: ProofFactTrace = report.traces.records[precondition_index]
     test_scope_context(&report, 58, 60, 0)
-    return 23 if not proof_replay_boundary_trace_shape_valid(report, precondition_trace)
+    return 25 if not (proof_replay_fact_trace_entry(&report, precondition_index) can Global{Read,Write})
     pos_position: Ast::Pos = Ast::pos_at_line(59)
     forged_pos: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", pos_position), TokenKind.Lt, Ast::Expr.IntLit(0, pos_position), pos_position)
-    return 24 if not test_scope_mutate_precondition(&report, "pos", 58, forged_pos)
-    return 25 if proof_replay_boundary_trace_shape_valid(report, precondition_trace)
-    proof_replay_certificates(&report)
-    return 26 if report.replay_gaps == 0
+    return 26 if not test_scope_mutate_precondition(&report, "pos", 58, 0, forged_pos)
+    return 27 if (proof_replay_fact_trace_entry(&report, precondition_index) can Global{Read,Write})
+    (proof_replay_certificates(&report) can Global{Read,Write})
+    return 28 if report.replay_gaps == 0
     return 128 + forged if SCOPE_MODE == 1
     return 0
 '''
