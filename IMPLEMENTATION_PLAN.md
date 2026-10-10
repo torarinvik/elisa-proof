@@ -8564,20 +8564,14 @@ independent replay of `early_return_index_guard.elisa`, then continue the portab
 latest compiler changes during that wait, update `ELISA_COMPILER_REV` and the snapshot to that exact
 source before qualification. Do not report the replay gap fixed until all these checks pass.
 
-### 23.27.60 Newest Stage1 build exposed a mutable-local diagnostic; retry held for wrapper-cache control (2026-10-10)
+### 23.27.60 Matched build reached backend; simplify unsupported emission forms (2026-10-10, qualification open)
 
-The r12/run-002 coordinator reports 17/17 compiler processes exited successfully with bytewise
-output parity. The newest matching product is still Stage1 source `4bff8824307caa36be0e1dcd8979c7ded08ee99b`,
-product SHA-256 `a68043cd9a3666b41d19824f665c9acbf92be0872f72b9d149435a480c7105ee`, and runtime SHA-256
-`347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`. The proof build passed Stage1
-provenance and started on the exact pair, then stopped before object emission at
-`state_and_regions.elisa:472`: `region_view` was assigned inside a trusted block but declared
-immutable. The local is now mutable; diff, Python syntax, and source-length checks pass. The Stage1
-process and build lock are gone.
+The strict-O2 proof/replay build on proof commit `1067ba3ed541a4dee88e08266866358c8b4ef8fa`, using the matched r11 Stage1 product and runtime, cleared the earlier `region_view` mutability diagnostic but emitted no object. The backend declined three constructs: the cstr `.sview()` call in `proof_resource_finish@472`, the guard-fact match statement in `proof_index_upper_guard_array@53`, and the guard-statement match in `proof_replay_type_bound_dynamic_array_guard_fact@57`.
 
-The compiler coordinator has queued a native wrapper-cache correctness control and asked that no
-new Stage1 process start until it finishes. Hold the retry through that gate. After explicit release,
-rebuild proof and replay together at strict O2 on the same newest matched pair, then run the direct-API
-dynamic-array controls, CLI/package export, independent replay, and the Global grant regression suite.
-If the compiler revision advances before release, refresh the frontend snapshot and pin first. This
-candidate remains unqualified; the failed build emitted no candidate executable.
+The current source-only repair uses the explicit `sview(ptr, start, length)` constructor inside the existing narrow trusted Unsafe block and converts the two reported statement matches into value-producing `match` helpers. This aligns the code with Elisa's expression style and preserves the same exact source conditions. `git diff --check`, Python syntax validation for the direct-API harness, and `scripts/check_source_length.py` pass. The repair remains uncompiled and unqualified.
+
+### 23.27.61 Preserve and qualify the private-rejection pruning candidate on the newest compiler (2026-10-10, shared slot held)
+
+Compiler source audit cleared commit `757c231e327ed5a2420be8a855a6abb0ac59d0ed` on branch `codex/capture-private-rejection-pruning`. Its branch bundle and patch are in the local-compute handoff. The r13d native harness passed its six object/link/native phases with all 1,796 pinned inputs unchanged, but the harness was produced by the baseline Stage1 binary (`9ff9000d8691052cb699154e625605f654c802b1dd2aad80ab92e68793aa1d35`) and matching runtime (`347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`). This does not qualify the candidate Stage1 product built from commit `757c231e`; that exact product and full-driver coverage remain in progress.
+
+The coordinator owns the Stage1 slot while it prepares and runs the candidate build and full-driver coverage. Do not start another compiler process until it explicitly releases the slot and reports the exact candidate product/runtime pair and terminal coverage result. Then update the proof's compiler pin and frontend snapshot to the newest exact source revision, build proof and replay together at strict O2, and run the focused direct-API positive and forged-bound controls. If those pass, verify package export and independent replay for `early_return_index_guard.elisa`, then continue the portable replay suite and Global grant regressions. Keep the candidate labeled unqualified until all gates pass; do not accept producer-only evidence or weaken the independent source replay.
