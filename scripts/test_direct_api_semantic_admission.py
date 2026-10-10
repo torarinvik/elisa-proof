@@ -72,6 +72,7 @@ constants += "const LOCAL_FIXED_ARRAY_TYPE_BOUND_API_SOURCE: sview = " + json.du
 constants += "const LOCAL_SCALAR_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> u8:\n    ensure result == 7\n    status: u8 = 7\n    return status\n") + "\n"
 constants += "const FIXED_ARRAY_NO_BOUND_API_SOURCE: sview = " + json.dumps("def checked(values: i64[1], index: usize) -> i64:\n    return values[index]\n") + "\n"
 constants += "const DYNAMIC_ARRAY_GUARD_API_SOURCE: sview = " + json.dumps("def checked(values: darray[i64]&, index: usize) -> i64:\n    requires index >= 0\n    if index >= values.count:\n        return 0\n    return values[index]\n") + "\n"
+constants += "const DYNAMIC_ARRAY_SHADOWED_GUARD_API_SOURCE: sview = " + json.dumps("def checked(values: darray[i64]&, index: usize) -> i64:\n    requires index >= 0\n    values: darray[i64] = [7]\n    if index >= values.count:\n        return 0\n    return values[index]\n") + "\n"
 constants += "const INVALID_API_SOURCES: sview[17] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
 constants += "const INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS: sview[10] = [" + ", ".join(map(json.dumps, (effect for effect, _ in global_grant_expectations))) + "]\n"
 constants += "const INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS: sview[10] = [" + ", ".join(map(json.dumps, (global_name for _, global_name in global_grant_expectations))) + "]\n"
@@ -400,6 +401,14 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     unrelated_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("index", nearby_position), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident("other", nearby_position), "count", nearby_position), nearby_position)
     unrelated_trace: ProofFactTrace = ProofFactTrace{expression: unrelated_bound, kernel_expression: dynamic_bound_trace.kernel_expression, kind: "type-bound", line: dynamic_bound_trace.line, name: dynamic_bound_trace.name, dependency: dynamic_bound_trace.dependency, premises_start: dynamic_bound_trace.premises_start, premises_count: dynamic_bound_trace.premises_count, kernel_premises_start: dynamic_bound_trace.kernel_premises_start, kernel_premises_count: dynamic_bound_trace.kernel_premises_count, summary_bindings_start: dynamic_bound_trace.summary_bindings_start, summary_bindings_count: dynamic_bound_trace.summary_bindings_count, summary_requires_start: dynamic_bound_trace.summary_requires_start, summary_requires_count: dynamic_bound_trace.summary_requires_count, summary_ensure_index: dynamic_bound_trace.summary_ensure_index, owner_line: dynamic_bound_trace.owner_line}
     return 243 if (proof_replay_type_bound_source_valid(report, unrelated_trace) can Global{Read,Write})
+    (api_probe(DYNAMIC_ARRAY_SHADOWED_GUARD_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    shadowed_position: Ast::Pos = Ast::pos_at_line(6)
+    shadowed_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("index", shadowed_position), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident("values", shadowed_position), "count", shadowed_position), shadowed_position)
+    shadowed_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(shadowed_bound, &report, "checked")
+    return 244 if not shadowed_encoding.known
+    shadowed_trace: ProofFactTrace = ProofFactTrace{expression: shadowed_bound, kernel_expression: shadowed_encoding.root, kind: "type-bound", line: 6, name: dynamic_bound_trace.name, dependency: dynamic_bound_trace.dependency, premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: dynamic_bound_trace.owner_line}
+    return 245 if (proof_replay_type_bound_source_valid(report, shadowed_trace) can Global{Read,Write})
+    return 246 if report.replay_gaps != 0
     return 0
 '''
 ast_nodes = (ROOT / "build/snapshot/Elisa-compiler/src/parser/ast_nodes.elisa").read_text()

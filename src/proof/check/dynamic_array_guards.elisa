@@ -22,26 +22,67 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_index_find_dynamic_array_parameter(declarations: darray[Ast::Decl]&, owner: sview, array_name: sview, matches: mutable usize&, valid: mutable bool&, depth: usize) -> void:
+        def proof_index_dynamic_array_single_return_body(statements: darray[Ast::Stmt]&) -> bool:
+            return false if statements.count != 1
+            return match statements[0]:
+                Ast::Stmt.Return(_, _):
+                    true
+                _:
+                    false
+
+        def proof_index_dynamic_array_guard_statement(statement: Ast::Stmt, array_name: sview, bound_symbol: sview, line: u32) -> bool:
+            return match statement:
+                Ast::Stmt.If(Ast::Expr.Binary(Ast::Expr.Ident(guard_index, _), TokenKind.GtEq, Ast::Expr.Field(Ast::Expr.Ident(guard_array, _), "count", _), _), then_body, else_body, guard_position):
+                    guard_index == bound_symbol and guard_array == array_name and guard_position.line < line and else_body.count == 0 and proof_index_dynamic_array_single_return_body(then_body)
+                _:
+                    false
+
+        def proof_index_dynamic_array_access_return(statement: Ast::Stmt, array_name: sview, bound_symbol: sview, line: u32) -> bool:
+            return match statement:
+                Ast::Stmt.Return(Ast::Expr.Index(Ast::Expr.Ident(access_array, _), Ast::Expr.Ident(access_index, _), access_position), statement_position):
+                    access_array == array_name and access_index == bound_symbol and access_position.line == line and statement_position.line == line
+                _:
+                    false
+
+        def proof_index_dynamic_array_source_body_shape(statements: darray[Ast::Stmt]&, array_name: sview, bound_symbol: sview, line: u32) -> bool:
+            guard_index: mutable usize = 0
+            while guard_index < statements.count |guard_index, statements|:
+                is_requires: bool = match statements[guard_index]:
+                    Ast::Stmt.Contract("requires", _, _):
+                        true
+                    _:
+                        false
+                break if not is_requires
+                guard_index <- guard_index + 1
+            return false if statements.count != guard_index + 2
+            proof_index_dynamic_array_guard_statement(statements[guard_index], array_name, bound_symbol, line) and proof_index_dynamic_array_access_return(statements[guard_index + 1], array_name, bound_symbol, line)
+
+        def proof_index_find_dynamic_array_parameter(declarations: darray[Ast::Decl]&, source_declarations: darray[Ast::Decl]&, owner: sview, array_name: sview, bound_symbol: sview, line: u32, array_matches: mutable usize&, array_valid: mutable bool&, index_matches: mutable usize&, index_valid: mutable bool&, depth: usize) -> void:
             return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            for declaration in declarations |owner, array_name, matches, valid, depth|:
+            for declaration in declarations |source_declarations, owner, array_name, bound_symbol, line, array_matches, array_valid, index_matches, index_valid, depth|:
                 match declaration:
-                    Ast::Decl.Func(candidate, parameters, _, _, _, _, _):
+                    Ast::Decl.Func(candidate, parameters, _, body, _, _, _):
                         if candidate == owner:
-                            for parameter in parameters |array_name, matches, valid|:
+                            body_valid: bool = proof_index_dynamic_array_source_body_shape(body, array_name, bound_symbol, line)
+                            for parameter in parameters |source_declarations, array_name, bound_symbol, array_matches, array_valid, index_matches, index_valid, body_valid|:
                                 if parameter.name == array_name:
-                                    matches <- matches + 1
-                                    valid <- not parameter.is_mutable and proof_index_readonly_dynamic_array_type(parameter.type_expression, 0)
+                                    array_matches <- array_matches + 1
+                                    array_valid <- body_valid and not parameter.is_mutable and proof_index_readonly_dynamic_array_type(parameter.type_expression, 0)
+                                if parameter.name == bound_symbol:
+                                    index_matches <- index_matches + 1
+                                    index_valid <- not parameter.is_mutable and proof_unsigned_type_width(parameter.type_expression, source_declarations, 0) > 0
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_index_find_dynamic_array_parameter(nested, owner, array_name, matches, valid, depth + 1)
+                        proof_index_find_dynamic_array_parameter(nested, source_declarations, owner, array_name, bound_symbol, line, array_matches, array_valid, index_matches, index_valid, depth + 1)
                     _:
                         pass
 
-        def proof_index_source_dynamic_array_parameter(report: ProofReport&, owner: sview, array_name: sview) -> bool:
-            matches: mutable usize = 0
-            valid: mutable bool = false
-            proof_index_find_dynamic_array_parameter(report.source_declarations, owner, array_name, matches, valid, 0)
-            return matches == 1 and valid
+        def proof_index_source_dynamic_array_parameter(report: ProofReport&, owner: sview, array_name: sview, bound_symbol: sview, line: u32) -> bool:
+            array_matches: mutable usize = 0
+            array_valid: mutable bool = false
+            index_matches: mutable usize = 0
+            index_valid: mutable bool = false
+            proof_index_find_dynamic_array_parameter(report.source_declarations, report.source_declarations, owner, array_name, bound_symbol, line, array_matches, array_valid, index_matches, index_valid, 0)
+            return array_matches == 1 and array_valid and index_matches == 1 and index_valid
 
         # Import only the exact upper bound carried by a post-return `if index >= array.count`
         # edge. The independent replay checks the source declaration, guard, and consumer site.
@@ -62,5 +103,10 @@ extend ElisaProof:
 
         def proof_add_dynamic_array_guard_bound(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, goal: Ast::Expr, owner: sview, line: u32) -> void:
             array_name: sview = proof_index_upper_guard_array(goal, facts)
-            return if array_name == "" or not proof_index_source_dynamic_array_parameter(report, owner, array_name)
+            bound_symbol: sview = match goal:
+                Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.Lt, _, _):
+                    symbol
+                _:
+                    ""
+            return if array_name == "" or bound_symbol == "" or not proof_index_source_dynamic_array_parameter(report, owner, array_name, bound_symbol, line)
             proof_add_type_bound_fact(facts, report, goal, line, owner)

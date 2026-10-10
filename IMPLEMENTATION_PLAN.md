@@ -8548,30 +8548,48 @@ same parameter types, guard, access line, and adjacency. The direct-API harness 
 case plus refusal checks for a nearby bound and a different array's count. These source changes remain
 unqualified until a strict build and the focused harness pass.
 
-The proof project pin is updated to compiler source `4bff8824307caa36be0e1dcd8979c7ded08ee99b`,
-the latest compiler candidate currently available. Its matched Stage1 product passed freshness and
-same-source correctness parity for report-capture reuse, but capture was slower than cold compile and
-no speedup is claimed. The first matched proof/replay build reached the r11 compiler but exposed a
+At this earlier checkpoint, the proof project was pinned to compiler source
+`4bff8824307caa36be0e1dcd8979c7ded08ee99b`. The matched Stage1 product used for that proof attempt
+passed freshness and same-source correctness parity for report-capture reuse, but capture was slower
+than cold compile and no speedup was claimed. Source `757c231e` had passed audit while its candidate
+Stage1 product was pending. Those compiler status details are superseded by section 23.27.62. The first
+matched proof/replay build reached the r11 compiler but exposed a
 lifetime rejection where AST-backed region names were retained in resource snapshots, plus explicit
 `Global{Read,Write}` grant requirements for copying those names. Resource snapshots now retain the
 permanent arena's stable `cstr` pointers for active/protected region labels and use explicit grants at copy
 sites; static checks pass, but the source fix is still uncompiled.
 
-Next gate: wait for the compiler coordinator to release the single Stage1 timing slot, then select
-the newest released compiler product and its matching runtime, build proof and replay together at
-strict O2, and run the direct-API dynamic-array tests. On success, verify package export and
-independent replay of `early_return_index_guard.elisa`, then continue the portable suite. If the
-latest compiler changes during that wait, update `ELISA_COMPILER_REV` and the snapshot to that exact
-source before qualification. Do not report the replay gap fixed until all these checks pass.
+At that earlier checkpoint, the next gate was to wait for the compiler coordinator to release the
+single Stage1 timing slot, then build proof and replay at strict O2 with the selected matched product
+and runtime. The current gate and compiler status are recorded in section 23.27.62. Do not report the
+replay gap fixed until the focused source, export, and independent replay checks pass.
 
 ### 23.27.60 Matched build reached backend; simplify unsupported emission forms (2026-10-10, qualification open)
 
 The strict-O2 proof/replay build on proof commit `1067ba3ed541a4dee88e08266866358c8b4ef8fa`, using the matched r11 Stage1 product and runtime, cleared the earlier `region_view` mutability diagnostic but emitted no object. The backend declined three constructs: the cstr `.sview()` call in `proof_resource_finish@472`, the guard-fact match statement in `proof_index_upper_guard_array@53`, and the guard-statement match in `proof_replay_type_bound_dynamic_array_guard_fact@57`.
 
-The current source-only repair uses the explicit `sview(ptr, start, length)` constructor inside the existing narrow trusted Unsafe block and converts the two reported statement matches into value-producing `match` expressions, keeping the producer-side fact scan short-circuiting. This aligns the code with Elisa's expression style and preserves the same exact source conditions. `git diff --check`, Python syntax validation for the direct-API harness, and `scripts/check_source_length.py` pass. The repair remains uncompiled and unqualified.
+The source-only refactor replaces `.sview()` with the explicit `sview(ptr, start, length)` constructor inside the existing narrow trusted Unsafe block and rewrites the two reported statement matches as value-producing `match` expressions. A scope audit confirmed that a local declaration may shadow a parameter, so merely matching names and adjacent statements is insufficient. Producer and replay now accept only a leading `requires` contract prefix followed by exactly the guard and indexed return, and both verify that the array and unsigned index are the immutable formal parameters. The direct-API harness adds a shadowed-parameter refusal case alongside the nearby and unrelated-bound forgeries. `git diff --check`, Python syntax validation, and `scripts/check_source_length.py` pass. The changes remain uncompiled and unqualified.
 
 ### 23.27.61 Preserve and qualify the private-rejection pruning candidate on the newest compiler (2026-10-10, shared slot held)
 
-Compiler source audit cleared commit `757c231e327ed5a2420be8a855a6abb0ac59d0ed` on branch `codex/capture-private-rejection-pruning`. Its branch bundle and patch are in the local-compute handoff. The r13d native harness passed its six object/link/native phases with all 1,796 pinned inputs unchanged, but the harness was produced by the baseline Stage1 binary (`9ff9000d8691052cb699154e625605f654c802b1dd2aad80ab92e68793aa1d35`) and matching runtime (`347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`). This does not qualify the candidate Stage1 product built from commit `757c231e`; that exact product and full-driver coverage remain in progress.
+Compiler source audit cleared commit `757c231e327ed5a2420be8a855a6abb0ac59d0ed` on branch `codex/capture-private-rejection-pruning`. Its branch bundle and patch are in the local-compute handoff. The r13d native harness passed its six object/link/native phases with all 1,796 pinned inputs unchanged, but the harness was produced by the baseline Stage1 binary (`9ff9000d8691052cb699154e625605f654c802b1dd2aad80ab92e68793aa1d35`) and matching runtime (`347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`). The candidate Stage1 product built from commit `757c231e` and its full-driver coverage have now passed; section 23.27.62 records the terminal identity and remaining timing comparison.
 
-The coordinator owns the Stage1 slot while it prepares and runs the candidate build and full-driver coverage. Do not start another compiler process until it explicitly releases the slot and reports the exact candidate product/runtime pair and terminal coverage result. Then update the proof's compiler pin and frontend snapshot to the newest exact source revision, build proof and replay together at strict O2, and run the focused direct-API positive and forged-bound controls. If those pass, verify package export and independent replay for `early_return_index_guard.elisa`, then continue the portable replay suite and Global grant regressions. Keep the candidate labeled unqualified until all gates pass; do not accept producer-only evidence or weaken the independent source replay.
+At this checkpoint, the coordinator owned the Stage1 slot for the candidate build and full-driver
+coverage. Both gates have since passed; the remaining timing comparison and current proof gate are
+recorded in section 23.27.62. The proof candidate remains unqualified until strict-O2 build, focused
+direct-API controls, package export, independent replay, and the following regression gates pass.
+
+
+### 23.27.62 r14 pruning candidate passes full-driver coverage; proof build queued behind timing comparison (2026-10-10)
+
+The newest candidate source is `757c231e327ed5a2420be8a855a6abb0ac59d0ed`. Its r14 Stage1 product is `qualification-capture-private-pruning-driver-r14/elisac-stage1`, SHA-256 `2fe3534f3c2afe61baa9d2df2b50454f4d3998809583568e9fb43b6aeca2bc4d`; the matching runtime object is `authority-invocation-field-call-working/build/runtime/elisacore_runtime.o`, SHA-256 `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`. The terminal reports complete same-source coverage; all five recorded stages (object build, hooks, link, cold run, and capture-reuse run) pass, with 1,796 pinned inputs unchanged, 2,506 actual invocation reuses, 2,506 retained capture owners, and zero capture budget rejections. This is correctness/coverage evidence; no performance claim is made.
+
+The proof compiler pin and exported frontend snapshot now name source commit `757c231e`. The dynamic-array source rule is being hardened against parameter shadowing: producer and replay accept only a prefix of `requires` contracts followed by the exact bounds guard and indexed return, and the direct-API harness includes a local-shadow refusal. Static whitespace, Python syntax, and source-length checks pass. These proof changes remain uncompiled.
+
+The compiler coordinator selected an r14-versus-r11 timing comparison to isolate the pruning patch
+and has started paired direct-compiler trials while owning the compiler slot. Do not launch a proof
+compiler until it reports the comparison complete and explicitly releases the slot. Then build
+proof/replay at strict O2 with the exact r14 product/runtime, run the direct-API harness including the
+shadow control, and validate package export and independent replay of
+`early_return_index_guard.elisa`. Continue with portable replay and Global grant regressions after
+those focused gates pass. Keep the dynamic-array candidate unqualified until all gates pass.
