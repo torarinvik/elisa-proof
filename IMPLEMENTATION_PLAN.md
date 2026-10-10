@@ -8824,3 +8824,20 @@ The compiler coordinator imported commits `8d7cfca2` and `7080f92f` into its int
 4. **P2 — Rebaseline performance only after correctness gates.** Use paired, reproducible workloads with identical semantic and trust projections; make no speedup claim from compiler build timing alone.
 
 This section supersedes the uncommitted/unqualified status in §23.27.70 for the isolated branch only. It does not supersede the integrated compiler gate, close P0, or establish Lean/Dafny/F* performance parity.
+
+
+### 23.27.72 Direct-API assert-by mutation probes are expanded; compiler gate is still active (2026-10-10)
+
+The direct-API harness now exercises the distinction between source-attempt coverage before
+replay and final certificate coverage after replay. It also mutates a positive report to remove
+all attempts, duplicate the source-bound attempt, and forge its certificate goal; each case must
+be rejected by the public coverage API. The positive report must fail final coverage before
+replay and pass it afterward. Python byte-compilation and `git diff --check` pass. The Elisa
+harness has not yet been compiled or run: the integrated compiler's 596-check uncached suite is
+still active, and the proof compiler pin remains unchanged until that gate and its tuple postflight
+pass. Keep these probes unqualified until the direct-API test passes on the resulting matched
+Stage1/runtime pair.
+
+The high-ROI queue remains: finish the integrated compiler gate; qualify direct API plus the
+Global.Read/Write matrix, source-goal mutation, export, and independent replay; then fix the next
+source-to-goal/replay defect; measure proof workloads only after correctness qualification.

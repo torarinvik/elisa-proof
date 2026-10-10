@@ -142,6 +142,19 @@ def api_parameter_goal_attempt_index(report: ProofReport&) -> usize:
         return index if attempt.name == "checked" and attempt.rule == "goal"
     return report.goal_attempts.count
 
+def api_source_assert_by_attempt_index(report: ProofReport&, inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&) -> usize:
+    return report.goal_attempts.count if inventory.count == 0
+    expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[0]
+    for index in 0..<report.goal_attempts.count |index, report, expected|:
+        attempt: ProofGoalAttempt = report.goal_attempts[index]
+        if attempt.name == expected.name and attempt.line == expected.attempt_line and attempt.rule == "goal":
+            match attempt.goal:
+                Ast::Expr.BoolLit(value, position):
+                    return index if value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
+                _:
+                    pass
+    return report.goal_attempts.count
+
 def api_parameter_goal_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, tamper: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
@@ -213,8 +226,32 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         if route < 2:
             (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 247 if report.failed != 0 or report.findings.count != 0 or report.replayed != 0
+            source_assert_by_goals: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(report.source_declarations)
+            return 252 if source_assert_by_goals.count != 1
+            return 253 if not proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
+            return 254 if proof_source_assert_by_coverage(source_assert_by_goals, report)
             (proof_replay_certificates(&report) can Global{Read,Write})
-            return 248 if report.replay_gaps != 0 or not proof_report_source_admission_invariants_consistent(report)
+            return 248 if report.replay_gaps != 0 or not proof_source_assert_by_coverage(source_assert_by_goals, report) or not proof_report_source_admission_invariants_consistent(report)
+            if route == 0:
+                report.goal_attempts.clear()
+                return 255 if proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
+                (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+                source_assert_by_goals <- proof_source_assert_by_inventory(report.source_declarations)
+                source_assert_by_attempt: mutable usize = api_source_assert_by_attempt_index(report, source_assert_by_goals)
+                return 256 if source_assert_by_attempt >= report.goal_attempts.count
+                original_source_assert_by_attempt: ProofGoalAttempt = report.goal_attempts[source_assert_by_attempt]
+                report.goal_attempts.push(original_source_assert_by_attempt)
+                return 257 if proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
+                (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+                source_assert_by_goals <- proof_source_assert_by_inventory(report.source_declarations)
+                source_assert_by_attempt <- api_source_assert_by_attempt_index(report, source_assert_by_goals)
+                return 258 if source_assert_by_attempt >= report.goal_attempts.count
+                source_assert_by_certificate: ProofGoalAttempt = report.goal_attempts[source_assert_by_attempt]
+                return 259 if not source_assert_by_certificate.has_certificate or source_assert_by_certificate.certificate_index >= report.certificates.count
+                original_source_assert_by_certificate: ProofGoalCertificate = report.certificates[source_assert_by_certificate.certificate_index]
+                forged_source_assert_by_goal: Ast::Expr = Ast::Expr.BoolLit(false, Ast::pos_at_line(4))
+                report.certificates[source_assert_by_certificate.certificate_index] <- ProofGoalCertificate{goal: forged_source_assert_by_goal, facts_start: original_source_assert_by_certificate.facts_start, facts_count: original_source_assert_by_certificate.facts_count, kernel_goal: original_source_assert_by_certificate.kernel_goal, kernel_facts_start: original_source_assert_by_certificate.kernel_facts_start, kernel_facts_count: original_source_assert_by_certificate.kernel_facts_count, line: original_source_assert_by_certificate.line, name: original_source_assert_by_certificate.name, rule: original_source_assert_by_certificate.rule, replayed: original_source_assert_by_certificate.replayed}
+                return 260 if proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
             (api_probe_before_replay(SOURCE_ASSERT_BY_NESTED_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 249 if not any finding in report.findings where finding.kind == "source-obligation-inventory" and finding.status == "unsupported"
             return 250 if report.replayed != 0
