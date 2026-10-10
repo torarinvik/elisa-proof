@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-10. **Section 23.27.90 is the current full-gate status; §23.27.71 remains the authoritative high-ROI execution order.** The integrated compiler candidate has a live uncached 596-check qualification with 41 failures recorded so far; the malformed-input fuzzer passed, while emitter checks continue. The completed differential corpus has zero behavioral mismatches but 85 Stage1 compile declines, of which 21 borrow-exclusivity negatives are now independently covered and 64 remain untriaged. The proof compiler pin and proof-consumer changes remain unqualified on the final matched compiler/runtime pair. Prioritize finishing the exact-tuple compiler gate, triaging its real failures, qualifying proof-consumer admission and kernel replay, then measuring common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.90 for the ordered backlog and current status.
+Status: refreshed 2026-10-10. **Section 23.27.93 is the current full-gate status; §23.27.71 remains the authoritative high-ROI execution order.** The frozen integrated compiler candidate has a live uncached 596-check qualification with 44 failures observed so far; the malformed-input fuzzer and completed differential corpus passed their recorded controls, while documentation, lowered, and packed emit checks continue. Failure count is not final. The interface matrix has 23 compile refusals and 38 byte mismatches across 333 cases. The interpreter matrix has 17 divergences; triage identifies 15 intentional Stage1 safety rejections, one warning-only effect-grant migration, and one unresolved named-argument result requiring a native oracle. The proof compiler pin and proof-consumer changes remain unqualified on the final matched compiler/runtime pair. Prioritize finishing the exact-tuple compiler gate, triaging its real failures, qualifying proof-consumer admission and kernel replay, then measuring common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.93 for the ordered backlog and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9347,3 +9347,36 @@ preserved in `vast-recovery-2026-10-09/compiler-interface-artifact-preview-0514d
 After the frozen suite exits, use this harness on the exact candidate to capture refusal diagnostics
 and full interface diffs. Keep the Stage0/Stage1 byte-parity gate strict while using those artifacts
 to trace each mismatch to parser, semantic interface formation, or rendering.
+
+
+### 23.27.93 Classify interpreter safety refusals without weakening runtime parity (2026-10-10)
+
+The exact-tuple compiler gate remains active at `2f68db2d046f9711d734edefe37db91d544b46ed`.
+At the latest poll, 44 failures are recorded, `full.exit` is absent, and the documentation emitter
+is still compiling cases; lowered and packed emitter checks are also active. Preserve the frozen
+tree until every worker exits. The count is provisional.
+
+The completed interpreter check reported 100 identical results, three already-classified Stage0
+interpreter bugs, 17 divergences, and 786 skipped inputs. Read-only triage and the dedicated
+negative-test sources show that 15 divergences are intentional Stage1 rejections: one protocol
+transition alias, one non-constant static block, ten unproven struct-field refinements, and three
+non-null reference zero-initialization cases. The isolated preview now checks Stage1's exit and
+specific safety diagnostic for each of these, keeping them out of executable-result parity. Its
+scope-restore probe grants `Memory.Allocate` and `Abort.Panic` locally at each call, removing only
+warning-format noise while preserving the existing result assertion.
+
+`disjoint_named_argument_reorder` remains a real unresolved result mismatch: Stage0's interpreter
+returns an unrelated `Cell(value: 3)`, while Stage1 returns the source-expected value `1`. A native
+Stage0/Stage1 runtime oracle is still required before classifying this as a Stage0-only defect or
+adding it to the known-divergence list. Do not hide this case in the parity harness.
+
+The changes are on isolated preview commit `48d2a5e493ee409a82713a38def49b4ffa175902`. Shell
+syntax, a static check of all 15 classifier entries, and `git diff --check` pass. The compiler test
+has not been run while the full gate is active. The complete-history bundle is
+`vast-recovery-2026-10-09/compiler-postgate-preview-48d2a5e4.bundle` (SHA-256
+`bb127cf26049b436dd92389912dd684827aa845948e76df18403fa9f804395d7`).
+
+After gate completion, rerun the instrumented interpreter check and the native O0/O2 result oracle
+for the named-argument fixture on the same compiler/runtime tuple. Keep the strict assertion that
+Stage1 rejects the 15 invalid sources with their expected diagnostics, and proceed to proof API,
+Global grant, and independent replay qualification only after the entire compiler gate passes.
