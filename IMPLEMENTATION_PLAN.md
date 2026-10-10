@@ -9197,7 +9197,7 @@ AST contract and downstream serializer use. Preserve exact Stage0/Stage1 compari
 bulk-regenerate the baseline without confirming every semantic and presentation change.
 
 
-### 23.27.88 Atomic fetch-add probe requires authenticated standard-library context (2026-10-10)
+### 23.27.88 Atomic controls pass with authenticated standard-library context (2026-10-10)
 
 The first isolated atomic IR probe appeared to show a Stage1 lowering defect: its generated
 `atomic_fetch_add_acqrel` called internal `@fetch_add` with order code 3 rather than emitting
@@ -9206,6 +9206,8 @@ outside the authenticated standard-library root, so the compiler correctly treat
 helper as a user overload. Recompiling the same grant-migrated fixture with an absolute include of
 the frozen product's canonical standard library emits `atomicrmw add ... acq_rel`; exchange and
 compare-exchange also lower correctly. No compiler atomic-lowering bug is established by the
-flattened probe. Preserve both IR captures, keep source-origin checks strict, and complete native
-atomic runtime validation with the canonical include before qualifying the fixture. Do not weaken
-the explicit grants or ordering checks.
+flattened probe. Commit `29c1d5d4` adds only the local `Unsafe.RawExtern` grants required by the
+fixture's `pthread_create` and `pthread_join` calls. Native atomic controls now pass on Stage0 and
+Stage1 at both O0 and O2 with the canonical include. Preserve the canonical and flattened IR
+captures, keep source-origin checks strict, and rerun this focused fixture after integration. Do
+not weaken the explicit grants or ordering checks.
