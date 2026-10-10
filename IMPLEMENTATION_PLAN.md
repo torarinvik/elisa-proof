@@ -9288,3 +9288,43 @@ qualify proof-consumer admission, direct API source obligations, exact Global gr
 kernel replay and package ingress; then measure performance only on correctness-qualified
 workloads. The existing local checkpoints and compiler bundles preserve the work if the current
 process is interrupted.
+
+
+### 23.27.91 Interface parity triage and explicit-grant preview checkpoint (2026-10-10)
+
+The frozen integrated compiler candidate is still `2f68db2d046f9711d734edefe37db91d544b46ed`,
+based on the newest local compiler `main` snapshot `71e12c837ac9420f5e20154a76ce6a05f7d8b821`.
+Its uncached 596-check suite remains active; 43 failures are recorded so far, the documentation
+emitter check is still running, and `full.exit` is absent. The count is an in-progress observation,
+not the final result. Keep this checkout and its compiler inputs frozen until the gate terminates.
+
+The completed interface parity check compares 333 cases: 23 are compile refusals and 38 have
+interface-byte mismatches. The retained `iface-parity-triage.json` groups observed spelling
+mismatches into predicate parentheses, nullable enum parameter spelling, qualified type
+separators, and inferred reference-region annotations. Treat these as renderer/source-contract
+diagnoses; do not bulk-migrate fixtures or waive the parity ratchet. The header parity harness also
+reported 32 asymmetric compile outcomes with no byte mismatches, as recorded in its retained triage.
+
+The separate preview branch `codex/merged-origin-smc-fix-preview` is based on the frozen candidate
+and is now at `7190ea2423af0187f332d106bea008144b2b395c`. This checkpoint adds explicit local
+`Global.Read`/`Global.Write` grants to positive fixtures for dictionary mutation, pointer scopes,
+reference identity, block guards, runtime strings, region pools, arena reset/cache concurrency,
+and C-string return paths. The packed bounds fixtures also declare their required raw-extern call
+grants. `bash -n` passed for the edited smoke scripts and `git diff --check` passed. The combined
+preview has not been compiled or included in the live gate; validate it only after the gate exits.
+Its complete-history source bundle is preserved at
+`vast-recovery-2026-10-09/compiler-global-grant-fixtures-7190ea24.bundle` (SHA-256
+`4404ecc816a7d955f6d030f08b5d0c5edde4376f3492fdd5384c2f9d2ed0d546`).
+
+Compiler commit `8d7cfca2` renames the shadowing SMC error-binding local and updates its native
+owner regression. The frozen candidate already contains the patch-equivalent `ec3ef1fe`; do not
+cherry-pick the commit into the active gate. The scoped region-return repair is separately
+identified as compiler commit `7080f92f` in `src/backend/codegen_env.elisa` (`query_head_for`) and
+`src/backend/codegen_const_folding.elisa` (`const_scope_owner`). It ties both returned views to
+their `StructTable` region; the owning commit exists, but the repair still needs focused and gen2
+validation.
+
+The next high-ROI steps remain: finish the exact-tuple compiler gate; diagnose each remaining
+parity/refusal class and apply narrow fixes on an isolated preview; then rerun the relevant compiler
+checks and continue proof admission, authentic Global grants, direct API obligations, kernel replay,
+and measured performance qualification.
