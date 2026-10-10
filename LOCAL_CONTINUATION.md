@@ -1,18 +1,53 @@
-# Local continuation checkpoint — updated 2026-10-10, r17
+# Local continuation checkpoint — updated 2026-10-10, r18
 
-Checkpointed on 2026-10-09 so work can continue on the Mac without the Vast instance.
+The proof checkout, local products, compiler provenance, direct-API regression harness, and
+benchmark checkpoint are saved on the Mac. Work can continue without the Vast instance.
 
 ## Proof assistant checkout
 
-The active branch is `codex/vast-local-checkpoint-20261009`. It contains the refreshed high-ROI implementation plan, exact Elisa compiler/core pins, and the completed expression-scoped `Global.Read` / `Global.Write` migration for global mutable accesses. The direct-API source-goal binding candidate and its regression updates are committed locally; the harness now checks the expected finding and exact grant diagnostic for every invalid source rather than only the final loop case. Static checks pass, but the candidate still needs the held Stage1 runtime qualification described below. The matching portable branch bundle is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r17.bundle`; its verified checksum is recorded in the recovery continuation file.
+The active branch is `codex/vast-local-checkpoint-20261009`, with implementation commit
+`f5e629fe` (`replay: source validate generic type-bound facts`). The branch also carries the
+high-ROI implementation plan and the completed expression-scoped `Global.Read` / `Global.Write`
+migration for global mutable accesses. The compiler grant migration covers 1,066 effectful call
+sites across 89 source files; seven increments that read and write globals require
+`Global{Read,Write}`. Qualification details and per-file hashes are in
+[global-grant-scope-qualification-2026-10-09.json](docs/evidence/global-grant-scope-qualification-2026-10-09.json).
 
-The latest proof implementation source is commit `716bedba`; the r17 checkpoint adds profile-result documentation without changing that source candidate. The candidate source and indexed/global-reference grant controls remain unqualified on Stage1. The installed newest Stage1 and matching runtime are already on this Mac. The authority profile completed with 21/21 samples and three instrumented captures, but the candidate showed no robust speedup and remains disabled. The compiler coordinator's parser A/B seed now owns the serial Stage1 slot. One direct-API harness build was started after the authority agent's release message, then terminated as soon as the coordinator reserved the slot; it produced no test result. SSH retries from this checkpoint received a closed connection from the original Vast endpoint and a refused connection from the replacement, so no additional remote files were recovered.
+The type-bound replay change closes a P0 trust hole where a forged generic `type-bound` fact such
+as `value < value` could pass shape-only validation. It reconstructs parameter widths/ranges,
+scalar constants, fixed-array bounds and witnesses, scalar-local witnesses, literal counting-loop
+facts, and direct call-result types from the source AST. Cast-identity facts remain rejected until
+replay can authenticate an exact widening site. The focused direct-API mutation harness, Global
+grant suite, qualified-constant pin suite, and pure-summary replay suite pass. Qualification is
+still open: `test_global_constant_relevance.py` has a replay gap in
+`module_u32_scoped_constant_branch.elisa`; `test_qualified_constants.py` has loop/rebind witness
+coverage gaps; and `test_qualified_constant_call_domain.py` retains one unproven goal with zero
+replay gaps. These remaining cases are documented in section 23.27.52 of `IMPLEMENTATION_PLAN.md`.
 
-The migration covers 1,066 effectful call sites across 89 source files. Seven counter increments that both read and write globals now require `Global{Read,Write}`. The native Stage1 compiler strict check of the final candidate passed with exit code 0 and zero diagnostics. Qualification details and per-file SHA-256 values are in [global-grant-scope-qualification-2026-10-09.json](docs/evidence/global-grant-scope-qualification-2026-10-09.json).
+Both local products were refreshed after the implementation commit using strict O2 and the newest
+pinned public Elisa compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Stage1 is
+`/Users/torarinvikbjarko/.elisac/stage1/bin/elisac-stage1` (SHA-256
+`2faf57f2dca6914d3f500c6b4532fb993349208ff556459de0a6af025688c644`), from
+`../local-compiler-optimization-20261009/parser-effect-template-working`; the matching runtime
+object SHA-256 is `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`.
+Both manifests record `source_dirty: false` and the current implementation commit. Proof executable
+SHA-256: `48299b242d079f1d41a00c449ab79323bd59605a403eae1e143eef7c3f69aaef`; manifest SHA-256:
+`fa976bedc97e3bf5bfeb2fd0f5abbb8278d3b52d10a0480f83b4e13371e282e2`. Replay executable
+SHA-256: `5d2495e5ef171814ccef723e6726787ab077fd92647562654455122031fb9515`; manifest SHA-256:
+`a7f52517618da9c37a75bd140bae94f9dfe6d0035f14e972f915921e25c224a8`.
 
-The check used the exact command `$ELISA_COMPILER_BIN -emit check -O0 src/main.elisa` from the proof project root. The proof source is saved in this branch; the candidate snapshot and raw check log remain under `../local-compiler-optimization-20261009/pinned-f992-ef042-llvm21/evidence/proof-consumer/`.
+The compiler self-build A/B run is paused locally with no Stage1 child running. Its retained
+checkpoint is `/Users/torarinvikbjarko/.codex/benchmark-results/elisa-selfcompile-ab-install-index-r1/`.
+`checkpoint-after-pairs-01.json` SHA-256 is
+`290337ea4db43193529154356e28020540fac460f472bfa4bb3236ff5ba7382f`; `primary-results.jsonl`
+SHA-256 is `b189df7109a8a49cdd3593a452726211a645162251a0fd807fe49421f3f68f51`; `run.json` SHA-256
+is `c237166e60081b36d948688a8d11ed040dbfa697eee849fb6702e9ff2364286d`. Do not resume that run
+until its qualification is repaired and the compiler coordinator releases Stage1.
 
-The full proof regression matrix, CLI/API checks, and replay gates still need to be run against this migration before treating it as release-qualified.
+The implementation commit is local on the branch and was not pushed. The portable branch bundle
+is refreshed from this checkpoint at
+`../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r24.bundle`; a SHA-256 sidecar
+is stored beside it.
 
 ## Native local toolchain
 
