@@ -85,6 +85,7 @@ run_py_test test_build_dependency_closure.py
 run_py_test test_build_manifest_sidecar_integrity.py
 run_py_test test_compiler_recipe_inputs.py
 run_py_test test_plain_enum_propositions.py
+run_py_test test_const_enum_shorthand.py
 run_py_test test_conditional_scaled_sum.py
 run_py_test test_guarded_call_result.py
 run_py_test test_range_binder_resources.py

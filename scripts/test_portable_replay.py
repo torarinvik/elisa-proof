@@ -8,6 +8,9 @@ import subprocess
 from portable_replay_support import *
 from portable_resource_controls import check_unresolved_shadow
 
+if not __debug__:
+    raise SystemExit("portable replay checks must run without Python -O")
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
