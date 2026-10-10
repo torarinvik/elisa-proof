@@ -5,7 +5,11 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-from perf_build_provenance import read_build_manifest, source_tree_identity
+from perf_build_provenance import (
+    read_build_manifest,
+    source_tree_identity,
+    verify_build_artifacts,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof"))
@@ -18,6 +22,7 @@ def require_current_proof_binary():
     """Refuse to turn stale verifier output into evidence for the current grant checker."""
     try:
         manifest = read_build_manifest(Path(BIN), "Global grants test proof")
+        verify_build_artifacts(manifest, "Global grants test proof")
         proof = manifest.get("proof")
         frontend = manifest.get("frontend")
         compiler = manifest.get("compiler")

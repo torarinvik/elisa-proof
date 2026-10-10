@@ -8593,3 +8593,26 @@ proof/replay at strict O2 with the exact r14 product/runtime, run the direct-API
 shadow control, and validate package export and independent replay of
 `early_return_index_guard.elisa`. Continue with portable replay and Global grant regressions after
 those focused gates pass. Keep the dynamic-array candidate unqualified until all gates pass.
+
+### 23.27.63 Strengthen Global grant qualification provenance; record runtime-mode source audit (2026-10-10)
+
+The Global grant integration suite already checks read, write, read-modify-write, indexing, reference
+acquisition, forwarding, and local/parameter shadowing through both function and module report
+routes. Its preflight verified the proof binary and source/compiler revision but did not re-hash the
+Stage1 driver/product or matching runtime object named in the build manifest. The harness now calls
+`verify_build_artifacts` before accepting the manifest, so mutated or missing compiler/runtime
+artifacts cannot qualify the grant checks. `python3 -m py_compile` and
+`scripts/tests/test_perf_luna_benchmark_hardening.py` pass (seven tests, including runtime-object
+mutation refusal). The actual Global grant suite remains queued for a fresh strict-O2 pair built from
+the current source and pinned compiler; no semantic qualification is added by this harness change.
+
+Source inspection of compiler candidate `757c231e` confirms that
+`src/driver/elisac_source_probes.elisa` selects `runtime_std` from either a raw byte search for
+`def arena_alloc(` or presence of `ELISA_STAGE1_RUNTIME_STD`, and the driver passes that boolean to
+`Semantic::check_full_diagnostics`. This establishes attacker-controlled policy selection in the
+current Stage1 path; the exact affected checks and interaction with mutable-global grants still need
+an adversarial compiler run. In particular, `check_mutable_global_authority` receives the separate
+`enforce_mutable_global_grants` option, so do not claim that the source probe itself disables
+Global.Read/Write until that path is reproduced. The compiler slot is currently reserved for the
+coordinator's r15a native gate followed by the repaired r11/r14 timing comparison; source-only review
+may continue, but no compiler launch is permitted until explicit release.
