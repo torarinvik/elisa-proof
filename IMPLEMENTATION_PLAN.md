@@ -9160,6 +9160,22 @@ weaken compiler grants or use trusted suppression. Preserve the regression and i
 evidence, then rerun it as part of the full gate after the frozen run releases.
 
 
+### 23.27.85 Differential corpus exposes 85 Stage1 compile declines (2026-10-10)
+
+The long serial differential corpus completed with 849 programs: 359 matched, 0 behavioral
+mismatches, 85 newly declined by Stage1 against a baseline of zero, and 405 skipped because
+Stage0 could not arbitrate. The declines span EASM smoke programs, dictionary and reference/view
+fixtures, borrow/alias cases, and `region_owner_lookup_smoke`. The corpus harness suppresses
+per-case diagnostics, so the cause cannot yet be assigned reliably between newly enforced
+Global/effect contracts and compiler regressions.
+
+After the full gate releases, rerun representative listed cases with Stage1 diagnostics enabled,
+group the declines by root cause, migrate only valid fixtures with narrow grants, and fix any true
+checker regression. Preserve the zero-mismatch result and baseline of zero unexplained declines;
+do not ratchet all 85 failures away. The complete captured corpus log is
+`build/cache-diagnostic-integration/full-logs/behavioural_differential_corpus__ratchet_.log` in
+the frozen compiler worktree.
+
 ### 23.27.86 Bounds and seeded-stress fixture migrations pass native controls (2026-10-10)
 
 Compiler commits `150dce6c`, `b9b26f0c`, and `92677246` update the bounds and seeded-stress
@@ -9181,30 +9197,15 @@ AST contract and downstream serializer use. Preserve exact Stage0/Stage1 compari
 bulk-regenerate the baseline without confirming every semantic and presentation change.
 
 
-### 23.27.88 Atomic fetch-add lowering emits a non-atomic call (2026-10-10)
+### 23.27.88 Atomic fetch-add probe requires authenticated standard-library context (2026-10-10)
 
-The isolated native atomic runner found a Stage1 LLVM lowering defect after the fixture received
-its explicit grants. In `atomic-stage1.ll`, `atomic_fetch_add_acqrel` calls internal `@fetch_add`
-with order code 3 instead of emitting an LLVM `atomicrmw add` with acquire-release ordering;
-exchange and compare-exchange lower correctly. The runner stops on this IR mismatch, so no native
-runtime pass is claimed. Treat this as a compiler correctness blocker: repair the typed atomic
-lowering, assert the emitted operation and ordering, then run the atomic runtime controls under
-the required thread sanitizer or equivalent concurrency checks. The source IR evidence is saved in
-the local recovery folder; do not weaken the grant or ordering checks.
-
-
-### 23.27.85 Differential corpus exposes 85 Stage1 compile declines (2026-10-10)
-
-The long serial differential corpus completed with 849 programs: 359 matched, 0 behavioral
-mismatches, 85 newly declined by Stage1 against a baseline of zero, and 405 skipped because
-Stage0 could not arbitrate. The declines span EASM smoke programs, dictionary and reference/view
-fixtures, borrow/alias cases, and `region_owner_lookup_smoke`. The corpus harness suppresses
-per-case diagnostics, so the cause cannot yet be assigned reliably between newly enforced
-Global/effect contracts and compiler regressions.
-
-After the full gate releases, rerun representative listed cases with Stage1 diagnostics enabled,
-group the declines by root cause, migrate only valid fixtures with narrow grants, and fix any true
-checker regression. Preserve the zero-mismatch result and baseline of zero unexplained declines;
-do not ratchet all 85 failures away. The complete captured corpus log is
-`build/cache-diagnostic-integration/full-logs/behavioural_differential_corpus__ratchet_.log` in
-the frozen compiler worktree.
+The first isolated atomic IR probe appeared to show a Stage1 lowering defect: its generated
+`atomic_fetch_add_acqrel` called internal `@fetch_add` with order code 3 rather than emitting
+`atomicrmw add`. This result came from a fixture that flattened the standard-library helper
+outside the authenticated standard-library root, so the compiler correctly treated that concrete
+helper as a user overload. Recompiling the same grant-migrated fixture with an absolute include of
+the frozen product's canonical standard library emits `atomicrmw add ... acq_rel`; exchange and
+compare-exchange also lower correctly. No compiler atomic-lowering bug is established by the
+flattened probe. Preserve both IR captures, keep source-origin checks strict, and complete native
+atomic runtime validation with the canonical include before qualifying the fixture. Do not weaken
+the explicit grants or ordering checks.
