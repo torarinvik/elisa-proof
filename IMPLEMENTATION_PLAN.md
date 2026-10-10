@@ -8538,3 +8538,28 @@ nearby or unrelated bound. Once this focused rule is repaired, rerun this exampl
 and independent replay first, then continue the portable suite to its next result. Keep the full
 portable replay gate open until all positives and refusal controls pass; do not weaken admissibility
 or accept producer-only proof status.
+
+### 23.27.59 Dynamic-array source rule drafted; qualification queued on newest compiler (2026-10-10)
+
+The source candidate now recognizes only the direct early-return shape `if index >= values.count:
+return ...` followed immediately by `return values[index]`. Producer-side fact creation is limited to
+a read-only `darray` parameter and an exact `index < values.count` goal. Independent replay checks the
+same parameter types, guard, access line, and adjacency. The direct-API harness adds the positive
+case plus refusal checks for a nearby bound and a different array's count. These source changes remain
+unqualified until a strict build and the focused harness pass.
+
+The proof project pin is updated to compiler source `4bff8824307caa36be0e1dcd8979c7ded08ee99b`,
+the latest compiler candidate currently available. Its matched Stage1 product passed freshness and
+same-source correctness parity for report-capture reuse, but capture was slower than cold compile and
+no speedup is claimed. The first matched proof/replay build reached the r11 compiler but exposed a
+lifetime rejection where AST-backed region names were retained in resource snapshots, plus explicit
+`Global{Read,Write}` grant requirements for copying those names. Resource snapshots now retain the
+permanent arena's owning `cstr` for active/protected region labels and use explicit grants at copy
+sites; static checks pass, but the source fix is still uncompiled.
+
+Next gate: wait for the compiler coordinator to release the single Stage1 timing slot, then select
+the newest released compiler product and its matching runtime, build proof and replay together at
+strict O2, and run the direct-API dynamic-array tests. On success, verify package export and
+independent replay of `early_return_index_guard.elisa`, then continue the portable suite. If the
+latest compiler changes during that wait, update `ELISA_COMPILER_REV` and the snapshot to that exact
+source before qualification. Do not report the replay gap fixed until all these checks pass.

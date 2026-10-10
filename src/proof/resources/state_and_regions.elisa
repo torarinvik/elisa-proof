@@ -62,7 +62,7 @@ extend ElisaProof:
             # collection's lifetime -- which is what lets a region-polymorphic function state a
             # bounds contract over its own parameter.
             binding_extent: mutable darray[bool]
-            active_regions: mutable darray[sview]
+            active_regions: mutable darray[cstr]
             # The function's module path and the immutable constants declared directly in it:
             # what a bare, unbound name in a value operand can denote. See encode_value.
             static_scope: mutable darray[sview]
@@ -71,7 +71,7 @@ extend ElisaProof:
             # Nested snapshots inherit these region identities. A child may not destroy an
             # inherited region and reopen the same spelling, because the parent would otherwise
             # continue with a different lifetime after the child joins.
-            protected_regions: mutable darray[sview]
+            protected_regions: mutable darray[cstr]
             # Region parameters are caller-owned capabilities. They remain active across the
             # callee's return and therefore must not be closed by proof_resource_finish.
             external_regions: mutable darray[sview]
@@ -221,14 +221,14 @@ extend ElisaProof:
             index: mutable usize = state.active_regions.count
             while index > 0 |index, state, region|:
                 index <- index - 1
-                return true if state.active_regions[index] == region
+                return true if string_view_eq(region, state.active_regions[index]) != 0
             return false
 
         def proof_resource_region_is_external(state: ProofResourceState&, region: sview) -> bool:
             return any external in state.external_regions where external == region
 
         def proof_resource_region_is_protected(state: ProofResourceState&, region: sview) -> bool:
-            return any protected in state.protected_regions where protected == region
+            return any protected in state.protected_regions where string_view_eq(region, protected) != 0
 
         # Mark the active region identities inherited by a child snapshot before its body is
         # checked. This is separate from external-region status: ordinary lexical regions are
@@ -305,7 +305,7 @@ extend ElisaProof:
         # `region r(size)` form keeps the owner live across following statements, so its close
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and state.active_regions[state.active_regions.count - 1] == region
+            innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and string_view_eq(region, state.active_regions[state.active_regions.count - 1]) != 0
             live_borrow: bool = innermost and proof_resource_region_has_live_borrow(state, region)
             valid: bool = innermost and not live_borrow
             proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not innermost
@@ -466,11 +466,14 @@ extend ElisaProof:
             # the certificate so replay never accepts an unbalanced open region. Explicit
             # `destroy r` has already removed its entry and therefore emits no duplicate close.
             while state.active_regions.count > 0 and not report.kernel.budget_exhausted |state, report, function_name, line|:
-                region: sview = state.active_regions[state.active_regions.count - 1]
+                region: cstr = state.active_regions[state.active_regions.count - 1]
                 state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
-                if not proof_resource_region_is_external(state, region):
-                    proof_resource_invalidate_region_bindings(state, region)
-                    proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", 0)
+                region_view: sview = ""
+                trusted Unsafe{PointerArithmetic,RawExtern}:
+                    region_view <- region.sview()
+                if not proof_resource_region_is_external(state, region_view):
+                    proof_resource_invalidate_region_bindings(state, region_view)
+                    proof_resource_record_event(state, report, "resource-region-close", "", 0, region_view, "", 0)
             return if report.kernel.budget_exhausted
             if not proof_resource_kernel_capacity(report, 1, state.trace_events.count, function_name):
                 proof_kernel_budget_note(report, function_name)
