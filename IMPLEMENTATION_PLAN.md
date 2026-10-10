@@ -9165,16 +9165,21 @@ evidence, then rerun it as part of the full gate after the frozen run releases.
 The long serial differential corpus completed with 849 programs: 359 matched, 0 behavioral
 mismatches, 85 newly declined by Stage1 against a baseline of zero, and 405 skipped because
 Stage0 could not arbitrate. The declines span EASM smoke programs, dictionary and reference/view
-fixtures, borrow/alias cases, and `region_owner_lookup_smoke`. The corpus harness suppresses
-per-case diagnostics, so the cause cannot yet be assigned reliably between newly enforced
-Global/effect contracts and compiler regressions.
+fixtures, borrow/alias cases, and `region_owner_lookup_smoke`. Twenty-one borrow-exclusivity
+cases are now checked directly by Stage1 object compilation; all reject without producing an
+object. All 21 now have explicit expected diagnostics and are marked
+`corpus: deliberate-decline` on the isolated fixture branch. The other 64 declines remain to
+diagnose. The corpus harness now retains Stage0 and Stage1 compile logs for future declines.
 
-After the full gate releases, rerun representative listed cases with Stage1 diagnostics enabled,
-group the declines by root cause, migrate only valid fixtures with narrow grants, and fix any true
-checker regression. Preserve the zero-mismatch result and baseline of zero unexplained declines;
-do not ratchet all 85 failures away. The complete captured corpus log is
+After the full gate releases, rerun representative remaining cases with Stage1 diagnostics
+enabled, group the declines by root cause, migrate only valid fixtures with narrow grants, and fix
+any true checker regression. Preserve the zero-mismatch result and baseline of zero unexplained
+declines; do not ratchet away any of the remaining 64 without individual evidence. The captured
+corpus log is
 `build/cache-diagnostic-integration/full-logs/behavioural_differential_corpus__ratchet_.log` in
 the frozen compiler worktree.
+
+
 
 ### 23.27.86 Bounds and seeded-stress fixture migrations pass native controls (2026-10-10)
 
@@ -9211,3 +9216,25 @@ fixture's `pthread_create` and `pthread_join` calls. Native atomic controls now 
 Stage1 at both O0 and O2 with the canonical include. Preserve the canonical and flattened IR
 captures, keep source-origin checks strict, and rerun this focused fixture after integration. Do
 not weaken the explicit grants or ordering checks.
+
+
+### 23.27.89 Two borrow-exclusivity declines are intentional corpus negatives (2026-10-10)
+
+Twenty-one borrow-exclusivity cases among the 85 corpus declines are verified expected negatives:
+`p03_global_alias`, `p04_global_field_alias`, `p11_ref_from_call_local`,
+`p12_ref_from_call_inline`, `p13_ref_in_struct`, `p17_fn_value_callee`,
+`p18_conditional_ref`, `p21_ref_param_and_owner_field`,
+`p32_ref_param_reachable_from_other_param`, `p33_global_darray_elem_push`, and
+`p40_global_write_transitive`, plus `p01_same_twice`, `p05_field_and_whole`,
+`p07_elements_dynamic`, `p15_method_call`, `p16_module_qualified`, `p19_two_ref_locals`,
+`p23_elem_ref_local_then_push`, `p25_loop_capture_borrow`, `p34_global_by_name_twice`, and
+`p35_ref_param_then_owner_global_ref_local`. Stage1 object compilation rejects all 21 without
+emitting an object. Eleven match explicit rewrite-hint messages; the other ten now have targeted
+message assertions covering nine overlapping mutable-borrow cases and the storage-invalidated
+`p23` case. Commit `c640b0b9` marks the first eleven, and `4aac8cdf` marks the additional ten,
+preserving each fixture's `expect: reject` and expected-message line while excluding them only
+from the differential acceptance corpus. The dedicated native borrow-exclusivity gate now passes
+all 43 probes on the latest isolated fixture tree, including explicit negative diagnostics and
+accepted O0/O2 no-alias programs. Commit `2cd6d00a` retains Stage0 and Stage1 compile logs for
+remaining declines. Keep the corpus baseline at zero unexplained declines and triage the other 64
+cases individually after the frozen run releases.
