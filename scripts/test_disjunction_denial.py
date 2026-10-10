@@ -29,4 +29,4 @@ assert any(f["name"] == "disjunction_denial_float_order" and f["kind"] in
            ("ensure-unproven", "contract-proposition-type")
            for f in negative["findings"]), negative["findings"]
 assert negative["replay"]["gaps"] == 0 and not negative["trust"]["trusted_assumptions"]
-print("bounded Boolean/equality denial replays; false Boolean/null claims and total float order rejected")
+print("bounded denial replays integer product order; false Boolean/null claims and total float order rejected")
