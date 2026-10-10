@@ -11,10 +11,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from test_kernel_inventory import kernel_call_target_violations  # noqa: E402
+from test_kernel_inventory import (  # noqa: E402
+    kernel_call_target_violations,
+    kernel_source_files,
+)
 
 
 class KernelCallClosureTests(unittest.TestCase):
+    def test_kernel_source_set_follows_the_replay_facade_includes(self) -> None:
+        names = {path.name for path in kernel_source_files()}
+        self.assertTrue({
+            "kernel_core.elisa", "kernel_replay.elisa", "kernel_typed_literals.elisa",
+            "kernel_typed_arithmetic.elisa", "kernel_contextual_constants.elisa",
+            "api.elisa",
+        } <= names)
+
     def check_source(self, source: str) -> set[str]:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "kernel.elisa"

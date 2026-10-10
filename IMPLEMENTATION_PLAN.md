@@ -9419,13 +9419,17 @@ state was confirmed; sixteen named Git stashes still preserve their prior uncomm
 No remote branch was changed.
 
 The proof pin and adjacent clean compiler `main` both identify Elisa Stage1 `a84089fd`.
-The compiler Codex task is still qualifying compiler-only gates on that host and explicitly asked
-that proof replay remain on hold. The O0/O2 seal smoke now passes with preserved compiler, fixture,
-IR-verifier, and execution evidence. A separate portable capture-witness smoke failed because of
-storage-dependency invalidation in its fixture; the integration agent is correcting it. The
-compiler task remains active and has not released the proof matrix. Do not build or replay proof
-cases until that task sends an explicit release, and do not infer release from a cleared subprocess
-or an observation timeout.
+The active authority candidate is clean at compiler commit `997a617e`, 21 commits ahead of compiler
+`main`. Its corrected portable capture witness passes O0/O2, the 30-case Global permission smoke
+passes, and enabled gen2 passes. Candidate/baseline postflight confirms current products and matching
+runtime objects; evidence is under `build/authority-qualification/` in that compiler worktree. The
+compiler task explicitly says these release only the compiler correctness/timing lanes. The proof
+replay hold remains until its uninstrumented compile-time qualification and adoption decision are
+complete. Do not build or replay proof cases, including the pending record-field grant cases, before
+an explicit release. A separate `8d7cfca` compiler commit remains outside this candidate. The
+compiler agent confirms its binding-rename fix is superseded by the candidate's current
+`resolved_error_family(...)` path; the commit's owner-lookup smoke repair is separate regression
+coverage and can be revisited after the authority timing gate.
 
 An uncommitted proof test slice adds positive and missing-grant cases for mutable global record
 field reads/writes to `examples/global_mutable_grants.elisa`,
@@ -9449,16 +9453,16 @@ performance and kernel-reliability objective remains open.
 The adjacent compiler repository is a separate integration queue. Its `main` remains at
 `a84089fd`; after removing two clean branches whose commits were all patch-equivalent to `main`, it
 has 70 local branches and 87 worktrees, 35 of them dirty. The active authority qualification branch
-is clean at `6f8328ac` and 20 commits ahead of compiler `main`; a separate `8d7cfca` compiler commit
-was offered for cherry-pick but is not in that active branch. Review their dependencies and gates
-before integration. Preserve dirty worktrees and active task checkouts; prune only clean worktrees
-whose commits are already represented on the target branch. The proof checkout itself remains
-consolidated to one `main` branch and one worktree.
+is clean at `997a617e` and 21 commits ahead of compiler `main`; the offered `8d7cfca` rename fix is
+superseded there, while its smoke repair remains a separate possible regression test. Review the
+branch's other unique changes before cleanup. Preserve dirty worktrees and active task checkouts;
+prune only clean worktrees whose commits are already represented on the target branch. The proof
+checkout itself remains consolidated to one `main` branch and one worktree.
 
 The kernel-boundary inventory now follows the actual include closure of `kernel_replay.elisa` and
 checks every bare and module-qualified helper call against its defining kernel module. The previous
 check only recognized unqualified `proof_*` calls and omitted three root-level files included by the
-replay facade. Three adversarial Python tests cover local resolution, external-call rejection, and
-comment/string/operator false positives; they and the 10-table/228-entry inventory pass. This is a
-stronger static dependency guard, not a substitute for independently checking kernel semantics or
-replaying source-level proofs.
+replay facade. Four Python tests cover include-closure discovery, local resolution, external-call
+rejection, and comment/string/operator false positives; they and the 10-table/228-entry inventory
+pass. This is a stronger static dependency guard, not a substitute for independently checking
+kernel semantics or replaying source-level proofs.
