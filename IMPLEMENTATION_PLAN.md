@@ -9088,3 +9088,25 @@ The compiler agent also reports that a root codec-integrity fixture passed Stage
 with native execution still pending. Treat that as a partial result, not qualification. The full
 compiler run remains active; keep its candidate frozen, preserve its output, and leave the proof
 pin unchanged until a complete run and exact-tuple postflight pass.
+
+
+### 23.27.80 Downstream UI and docs form checks need environment and baseline triage (2026-10-10)
+
+The active gate has recorded 38 failing checks and is still running. `downstream_elisa_ui_smoke.sh`
+now fails after its native hello-state and UTF-8/UTF-16 codec controls pass. The retained log
+requires the pinned real Skia renderer, while this local checkout has only the generated Skia
+shim objects and no Skia source tree at the pinned revision. This is an incomplete downstream
+acceptance check, not evidence by itself that the compiler regressed; after the main run releases,
+provide the pinned renderer dependency and compare the same UI checkout against the pushed Stage1
+baseline before attribution.
+
+`docs119_forms_smoke.sh` has one reported parse error across the frontend and standard library,
+but the harness output does not retain the actual parser diagnostic. Capture the exact file,
+location, and Stage0-versus-Stage1 result after the run. Compare against the consumer baseline and
+keep the column divergences in §23.27.79 separate from parser acceptance. Do not update expected
+results until the triggering source and intended syntax are verified.
+
+The compiler agent confirms the fuzzer and serial differential worker are both still active. Keep
+the candidate and proof pin frozen, preserve the complete final logs and status, and do not install
+the candidate until the paired standard-library lifetime repairs and exact-tuple qualification
+are complete.
