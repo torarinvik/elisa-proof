@@ -7,8 +7,8 @@ provenance and trust boundary (implementation plan item P1-01). Every table betw
 exact equality with the first column. A kind added to the kernel without a row here, or a row
 left behind after a kind is removed, fails `scripts/test.sh`.
 
-Paths are relative to `src/`. "Kernel" means `proof/kernel_core.elisa` plus
-`proof/kernel_replay/*`; "replay" means `proof/replay/*`.
+Paths are relative to `src/`. "Kernel" means `proof/kernel_core.elisa` plus the transitive include
+closure of `proof/kernel_replay.elisa`; "replay" means `proof/replay/*`.
 
 ## Arena node kinds
 
@@ -271,19 +271,19 @@ resource tree:
 
 ## Trust ledger
 
-Line counts are as of this inventory. `scripts/test_kernel_inventory.py` checks the dependency
-claims marked "(checked)".
+Line counts are physical `.elisa` source lines in the listed trust-role groups, including comments
+and blank lines. `scripts/test_kernel_inventory.py` checks the dependency claims marked "(checked)".
 
 | Tier | Modules | Lines | Role |
 |---|---|---|---|
-| Trusted kernel | `proof/kernel_core.elisa`, `proof/kernel_replay.elisa`, `proof/kernel_replay/*` | ~7.9k | Decides every certificate from arena terms alone. Calls no `proof_*` function defined outside the kernel (checked). |
-| Trusted certificate admission | `proof/certificate_admission.elisa` | ~80 | Admits trace-certificate roots by kind and version tag. |
-| Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | ~2.4k | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
-| Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | ~18k | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
-| Trusted package reader | `portable/*`, `app/portable_io.elisa` | ~0.5k | Reads `elisa-proof-package-v1` files under exact schemas and hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
-| Trusted correspondence checker | `correspondence/*` | ~1.2k | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
-| Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | ~5k | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
-| Presentation | `app/*` except repair | ~2.8k | Output and CLI. Fingerprints are binding guards only (limitation 2). |
+| Trusted kernel | `proof/kernel_core.elisa`, `proof/kernel_replay.elisa` and its include closure (including `proof/kernel_typed_literals.elisa`, `proof/kernel_typed_arithmetic.elisa`, `proof/kernel_contextual_constants.elisa`, and `proof/kernel_replay/*`) | 15,404 | Decides every certificate from arena terms alone. Every bare helper and module-qualified call resolves to a function defined in one of the kernel modules (checked). |
+| Trusted certificate admission | `proof/certificate_admission.elisa` | 82 | Admits trace-certificate roots by kind and version tag. |
+| Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | 14,734 | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
+| Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | 29,525 | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
+| Trusted package reader | `portable/*`, `app/portable_io.elisa` | 351 | Reads `elisa-proof-package-v1` files under exact schemas and hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
+| Trusted correspondence checker | `correspondence/*` | 3,116 | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
+| Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | 12,512 | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
+| Presentation | `app/*` except repair and portable I/O | 3,138 | Output and CLI. Fingerprints are binding guards only (limitation 2). |
 
 ### Host-side soundness-incident registry
 

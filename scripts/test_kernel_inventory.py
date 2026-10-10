@@ -73,6 +73,27 @@ def defined_functions(files: list[Path]) -> set[str]:
     return {m.group(1) for path in files for m in re.finditer(r"\bdef (\w+)", read(path))}
 
 
+def kernel_source_files() -> list[Path]:
+    """Return the transitive source closure actually included by the kernel entry modules."""
+    roots = (PROOF / "kernel_core.elisa", PROOF / "kernel_replay.elisa")
+    pending = list(roots)
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        if PROOF.resolve() not in resolved.parents:
+            raise AssertionError(f"kernel include escapes proof/: {path}")
+        if not resolved.is_file():
+            raise AssertionError(f"kernel include is missing: {path}")
+        seen.add(resolved)
+        text = strip_comments(read(resolved))
+        for include in re.findall(r'^\s*include\s+"([^"]+)"', text, re.MULTILINE):
+            pending.append(resolved.parent / include)
+    return sorted(seen)
+
+
 def called_functions(files: list[Path]) -> set[str]:
     calls: set[str] = set()
     for path in files:
@@ -184,7 +205,7 @@ def resource_fact_free_leaves() -> set[str]:
 def replay_external_calls() -> set[str]:
     replay = elisa_files(PROOF / "replay")
     own = defined_functions(replay + [PROOF / "replay.elisa"])
-    kernel_public = defined_functions(elisa_files(PROOF / "kernel_replay", PROOF / "kernel_core.elisa"))
+    kernel_public = defined_functions(kernel_source_files())
     # Kernel entry points are called qualified (`ElisaProofKernelReplay::...`) and so never
     # match the unqualified pattern; anything left is a call into a non-kernel tier.
     return called_functions(replay) - own - kernel_public
@@ -192,13 +213,91 @@ def replay_external_calls() -> set[str]:
 
 def correspondence_external_calls() -> set[str]:
     checker = elisa_files(SRC / "correspondence")
-    kernel_public = defined_functions(elisa_files(PROOF / "kernel_replay", PROOF / "kernel_core.elisa"))
+    kernel_public = defined_functions(kernel_source_files())
     return called_functions(checker) - defined_functions(checker) - kernel_public
 
 
 def kernel_external_calls() -> set[str]:
-    kernel = elisa_files(PROOF / "kernel_replay", PROOF / "kernel_core.elisa", PROOF / "kernel_replay.elisa")
-    return called_functions(kernel) - defined_functions(kernel)
+    kernel = kernel_source_files()
+    return kernel_call_target_violations(kernel)
+
+
+KERNEL_CALL_SYNTAX = frozenset({
+    "and", "assert", "cast", "elif", "else", "for", "if", "is", "match",
+    "mutable", "not", "or", "return", "sizeof", "typeof", "when", "while",
+})
+
+
+def _mask_comments_and_strings(text: str) -> str:
+    """Blank comments and literals while preserving line boundaries and token positions."""
+    chars = list(text)
+    quote: str | None = None
+    escaped = False
+    in_comment = False
+    for index, char in enumerate(chars):
+        if in_comment:
+            if char == "\n":
+                in_comment = False
+            else:
+                chars[index] = " "
+            continue
+        if quote is not None:
+            if char != "\n":
+                chars[index] = " "
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char == "#":
+            chars[index] = " "
+            in_comment = True
+        elif char in {'"', "'"}:
+            chars[index] = " "
+            quote = char
+    return "".join(chars)
+
+
+def kernel_call_target_violations(files: list[Path]) -> set[str]:
+    """Require every kernel helper call to resolve within its declared kernel module."""
+    module_for_line: dict[Path, list[str | None]] = {}
+    definitions: set[tuple[str, str]] = set()
+    masked: dict[Path, str] = {}
+    module_pattern = re.compile(r"^\s*(?:module|extend)\s+([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)\s*:")
+    definition_pattern = re.compile(r"^\s*def\s+(\w+)\b")
+
+    for path in files:
+        text = _mask_comments_and_strings(read(path))
+        masked[path] = text
+        owners: list[str | None] = []
+        owner: str | None = None
+        for line in text.splitlines():
+            module = module_pattern.match(line)
+            if module:
+                owner = module.group(1)
+            owners.append(owner)
+            definition = definition_pattern.match(line)
+            if definition and owner is not None:
+                definitions.add((owner, definition.group(1)))
+        module_for_line[path] = owners
+
+    violations: set[str] = set()
+    bare_call = re.compile(r"(?<![:\w.])([A-Za-z_]\w*)[ \t]*\(")
+    qualified_call = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)::([A-Za-z_]\w*)[ \t]*\(")
+    for path, text in masked.items():
+        for line_number, line in enumerate(text.splitlines()):
+            owner = module_for_line[path][line_number]
+            for qualified_owner, name in qualified_call.findall(line):
+                if (qualified_owner, name) not in definitions:
+                    violations.add(f"{qualified_owner}::{name}")
+            for name in bare_call.findall(line):
+                if name in KERNEL_CALL_SYNTAX:
+                    continue
+                if owner is None or (owner, name) not in definitions:
+                    violations.add(f"{owner or '<unscoped>'}::{name}")
+    return violations
 
 
 def main() -> int:

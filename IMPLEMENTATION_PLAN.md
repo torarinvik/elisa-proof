@@ -9406,3 +9406,59 @@ coverage, or complete kernel self-verification. Continue with the exact-tuple so
 independent replay matrices, then run the immutable full proof suite. Integrate additional branch
 changes only after they pass the matching a840 compiler/runtime gates and preserve current grant
 enforcement.
+
+
+### 23.27.95 Consolidated proof mainline and pending record-field grant controls (2026-10-10)
+
+Proof `main` is now `c28e6796`, 340 commits ahead of `origin/main`. The audited proof/replay,
+source-binding, loop-certificate, denial, global-grant, and report-storage gains are represented on
+this branch. The performance corpus manifest now points at an available source revision; its 13
+identity tests pass. The only registered checkout and local branch are the proof `main` worktree and
+branch. Five obsolete worktrees and fourteen stale local branches were removed after their clean
+state was confirmed; sixteen named Git stashes still preserve their prior uncommitted snapshots.
+No remote branch was changed.
+
+The proof pin and adjacent clean compiler `main` both identify Elisa Stage1 `a84089fd`.
+The compiler Codex task is still qualifying compiler-only gates on that host and explicitly asked
+that proof replay remain on hold. The O0/O2 seal smoke now passes with preserved compiler, fixture,
+IR-verifier, and execution evidence. A separate portable capture-witness smoke failed because of
+storage-dependency invalidation in its fixture; the integration agent is correcting it. The
+compiler task remains active and has not released the proof matrix. Do not build or replay proof
+cases until that task sends an explicit release, and do not infer release from a cleared subprocess
+or an observation timeout.
+
+An uncommitted proof test slice adds positive and missing-grant cases for mutable global record
+field reads/writes to `examples/global_mutable_grants.elisa`,
+`examples/rejected_global_mutable_grants.elisa`, `scripts/test_global_mutable_grants.py`, and
+`scripts/test_direct_api_semantic_admission.py`. The direct API harness now constructs 21 negative
+inputs, 14 of them permission cases, and exercises both accepted field accesses across all three
+API routes. Python syntax, the 21/14 matrix-construction check, `git diff --check`, and the kernel
+inventory (10 tables, 228 entries) pass. The 41 Python-only benchmark/evidence unit tests also pass.
+The actual Stage1 parse/semantic diagnostics and proof replay for these new Elisa cases are not yet
+verified, and the source/test changes must remain uncommitted until the focused runtime gates pass.
+
+**Next actions:** after explicit compiler-task release, build or select a pair whose manifest proves
+the exact current proof source tree and Stage1/runtime tuple. Run `scripts/test_global_mutable_grants.py`
+and `scripts/test_direct_api_semantic_admission.py`; verify the expected `Global.Read` versus
+`Global.Write` diagnostics and zero replay gaps on accepted cases. Repair any discrepancy without
+weakening grant checks, then run the relevant full source-admission/replay gate. Commit the source
+fixtures and tests only after those focused checks pass. Continue the high-ROI queue with independent
+source-obligation completeness and an exact-current performance baseline; the professional-level
+performance and kernel-reliability objective remains open.
+
+The adjacent compiler repository is a separate integration queue. Its `main` remains at
+`a84089fd`; after removing two clean branches whose commits were all patch-equivalent to `main`, it
+has 70 local branches and 87 worktrees, 35 of them dirty. The active authority qualification branch
+is clean at `6f8328ac` and 20 commits ahead of compiler `main`; a separate `8d7cfca` compiler commit
+was offered for cherry-pick but is not in that active branch. Review their dependencies and gates
+before integration. Preserve dirty worktrees and active task checkouts; prune only clean worktrees
+whose commits are already represented on the target branch. The proof checkout itself remains
+consolidated to one `main` branch and one worktree.
+
+The kernel-boundary inventory now follows the actual include closure of `kernel_replay.elisa` and
+checks every bare and module-qualified helper call against its defining kernel module. The previous
+check only recognized unqualified `proof_*` calls and omitted three root-level files included by the
+replay facade. Three adversarial Python tests cover local resolution, external-call rejection, and
+comment/string/operator false positives; they and the 10-table/228-entry inventory pass. This is a
+stronger static dependency guard, not a substitute for independently checking kernel semantics or
+replaying source-level proofs.
