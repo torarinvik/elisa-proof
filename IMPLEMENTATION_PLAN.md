@@ -8871,3 +8871,26 @@ resolved.
 The high-ROI queue remains: finish the integrated compiler gate; qualify direct API plus the
 Global.Read/Write matrix, source-goal mutation, export, and independent replay; then fix the next
 source-to-goal/replay defect; measure proof workloads only after correctness qualification.
+
+
+### 23.27.73 Adversarial differential has two unresolved dictionary declines; full gate remains live (2026-10-10)
+
+The same frozen 596-check compiler run also failed `adversarial_differential_smoke.sh`: 345
+programs matched, no wrong answers or optimization-only differences were reported, but Stage1
+declined two programs accepted by Stage0: `mangle_two_dicts` and
+`std_dict_put_get_overwrite`. The generated sources are in `test/breadth/adv_gen_core.py` and
+`test/breadth/adv_gen_containers.py`. Both use local mutable dictionaries and the standard
+`.put` API. This is not yet attributed to Global grant enforcement or classified as an expected
+limitation. The differential harness discards compiler stdout and stderr, and its temporary case
+directories retain only Stage0 artifacts for these declines, so the exact Stage1 diagnostics are
+not available from this run. After the shared gate releases, reproduce each case with the same
+Stage1 binary while preserving diagnostics and resolve the concrete cause before changing any
+acceptance baseline.
+
+The uncached full suite still has no exit marker. `malformed_input_smoke.sh` and
+`differential_corpus.sh` remain active workers, so keep the integrated compiler source and product
+frozen. The proof pin remains unchanged. The candidate has demonstrated gen3/gen4 fixpoint,
+resolution and include-smoke success, but is not qualified with three known gate failures and the
+remaining workers incomplete. Continue with the high-ROI order in §23.27.72 after the full run:
+resolve the compiler gate, then qualify the direct API and Global grant matrix plus export and
+independent replay on the exact resulting compiler/runtime pair.
