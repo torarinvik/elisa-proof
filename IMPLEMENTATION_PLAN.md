@@ -8330,3 +8330,29 @@ The last read-only SSH probes returned connection refused for copied-instance
 `141.195.21.72:47559` and connection closed for original `38.49.42.120:53652`. All located source,
 benchmark results and evidence are now preserved locally in r28/r29; remote-only `/root/work` state
 remains unverified.
+
+### 23.27.50 Local proof checkpoint: global fixed-array access qualified (2026-10-10)
+
+This entry supersedes the indexed-read status in §23.27.49. Local proof work now derives fixed-array
+representation facts only for uniquely bound, root-scope `__global_mutable` declarations with an
+exact built-in array type. The source value remains opaque. Reads and writes still pass through the
+ordinary Global.Read/Global.Write admission check. For an indexed access, a literal fixed extent is
+not accepted by itself: the checker records the boundary only when the function has the matching
+`usize` precondition `index < N`, and replay binds the custom fact to the unique global declaration,
+the owning function, its parameter, the precondition, and the unchanged parameter binding. A broad
+`type-bound` trace mutation is routed back through the same source validator.
+
+The direct API admission harness now checks source-goal identity, Global grant mutations, forged
+array evidence mutations, and report reset behavior across CLI, strict API, and focused refinement
+routes. All three routes passed on pinned Stage1 `8f2023ce8a7d52358b733a0e812ff46293d45f10`.
+The strict O2 proof product built from the current source tree, and
+`scripts/test_global_mutable_grants.py` passed: reads and writes are denied independently when the
+matching grant is absent or wrong, while accepted indexed array witnesses replay successfully. The
+build manifest records a clean pinned compiler tree and the current proof source digest.
+
+Keep the boundaries explicit: mutable global borrow lifetime proofs and dynamic global-array index
+proofs remain unsupported and fail closed; imported/module-qualified globals are not admitted by
+this witness. The focused refinement API can replay its theorem but currently reports a conservative
+source-obligation-inventory refusal, covered by the harness. Continue from this local branch and
+commit, with source/replay trust mutations and complete current-product qualification ahead of any
+performance experiment. No Vast filesystem is needed to rebuild or run these checks.

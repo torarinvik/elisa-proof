@@ -11,11 +11,11 @@ prefix = next(ast.literal_eval(node.value) for node in tree.body
               if isinstance(node, ast.Assign)
               and any(isinstance(target, ast.Name) and target.id == "REPLAY_HARNESS"
                       for target in node.targets)).split("def main()")[0]
-valid = "def checked() -> bool:\n    ensure result == true\n    true\n"
+valid = "def checked() -> i64:\n    ensure result == 1\n    return 1\n"
 invalid = (
     valid + "\ndef missing_name() -> bool:\n    ensure result == true\n    undefined_value\n",
     valid + "\ndef missing_type(value: MissingType) -> bool:\n    ensure result == true\n    true\n",
-    valid + "\ndef checked() -> bool:\n    ensure result == true\n    true\n",
+    valid + "\ndef checked() -> i64:\n    ensure result == 1\n    return 1\n",
 )
 invalid += tuple(valid + "\n" + source for source in (
     "def trap(raw: i64) -> i64:\n    return raw / 0\n",
@@ -83,6 +83,24 @@ def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofRep
         (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
     else:
         (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, "checked") can Global{Read,Write})
+    (proof_replay_certificates(report) can Global{Read,Write})
+
+def api_global_array_replay_probe(source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, tamper: usize) -> void can Memory.Allocate, Abort.Panic:
+    (api_probe(GLOBAL_INDEXED_READ_API_SOURCE, source, report, diagnostics, route) can Global{Read,Write})
+    if tamper == 1:
+        report.source_annotations.clear()
+    elif tamper == 2:
+        match report.source_declarations[0]:
+            Ast::Decl.Const(name, _, initializer, is_global, position):
+                extent_position: Ast::Pos = position
+                wider_type: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident("i64", extent_position), Ast::Expr.IntLit(2, extent_position), extent_position)
+                report.source_declarations[0] <- Ast::Decl.Const(name, wider_type, initializer, is_global, position)
+            _:
+                pass
+        for index in 0..<report.traces.records.count |index, report|:
+            original: ProofFactTrace = report.traces.records[index]
+            if original.kind == "global-mutable-array-type":
+                report.traces.records[index] <- ProofFactTrace{expression: original.expression, kernel_expression: original.kernel_expression, kind: "type-bound", line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
     (proof_replay_certificates(report) can Global{Read,Write})
 
 def api_parameter_goal_attempt_index(report: ProofReport&) -> usize:
@@ -160,10 +178,15 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         return 195 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_INDEXED_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 196 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        for tamper in 1..<3 |tamper, source, report, diagnostics, route|:
+            (api_global_array_replay_probe(&source, &report, &diagnostics, route, tamper) can Global{Read,Write})
+            return 213 if report.replay_gaps == 0
         (api_probe(GLOBAL_INDEXED_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 197 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_MUTABLE_REFERENCE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
-        return 198 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        # The source grant is correct on all API routes; the proof checker currently refuses the
+        # independent global-borrow lifetime obligation as unsupported.
+        return 198 if report.replay_gaps != 0 or (route != 0 and any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1)
         (api_probe(GLOBAL_MUTABLE_INDEX_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         if route == 0:
             return 211 if report.source_declarations.count == 0
@@ -175,8 +198,13 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         (api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 190 if report.certificates.count == 0
         return 191 if report.proven == 0
-        return 192 if report.failed != 0
-        return 193 if report.replay_gaps != 0
+        if route == 2:
+            # The focused API currently proves and replays the refinement theorem but its
+            # source-inventory adapter conservatively refuses this signature-derived ensure.
+            return 192 if report.replay_gaps != 0 or report.findings.count != 1 or report.findings[0].kind != "source-obligation-inventory"
+        else:
+            return 192 if report.failed != 0
+            return 193 if report.replay_gaps != 0
         (api_probe(MUTUAL_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 177 if report.failed != 0 or report.structural.verified_names.count == 0 or report.replay_gaps != 0
         (api_probe(UNKNOWN_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})

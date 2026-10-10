@@ -1,0 +1,186 @@
+# Independent replay for the representation facts imported from a root-scope mutable global
+# fixed array. The source initializer is deliberately irrelevant: these facts never reveal or
+# freeze the array's contents.
+extend ElisaProof:
+    private:
+        const PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT: usize = 127
+
+        def proof_replay_global_mutable_array_primitive(head: sview) -> bool:
+            return head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64" or head == "bool" or head == "char"
+
+        def proof_replay_global_mutable_array_literal_extent(type_expression: Ast::Expr, depth: usize) -> i64:
+            return -1 if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            match type_expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_global_mutable_array_literal_extent(inner, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident(element, _), Ast::Expr.IntLit(extent, _), _):
+                    return extent if proof_replay_global_mutable_array_primitive(element) and extent >= 0
+                Ast::Expr.IndexN(Ast::Expr.Ident("array", _), arguments, _):
+                    if arguments.count == 2:
+                        match arguments[1]:
+                            Ast::Expr.IntLit(extent, _):
+                                return extent if extent >= 0
+                            _:
+                                pass
+                _:
+                    pass
+            return -1
+
+        def proof_replay_global_mutable_array_annotation_count(annotations: darray[Ast::EnumAnnotation]&, name: sview, position: Ast::Pos) -> usize:
+            count: mutable usize = 0
+            for annotation in annotations |name, position, count|:
+                count <- count + 1 if annotation.name == "__global_mutable" and annotation.owner == name and annotation.module == "" and annotation.line == position.line and annotation.offset == position.offset and annotation.pos.line == position.line and annotation.pos.offset == position.offset
+            return count
+
+        def proof_replay_global_mutable_array_root_binding_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |name, depth, count|:
+                match declaration:
+                    Ast::Decl.Const(candidate, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Extern(candidate, _, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Import(candidate, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Module(candidate, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_replay_global_mutable_array_root_binding_count(body, name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_replay_global_mutable_array_find_root(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, declaration_line: u32, count: mutable usize&, valid: mutable bool&, extent: mutable i64&, position: mutable Ast::Pos&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            for declaration in declarations |annotations, name, declaration_line, count, valid, extent, position, depth|:
+                match declaration:
+                    Ast::Decl.Const(candidate, candidate_type, _, is_global, candidate_position):
+                        if candidate == name:
+                            count <- count + 1
+                            valid <- false
+                            if is_global and candidate_position.line == declaration_line and proof_replay_global_mutable_array_annotation_count(annotations, name, candidate_position) == 1:
+                                candidate_extent: i64 = proof_replay_global_mutable_array_literal_extent(candidate_type, 0)
+                                if candidate_extent >= 0:
+                                    valid <- true
+                                    extent <- candidate_extent
+                                    position <- candidate_position
+                    Ast::Decl.Scoped(body, _):
+                        proof_replay_global_mutable_array_find_root(body, annotations, name, declaration_line, count, valid, extent, position, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_global_mutable_array_find_owner(declarations: darray[Ast::Decl]&, name: sview, declaration_line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            for declaration in declarations |name, declaration_line, matches, parameters, body, position, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, candidate_parameters, _, candidate_body, _, _, candidate_position):
+                        if candidate == name and candidate_position.line == declaration_line:
+                            matches <- matches + 1
+                            parameters <- candidate_parameters
+                            body <- candidate_body
+                            position <- candidate_position
+                    Ast::Decl.Scoped(scoped, _):
+                        proof_replay_global_mutable_array_find_owner(scoped, name, declaration_line, matches, parameters, body, position, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_global_mutable_array_marker_term(expression: Ast::Expr) -> (known: bool, term: Ast::Expr):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (true, arguments[0]) if proof_ident_name(callee) == "__elisa_builtin_index_type" and arguments.count == 1 and argument_names.count == 0
+                _:
+                    pass
+            return (false, Ast::Expr.Invalid)
+
+        def proof_replay_global_mutable_array_fact_shape(expression: Ast::Expr, name: sview, extent: i64, global_position: Ast::Pos) -> bool:
+            marker: (known: bool, term: Ast::Expr) = proof_replay_global_mutable_array_marker_term(expression)
+            if marker.known:
+                match marker.term:
+                    Ast::Expr.Ident(candidate, position):
+                        return candidate == name and position.line == global_position.line and position.offset == global_position.offset
+                    _:
+                        return false
+            match expression:
+                Ast::Expr.Binary(Ast::Expr.Field(Ast::Expr.Ident(candidate, object_position), "count", _), TokenKind.EqEq, Ast::Expr.IntLit(value, _), _):
+                    return candidate == name and value == extent and object_position.line == global_position.line and object_position.offset == global_position.offset
+                Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(candidate, _), "count", _), _):
+                    return candidate == name
+                _:
+                    return false
+
+        def proof_replay_global_mutable_array_bound_precondition(report: ProofReport&, owner_parameters: darray[Ast::ParamDecl]&, owner_body: darray[Ast::Stmt]&, expression: Ast::Expr, extent: i64, line: u32) -> bool:
+            match expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(bound_parameter, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(_, _), "count", _), _):
+                    return false if bound_parameter == ""
+                    unsigned_parameter: mutable bool = false
+                    for parameter in owner_parameters |bound_parameter, unsigned_parameter|:
+                        if parameter.name == bound_parameter:
+                            match parameter.type_expression:
+                                Ast::Expr.Ident("usize", _):
+                                    unsigned_parameter <- true
+                                _:
+                                    pass
+                    return false if not unsigned_parameter
+                    return false if proof_replay_source_body_declares(report.source_declarations, owner_body, bound_parameter)
+                    # A precondition about a by-value parameter is stable only while the function
+                    # body leaves that binding unchanged. Calls and unsupported writes are treated
+                    # conservatively by the shared source-write walk.
+                    return false if proof_replay_source_body_touches(report.source_declarations, owner_body, bound_parameter, true, 0)
+                    for statement in owner_body |bound_parameter, extent, line|:
+                        match statement:
+                            Ast::Stmt.Contract("requires", requirement, contract_position):
+                                continue if contract_position.line > line
+                                match requirement:
+                                    Ast::Expr.Binary(Ast::Expr.Ident(required_parameter, _), TokenKind.Lt, Ast::Expr.IntLit(required_extent, _), _):
+                                        return true if required_parameter == bound_parameter and required_extent == extent
+                                    _:
+                                        pass
+                            _:
+                                pass
+                    return false
+                _:
+                    return false
+
+        def proof_replay_global_mutable_array_type_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "global-mutable-array-type" and trace.kind != "global-mutable-array-index-bound" and trace.kind != "type-bound"
+            return false if trace.name == "" or trace.line == 0 or trace.owner_line == 0
+            return false if report.replay_owner_line == 0 or trace.owner_line != report.replay_owner_line
+            owner_matches: mutable usize = 0
+            owner_parameters: mutable darray[Ast::ParamDecl] = []
+            owner_body: mutable darray[Ast::Stmt] = []
+            owner_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            proof_replay_global_mutable_array_find_owner(report.source_declarations, trace.name, trace.owner_line, &owner_matches, &owner_parameters, &owner_body, &owner_position, 0)
+            return false if owner_matches != 1 or owner_position.line != trace.owner_line
+            global_matches: mutable usize = 0
+            global_valid: mutable bool = false
+            extent: mutable i64 = -1
+            global_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            proof_replay_global_mutable_array_find_root(report.source_declarations, report.source_annotations, proof_replay_global_mutable_array_trace_global_name(trace.expression), trace.line, &global_matches, &global_valid, &extent, &global_position, 0)
+            global_name: sview = proof_replay_global_mutable_array_trace_global_name(trace.expression)
+            return false if global_name == "" or global_matches != 1 or not global_valid or extent < 0
+            return false if proof_replay_global_mutable_array_root_binding_count(report.source_declarations, global_name, 0) != 1
+            return false if any parameter in owner_parameters where parameter.name == global_name
+            return false if proof_replay_source_body_declares(report.source_declarations, owner_body, global_name)
+            return false if not proof_replay_global_mutable_array_fact_shape(trace.expression, global_name, extent, global_position)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(_, _), "count", _), _):
+                    return false if trace.kind != "global-mutable-array-index-bound" and trace.kind != "type-bound"
+                    return proof_replay_global_mutable_array_bound_precondition(report, owner_parameters, owner_body, trace.expression, extent, trace.line)
+                _:
+                    return false if trace.kind == "global-mutable-array-index-bound"
+            return true
+
+        def proof_replay_global_mutable_array_trace_global_name(expression: Ast::Expr) -> sview:
+            marker: (known: bool, term: Ast::Expr) = proof_replay_global_mutable_array_marker_term(expression)
+            if marker.known:
+                return proof_ident_name(marker.term)
+            match expression:
+                Ast::Expr.Binary(Ast::Expr.Field(object, "count", _), TokenKind.EqEq, _, _):
+                    return proof_ident_name(object)
+                Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(global_name, _), "count", _), _):
+                    return global_name
+                _:
+                    return ""

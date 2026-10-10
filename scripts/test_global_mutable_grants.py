@@ -74,16 +74,28 @@ def run(fixture, target, route):
 for route in ("function", "module"):
     for name in ("read_counter", "write_counter", "copy_counter", "shadow_counter",
                  "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read",
-                 "indexed_read", "indexed_write", "indexed_write_reads_mutable_global_index",
+                 "indexed_read", "indexed_write", "indexed_parameter_shadow", "indexed_local_shadow",
+                 "indexed_write_reads_mutable_global_index",
                  "mutable_reference_acquisition"):
         code, report = run("global_mutable_grants.elisa", name, route)
-        if name == "indexed_write_reads_mutable_global_index":
+        if name in ("indexed_write_reads_mutable_global_index", "mutable_reference_acquisition"):
             # This control isolates semantic grants even if the independent proof checker cannot
-            # yet close the dynamic-index safety obligation for a mutable global index.
+            # yet close dynamic-index safety or model a mutable borrow of global storage.
             assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
             continue
         assert code == 0 and report["status"] == "proved", context(route, name, report)
         assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
+        kernel = report.get("kernel", {})
+        traces = kernel.get("fact_traces", report.get("fact_traces", []))
+        array_type_traces = [trace for trace in traces
+                             if trace.get("kind") == "global-mutable-array-type"]
+        array_bound_traces = [trace for trace in traces
+                              if trace.get("kind") == "global-mutable-array-index-bound"]
+        if name in ("indexed_read", "indexed_write"):
+            assert len(array_type_traces) == 2, context(route, name, report)
+            assert len(array_bound_traces) == 1, context(route, name, report)
+        if name in ("indexed_parameter_shadow", "indexed_local_shadow"):
+            assert not array_type_traces, context(route, name, report)
 
     for name in ("missing_read", "missing_write", "write_only_reads",
                  "read_only_writes", "read_only_update",

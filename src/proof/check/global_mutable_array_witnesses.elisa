@@ -1,0 +1,128 @@
+# Source-derived type facts for root-scope mutable globals whose declared type is a
+# built-in fixed array. These facts describe only the array's representation; its value
+# and the effects needed to read or write it remain opaque.
+extend ElisaProof:
+    private:
+        const PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT: usize = 127
+        const PROOF_GLOBAL_MUTABLE_ARRAY_IMPORT_BUDGET: usize = 64
+
+        def proof_global_mutable_array_literal_extent(type_expression: Ast::Expr, depth: usize) -> i64:
+            return -1 if depth >= PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            match type_expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_global_mutable_array_literal_extent(inner, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident(element, _), Ast::Expr.IntLit(extent, _), _):
+                    return extent if proof_fixed_array_primitive_head(element) and extent >= 0
+                Ast::Expr.IndexN(Ast::Expr.Ident("array", _), arguments, _):
+                    if arguments.count == 2:
+                        match arguments[1]:
+                            Ast::Expr.IntLit(extent, _):
+                                return extent if extent >= 0
+                            _:
+                                pass
+                _:
+                    pass
+            return -1
+
+        def proof_global_mutable_array_annotation_count(annotations: darray[Ast::EnumAnnotation]&, name: sview, position: Ast::Pos) -> usize:
+            count: mutable usize = 0
+            for annotation in annotations |name, position, count|:
+                count <- count + 1 if annotation.name == "__global_mutable" and annotation.owner == name and annotation.module == "" and annotation.line == position.line and annotation.offset == position.offset and annotation.pos.line == position.line and annotation.pos.offset == position.offset
+            return count
+
+        # Count competing root value declarations conservatively. Scoped blocks preserve the
+        # current namespace; nested modules are a different namespace and are not root bindings.
+        def proof_global_mutable_array_root_binding_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+            return 2 if depth >= PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |name, depth, count|:
+                match declaration:
+                    Ast::Decl.Const(candidate, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Extern(candidate, _, _, _, _, _, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Import(candidate, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Module(candidate, _, _):
+                        count <- count + 1 if candidate == name
+                    Ast::Decl.Scoped(body, _):
+                        count <- count + proof_global_mutable_array_root_binding_count(body, name, depth + 1)
+                    _:
+                        pass
+            return count
+
+        def proof_add_global_mutable_array_type_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            for trace in report.traces.records |facts, report, expression, line, owner|:
+                continue if trace.kind != "global-mutable-array-type" or trace.name != owner
+                return if proof_expr_equal(trace.expression, expression)
+            return if not proof_kernel_report_append_allowed(report, facts.count, 1, owner)
+            return if not proof_trace_fact(report, expression, "global-mutable-array-type", line, owner)
+            facts.push(expression) if not (any existing in facts where proof_expr_equal(existing, expression))
+            if not (any existing in report.type_bounds.seen where proof_expr_equal(existing, expression)):
+                report.type_bounds.seen.push(expression)
+                report.type_bounds.seen_hashes.push(proof_expr_shape_hash(expression, 0))
+
+        # A fixed extent and the function's exact `requires index < N` fact together imply
+        # `index < global.count`. Preserve that derivation as a distinct boundary fact so replay
+        # can bind it to both source declarations instead of accepting a generic type-bound axiom.
+        def proof_global_mutable_array_has_precondition_bound(facts: darray[Ast::Expr]&, report: ProofReport&, bound: Ast::Expr, owner: sview) -> bool:
+            return false if not (any fact in facts where proof_expr_equal(fact, bound))
+            for trace in report.traces.records |bound, owner|:
+                continue if trace.kind != "precondition" or trace.name != owner
+                return true if proof_expr_equal(trace.expression, bound)
+            return false
+
+        def proof_add_global_mutable_array_index_bound_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
+            for trace in report.traces.records |expression, owner|:
+                continue if trace.kind != "global-mutable-array-index-bound" or trace.name != owner
+                return if proof_expr_equal(trace.expression, expression)
+            return if not proof_kernel_report_append_allowed(report, facts.count, 1, owner)
+            return if not proof_trace_fact(report, expression, "global-mutable-array-index-bound", line, owner)
+            facts.push(expression) if not (any existing in facts where proof_expr_equal(existing, expression))
+            if not (any existing in report.type_bounds.seen where proof_expr_equal(existing, expression)):
+                report.type_bounds.seen.push(expression)
+                report.type_bounds.seen_hashes.push(proof_expr_shape_hash(expression, 0))
+
+        def proof_global_mutable_array_import_root(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, function_name: sview, function_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, fixed_names: mutable darray[Ast::Expr]&, fixed_extents: mutable darray[i64]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, budget: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT or budget == 0
+            for declaration in declarations |annotations, function_name, function_line, parameters, body, fixed_names, fixed_extents, facts, report, budget, depth|:
+                match declaration:
+                    Ast::Decl.Const(global_name, global_type, _, is_global, global_position):
+                        continue if not is_global or budget == 0
+                        extent: i64 = proof_global_mutable_array_literal_extent(global_type, 0)
+                        continue if extent < 0
+                        continue if proof_global_mutable_array_root_binding_count(report.source_declarations, global_name, 0) != 1
+                        continue if proof_global_mutable_array_annotation_count(annotations, global_name, global_position) != 1
+                        continue if any parameter in parameters where parameter.name == global_name
+                        continue if proof_replay_source_body_declares(report.source_declarations, body, global_name)
+                        continue if not proof_global_constant_body_mentions_name(body, global_name)
+                        root: Ast::Expr = Ast::Expr.Ident(global_name, global_position)
+                        continue if proof_fixed_array_extent_for_object(root, fixed_names, fixed_extents) >= 0
+                        budget <- budget - 1
+                        fixed_names.push(root)
+                        fixed_extents.push(extent)
+                        marker: Ast::Expr = proof_builtin_index_marker(root, global_position)
+                        count_fact: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Field(root, "count", global_position), TokenKind.EqEq, Ast::Expr.IntLit(extent, global_position), global_position)
+                        proof_add_global_mutable_array_type_fact(facts, report, marker, global_position.line, function_name)
+                        proof_add_global_mutable_array_type_fact(facts, report, count_fact, global_position.line, function_name)
+                    Ast::Decl.Scoped(scoped, _):
+                        proof_global_mutable_array_import_root(scoped, annotations, function_name, function_line, parameters, body, fixed_names, fixed_extents, facts, report, budget, depth + 1)
+                    _:
+                        pass
+
+        def proof_import_global_mutable_array_facts(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, fixed_names: mutable darray[Ast::Expr]&, fixed_extents: mutable darray[i64]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> void:
+            root_scope: mutable darray[sview] = []
+            function_scope: mutable darray[sview] = []
+            function_name_matches: mutable usize = 0
+            function_matches: mutable usize = 0
+            proof_global_constant_find_function_scope(file.top_decls, function_name, position.line, &root_scope, &function_scope, &function_name_matches, &function_matches, 0)
+            # This first implementation admits unqualified root globals only for root-scope
+            # functions. Module lookup, aliases, and imported globals stay fail-closed until
+            # replay can bind their full namespace identities.
+            return if function_matches != 1 or function_scope.count != 0
+            report.trace_owner_line <- position.line
+            budget: mutable usize = PROOF_GLOBAL_MUTABLE_ARRAY_IMPORT_BUDGET
+            proof_global_mutable_array_import_root(file.top_decls, file.enum_annotations, function_name, position.line, parameters, body, fixed_names, fixed_extents, facts, report, &budget, 0)
+            report.trace_owner_line <- 0
