@@ -114,6 +114,9 @@ and the source producer is `check/kernel_proposition_environment.elisa`.
 | `enum-member` | an enum member value | owner is the enum; identities agree |
 | `enum-tag` | an enum tag used in `is` tests | owner is the enum; identities agree |
 | `enum-scope-segment` | one module/type segment of a qualified enum path | owner type identity set; `parameter_index` < `parameter_count` == path length; name is that segment |
+| `enum-underlying` | the backing integer sort of a const enum | owner is the enum; `type_name` is a fixed-width integer sort; owner type identity is nonzero |
+| `module-context` | lexical module identity for qualified lookup | all spelling/type fields empty; owner type identity is nonzero |
+| `module-owner-segment` | one authenticated module path segment for a qualified enum name | owner type identity is nonzero; parameter index/count encode the complete path |
 <!-- /inventory:typing-kinds -->
 
 ## Certificate rules
@@ -197,6 +200,8 @@ establish independent source correspondence for every boundary fact.
 | `linear-certificate` | `linear/linear_certificate_search.elisa` | a hint naming premises and multipliers; it asserts nothing, and `kernel_replay/linear_certificates.elisa` admits a goal only when the premises are facts and the weighted constraints cancel to `0 < c <= 0` |
 | `const-enum-exclusion` | `check/operator_impl_chain.elisa` | a const-enum value differs from another explicit variant's value (distinct explicit discriminants) |
 | `const-enum-member-value` | `check/enum_value_types.elisa`, `check/operator_impl_chain.elisa` | a qualified const-enum member equals its declared constant value |
+| `global-mutable-array-type` | `check/global_mutable_array_witnesses.elisa` | fixed-array element/index type and exact count for an annotated mutable global array; replay checks the source declaration and grant |
+| `global-mutable-array-index-bound` | `check/global_mutable_array_witnesses.elisa` | a fixed-extent array index bound derived from the array declaration and the function's exact precondition |
 <!-- /inventory:boundary-trace-kinds -->
 
 Derived kinds are never axioms. Their premises are themselves traced. Replay re-proves each step
@@ -361,7 +366,6 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
 | `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
 | `proof_report_builtin_operator_impl_exists` | `proof/check/operator_witnesses.elisa` | source adapter; builtin operator override guard |
-| `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_signed_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; signed machine width |
 | `proof_source_expression_has_overloaded_operator` | `proof/check/source_operator_guard.elisa` | source adapter; overloaded operator audit |
 | `proof_unsigned_type_width` | `proof/check/bounds_and_facts_integrated_helpers.elisa` | source adapter; unsigned machine width |
@@ -372,6 +376,24 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_statement_position` | `proof/check/runtime_support_and_calls.elisa` | source adapter; statement span projection |
 | `proof_expression_is_terminal` | `proof/check/runtime_support_and_calls.elisa` | source adapter; reserved raise/panic expression classification |
 | `proof_unsigned_place_marker_width` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker-width lookup |
+| `proof_builtin_index_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index marker construction |
+| `proof_constant_int` | `proof/expr/constant_arithmetic.elisa` | source adapter; bounded integer constant extraction |
+| `proof_index_operator_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index operator marker construction |
+| `proof_literal_argument_fits` | `proof/check/literal_call_arguments.elisa` | source adapter; signed literal fit check for an exact call parameter |
+| `proof_loop_range_base` | `proof/check/loop_range_facts.elisa` | source adapter; canonical loop range base expression |
+| `proof_marker_argument` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker argument extraction |
+| `proof_name_is_reserved_internal` | `proof/check/internal_name_safety.elisa` | source adapter; reserved compiler-generated name check |
+| `proof_scalar_element_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar element type marker construction |
+| `proof_scalar_term_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar term marker construction |
+| `proof_scalar_type_kind` | `proof/check/flow_and_type_model.elisa` | source adapter; scalar sort classification |
+| `proof_scalar_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar type marker construction |
+| `proof_signed_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); signed place marker construction |
+| `proof_signed_primitive_width` | `proof/check/flow_and_type_model.elisa` | source adapter; fixed-width signed primitive classification |
+| `proof_signed_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); signed type marker construction |
+| `proof_unsigned_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); unsigned place marker construction |
+| `proof_unsigned_primitive_width` | `proof/check/flow_and_type_model.elisa` | source adapter; fixed-width unsigned primitive classification |
+| `proof_unsigned_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); unsigned type marker construction |
+| `proof_unsigned_width_max` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); maximum value for a bounded unsigned width |
 <!-- /inventory:replay-external-calls -->
 
 2. **Scalar fingerprint encoding.** `proof_push_kernel_identity` (`app/runtime.elisa`) hashes some
@@ -410,4 +432,5 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_push_json_i64` | `app/portable_io.elisa` | output |
 | `proof_push_json_string` | `app/portable_io.elisa` | output |
 | `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
+| `proof_ident_name` | `proof/expr/ast_equal.elisa` | shared source adapter; identifier spelling extraction |
 <!-- /inventory:correspondence-external-calls -->
