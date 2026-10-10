@@ -77,6 +77,12 @@ def run(fixture, target, route):
     return process.returncode, report
 
 for route in ("function", "module"):
+    for name in ("qualified_global_read", "qualified_global_write", "qualified_global_update"):
+        code, report = run("global_mutable_grants_module.elisa", name, route)
+        # These controls target semantic permission admission. Source-correspondence support for
+        # a qualified global is a separate proof rule and is not implied by a clean grant result.
+        assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
+
     for name in ("read_counter", "write_counter", "copy_counter", "shadow_counter",
                  "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read",
                  "indexed_read", "indexed_write", "indexed_parameter_shadow", "indexed_local_shadow",
@@ -108,8 +114,12 @@ for route in ("function", "module"):
                  "signature_only_read", "signature_only_write", "indexed_read_write_only",
                  "indexed_write_read_only", "indexed_target_missing_index_read",
                  "indexed_target_missing_root_write", "mutable_reference_read_only",
-                 "mutable_reference_write_only"):
-        code, report = run("rejected_global_mutable_grants.elisa", name, route)
+                 "mutable_reference_write_only", "qualified_global_missing_read",
+                 "qualified_global_missing_write", "qualified_global_write_only_read",
+                 "qualified_global_read_only_write"):
+        module_qualified = name.startswith("qualified_global_")
+        fixture = "global_mutable_grants_module.elisa" if module_qualified else "rejected_global_mutable_grants.elisa"
+        code, report = run(fixture, name, route)
         assert code != 0 and report["status"] != "proved", context(route, name, report)
         assert report["summary"]["semantic_errors"] > 0, context(route, name, report)
         assert not any(d.get("name") == name and d.get("verified")
@@ -137,6 +147,15 @@ for route in ("function", "module"):
             assert any(d.get("severity") == 1 and d.get("expected") == effect
                        and d.get("actual") == actual
                        and (name != "forward_missing_read" or d.get("name") == "read_counter")
+                       for d in report["semantic_diagnostics"]), context(route, name, report)
+        required_qualified_effect = {
+            "qualified_global_missing_read": "Global.Read",
+            "qualified_global_missing_write": "Global.Write",
+            "qualified_global_write_only_read": "Global.Read",
+            "qualified_global_read_only_write": "Global.Write",
+        }.get(name)
+        if required_qualified_effect is not None:
+            assert any(d.get("severity") == 1 and d.get("expected") == required_qualified_effect
                        for d in report["semantic_diagnostics"]), context(route, name, report)
 
 print("Global grants cover reads/writes separately; both report routes reject missing/wrong grants")

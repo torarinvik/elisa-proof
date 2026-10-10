@@ -8613,6 +8613,14 @@ Source inspection of compiler candidate `757c231e` confirms that
 current Stage1 path; the exact affected checks and interaction with mutable-global grants still need
 an adversarial compiler run. In particular, `check_mutable_global_authority` receives the separate
 `enforce_mutable_global_grants` option, so do not claim that the source probe itself disables
-Global.Read/Write until that path is reproduced. The compiler slot is currently reserved for the
-coordinator's r15a native gate followed by the repaired r11/r14 timing comparison; source-only review
-may continue, but no compiler launch is permitted until explicit release.
+Global.Read/Write until that path is reproduced. The first r14/r11 timing attempt was invalidated by
+the runner's frozen-input integrity check after inputs changed; no timing result is accepted. The
+coordinator reports that the r15a six-phase native correctness gate now passes with all 1,796 inputs
+unchanged, and is rechecking the A/B bundle before starting corrected paired trials. Do not launch a
+proof compiler until the benchmark is terminal and the coordinator explicitly releases the slot.
+
+The grant suite now also has a module-scoped `SharedState::counter` fixture: positive qualified
+read/write/read-modify-write cases and missing/wrong-grant refusals run through both report routes.
+These controls isolate compiler semantic permission admission; they do not claim proof-source
+correspondence for qualified globals. Static checks and fixture-selection validation pass; run the
+full grant matrix with the fresh strict-O2 proof/compiler pair before qualifying it.
