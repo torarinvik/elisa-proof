@@ -9016,3 +9016,25 @@ increment from 23:
 Keep all three changes isolated until the frozen lane releases. Do not reintroduce raw atomics or
 broaden capabilities just to satisfy legacy fixtures. The proof pin remains unchanged; the full
 compiler suite and source/runtime postflight remain incomplete.
+
+
+### 23.27.77 Backend and language-smoke fixtures add four grant failures (2026-10-10)
+
+Four further checks fail in the active suite, bringing the known total to 30:
+
+- `backend_obj_smoke.sh` cannot compile `test/breadth/emit_obj.elisa`; its driver calls
+  `frontend_parser_parse_file` without the required Global grants. The test redirects compiler
+  stderr to `/dev/null`, so it reports only the summary. Preserve the diagnostics in the repaired
+  harness and scope the grant narrowly.
+- `backend_trace_smoke.sh` fails before trace assertions. Its retained `build/trace_smoke/build.log`
+  identifies missing Global grants at `frontend_parser_parse_file` and
+  `Backend.emit_module_with_debug_trace` in `test/breadth/emit_trace.elisa`.
+- `block_expressions_smoke.sh` fails Stage0 on `block_optional_guard_match.elisa`: global mutable
+  `guard_calls` and calls to `kind_of`/`validate` require explicit grants, so the block-expression
+  behavior is not reached.
+- `bounds_default_smoke.sh` fails Stage0 and Stage1 at O0/O2 because its fixture writes global
+  mutable `buf` and `canary` without Global.Write.
+
+After the frozen run releases, add local capabilities to these positive fixtures and retain the
+intended block-expression, bounds, object, and trace assertions. No compiler source or proof pin
+has changed; focused and full qualification are still required.
