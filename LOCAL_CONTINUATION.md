@@ -1,4 +1,4 @@
-# Local continuation checkpoint — updated 2026-10-10, r19
+# Local continuation checkpoint — updated 2026-10-10, r20
 
 The proof checkout, local products, compiler provenance, direct-API regression harness, and
 benchmark checkpoint are saved on the Mac. Work can continue without the Vast instance.
@@ -107,3 +107,15 @@ Vast instance. The replacement-instance recovery archive remains verified at 78,
 symlinks with zero mismatches, and the parser candidate has its own checksum-verified supplement.
 The original instance's separate `/root/work` tree was never confirmed as part of that transfer;
 files unique to it remain outside the verified recovery boundary.
+
+Before closing Vast, the local checkpoint was revalidated on 2026-10-10. The proof branch is clean
+and its portable Git bundle is at
+`../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r26.bundle`. The strict O2
+ARM64 product pair at `build/elisa-proof-generations/0ac2cc98e48043268a334743d09a07fa/` passed
+`verify_product_pair.py check-current` with exit code 0. The installed Stage1 compiler SHA-256 is
+`2faf57f2dca6914d3f500c6b4532fb993349208ff556459de0a6af025688c644`, and upstream `main` still
+resolves to `8f2023ce8a7d52358b733a0e812ff46293d45f10`. The bundle, product executables, manifests,
+compiler, and matching runtime are all local. The last attempts to reach the original instance's
+SSH endpoint (`38.49.42.120:53652`) were closed by the host; the replacement endpoint
+(`141.195.21.72:47559`) refused the connection. This verifies the local work listed above but
+does not recover or rule out files unique to the original `/root/work` tree.
