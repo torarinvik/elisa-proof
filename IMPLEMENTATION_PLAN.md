@@ -9260,12 +9260,14 @@ baselines or weaken lifetime/effect checks.
 The SMC binding rename and region-owner regression in compiler commit `8d7cfca2` are already
 present in the frozen candidate as patch-equivalent commit `ec3ef1fe`; a trial cherry-pick was
 empty. A separate post-gate preview branch, `codex/merged-origin-smc-fix-preview`, is now at
-`52650a15` and adds the narrow `Global{Read,Write}` grant to the affine dictionary move acceptance
-fixture. The compiler agent reports that this fixture emits O0 objects successfully with both
-Stage0 and Stage1; the preview itself has not been built or included in the active gate.
+`baf5e36f`. It adds narrow `Global{Read,Write}` grants to the affine dictionary move acceptance
+fixture and the two parser calls in `effect_type_reference.elisa`. The compiler agent reports that
+the affine fixture emits O0 objects with Stage0 and Stage1, and the effect-type-reference probe
+returns its expected value with Stage1 O0. The combined preview has not been built or included in
+the active gate.
 
 The latest isolated compiler branch is `codex/object-cache-integrity` at
-`43b2e6c772824474e2403ee45d71be79f2d9246e`. Its earlier codec snapshot passed a native O0 control;
+`4c798bdbaa3e445e66e22de08a95b5e6149f73cf`. Its earlier codec snapshot passed a native O0 control;
 the compiler agent reports native O2 control passing on the later codec draft. Gen2 validation is
 still pending and production reuse remains unwired; do not claim a qualified optimization or
 speedup. The reported `query_head_for` / `const_scope_owner` annotations still need an owning commit
