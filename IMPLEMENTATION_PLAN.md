@@ -8986,3 +8986,10 @@ after the grant-fixture and runtime findings in §23.27.74:
 Re-run these focused checks and the full gate on the synchronized compiler/runtime pair after the
 active workers release. The proof pin remains unchanged, and no compiler source has been edited
 in this proof worktree.
+
+An isolated source audit located the line-parity defect: `append_parse_errors` creates exported
+`Diagnostic` rows without a source position, while `check_full_diagnostics` deduplicates on
+`pos.column` and `pos.end_column`. The missing positions make distinct same-line semicolon
+errors look identical. A candidate fix populates the parser line and column in each diagnostic;
+it is not integrated or qualified. Require a fresh seed and native reporter regression before
+including it, and preserve deduplication for genuinely identical same-location findings.
