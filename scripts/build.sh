@@ -458,7 +458,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --snapshot-root "$SNAPSHOT_ROOT" \
         --opt-level "$OPT_LEVEL" \
         --compile-mode "$COMPILE_MODE" \
-        --contract-flag "$CONTRACT_FLAG" \
+        --contract-flag="$CONTRACT_FLAG" \
         --installed-as "$PROOF_OUTPUT" \
         "${PAIR_MANIFEST_ARGS[@]+"${PAIR_MANIFEST_ARGS[@]}"}" \
         --output "$MANIFEST_TEMP"
