@@ -8563,3 +8563,21 @@ strict O2, and run the direct-API dynamic-array tests. On success, verify packag
 independent replay of `early_return_index_guard.elisa`, then continue the portable suite. If the
 latest compiler changes during that wait, update `ELISA_COMPILER_REV` and the snapshot to that exact
 source before qualification. Do not report the replay gap fixed until all these checks pass.
+
+### 23.27.60 Newest Stage1 build exposed a mutable-local diagnostic; retry held for wrapper-cache control (2026-10-10)
+
+The r12/run-002 coordinator reports 17/17 compiler processes exited successfully with bytewise
+output parity. The newest matching product is still Stage1 source `4bff8824307caa36be0e1dcd8979c7ded08ee99b`,
+product SHA-256 `a68043cd9a3666b41d19824f665c9acbf92be0872f72b9d149435a480c7105ee`, and runtime SHA-256
+`347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`. The proof build passed Stage1
+provenance and started on the exact pair, then stopped before object emission at
+`state_and_regions.elisa:472`: `region_view` was assigned inside a trusted block but declared
+immutable. The local is now mutable; diff, Python syntax, and source-length checks pass. The Stage1
+process and build lock are gone.
+
+The compiler coordinator has queued a native wrapper-cache correctness control and asked that no
+new Stage1 process start until it finishes. Hold the retry through that gate. After explicit release,
+rebuild proof and replay together at strict O2 on the same newest matched pair, then run the direct-API
+dynamic-array controls, CLI/package export, independent replay, and the Global grant regression suite.
+If the compiler revision advances before release, refresh the frontend snapshot and pin first. This
+candidate remains unqualified; the failed build emitted no candidate executable.
