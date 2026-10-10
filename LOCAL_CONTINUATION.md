@@ -1,12 +1,13 @@
-# Local continuation checkpoint — updated 2026-10-10, r18
+# Local continuation checkpoint — updated 2026-10-10, r19
 
 The proof checkout, local products, compiler provenance, direct-API regression harness, and
 benchmark checkpoint are saved on the Mac. Work can continue without the Vast instance.
 
 ## Proof assistant checkout
 
-The active branch is `codex/vast-local-checkpoint-20261009`, with implementation commit
-`f5e629fe` (`replay: source validate generic type-bound facts`). The branch also carries the
+The active branch is `codex/vast-local-checkpoint-20261009`. It contains the source-validated
+generic type-bound replay change `f5e629fe` and the qualified-module lookup fix `e55599ce`. The
+branch also carries the
 high-ROI implementation plan and the completed expression-scoped `Global.Read` / `Global.Write`
 migration for global mutable accesses. The compiler grant migration covers 1,066 effectful call
 sites across 89 source files; seven increments that read and write globals require
@@ -17,37 +18,45 @@ The type-bound replay change closes a P0 trust hole where a forged generic `type
 as `value < value` could pass shape-only validation. It reconstructs parameter widths/ranges,
 scalar constants, fixed-array bounds and witnesses, scalar-local witnesses, literal counting-loop
 facts, and direct call-result types from the source AST. Cast-identity facts remain rejected until
-replay can authenticate an exact widening site. The focused direct-API mutation harness, Global
-grant suite, qualified-constant pin suite, and pure-summary replay suite pass. Qualification is
-still open: `test_global_constant_relevance.py` has a replay gap in
-`module_u32_scoped_constant_branch.elisa`; `test_qualified_constants.py` has loop/rebind witness
-coverage gaps; and `test_qualified_constant_call_domain.py` retains one unproven goal with zero
-replay gaps. These remaining cases are documented in section 23.27.52 of `IMPLEMENTATION_PLAN.md`.
+replay can authenticate an exact widening site. The scoped-module `u32` gap is fixed: qualified
+paths now resolve from the source root, and
+`scripts/test_qualified_type_bound_module_scope.py` proves all three goals plus the wrong-value
+refusal with zero replay gaps. The direct-API mutation harness, Global grant suite,
+qualified-constant pin suite, and pure-summary replay suite passed on the preceding type-bound
+candidate; direct-API qualification of this last lookup change remains for the next Stage1 slot.
+The broad `test_global_constant_relevance.py` run now reaches an existing literal array-index
+replay gap in `fixed_array_constant_indices.elisa` (confirmed on the previous binary too).
+`test_qualified_constants.py` still has loop/rebind witness gaps, and
+`test_qualified_constant_call_domain.py` retains one unproven goal despite zero replay gaps.
+Section 23.27.52 of `IMPLEMENTATION_PLAN.md` records the current qualification state.
 
-Both local products were refreshed after the implementation commit using strict O2 and the newest
+Both local products were rebuilt from the committed source tree using strict O2 and the newest
 pinned public Elisa compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Stage1 is
 `/Users/torarinvikbjarko/.elisac/stage1/bin/elisac-stage1` (SHA-256
 `2faf57f2dca6914d3f500c6b4532fb993349208ff556459de0a6af025688c644`), from
 `../local-compiler-optimization-20261009/parser-effect-template-working`; the matching runtime
 object SHA-256 is `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`.
-Both manifests record `source_dirty: false` and the current implementation commit. Proof executable
-SHA-256: `48299b242d079f1d41a00c449ab79323bd59605a403eae1e143eef7c3f69aaef`; manifest SHA-256:
-`fa976bedc97e3bf5bfeb2fd0f5abbb8278d3b52d10a0480f83b4e13371e282e2`. Replay executable
-SHA-256: `5d2495e5ef171814ccef723e6726787ab077fd92647562654455122031fb9515`; manifest SHA-256:
-`a7f52517618da9c37a75bd140bae94f9dfe6d0035f14e972f915921e25c224a8`.
+Both recorded source-tree hashes match the committed `src/` tree. The manifests still name the
+previous Git head and `source_dirty: true` because the build finished just before commit
+`e55599ce`; the immutable product-pair check passes. Proof executable SHA-256:
+`b8d6a500281cef24a5e7c81ab6ea44832fc22d163af1114228c457ffdd86bbcc`; manifest SHA-256:
+`cdb8d8ad3d88516d3110f5923142a06036f4f61838181224afe54015f6eeae5f`. Replay executable
+SHA-256: `d5410575a7e7543bd864a08a033dfc899e6970150d7419c55f0f11058b83c42f`; manifest SHA-256:
+`33cfb7bb044e1c161f42c0f9b34a09487360b300eaf9420cfe3c52ce40d6f7e2`.
 
-The compiler self-build A/B run is paused locally with no Stage1 child running. Its retained
+The compiler self-build A/B run is active again under the coordinator. The observed runner is PID
+81009. Do not start another Stage1 job until the coordinator releases the slot. Its retained
 checkpoint is `/Users/torarinvikbjarko/.codex/benchmark-results/elisa-selfcompile-ab-install-index-r1/`.
+The hashes below were verified while it was paused; the active run may have advanced the result
+files, so recompute them after the coordinator reports completion.
 `checkpoint-after-pairs-01.json` SHA-256 is
 `290337ea4db43193529154356e28020540fac460f472bfa4bb3236ff5ba7382f`; `primary-results.jsonl`
 SHA-256 is `b189df7109a8a49cdd3593a452726211a645162251a0fd807fe49421f3f68f51`; `run.json` SHA-256
-is `c237166e60081b36d948688a8d11ed040dbfa697eee849fb6702e9ff2364286d`. Do not resume that run
-until its qualification is repaired and the compiler coordinator releases Stage1.
+is `c237166e60081b36d948688a8d11ed040dbfa697eee849fb6702e9ff2364286d`.
 
-The implementation commit is local on the branch and was not pushed. The portable branch bundle
-is refreshed from this checkpoint at
-`../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r24.bundle`; a SHA-256 sidecar
-is stored beside it.
+The implementation commits are local on the branch and were not pushed. The portable branch bundle
+for this checkpoint is `../vast-recovery-2026-10-09/elisa-proof-local-checkpoint-20261009-r25.bundle`;
+its SHA-256 sidecar is stored beside it.
 
 ## Native local toolchain
 

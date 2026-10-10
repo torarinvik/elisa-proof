@@ -8405,9 +8405,14 @@ and the Global grant and qualified-constant-pins suites passed. Build products a
 available locally under `build/`.
 
 Qualification is incomplete and this candidate must not be treated as a finished P0 fix. The
-Global-constant relevance suite still has a replay gap in
-`module_u32_scoped_constant_branch.elisa`; qualified-constant CLI coverage exposes loop/rebind
-type-bound forms that still need exact source reconstruction; and
+scoped-module `u32` replay gap is now fixed: qualified constant paths start lookup at the
+source root, while unqualified names retain the owning module scope. The focused regression
+`scripts/test_qualified_type_bound_module_scope.py` proves all three obligations and checks the
+wrong-value refusal with zero replay gaps. `scripts/test_global_constant_relevance.py` now reaches
+a separate replay gap in `fixed_array_constant_indices.elisa`; the previous product shows the same
+gap, so this is an existing unsupported literal-index type-bound form rather than a regression.
+Qualified-constant CLI coverage also exposes loop/rebind type-bound forms that still need exact
+source reconstruction; and
 `qualified_constant_call_domain.elisa` has one remaining unproven source goal despite zero replay
 gaps. The pure-contract impure-control fixture now accepts the expected Global permission refusal
 as well as the explicit unsupported-call refusal. Continue by grouping the remaining producers by
