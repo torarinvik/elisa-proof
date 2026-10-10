@@ -9147,3 +9147,14 @@ valid fixture (P0) and rejects a deliberately injected semicolon sibling (P1). T
 skip or suppress parser checks, alter the breadth ratchet, or rewrite compiler source. A source
 scan found no other parse errors. Preserve this repair in the isolated branch and integrate only
 after the frozen full gate releases; its codec native execution remains a separate pending check.
+
+
+### 23.27.84 Allocator overflow controls pass with explicit scoped effects (2026-10-10)
+
+An isolated fixture migration at compiler commit `ba6cb0c2` now gives each `arena_alloc` and
+`arena_free` call the explicit `Global{Read,Write}`, `Atomics{Exchange,Store}`, and required
+`Unsafe` capabilities. The `arena_free` call also carries `Unsafe.UncheckedIndex`. Stage0 and
+Stage1 both pass the native controls at O0 and O2: zero-byte and small allocations succeed, while
+the `usize`-maximum byte request traps as expected. This is a narrow test migration; it does not
+weaken compiler grants or use trusted suppression. Preserve the regression and its four-mode
+evidence, then rerun it as part of the full gate after the frozen run releases.
