@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-10. **Section 23.27.93 is the current full-gate status; §23.27.71 remains the authoritative high-ROI execution order.** The frozen integrated compiler candidate has a live uncached 596-check qualification with 44 failures observed so far; the malformed-input fuzzer and completed differential corpus passed their recorded controls, with documentation parity passed after 3270 seconds while lowered, packed, and progress emit checks continue. Failure count is not final. The interface matrix has 23 compile refusals and 38 byte mismatches across 333 cases. The interpreter matrix has 17 divergences; triage identifies 15 intentional Stage1 safety rejections, one warning-only effect-grant migration, and one unresolved named-argument result requiring a native oracle. The proof compiler pin and proof-consumer changes remain unqualified on the final matched compiler/runtime pair. Prioritize finishing the exact-tuple compiler gate, triaging its real failures, qualifying proof-consumer admission and kernel replay, then measuring common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.93 for the ordered backlog and current status.
+Status: refreshed 2026-10-10. **Section 23.27.94 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is pinned to compiler `a84089fd`. The all-products O2 build, the separate `Global.Read`/`Global.Write` grant regression, and the deterministic-call loop replay harness passed on this tuple. These focused gates do not close the full proof suite or the frozen compiler matrix recorded in §23.27.93. The annotation-index candidate passed correctness but showed no repeatable compile-time gain, so it was not integrated. Keep the unsigned-diagnostic branch isolated until its large accepted-source memory regression is explained and repaired. Next, finish the current compiler storage qualification without overlap, qualify source-admission and independent replay on the same compiler/runtime, then measure common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.94 for the ordered backlog and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9380,3 +9380,29 @@ After gate completion, rerun the instrumented interpreter check and the native O
 for the named-argument fixture on the same compiler/runtime tuple. Keep the strict assertion that
 Stage1 rejects the 15 invalid sources with their expected diagnostics, and proceed to proof API,
 Global grant, and independent replay qualification only after the entire compiler gate passes.
+
+
+### 23.27.94 Current proof tuple passes focused O2, grant, and call-replay gates (2026-10-10)
+
+Local proof `main` is at `2d8ff432` and pins Elisa compiler `a84089fdcaab3d79a23f01354df9f2b54b20a212`.
+The proof all-products O2 build emitted both `elisa-proof` and `elisa-proof-replay` without a
+backend decline. `scripts/test_global_mutable_grants.py` passed its independent `Global.Read` and
+`Global.Write` controls through both proof/report routes. The freshness-guarded
+`scripts/tests/test_deterministic_call_loop_replay.py` compiled and passed against the pinned
+Stage1. Its fixture was corrected to avoid redeclaring a parameter name, which the current compiler
+properly rejects; it now checks that a distinct local cannot replace the call's exact source actual.
+The fixture change preserves the positive and forged-argument controls.
+
+The annotation-index candidate on compiler `a84089fd` passed its correctness and parity controls,
+but its paired timing runs did not show a repeatable gain. It remains out of `main`. The compiler
+storage-fusion candidate is still awaiting an uncontended exact-tuple qualification; the overlapped
+seed is invalid evidence and must not support a performance claim. The branch
+`codex/unsigned-diagnostic-arithmetic` remains preserved but unmerged because its accepted-source
+memory regression is unresolved and its source merge collides with current grant-enforcement
+changes. Do not discard its unique fixes or evidence while evaluating a repair.
+
+The focused proof results above do not establish full-suite completion, full source-obligation
+coverage, or complete kernel self-verification. Continue with the exact-tuple source-admission and
+independent replay matrices, then run the immutable full proof suite. Integrate additional branch
+changes only after they pass the matching a840 compiler/runtime gates and preserve current grant
+enforcement.

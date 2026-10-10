@@ -81,10 +81,10 @@ SOURCE_LINES = [
     "    xs.push(a)",
     "    return step(xs.count)",  # METHOD_AFTER
     "",
-    "def shadowed(x: i64) -> i64:",
-    "    z: i64 = x",
+    "def local_alias(seed: i64) -> i64:",
+    "    z: i64 = seed",
     "    x: i64 = 5",
-    "    return step(z)",  # SHADOW_CALL
+    "    return step(z)",  # LOCAL_ALIAS_CALL
     "",
     "def guarded(n: i64) -> i64:",
     "    t: mutable i64 = 0",
@@ -172,7 +172,7 @@ SOURCE_LINES = [
 
 TAGS = [
     "LOOP_BODY", "LOOP_ASSIGNED", "LOOP_AFTER", "BRANCH_AFTER", "BUMP_ASSIGN", "BUMP_CALL",
-    "FOR_CALL", "MATCH_AFTER", "METHOD_AFTER", "SHADOW_CALL", "GUARD_CALL", "NESTED_CALL",
+    "FOR_CALL", "MATCH_AFTER", "METHOD_AFTER", "LOCAL_ALIAS_CALL", "GUARD_CALL", "NESTED_CALL",
     "ELSE_AFTER", "COMPOUND_AFTER", "LENT_AFTER", "SHARED_AFTER", "ENCLOSED_CALL", "SIBLING_CALL", "LOOKED_AFTER",
     "DECL_CALL", "REASSIGNED_CALL", "SHADOWED_CALLBACK_CALL",
 ]
@@ -397,11 +397,11 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     stale_count: Ast::Expr = Ast::Expr.Field(Ast::Expr.Array(no_elements, position), "count", position)
     return 29 if test_loop_site_accepted(&report, "pushed", test_loop_with_argument(method_call.value, stale_count))
 
-    # A redeclared name makes the outer binding ambiguous: the function is refused.
-    shadow_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "shadowed", SHADOW_CALL, false)
+    # A distinct local with a different initializer cannot replace the exact actual.
+    shadow_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "local_alias", LOCAL_ALIAS_CALL, false)
     return 30 if not shadow_call.known
-    return 31 if test_loop_site_accepted(&report, "shadowed", shadow_call.value)
-    return 32 if test_loop_site_accepted(&report, "shadowed", test_loop_with_argument(shadow_call.value, Ast::Expr.Ident("x", Ast::expr_pos(shadow_call.value))))
+    return 31 if not test_loop_site_accepted(&report, "local_alias", shadow_call.value)
+    return 32 if test_loop_site_accepted(&report, "local_alias", test_loop_with_argument(shadow_call.value, Ast::Expr.Ident("x", Ast::expr_pos(shadow_call.value))))
 
     # A call in the loop guard runs at every iteration entry.
     guard_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "guarded", GUARD_CALL, false)
