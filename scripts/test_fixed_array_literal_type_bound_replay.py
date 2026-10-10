@@ -13,6 +13,10 @@ prefix = next(ast.literal_eval(node.value) for node in tree.body
                       for target in node.targets)).split("def main()")[0]
 fixture_source = (ROOT / "examples/fixed_array_constant_indices.elisa").read_text()
 constants = "const FIXED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(fixture_source) + "\n"
+parenthesized_source = fixture_source.replace("return values[1]", "return (values)[1]", 1)
+nested_source = fixture_source.replace("return values[1]", "return [values[1]][0]", 1)
+constants += "const PARENTHESIZED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(parenthesized_source) + "\n"
+constants += "const NESTED_ARRAY_LITERAL_SOURCE: sview = " + json.dumps(nested_source) + "\n"
 harness = prefix + constants + r'''
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
@@ -52,6 +56,14 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     report.traces.records[genuine_index] <- original
     return 244 if forged_replayed
     return 245 if not (proof_replay_fact_trace_entry(&report, genuine_index) can Global{Read,Write})
+    parenthesized_report: mutable ProofReport = proof_empty_report()
+    parenthesized_diagnostics: mutable darray[Semantic::Diagnostic] = []
+    (api_probe(PARENTHESIZED_ARRAY_LITERAL_SOURCE, &source, &parenthesized_report, &parenthesized_diagnostics) can Global{Read,Write})
+    return 246 if parenthesized_report.failed != 0 or parenthesized_report.replay_gaps != 0 or parenthesized_report.proven != parenthesized_report.obligations
+    nested_report: mutable ProofReport = proof_empty_report()
+    nested_diagnostics: mutable darray[Semantic::Diagnostic] = []
+    (api_probe(NESTED_ARRAY_LITERAL_SOURCE, &source, &nested_report, &nested_diagnostics) can Global{Read,Write})
+    return 247 if nested_report.failed != 0 or nested_report.replay_gaps != 0 or nested_report.proven != nested_report.obligations
     return 0
 '''
 
@@ -62,4 +74,4 @@ run_source_binding_replay_harness(
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(),
     harness,
 )
-print("Fixed-array literal replay: direct API authenticates values[1] and rejects a forged 2 bound")
+print("Fixed-array literal replay: direct API authenticates direct, parenthesized and nested values[1] uses, and rejects a forged 2 bound")

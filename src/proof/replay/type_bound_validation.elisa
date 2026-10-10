@@ -218,42 +218,80 @@ extend ElisaProof:
                     _:
                         pass
 
+        def proof_replay_type_bound_array_name(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_type_bound_array_name(inner, depth + 1)
+                _:
+                    return ""
+
         def proof_replay_type_bound_index_use(expression: Ast::Expr, array_identifier: sview, index_expression: Ast::Expr, line: u32, depth: usize) -> usize:
             return 0 if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match expression:
-                Ast::Expr.Index(Ast::Expr.Ident(object_name, _), subscript, position):
-                    return 1 if object_name == array_identifier and proof_replay_expr_equal(subscript, index_expression) and position.line == line
-                    return 0
-                Ast::Expr.IndexN(Ast::Expr.Ident(object_name, _), arguments, position):
-                    return 1 if object_name == array_identifier and arguments.count == 1 and proof_replay_expr_equal(arguments[0], index_expression) and position.line == line
-                    return 0
-                Ast::Expr.Index(object, index, _):
-                    return proof_replay_type_bound_index_use(object, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(index, array_identifier, index_expression, line, depth + 1)
-                Ast::Expr.IndexN(object, arguments, _):
-                    count: mutable usize = proof_replay_type_bound_index_use(object, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.Index(object, subscript, position):
+                    count: usize = 1 if proof_replay_type_bound_array_name(object, depth + 1) == array_identifier and proof_replay_expr_equal(subscript, index_expression) and position.line == line else 0
+                    return count + proof_replay_type_bound_index_use(object, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(subscript, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.IndexN(object, arguments, position):
+                    count: mutable usize = 1 if proof_replay_type_bound_array_name(object, depth + 1) == array_identifier and arguments.count == 1 and proof_replay_expr_equal(arguments[0], index_expression) and position.line == line else 0
+                    count <- count + proof_replay_type_bound_index_use(object, array_identifier, index_expression, line, depth + 1)
                     for argument in arguments |array_identifier, index_expression, line, depth, count|:
                         count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_expression, line, depth + 1)
                     return count
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _):
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
                     return proof_replay_type_bound_index_use(inner, array_identifier, index_expression, line, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
                     return proof_replay_type_bound_index_use(left, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(right, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_replay_type_bound_index_use(object, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(low, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(high, array_identifier, index_expression, line, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
                     count: mutable usize = proof_replay_type_bound_index_use(callee, array_identifier, index_expression, line, depth + 1)
                     for argument in arguments |array_identifier, index_expression, line, depth, count|:
                         count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_expression, line, depth + 1)
                     return count
-                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
-                    count: mutable usize = 0
+                Ast::Expr.StaticEffectCall(effect_type, _, _, arguments, _, _):
+                    count: mutable usize = proof_replay_type_bound_index_use(effect_type, array_identifier, index_expression, line, depth + 1)
                     for argument in arguments |array_identifier, index_expression, line, depth, count|:
                         count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_expression, line, depth + 1)
                     return count
-                Ast::Expr.If(condition, yes, no, _):
-                    return proof_replay_type_bound_index_use(condition, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(yes, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(no, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    count: mutable usize = 0
+                    for element in elements |array_identifier, index_expression, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(element, array_identifier, index_expression, line, depth + 1)
+                    return count
+                Ast::Expr.DictLit(entries, _):
+                    count: mutable usize = 0
+                    for entry in entries |array_identifier, index_expression, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(entry.key, array_identifier, index_expression, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use(entry.value, array_identifier, index_expression, line, depth + 1)
+                    return count
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    count: mutable usize = proof_replay_type_bound_index_use(type_expression, array_identifier, index_expression, line, depth + 1)
+                    for field in fields |array_identifier, index_expression, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(field.value, array_identifier, index_expression, line, depth + 1)
+                    return count
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    count: mutable usize = proof_replay_type_bound_index_use(subject, array_identifier, index_expression, line, depth + 1)
+                    for arm in arms |array_identifier, index_expression, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(arm.guard, array_identifier, index_expression, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use_body(arm.body, array_identifier, index_expression, line, depth + 1)
+                    return count
+                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                    return proof_replay_type_bound_index_use(iterable, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(condition, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(value, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_replay_type_bound_index_use(guarded, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use_body(recovery, array_identifier, index_expression, line, depth + 1)
+                Ast::Expr.Lambda(_, nested, _):
+                    return proof_replay_type_bound_index_use_body(nested, array_identifier, index_expression, line, depth + 1)
                 Ast::Expr.Block(nested, value, _, _):
                     return proof_replay_type_bound_index_use_body(nested, array_identifier, index_expression, line, depth + 1) + proof_replay_type_bound_index_use(value, array_identifier, index_expression, line, depth + 1)
-                _:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
                     return 0
+                _:
+                    # An expression variant added to the pinned AST without a visitor case
+                    # makes source-use uniqueness inconclusive; never count it as absent.
+                    return 2
 
         def proof_replay_type_bound_index_use_body(body: darray[Ast::Stmt]&, array_identifier: sview, index_expression: Ast::Expr, line: u32, depth: usize) -> usize:
             return 0 if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
