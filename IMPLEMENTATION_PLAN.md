@@ -8685,3 +8685,25 @@ mixed-runtime/application, and environment controls after the slot is released. 
 repair must bind runtime exceptions to authenticated per-declaration source origin; text markers
 and ambient environment alone must not grant trusted-runtime treatment. Keep this P0 open until
 adversarial Stage1, Stage0-parity, and Global-grant controls pass.
+
+
+### 23.27.66 Runtime-origin and global-grant qualification update (2026-10-10)
+
+The current public compiler `main` source is `71e12c837ac9420f5e20154a76ce6a05f7d8b821`. The proof candidate `02516ea6a69cd2ef1201ea08377c1f83a26ff8f5` is on a divergent branch from the same `8f2023ce` base, so keep the source-main compiler candidate and the proof-product pin distinct until a newer proof product passes the full driver gate.
+
+The runtime-origin candidate `ff828c9f59e2dbcf9dbc46fded0cafd6b7005a05` is based on `71e12c83`. Its guarded seed passed in 97.97 seconds; product, runtime-origin, and effect-handler smoke checks passed. Product SHA-256 is `4fff12a5e9c50a66c3a0fc92f4a23e63252c6cb0db498ea350b2bfed64a94b6c`; runtime SHA-256 is `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`.
+
+The expanded Global.Read/Write gate then stopped during reporter compilation with 28 `RegionTiedReturn` diagnostics in included compiler sources. The prior whole-unit runtime exemption had hidden these regions. The diagnosed returns include `sview` values backed by `Parser`, `SymbolTable`, `Ast` annotation, and facts arrays; treat them as missing lifetime contracts unless minimized controls prove a checker defect. Preserve per-declaration runtime provenance. Add explicit region-polymorphic `@r` signatures or copy results into caller-owned storage where required, then rerun the complete grant gate.
+
+Static review also found the normal runtime-std predicate falling back to an origin-map-only parser when its validated line-map cache is unavailable. The candidate must fail closed there, or validate the diagnostic and origin maps together, and cover missing, mismatched, and over-capacity maps. This repair and the lifetime-signature migration are in progress; the `ff828c9f` candidate is not fully qualified and cannot yet replace the proof compiler product.
+
+Next gates: finish the cache fallback repair and adversarial map tests; resolve the 28 lifetime diagnostics without broad trust exemptions; rebuild from the resulting immutable source; pass runtime-origin, product, effect, Global.Read/Write, Stage0/Stage1 parity, and proof-driver/replay checks on the same compiler/runtime tuple. Only then advance the proof pin and close P0.
+
+
+### 23.27.67 Local checkpoint and current trust-seed result (2026-10-10)
+
+The trust candidate is now committed through `f89408db244122b3bd92118c6067317972cfab9d` on `codex/merged-origin-qualification`, based on the current compiler main `71e12c83`. It adds joint cache validation with fail-closed behavior when the origin and diagnostic maps cannot be cached together, native cache regression coverage, and explicit region ties for borrowed helper results.
+
+A guarded Stage 0 seed using the local clean Stage 0 compiler ran against `f89408db` and failed after 38.82 seconds. The new lifetime signatures need correction before qualification: one named-value `@r` annotation is invalid, one `Parser.MachineArmAst` call does not supply the required reference region, and three `affine_path_type` calls pass a table in a different region than its declared parameter. The prior `ff828c9f` product remains on disk but is not a product for `f89408db`; no Global.Read/Write gate or new cache regression result has been recorded for this revision.
+
+Keep this candidate unqualified. Fix those compile errors without restoring unit-wide runtime trust, run the native missing/mismatched/overflow map controls, then repeat the guarded seed and runtime-origin, Global.Read/Write, Stage0/Stage1 parity, and proof-driver/replay gates. The source, build log, and failed-seed result are checkpointed locally; no step depends on the Vast instance.
