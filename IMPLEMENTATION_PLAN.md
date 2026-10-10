@@ -8962,9 +8962,12 @@ after the grant-fixture and runtime findings in §23.27.74:
   wholesale regenerate the ratchet. Review each changed fixture against its intended positive or
   negative outcome, account for new Global/effect findings, and retain all independently expected
   diagnostics before updating a baseline.
-- `diagnostic line parity` has one defect out of 672 messages: Stage0 and Stage1 both report four
-  messages for `region_param_container_return_semicolon_refusal`, but one location differs or a
-  repeat is missing. Trace the location mapping and preserve the zero-defect ratchet.
+- `diagnostic line parity` has one defect out of 672 messages. A focused repro confirms Stage0
+  semantic checking and Stage1 `-emit check`/object emission each produce both identical
+  semicolon-refusal messages at line 4, columns 40 and 77. `parse_report`/`check_full_diagnostics`
+  drops one repeated message, so this is a reporter deduplication bug rather than a source-line
+  mapping difference. Preserve the fixture and zero-defect ratchet; fix the reporter identity so
+  diagnostics at distinct columns are retained.
 - `adversarial_escape_smoke.sh` rejects two positive fixtures. `dict_get_ref_before_put.pos`
   calls dictionary `put` twice without Global.Read/Write grants. `call_protocol_view.pos` has a
   `Named` protocol whose effect contract does not permit the implementation's
@@ -8975,6 +8978,10 @@ after the grant-fixture and runtime findings in §23.27.74:
 - `amm_placement_soundness_smoke.sh` reports that Stage0 rejects `amm_drop_type_move`. The source
   writes global mutable `drops` in `__drop__` and reads it in `main` without Global.Write/Read;
   add the scoped capabilities so the fixture can reach its exact drop-count and placement check.
+  An isolated fixture-only candidate scopes Global.Read/Write across the destructor and moved
+  value's implicit scope-exit drop, then grants the caller write and read; Stage0 semantic and
+  Stage1 check pass. It still needs execution at O0 and O2 on the exact integrated tuple before
+  the placement result is qualified.
 
 Re-run these focused checks and the full gate on the synchronized compiler/runtime pair after the
 active workers release. The proof pin remains unchanged, and no compiler source has been edited
