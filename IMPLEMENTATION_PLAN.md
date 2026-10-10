@@ -8425,11 +8425,12 @@ regressions are resolved.
 The fixed-array literal-index candidate is now at proof commit `110c89a0`, following the source-only
 candidate checkpoint `7fdb1d31`. The replay source-use walk descends through nested indexing,
 parenthesized array names, collection and record literals, calls, branches, matches, lambdas, and
-block/control-flow expressions. A static comparison against the pinned compiler AST found cases
-for all 35 `Ast::Expr` variants; an unrecognized future variant makes the uniqueness check fail
-closed. This closes a source-walk omission where a direct outer index with a different subscript
-could hide a matching nested access. The standalone direct-API harness now includes parenthesized
-and nested-array positives plus a forged `2 < values.count` trace against source `values[1]`.
+block/control-flow expressions. The direct-API harness now checks the visitor against all 35
+`Ast::Expr` variants in the pinned compiler snapshot, so adding a parser variant requires an
+explicit source-walk decision; an unrecognized runtime variant also makes uniqueness fail closed.
+This closes a source-walk omission where a direct outer index with a different subscript could hide
+a matching nested access. The harness includes parenthesized and nested-array positives plus a
+forged `2 < values.count` trace against source `values[1]`.
 
 `git diff --check`, Python bytecode compilation of the harness, and `scripts/check_source_length.py`
 pass. No candidate build or direct-API assertion has run. The product pair currently saved under
