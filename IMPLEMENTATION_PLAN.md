@@ -9331,3 +9331,19 @@ The next high-ROI steps remain: finish the exact-tuple compiler gate; diagnose e
 parity/refusal class and apply narrow fixes on an isolated preview; then rerun the relevant compiler
 checks and continue proof admission, authentic Global grants, direct API obligations, kernel replay,
 and measured performance qualification.
+
+
+### 23.27.92 Preserve interface parity failure artifacts for focused triage (2026-10-10)
+
+The active interface smoke had hidden Stage1 stderr, discarded Stage1 stdout, truncated full diffs, and
+removed its temporary directory after failure. The isolated preview branch now captures both stage
+logs and outputs, writes complete unified diffs for mismatches, prints Stage1 diagnostics, and keeps
+the artifact directory only when a failure occurs. This is diagnostic-only: comparison criteria and
+exit status are unchanged. `bash -n` and `git diff --check` pass; no compiler was run while the
+uncached full gate remains active. The updated preview is `0514df64789ba9386c23062d0c2ac666c8ac0785`,
+preserved in `vast-recovery-2026-10-09/compiler-interface-artifact-preview-0514df64.bundle`
+(SHA-256 `e703a0cc40468361d81b7c8d194518311b56e3bb795b03fc29bd74abef203690`).
+
+After the frozen suite exits, use this harness on the exact candidate to capture refusal diagnostics
+and full interface diffs. Keep the Stage0/Stage1 byte-parity gate strict while using those artifacts
+to trace each mismatch to parser, semantic interface formation, or rendering.
