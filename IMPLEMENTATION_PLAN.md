@@ -8626,6 +8626,7 @@ refusals. These controls isolate compiler semantic permission admission; they do
 proof-source correspondence for qualified globals. Static checks and fixture-selection validation
 pass; run the full grant matrix with the fresh strict-O2 proof/compiler pair before qualifying it.
 
-The coordinator reports that the r11 readiness check passed and the A/B runner advanced into
-cold-mode warmups. The shared compiler slot remains occupied; no paired timing result is yet
-available, so the proof build remains queued.
+The coordinator reports that the r11 readiness check and both cold-mode warmups passed; the first
+measured pair has started. It is monitoring the five-minute per-process timeout because this
+compiler run is taking longer than the earlier r12 run. The shared compiler slot remains occupied
+and no paired timing result is available, so the proof build remains queued.
