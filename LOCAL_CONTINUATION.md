@@ -1,4 +1,4 @@
-# Local continuation checkpoint — updated 2026-10-10, r20
+# Local continuation checkpoint — updated 2026-10-10, r21
 
 The proof checkout, local products, compiler provenance, direct-API regression harness, and
 benchmark checkpoint are saved on the Mac. Work can continue without the Vast instance.
@@ -119,3 +119,21 @@ compiler, and matching runtime are all local. The last attempts to reach the ori
 SSH endpoint (`38.49.42.120:53652`) were closed by the host; the replacement endpoint
 (`141.195.21.72:47559`) refused the connection. This verifies the local work listed above but
 does not recover or rule out files unique to the original `/root/work` tree.
+
+## Fixed-array literal replay candidate (unqualified)
+
+The working tree has an uncommitted candidate in `src/proof/replay/type_bound_validation.elisa`
+and `src/proof/replay/global_mutable_array_validation.elisa`. It matches the exact index
+expression against a unique same-line source subscript and now unwraps `&`, `lmut`, and `mutable`
+around a source-declared fixed-array type. The standalone direct-API mutation control is
+`scripts/test_fixed_array_literal_type_bound_replay.py`; it checks the genuine `values[1]` fact
+and rejects a forged `2 < values.count` fact.
+
+Qualification is pending. Product generation `f705f90a243f48498138d0c0fe5510fa` predates the
+reference-type unwrapping change, so `scripts/test_fixed_array_constant_indices.py` still showed
+one replay gap on that older product. The first direct-API harness attempt failed before its
+assertions: the compiler backend declined the oversized generated `main` at `main@524` on a
+match statement. The mutation check was moved to a smaller standalone harness, but it has not yet
+been compiled. The compiler coordinator requested no further Stage1 builds until the next slot is
+assigned. Do not treat this candidate as passing until the standalone mutation test and refreshed
+CLI product controls pass.
