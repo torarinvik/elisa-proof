@@ -159,6 +159,8 @@ cd "$ROOT_DIR"
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 COMPILER_PRODUCT="$COMPILER"
 if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
+    # Preserve the compiler's per-source path check; never enable the legacy blanket trust flag.
+    unset ELISA_STAGE1_RUNTIME_STD
     stage1_root=""
     if [[ -n "${ELISA_STAGE1_ROOT:-}" ]]; then
         stage1_root="$ELISA_STAGE1_ROOT"
@@ -182,6 +184,16 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
         --resolve-stage1-provenance --compiler-product "$COMPILER_PRODUCT" \
         --compiler-root "$stage1_root" --frontend-repo "$COMPILER_SRC" \
         --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+    snapshot_std_root="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --validate-stage1-snapshot-std-root --snapshot-root "$SNAPSHOT_COMPILER" \
+        --compiler-product "$COMPILER_PRODUCT" --compiler-root "$stage1_root" \
+        --frontend-repo "$COMPILER_SRC" --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+    if [[ -n "${ELISA_STAGE1_RUNTIME_STD_ROOT:-}" && \
+          "$(cd "$ELISA_STAGE1_RUNTIME_STD_ROOT" 2>/dev/null && pwd -P || true)" != "$snapshot_std_root" ]]; then
+        printf 'build: refusing runtime std root outside the provenance-checked compiler snapshot\n' >&2
+        exit 2
+    fi
+    export ELISA_STAGE1_RUNTIME_STD_ROOT="$snapshot_std_root"
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
 if [[ ! -f "$PROFILE_HOOKS_SOURCE" ]]; then
@@ -238,6 +250,18 @@ object_key_of() {
     { printf '%s\n' "$RESOLVED_REV" "$current_compiler_digest" "$compiler_environment_digest" "$compiler_target_triple" "$build_recipe_digest" "$OPT_LEVEL" "$CONTRACT_FLAG" "$COMPILE_MODE" "$1"
         printf '%s\n' "$dependencies"; } | elisa_sha256 | cut -d' ' -f1
 }
+assert_snapshot_runtime_selection() {
+    local boundary="$1" selected_root
+    [[ "$COMPILER_IS_STAGE1" -eq 1 ]] || return 0
+    selected_root="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
+        --validate-stage1-snapshot-std-root --snapshot-root "$SNAPSHOT_COMPILER" \
+        --compiler-product "$COMPILER_PRODUCT" --compiler-root "$stage1_root" \
+        --frontend-repo "$COMPILER_SRC" --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || return $?
+    if [[ "$selected_root" != "${ELISA_STAGE1_RUNTIME_STD_ROOT:-}" ]]; then
+        printf 'build: runtime std root or snapshot provenance changed before %s\n' "$boundary" >&2
+        return 2
+    fi
+}
 build_identity_of() {
     local index="$1" object_key="$2" flags input sign_version
     local -a identity_args=(--identity-link-input "$PROFILE_HOOKS_OBJ" --identity-link-input "$PROFILE_HOOKS_SOURCE")
@@ -279,6 +303,7 @@ assert_stage1_fresh() {
 }
 assert_build_inputs_unchanged() {
     local boundary="$1" index current_object_key current_identity
+    assert_snapshot_runtime_selection "$boundary" || return $?
     assert_stage1_fresh || return $?
     for index in "${!PRODUCT_MAINS[@]}"; do
         current_object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")" || return $?
@@ -293,6 +318,7 @@ assert_build_inputs_unchanged() {
 }
 compile_object() {
     local main="$1" object="$2"
+    assert_snapshot_runtime_selection "compiler launch for $main" || return $?
     if [[ -n "$CONTRACT_FLAG" ]]; then
         "$COMPILER" "$CONTRACT_FLAG" -emit obj "-$OPT_LEVEL" -o "$object" "$SNAPSHOT_ROOT/$main"
     else
@@ -307,6 +333,7 @@ SKIP_PRODUCTS=()
 BINARY_REUSED=()
 COMPILE_INDICES=()
 compile_count=0
+assert_snapshot_runtime_selection "object identity capture" || exit $?
 for index in "${!PRODUCT_MAINS[@]}"; do
     object_key="$(object_key_of "${PRODUCT_MAINS[$index]}")"
     OBJECT_KEYS+=("$object_key")

@@ -1,14 +1,13 @@
 const module ProofUnfoldLimit:
     NODES: usize = 24
+    PATHS: usize = 16
 
 extend ElisaProof:
     private:
-        # Pure function unfolding (BACKLOG D-04). A function with no written postcondition whose
-        # body is one `return value` of a small call-free arithmetic or comparison term, and whose
-        # return type is a primitive integer or bool, gets the postcondition `result == value`.
-        # The synthesized ensure is an ordinary one: the function's own check must prove it from
-        # its body, and callers use it only through the verified-summary path, so unfolding adds
-        # no trusted step. Calls, fields, indexing and anything recursive stay opaque.
+        # Pure function unfolding (BACKLOG D-04). Small, straight-line conditional-return
+        # functions can expose one guarded result equation per return path. The synthesized
+        # ensures are checked through the ordinary return checker and summaries are consumed only
+        # for verified total-pure callees. Loops, mutation, indexing and non-local names stay out.
         def proof_unfold_term_nodes(expression: Ast::Expr, depth: usize) -> usize:
             return ProofUnfoldLimit::NODES + 1 if depth > ProofUnfoldLimit::NODES
             match expression:
@@ -26,10 +25,19 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, _):
                     return ProofUnfoldLimit::NODES + 1 if operator == TokenKind.RangeLt
                     return 1 + proof_unfold_term_nodes(left, depth + 1) + proof_unfold_term_nodes(right, depth + 1)
+                Ast::Expr.Field(object, _, _):
+                    return 1 + proof_unfold_term_nodes(object, depth + 1)
+                Ast::Expr.Scope(base, _, _):
+                    return 1 + proof_unfold_term_nodes(base, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    nodes: mutable usize = 1 + proof_unfold_term_nodes(callee, depth + 1)
+                    for argument in arguments |nodes, depth|:
+                        nodes <- nodes + proof_unfold_term_nodes(argument, depth + 1)
+                    return nodes
                 _:
                     return ProofUnfoldLimit::NODES + 1
 
-        def proof_unfold_return_type(return_type: Ast::Expr?) -> bool:
+        def proof_unfold_primitive_type(return_type: Ast::Expr?) -> bool:
             if return_type is declared:
                 match declared:
                     Ast::Expr.Ident(name, _):
@@ -38,58 +46,141 @@ extend ElisaProof:
                         return false
             return false
 
+        def proof_unfold_named_enum_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&) -> bool:
+            if type_expression is declared:
+                match declared:
+                    Ast::Expr.Ident(name, _):
+                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+                        return counts.enums == 0 and counts.const_enums == 1 and counts.structs == 0
+                    _:
+                        return false
+            return false
+
+        def proof_unfold_named_struct_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&) -> bool:
+            if type_expression is declared:
+                match declared:
+                    Ast::Expr.Ident(name, _):
+                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+                        return counts.enums == 0 and counts.const_enums == 0 and counts.structs == 1
+                    _:
+                        return false
+            return false
+
+        def proof_unfold_value_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&, allow_struct: bool) -> bool:
+            return true if proof_unfold_primitive_type(type_expression) or proof_unfold_named_enum_type(type_expression, declarations)
+            return allow_struct and proof_unfold_named_struct_type(type_expression, declarations)
+
+        def proof_unfold_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> void:
+            return if depth > ProofUnfoldLimit::NODES
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    if name != "" and proof_diagnostic_counterexample_name_index(names, name) == names.count:
+                        names.push(name)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _):
+                    proof_unfold_collect_names(inner, names, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_unfold_collect_names(left, names, depth + 1)
+                    proof_unfold_collect_names(right, names, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |names, depth|:
+                        proof_unfold_collect_names(argument, names, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    proof_unfold_collect_names(object, names, depth + 1)
+                    proof_unfold_collect_names(index, names, depth + 1)
+                Ast::Expr.Scope(_, _, _):
+                    pass
+                _:
+                    pass
+
+        def proof_unfold_path_expression(prefix: Ast::Expr, has_prefix: bool, condition: Ast::Expr, position: Ast::Pos) -> Ast::Expr:
+            return condition if not has_prefix
+            return Ast::Expr.Binary(prefix, TokenKind.And, condition, position)
+
+        def proof_unfold_guarded_ensures(result: mutable darray[Ast::Expr]&, value: Ast::Expr, guard: Ast::Expr, position: Ast::Pos, bool_result: bool) -> void:
+            subject: Ast::Expr = Ast::Expr.Ident("result", position)
+            equality: Ast::Expr = Ast::Expr.Binary(subject, TokenKind.EqEq, value, position)
+            if bool_result:
+                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, guard, position), TokenKind.Or, Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, subject, position), TokenKind.Or, value, position), position))
+                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, guard, position), TokenKind.Or, Ast::Expr.Binary(subject, TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, value, position), position), position))
+            else:
+                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, guard, position), TokenKind.Or, equality, position))
+
+        def proof_unfold_append_value_ensures(result: mutable darray[Ast::Expr]&, value: Ast::Expr, guard: Ast::Expr?, position: Ast::Pos, bool_result: bool) -> bool:
+            return false if proof_unfold_term_nodes(value, 0) > ProofUnfoldLimit::NODES
+            if guard is path:
+                return false if proof_unfold_term_nodes(path, 0) > ProofUnfoldLimit::NODES
+                proof_unfold_guarded_ensures(result, value, path, position, bool_result)
+                return true
+            if bool_result:
+                subject: Ast::Expr = Ast::Expr.Ident("result", position)
+                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, subject, position), TokenKind.Or, value, position))
+                result.push(Ast::Expr.Binary(subject, TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, value, position), position))
+            else:
+                result.push(Ast::Expr.Binary(Ast::Expr.Ident("result", position), TokenKind.EqEq, value, position))
+            return true
+
         def proof_unfold_bool_type(return_type: Ast::Expr?) -> bool:
             if return_type is declared:
                 return proof_ident_name(declared) == "bool"
             return false
 
-        def proof_unfolded_ensures(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, return_type: Ast::Expr?) -> darray[Ast::Expr]:
+        def proof_unfolded_ensures(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, return_type: Ast::Expr?, declarations: darray[Ast::Decl]&) -> darray[Ast::Expr]:
             result: mutable darray[Ast::Expr] = []
-            return result if not proof_unfold_return_type(return_type)
-            # Only by-value primitive parameters: a reference or aggregate argument would make
-            # the summary an equation over a place rather than a value.
+            return result if not proof_unfold_value_type(return_type, declarations, false)
+            # By-value admitted scalar/const-enum/struct parameters only. Reference parameters
+            # would make the summary an equation over a place rather than a value.
             for parameter in parameters |result|:
-                return result if parameter.has_default or not proof_unfold_return_type(parameter.type_expression)
-            returns: mutable usize = 0
-            others: mutable usize = 0
-            value: mutable Ast::Expr = Ast::Expr.Invalid
-            position: mutable Ast::Pos = proof_resource_default_position()
-            for statement in body |returns, others, value, position|:
-                match statement:
-                    Ast::Stmt.Contract(kind, _, _):
-                        others <- others + 1 if kind != "requires"
-                    Ast::Stmt.Return(returned_value, return_position):
-                        if returned_value is returned:
-                            returns <- returns + 1
-                            value <- returned
-                            position <- return_position
-                        else:
-                            others <- others + 1
-                    _:
-                        others <- others + 1
-            return result if returns != 1 or others != 0
-            return result if proof_unfold_term_nodes(value, 0) > ProofUnfoldLimit::NODES
-            # A closed body such as `return 0` gains nothing a caller cannot already see.
+                return result if parameter.has_default or not proof_unfold_value_type(parameter.type_expression, declarations, true)
+            prefix: mutable Ast::Expr = Ast::Expr.BoolLit(true, proof_resource_default_position())
+            has_prefix: mutable bool = false
+            paths: mutable usize = 0
             names: mutable darray[sview] = []
-            proof_diagnostic_counterexample_collect_names(value, &names)
+            for index in 0..<body.count |index, body, result, prefix, has_prefix, paths, names, return_type|:
+                statement: Ast::Stmt = body[index]
+                match statement:
+                    Ast::Stmt.If(condition, then_body, else_body, if_position):
+                        return [] if paths >= ProofUnfoldLimit::PATHS or then_body.count != 1 or else_body.count != 0
+                        match then_body[0]:
+                            Ast::Stmt.Return(returned_value, return_position):
+                                if returned_value is returned:
+                                    guard: Ast::Expr = proof_unfold_path_expression(prefix, has_prefix, condition, if_position)
+                                    return [] if not proof_unfold_append_value_ensures(&result, returned, guard, return_position, proof_unfold_bool_type(return_type))
+                                    proof_unfold_collect_names(condition, &names, 0)
+                                    proof_unfold_collect_names(returned, &names, 0)
+                                    paths <- paths + 1
+                                    prefix <- Ast::Expr.Binary(prefix, TokenKind.And, Ast::Expr.Unary(TokenKind.Not, condition, if_position), if_position) if has_prefix
+                                    prefix <- Ast::Expr.Unary(TokenKind.Not, condition, if_position) if not has_prefix
+                                    has_prefix <- true
+                                else:
+                                    return []
+                            _:
+                                return []
+                    Ast::Stmt.Return(returned_value, return_position):
+                        return [] if index + 1 < body.count or paths >= ProofUnfoldLimit::PATHS
+                        if returned_value is returned:
+                            guard: mutable Ast::Expr? = null
+                            guard <- prefix if has_prefix
+                            return [] if not proof_unfold_append_value_ensures(&result, returned, guard, return_position, proof_unfold_bool_type(return_type))
+                            proof_unfold_collect_names(returned, &names, 0)
+                            paths <- paths + 1
+                        else:
+                            return []
+                    Ast::Stmt.Expr(tail_value, tail_position):
+                        return [] if index + 1 < body.count or paths >= ProofUnfoldLimit::PATHS
+                        return [] if not proof_unfold_append_value_ensures(&result, tail_value, prefix if has_prefix else Ast::Expr.Absent, tail_position, proof_unfold_bool_type(return_type))
+                        proof_unfold_collect_names(tail_value, &names, 0)
+                        paths <- paths + 1
+                    _:
+                        return []
+            return [] if paths == 0
+            # Closed bodies gain nothing a caller cannot already see. Names in a scoped constant
+            # are not variables; the source proposition checker still resolves every such path.
             return result if names.count == 0
-            # Every name must be a parameter: a global or unresolved name has no binding in the
-            # synthesized proposition.
             for used in names |result, parameters|:
                 bound: mutable bool = false
                 for parameter in parameters |bound, used|:
                     bound <- true if parameter.name == used
                 return result if not bound
-            subject: Ast::Expr = Ast::Expr.Ident("result", position)
-            body_value: Ast::Expr = Ast::Expr.Paren(value, position)
-            # A bool result is summarized by the two implications rather than by `==`, because
-            # the solver resolves a disjunction against a fact but does not rewrite a bool
-            # equation: `is_digit(c)` as a fact then yields the body's condition directly.
-            if proof_unfold_bool_type(return_type):
-                result.push(Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, subject, position), TokenKind.Or, body_value, position))
-                result.push(Ast::Expr.Binary(subject, TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, body_value, position), position))
-                return result
-            result.push(Ast::Expr.Binary(subject, TokenKind.EqEq, body_value, position))
             return result
 
         # Entry facts unfold too: a precondition such as `is_digit(c)` is opaque until the

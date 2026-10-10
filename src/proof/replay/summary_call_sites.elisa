@@ -292,6 +292,92 @@ extend ElisaProof:
             return false if not proof_replay_summary_requires_call_declarations(report.source_declarations, trace.name, owner_line, call, &matches, &owners, 0)
             return owners == 1 and matches == 1
 
+        # A call summary stores normalized argument values: formal identifiers and checked
+        # constants carry their declaration positions, while the source call carries the
+        # argument-use positions. Site identity therefore uses the exact call span and callee;
+        # argument count and actual slot values are checked separately by
+        # proof_replay_summary_call_arguments_match before any summary is accepted.
+        def proof_replay_summary_call_exact_span_in_expr(source: Ast::Expr, expected: Ast::Expr, found: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            match source:
+                Ast::Expr.Call(source_callee, source_arguments, _, source_position):
+                    match expected:
+                        Ast::Expr.Call(expected_callee, expected_arguments, _, expected_position):
+                            if source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and proof_replay_expr_equal(source_callee, expected_callee) and source_arguments.count == expected_arguments.count:
+                                matches <- matches + 1
+                                found <- source
+                        _:
+                            pass
+                    return false if not proof_replay_summary_call_exact_span_in_expr(source_callee, expected, found, matches, depth + 1)
+                    for argument in source_arguments |expected, found, matches, depth|:
+                        return false if not proof_replay_summary_call_exact_span_in_expr(argument, expected, found, matches, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_summary_call_exact_span_in_expr(left, expected, found, matches, depth + 1) or not proof_replay_summary_call_exact_span_in_expr(right, expected, found, matches, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_summary_call_exact_span_in_expr(inner, expected, found, matches, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return proof_replay_summary_call_exact_span_in_expr(object, expected, found, matches, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    return false if not proof_replay_summary_call_exact_span_in_body(statements, expected, found, matches, depth + 1)
+                    return proof_replay_summary_call_exact_span_in_expr(value, expected, found, matches, depth + 1)
+                _:
+                    pass
+            return true
+
+        def proof_replay_summary_call_exact_span_in_body(body: darray[Ast::Stmt]&, expected: Ast::Expr, found: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for statement in body |expected, matches, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, value, _) | Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
+                        return false if not proof_replay_summary_call_exact_span_in_expr(value, expected, found, matches, depth + 1)
+                    Ast::Stmt.Assign(_, _, value, _):
+                        return false if not proof_replay_summary_call_exact_span_in_expr(value, expected, found, matches, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_summary_call_exact_span_in_declarations(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, call: Ast::Expr, found: mutable Ast::Expr&, found_owner_line: mutable u32&, matches: mutable usize&, owners: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |owner, owner_line, call, matches, owners, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                            local_found: mutable Ast::Expr = Ast::Expr.Invalid
+                            local_matches: mutable usize = 0
+                            return false if not proof_replay_summary_call_exact_span_in_body(body, call, &local_found, &local_matches, 0)
+                            if local_matches > 0:
+                                owners <- owners + 1
+                                matches <- matches + local_matches
+                                found <- local_found
+                                found_owner_line <- position.line
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_call_exact_span_in_declarations(nested, owner, owner_line, call, found, found_owner_line, matches, owners, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_summary_call_exact_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> (known: bool, source_call: Ast::Expr):
+            owner_line: u32 = report.replay_owner_line
+            return (false, Ast::Expr.Invalid) if owner_line == 4294967295 or trace.name == ""
+            # A direct audit entry may have no active certificate context. In that case derive
+            # the caller only from a unique exact source call span. A supplied nonzero owner line
+            # constrains the search and is never replaced with a nearby declaration.
+            source_owner_line: mutable u32 = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            matches: mutable usize = 0
+            owners: mutable usize = 0
+            return (false, Ast::Expr.Invalid) if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, trace.name, owner_line, call, &found, &source_owner_line, &matches, &owners, 0)
+            return (false, Ast::Expr.Invalid) if owners != 1 or matches != 1 or source_owner_line == 0
+            return (false, Ast::Expr.Invalid) if owner_line != 0 and owner_line != source_owner_line
+            caller_scope: mutable darray[sview] = []
+            caller_matches: mutable usize = 0
+            root_scope: mutable darray[sview] = []
+            proof_replay_summary_call_owner_scope(report.source_declarations, trace.name, source_owner_line, &root_scope, &caller_scope, &caller_matches, 0)
+            return (true, found) if caller_matches == 1
+            return (false, Ast::Expr.Invalid)
+
         def proof_replay_summary_direct_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
             return proof_replay_summary_direct_call_source_site_at(report, trace, call, 0)
 

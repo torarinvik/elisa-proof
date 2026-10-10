@@ -10,12 +10,15 @@
 # * Every count is bounded before the work it controls: nodes and children by the kernel's own
 #   budgets, theorems, hypotheses, and string bytes by `ProofPackageLimit`.
 
-const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v1"
+const PROOF_PACKAGE_INPUT_FORMAT_V1: sview = "elisa-proof-package-v1"
+const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v2"
 
 const module ProofPackageLimit:
     THEOREMS: usize = 65536
     HYPOTHESES: usize = 4096
     STRING_BYTES: usize = 65536
+    SOURCE_BYTES: usize = 8388608
+    SOURCE_FILES: usize = 1024
     # Canonical sequent identities of every theorem together. One identity is already capped by
     # PROOF_RUNTIME_IDENTITY_BYTE_LIMIT; this caps a package of many theorems over a shared DAG.
     IDENTITY_BYTES: usize = 67108864
@@ -168,6 +171,21 @@ def proof_package_string_field[@r](object: JsonValueHandle[r], key: sview) -> (k
     return (false, empty) if sview_len(text) > ProofPackageLimit::STRING_BYTES or not proof_package_string_is_valid_utf8(text)
     return (true, text)
 
+def proof_package_string_value[@r](value: JsonValueHandle[r]) -> (known: bool, value: sview):
+    empty: sview = ""
+    return (false, empty) if ElisaProofJson::kind(value) != JsonKind.STRING
+    text: sview @r = try ElisaProofJson::as_string(value) else empty
+    return (false, empty) if sview_len(text) > ProofPackageLimit::STRING_BYTES or not proof_package_string_is_valid_utf8(text)
+    return (true, text)
+
+def proof_package_source_text_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: sview):
+    empty: sview = ""
+    found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
+    return (false, empty) if not found.known or ElisaProofJson::kind(found.value) != JsonKind.STRING
+    text: sview @r = try ElisaProofJson::as_string(found.value) else empty
+    return (false, empty) if sview_len(text) > ProofPackageLimit::SOURCE_BYTES or not proof_package_string_is_valid_utf8(text)
+    return (true, text)
+
 def proof_package_bool_field[@r](object: JsonValueHandle[r], key: sview) -> (known: bool, value: bool):
     found: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(object, key)
     return (false, false) if not found.known or ElisaProofJson::kind(found.value) != JsonKind.BOOL
@@ -285,9 +303,11 @@ def proof_package_build_nodes(raw: darray[ProofPackageRawNode]&, pool: darray[u8
 def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdict:
     root_keys: darray[sview] = ["format", "source", "trust", "kernel", "theorems"]
     return proof_package_malformed("package-schema") if not proof_package_has_exactly(root, &root_keys)
-    return proof_package_malformed("format") if not proof_package_string_is(proof_package_string_field(root, "format"), PROOF_PACKAGE_INPUT_FORMAT)
+    format: (known: bool, value: sview) = proof_package_string_field(root, "format")
+    return proof_package_malformed("format") if not format.known or (format.value != PROOF_PACKAGE_INPUT_FORMAT and format.value != PROOF_PACKAGE_INPUT_FORMAT_V1)
+    source_v2: bool = format.value == PROOF_PACKAGE_INPUT_FORMAT
     source: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "source")
-    source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated"]
+    source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated", "expanded", "files"] if source_v2 else ["path", "bytes", "fingerprint", "admissible", "authenticated"]
     return proof_package_malformed("source-schema") if not source.known or not proof_package_has_exactly(source.value, &source_keys)
     path: (known: bool, value: sview) = proof_package_string_field(source.value, "path")
     bytes: (known: bool, value: usize) = proof_package_index_field(source.value, "bytes")
@@ -299,6 +319,14 @@ def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdi
     return proof_package_malformed("source-schema") if not fingerprint.known or not proof_package_has_exactly(fingerprint.value, &fingerprint_keys)
     fingerprint_value: (known: bool, value: usize) = proof_package_index_field(fingerprint.value, "value")
     return proof_package_malformed("source-schema") if not proof_package_string_is(proof_package_string_field(fingerprint.value, "algorithm"), "fnv1a32") or not fingerprint_value.known or fingerprint_value.value >= ProofPackageNumber::U32_BOUND
+    if source_v2:
+        expanded: (known: bool, value: sview) = proof_package_source_text_field(source.value, "expanded")
+        files: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(source.value, "files")
+        return proof_package_malformed("source-schema") if not expanded.known or not files.known or sview_len(expanded.value) != bytes.value or files.count == 0 or files.count > ProofPackageLimit::SOURCE_FILES
+        for index in 0..<files.count |index, files|:
+            entry: JsonValueHandle[r] = try ElisaProofJson::at(files.value, index.i64()) else ElisaProofJson::null_value(root)
+            path_entry: (known: bool, value: sview) = proof_package_string_value(entry)
+            return proof_package_malformed("source-schema") if not path_entry.known or sview_len(path_entry.value) == 0
     trust: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "trust")
     trust_keys: darray[sview] = ["hypotheses", "source_correspondence", "fingerprints"]
     return proof_package_malformed("trust-schema") if not trust.known or not proof_package_has_exactly(trust.value, &trust_keys)

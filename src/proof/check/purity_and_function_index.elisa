@@ -69,11 +69,18 @@ extend ElisaProof:
                         if value is returned:
                             return true if proof_expr_mentions_any_global(returned, mutable_globals)
                     Ast::Stmt.Expr(expression, _):
+                        if expression is Ast::Expr.Block(statements, value, captures, _):
+                            return true if value is not Ast::Expr.Invalid and proof_expr_mentions_any_global(value, mutable_globals)
+                            for captured_name in captures |mutable_globals|:
+                                return true if any global_name in mutable_globals where global_name == captured_name
+                            return true if proof_pure_body_reads_mutable_global(statements, mutable_globals)
                         return true if proof_expr_mentions_any_global(expression, mutable_globals)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
                         return true if proof_expr_mentions_any_global(initializer, mutable_globals)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         return true if proof_expr_mentions_any_global(condition, mutable_globals) or proof_pure_body_reads_mutable_global(then_body, mutable_globals) or proof_pure_body_reads_mutable_global(else_body, mutable_globals)
+                    Ast::Stmt.For(_, _, iterable, loop_body, _):
+                        return true if proof_expr_mentions_any_global(iterable, mutable_globals) or proof_pure_body_reads_mutable_global(loop_body, mutable_globals)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return true if proof_expr_mentions_any_global(scrutinee, mutable_globals)
                         for arm in arms |mutable_globals|:
@@ -90,26 +97,96 @@ extend ElisaProof:
                         return true
             return false
 
-        def proof_pure_body_direct(body: darray[Ast::Stmt]&, report: ProofReport&) -> bool:
+        def proof_pure_parameter_is_darray(type_expression: Ast::Expr) -> bool:
+            match type_expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_pure_parameter_is_darray(inner)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_pure_parameter_is_darray(base)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_pure_parameter_is_darray(inner) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable
+                    return false
+                Ast::Expr.Index(head, _, _):
+                    return proof_ident_name(head) == "darray"
+                _:
+                    return false
+
+        def proof_pure_body_shadows_name(body: darray[Ast::Stmt]&, target: sview) -> bool:
+            for statement in body:
+                match statement:
+                    Ast::Stmt.VarDecl(name, _, _, _):
+                        return true if name == target
+                    Ast::Stmt.For(_, variables, _, loop_body, _):
+                        return true if any variable in variables where variable == target
+                        return true if proof_pure_body_shadows_name(loop_body, target)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        return true if proof_pure_body_shadows_name(then_body, target) or proof_pure_body_shadows_name(else_body, target)
+                    Ast::Stmt.Expr(Ast::Expr.Block(statements, _, _, _), _):
+                        return proof_pure_body_shadows_name(statements, target)
+                    Ast::Stmt.Match(_, _, _):
+                        # Pattern binders are a separate source namespace; without a typed
+                        # binding identity, decline a name-based iterable check around a match.
+                        return true
+                    Ast::Stmt.While(_, _, _):
+                        return true
+                    Ast::Stmt.Block(_, _, _, _, _):
+                        return true
+                    _:
+                        pass
+            return false
+
+        def proof_pure_loop_iterable_supported(iterable: Ast::Expr, parameters: darray[Ast::ParamDecl]&, root_body: darray[Ast::Stmt]&) -> bool:
+            match iterable:
+                Ast::Expr.Binary(low, operator, high, _):
+                    return (operator == TokenKind.RangeLt or operator == TokenKind.RangeLe) and proof_expr_supported(low) and proof_pure_expression_shape(low) and proof_expr_supported(high) and proof_pure_expression_shape(high)
+                Ast::Expr.Ident(name, _):
+                    for parameter in parameters:
+                        if parameter.name == name:
+                            return proof_pure_parameter_is_darray(parameter.type_expression) and not proof_pure_body_shadows_name(root_body, name)
+                    return false
+                _:
+                    return false
+
+        def proof_pure_loop_captures_are_parameters(captures: darray[sview]&, parameters: darray[Ast::ParamDecl]&) -> bool:
+            return false if captures.count == 0
+            for capture_index in 0..<captures.count |capture_index, captures, parameters|:
+                capture_name: sview = captures[capture_index]
+                return false if capture_name == "" or any prior in 0..<capture_index where captures[prior] == capture_name
+                parameter_matches: mutable usize = 0
+                for parameter in parameters |capture_name, parameter_matches|:
+                    if parameter.name == capture_name:
+                        parameter_matches <- parameter_matches + 1
+                        return false if parameter.is_mutable or proof_parameter_type_is_mutable(parameter.type_expression) or not proof_pure_parameter_is_darray(parameter.type_expression)
+                return false if parameter_matches != 1
+            return true
+
+        def proof_pure_body_direct(body: darray[Ast::Stmt]&, root_body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, report: ProofReport&) -> bool:
             for statement in body:
                 match statement:
                     Ast::Stmt.Return(value, _):
                         if value is returned:
                             return false if not proof_expr_supported(returned)
                             return false if not proof_pure_expression_shape(returned)
-                    Ast::Stmt.Expr(expression, _):
+                    Ast::Stmt.Expr(expression, position):
                         continue if proof_inert_statement_kind(statement, report) == PROOF_INERT_PASS
-                        return false if not proof_expr_supported(expression)
-                        return false if not proof_pure_expression_shape(expression)
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return false if not proof_expr_supported(initializer)
-                        return false if not proof_pure_expression_shape(initializer)
-                    Ast::Stmt.Assign(_, _, _, _):
+                        if expression is Ast::Expr.Block(statements, value, captures, _):
+                            # A for-loop header with captures lowers to a block expression. Admit
+                            # only its no-yield, single-loop form with immutable darray formals;
+                            # arbitrary block scopes and hidden write-back remain refused.
+                            return false if value is not Ast::Expr.Invalid or statements.count != 1 or not proof_pure_loop_captures_are_parameters(captures, parameters)
+                            return proof_pure_body_direct(statements, root_body, parameters, report)
+                        if not proof_expr_supported(expression) or not proof_pure_expression_shape(expression):
+                            return false
+                    Ast::Stmt.VarDecl(_, _, initializer, position):
+                        if not proof_expr_supported(initializer) or not proof_pure_expression_shape(initializer):
+                            return false
+                    Ast::Stmt.Assign(_, _, _, position):
                         return false
-                    Ast::Stmt.If(condition, then_body, else_body, _):
-                        return false if not proof_expr_supported(condition)
-                        return false if not proof_pure_expression_shape(condition)
-                        return false if not proof_pure_body_direct(then_body, report) or not proof_pure_body_direct(else_body, report)
+                    Ast::Stmt.If(condition, then_body, else_body, position):
+                        if not proof_expr_supported(condition) or not proof_pure_expression_shape(condition):
+                            return false
+                        if not proof_pure_body_direct(then_body, root_body, parameters, report) or not proof_pure_body_direct(else_body, root_body, parameters, report):
+                            return false
                     Ast::Stmt.Match(scrutinee, arms, _):
                         return false if not proof_expr_supported(scrutinee)
                         return false if not proof_pure_expression_shape(scrutinee)
@@ -120,11 +197,16 @@ extend ElisaProof:
                                     pass
                                 _:
                                     return false if proof_expr_has_old(arm.guard) or not proof_expr_supported(arm.guard) or not proof_pure_expression_shape(arm.guard)
-                            return false if not proof_pure_body_direct(arm.body, report)
-                    Ast::Stmt.While(_, _, _):
+                            return false if not proof_pure_body_direct(arm.body, root_body, parameters, report)
+                    Ast::Stmt.While(_, _, position):
                         return false
-                    Ast::Stmt.For(_, _, _, _, _):
-                        return false
+                    Ast::Stmt.For(_, variables, iterable, loop_body, position):
+                        if not proof_pure_loop_iterable_supported(iterable, parameters, root_body):
+                            return false
+                        if iterable is Ast::Expr.Ident(iterable_name, _):
+                            return false if any variable in variables where variable == iterable_name
+                        if not proof_pure_body_direct(loop_body, root_body, parameters, report):
+                            return false
                     Ast::Stmt.Block(_, _, _, _, _):
                         return false
                     Ast::Stmt.Contract(kind, expression, _):
@@ -171,7 +253,7 @@ extend ElisaProof:
                     return false if proof_expr_mentions_any_global(parameters[parameter_index].default_value, mutable_globals)
             return true if proof_pure_range_search_body(body, parameters, mutable_globals, report)
             return false if proof_pure_body_reads_mutable_global(body, mutable_globals)
-            return proof_pure_body_direct(body, report)
+            return proof_pure_body_direct(body, body, parameters, report)
 
         def proof_recursive_purity_eligible(functions: ProofFunctionTable&, function_index: usize) -> bool:
             return false if function_index >= functions.recursive.count or not functions.recursive[function_index]
@@ -542,7 +624,7 @@ extend ElisaProof:
                         requires_count <- requires_count + signature_requires.count
                         ensures_count <- ensures_count + signature_ensures.count
                         if ensures_count == 0:
-                            unfolded_ensures: darray[Ast::Expr] = proof_unfolded_ensures(parameters, body, return_type)
+                            unfolded_ensures: darray[Ast::Expr] = proof_unfolded_ensures(parameters, body, return_type, file.top_decls)
                             functions.all_ensures.extend(unfolded_ensures)
                             ensures_count <- unfolded_ensures.count
                         functions.requires_counts <- functions.requires_counts.push(requires_count)

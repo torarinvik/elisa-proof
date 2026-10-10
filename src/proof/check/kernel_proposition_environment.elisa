@@ -3,22 +3,6 @@
 # declaration sorts only, never proof facts or per-expression Boolean markers.
 extend ElisaProof:
     private:
-        # Identity zero is reserved for missing/unresolved declarations, so source offsets are shifted by one.
-        const PROOF_SOURCE_KERNEL_IDENTITY_OFFSET: usize = 1
-
-        struct ProofSourceKernelTypeEntry:
-            name: sview
-            target: Ast::Expr
-            identity: usize
-            name_hash: u32
-            is_alias: bool
-
-        struct ProofSourceKernelTypeIndex:
-            entries: mutable darray[ProofSourceKernelTypeEntry]
-            bucket_heads: mutable darray[usize]
-            next_indices: mutable darray[usize]
-            complete: mutable bool
-
         struct ProofSourceKernelFormationWorkspace:
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]
             children: mutable darray[usize]
@@ -65,46 +49,6 @@ extend ElisaProof:
         def proof_source_kernel_numeric_binary(operator: TokenKind) -> bool:
             return operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent
 
-        def proof_source_kernel_collect_type_index(declarations: darray[Ast::Decl]&, entries: mutable darray[ProofSourceKernelTypeEntry]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |entries, depth|:
-                match declaration:
-                    Ast::Decl.Alias(name, target, _):
-                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: target, identity: 0, name_hash: proof_name_hash(name), is_alias: true})
-                    Ast::Decl.Struct(name, _, _, _, _, _, position):
-                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
-                    Ast::Decl.Enum(name, _, _, _, position):
-                        return false if entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-                        entries <- entries.push(ProofSourceKernelTypeEntry{name: name, target: Ast::Expr.Invalid, identity: position.offset.usize() + PROOF_SOURCE_KERNEL_IDENTITY_OFFSET, name_hash: proof_name_hash(name), is_alias: false})
-                    Ast::Decl.Module(_, body, _):
-                        return false if not proof_source_kernel_collect_type_index(&body, entries, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        return false if not proof_source_kernel_collect_type_index(&body, entries, depth + 1)
-                    _:
-                        pass
-            return true
-
-        def proof_source_kernel_build_type_index(entries: darray[ProofSourceKernelTypeEntry]) -> ProofSourceKernelTypeIndex:
-            index: mutable ProofSourceKernelTypeIndex = ProofSourceKernelTypeIndex{entries: entries, bucket_heads: [], next_indices: [], complete: false}
-            count: usize = entries.count
-            capacity: usize = proof_index_capacity(count)
-            if capacity == 0:
-                index.complete <- true
-                return index
-            index.bucket_heads.resize(capacity)
-            index.next_indices.resize(count)
-            for slot in 0..<capacity |slot, count|:
-                index.bucket_heads[slot] <- count
-            for entry in 0..<count |entry, index, capacity, count|:
-                hash: u32 = index.entries[entry].name_hash
-                slot: usize = (hash.i64() % capacity.i64()).usize()
-                index.next_indices[entry] <- index.bucket_heads[slot]
-                index.bucket_heads[slot] <- entry
-            index.complete <- true
-            return index
-
         # The alias entry of `name`: its index in `index.entries` when the count is one. Callers
         # read the target only then, so no placeholder term is built for the other answers --
         # each would be a new, never reclaimed AST record, and this runs per type audit.
@@ -112,6 +56,7 @@ extend ElisaProof:
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not index.complete
             count: mutable usize = 0
             found: mutable usize = 0
+            best_depth: mutable usize = 0
             capacity: usize = index.bucket_heads.count
             return (0, 0) if capacity == 0 and index.entries.count == 0
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if capacity == 0 or index.next_indices.count != index.entries.count
@@ -120,11 +65,20 @@ extend ElisaProof:
             entry_index: mutable usize = index.bucket_heads[slot]
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
             steps: mutable usize = 0
-            while entry_index < index.entries.count and steps < index.entries.count |entry_index, steps, index, hash, name, count, found|:
+            while entry_index < index.entries.count and steps < index.entries.count |entry_index, steps, index, hash, name, count, found, best_depth|:
                 entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
-                if entry.name_hash == hash and entry.is_alias and entry.name == name:
-                    count <- count + 1
-                    found <- entry_index
+                if entry.name_hash == hash and entry.is_alias and entry.name == name and entry.owner_path.count <= index.scope_path.count:
+                    prefix_match: mutable bool = true
+                    for segment in 0..<entry.owner_path.count |segment, entry, index, prefix_match|:
+                        prefix_match <- false if entry.owner_path[segment] != index.scope_path[segment]
+                    if prefix_match:
+                        if entry.owner_path.count > best_depth:
+                            best_depth <- entry.owner_path.count
+                            count <- 1
+                            found <- entry_index
+                        elif entry.owner_path.count == best_depth:
+                            count <- count + 1
+                            found <- entry_index
                 entry_index <- index.next_indices[entry_index]
                 steps <- steps + 1
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
@@ -132,44 +86,26 @@ extend ElisaProof:
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
             return (count, found)
 
-        def proof_source_kernel_named_type_lookup(index: ProofSourceKernelTypeIndex, name: sview) -> (count: usize, identity: usize):
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not index.complete
-            count: mutable usize = 0
-            identity: mutable usize = 0
-            capacity: usize = index.bucket_heads.count
-            return (0, 0) if capacity == 0 and index.entries.count == 0
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if capacity == 0 or index.next_indices.count != index.entries.count
-            hash: u32 = proof_name_hash(name)
-            slot: usize = (hash.i64() % capacity.i64()).usize()
-            entry_index: mutable usize = index.bucket_heads[slot]
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
-            steps: mutable usize = 0
-            while entry_index < index.entries.count and steps < index.entries.count |entry_index, steps, index, hash, name, count, identity|:
-                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
-                if entry.name_hash == hash and not entry.is_alias and entry.name == name:
-                    count <- count + 1
-                    identity <- entry.identity
-                entry_index <- index.next_indices[entry_index]
-                steps <- steps + 1
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if steps >= index.entries.count and entry_index < index.entries.count
-            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
-            return (count, identity)
-
         def proof_source_kernel_type_head_name(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, depth: usize) -> sview:
             return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, _):
                     return "" if proof_scalar_primitive_type_name(name)
                     alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, name)
-                    return proof_source_kernel_type_head_name(index.entries[alias.entry].target, index, depth + 1) if alias.count == 1
+                    if alias.count == 1:
+                        caller_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path)
+                        index.scope_path.clear()
+                        index.scope_path.extend(index.entries[alias.entry].owner_path)
+                        target_name: sview = proof_source_kernel_type_head_name(index.entries[alias.entry].target, index, depth + 1)
+                        index.scope_path.clear()
+                        index.scope_path.extend(caller_scope)
+                        return target_name
                     return "" if alias.count > 1
                     return name
                 Ast::Expr.Scope(_, name, _):
                     return "" if proof_scalar_primitive_type_name(name)
-                    alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, name)
-                    return proof_source_kernel_type_head_name(index.entries[alias.entry].target, index, depth + 1) if alias.count == 1
-                    return "" if alias.count > 1
+                    # Preserve the qualified leaf for exact-path lookup. A leaf alias visible in
+                    # the caller's lexical scope cannot capture `Other::Name`.
                     return name
                 Ast::Expr.Paren(inner, _):
                     return proof_source_kernel_type_head_name(inner, index, depth + 1)
@@ -292,13 +228,21 @@ extend ElisaProof:
                         return (false, "", "", "", "", 0, 0)
                     _:
                         pass
-                alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, type_name)
-                if alias.count == 1:
-                    return proof_source_kernel_type_sort(index.entries[alias.entry].target, "", declarations, index, depth + 1)
-                return (false, "", "", "", "", 0, 0) if alias.count > 1
+                is_qualified_type: bool = proof_source_kernel_type_is_qualified(type_expression)
+                if not is_qualified_type:
+                    alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, type_name)
+                    if alias.count == 1:
+                        caller_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path)
+                        index.scope_path.clear()
+                        index.scope_path.extend(index.entries[alias.entry].owner_path)
+                        alias_sort: (known: bool, sort: sview, type_name: sview, element_sort: sview, element_type_name: sview, type_identity: usize, element_type_identity: usize) = proof_source_kernel_type_sort(index.entries[alias.entry].target, "", declarations, index, depth + 1)
+                        index.scope_path.clear()
+                        index.scope_path.extend(caller_scope)
+                        return alias_sort
+                    return (false, "", "", "", "", 0, 0) if alias.count > 1
             named_type: sview = proof_source_kernel_type_head_name(type_expression, index, 0) if has_expression else type_name
             if named_type != "":
-                declared_type: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup(index, named_type)
+                declared_type: (count: usize, identity: usize) = proof_source_kernel_named_type_lookup_at_path(index, type_expression, named_type)
                 return (declared_type.count == 1 and declared_type.identity != 0, "named", named_type, "", "", declared_type.identity, 0) if declared_type.count == 1
                 return (false, "", "", "", "", 0, 0)
             return (false, "", "", "", "", 0, 0)
@@ -451,6 +395,8 @@ extend ElisaProof:
             decreases PROOF_TYPE_AUDIT_DEPTH_LIMIT - depth
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             for declaration in declarations |all_declarations, annotations, tuple_label_index, reference_parameters, bindings, module_owner, depth|:
+                type_index.scope_path.clear()
+                type_index.scope_path.extend(module_scope)
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, _, _, _, position):
                         return_type_expression: mutable Ast::Expr = Ast::Expr.Ident("void", Ast::pos_at_line(0))
@@ -531,6 +477,8 @@ extend ElisaProof:
             if module_owner_identity != 0:
                 local_bindings.push(ElisaProofKernelCore::ProofKernelTypingBinding{kind: "module-context", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: module_owner_identity, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false})
             return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if names.count != types.count or names.count != source_types.count
+            scoped_globals: (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) = proof_source_kernel_scoped_function_bindings(global_bindings, names, workspace.type_index.scope_path)
+            return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}) if not scoped_globals.known
             # Lexical contexts are flat and ordered outer-to-inner. Keep the nearest declaration
             # for each name so the kernel sees Elisa's resolved binding, not an ambiguous pair.
             # The names are AST-backed sviews; the imported file outlives this whole formation pass.
@@ -552,6 +500,10 @@ extend ElisaProof:
                         added <- proof_source_kernel_add_type_binding(&local_bindings, "value", names[index], "", 0, source_types[index], types[index], declarations, workspace.type_index, 0)
                     if not added:
                         return (false, ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings})
+            call_owner: mutable sview = ""
+            if workspace.type_index.scope_path.count > 0:
+                call_owner <- workspace.type_index.scope_path[workspace.type_index.scope_path.count - 1]
+                local_bindings.push(ElisaProofKernelCore::ProofKernelTypingBinding{kind: "call-owner-context", name: "", owner: call_owner, sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false})
             environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: local_bindings}
             return (true, environment)
 

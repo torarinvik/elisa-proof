@@ -258,6 +258,16 @@ extend ElisaProofKernelReplay:
                 active <- true if state.active_regions[index] == state.binding_region[slot]
             return active
 
+        # An implicit shared-borrow actual is valid for an owned aggregate explicitly
+        # marked borrowable, or for a field reached through an existing shared reference.
+        # Mutable reference capabilities stay excluded from this spelling; they require
+        # an explicit borrow event so replay can check the alias transition directly.
+        def proof_kernel_replay_resource_binding_allows_implicit_shared_borrow(state: ProofKernelReplayResourceState&, slot: usize, place: ProofKernelReplayResourcePlace) -> bool:
+            return false if slot >= state.binding_names.count or slot >= state.binding_moved.count or slot >= state.binding_borrowable.count or slot >= state.binding_reference.count or slot >= state.binding_mutable_reference.count or state.binding_moved[slot]
+            if state.binding_reference[slot]:
+                return not state.binding_mutable_reference[slot] and place.depth > 0
+            state.binding_borrowable[slot]
+
         def proof_kernel_replay_resource_invalidate_region_bindings(state: mutable ProofKernelReplayResourceState&, region: sview) -> void:
             for index in 0..<state.binding_region.count |index, state, region|:
                 if index < state.binding_region_live.count and state.binding_region[index] == region:
@@ -396,13 +406,13 @@ extend ElisaProofKernelReplay:
                 # are not exported to the caller state.
                 return (true, empty, state.binding_names.count, false, true)
             if nodes[argument_root].operator == "value":
-                # A non-scalar by-value actual may be Elisa's implicit shared borrow spelling.
-                # Only a binding explicitly marked borrowable by the producer can take this path;
-                # otherwise replay applies the ordinary scalar/no-region value rule below.
+                # A non-scalar by-value actual may be Elisa's implicit shared-borrow spelling.
+                # Owned aggregates need the producer's borrowable marker; fields reached through
+                # a shared reference may be lent only while that reference binding stays live.
                 decoded_value: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, nodes[argument_root].left, 0)
                 if decoded_value.known and proof_kernel_replay_resource_place_root_valid(nodes, decoded_value.place):
                     value_slot: usize = proof_kernel_replay_resource_lookup_place(state, nodes, decoded_value.place)
-                    if value_slot < state.binding_names.count and value_slot < state.binding_borrowable.count and state.binding_borrowable[value_slot]:
+                    if proof_kernel_replay_resource_binding_allows_implicit_shared_borrow(state, value_slot, decoded_value.place):
                         return (false, empty, state.binding_names.count, false, false) if value_slot >= state.binding_moved.count or state.binding_moved[value_slot]
                         return (false, empty, state.binding_names.count, false, false) if not proof_kernel_replay_resource_binding_region_lifetime_valid(state, value_slot)
                         return (true, decoded_value.place, value_slot, true, false)
@@ -514,7 +524,7 @@ extend ElisaProofKernelReplay:
                 return false if exclusive and nodes[actual_child.value].operator != "borrow" and nodes[actual_child.value].operator != "reference"
                 return false if not exclusive and nodes[actual_child.value].operator != "value" and nodes[actual_child.value].operator != "borrow" and nodes[actual_child.value].operator != "reference"
                 if nodes[actual_child.value].operator == "value":
-                    return false if exclusive or not actual.has_slot or actual.slot >= state.binding_borrowable.count or not state.binding_borrowable[actual.slot]
+                    return false if exclusive or not actual.has_slot or not proof_kernel_replay_resource_binding_allows_implicit_shared_borrow(state, actual.slot, actual.place)
                 return false if not proof_kernel_replay_resource_place_root_valid(nodes, actual.place)
                 lent[lent.count - 1] <- ProofKernelReplayLentArgument{place: actual.place, known: true, exclusive: exclusive}
                 if exclusive:

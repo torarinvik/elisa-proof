@@ -24,9 +24,9 @@ extend ElisaProof:
         const PROOF_DISJUNCTION_DENIAL_FACT_LIMIT: usize = 64
 
         # Admit integer ordering only from exact type witnesses, not a scalar witness
-        # that could describe a float. Primitive integer +/- preserves integer
-        # total ordering even under wrap; subsequent arithmetic tiers still
-        # enforce machine-range safety on every consumed premise.
+        # that could describe a float. Primitive integer arithmetic preserves integer
+        # total ordering even under wrap; subsequent arithmetic tiers still enforce
+        # machine-range safety on every consumed premise.
         def proof_disjunction_denial_integer_term(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
@@ -39,6 +39,12 @@ extend ElisaProof:
                 Ast::Expr.Binary(Ast::Expr.IntLit(numerator, _), TokenKind.Slash, Ast::Expr.IntLit(denominator, _), _):
                     return numerator >= 0 and denominator > 0 and proof_scalar_term_witnessed(expression, facts, 0)
                 Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Star and proof_scalar_term_witnessed(expression, facts, 0):
+                        left_literal: (known: bool, value: i64) = proof_constant_int(left)
+                        right_literal: (known: bool, value: i64) = proof_constant_int(right)
+                        return proof_disjunction_denial_integer_term(right, facts, depth + 1) if left_literal.known and left_literal.value >= 0
+                        return proof_disjunction_denial_integer_term(left, facts, depth + 1) if right_literal.known and right_literal.value >= 0
+                        return false
                     return (operator == TokenKind.Plus or operator == TokenKind.Minus) and proof_scalar_term_witnessed(expression, facts, 0) and proof_disjunction_denial_integer_term(left, facts, depth + 1) and proof_disjunction_denial_integer_term(right, facts, depth + 1)
                 Ast::Expr.Ident(name, _):
                     for fact in facts |expression|:
@@ -76,11 +82,32 @@ extend ElisaProof:
                 _:
                     return false
 
+        # Boolean calls are proposition atoms only when the checker emitted the dedicated
+        # marker after resolving one source declaration, checking its direct `bool` return,
+        # proving its total-pure summary, and admitting its call preconditions. The marker
+        # contains the complete call AST, so argument changes produce a different atom.
+        def proof_disjunction_denial_boolean_atom_witnessed(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact, expression|:
+                match fact:
+                    Ast::Expr.Call(callee, arguments, _, _):
+                        if proof_ident_name(callee) == "__elisa_verified_total_bool_atom" and arguments.count == 2:
+                            match arguments[1]:
+                                Ast::Expr.StringLit(_, _):
+                                    pass
+                                _:
+                                    continue
+                            return true if proof_expr_equal(arguments[0], expression)
+                    _:
+                        pass
+            return false
+
         def proof_disjunction_denial_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
                     return proof_disjunction_denial_value_closed(expression, facts, depth + 1)
+                Ast::Expr.Call(_, _, _, _):
+                    return proof_disjunction_denial_boolean_atom_witnessed(expression, facts)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
                     return proof_disjunction_denial_fragment(inner, facts, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):

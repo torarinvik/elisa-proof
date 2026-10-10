@@ -8,6 +8,8 @@ struct CorrObligation:
     kind: mutable sview
 struct CorrFunction:
     name: sview
+    owner_start: usize
+    owner_count: usize
     line: u32
     owner_start: usize
     owner_count: usize
@@ -31,7 +33,9 @@ struct CorrWork:
     active_returns_void: mutable bool
     seen: mutable darray[sview]
     parameters: mutable darray[sview]
+    parameter_types: mutable darray[sview]
     ensures: mutable darray[Ast::Expr]
+    function_ensures: mutable darray[Ast::Expr]
     # Names some declaration other than a top-level function takes, including type names.
     taken: mutable darray[sview]
     # Functions declared with `lemma`: ghost declarations, whose calls this semantics does not model.
@@ -209,6 +213,7 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                 return ("named-argument", 0) if sview_len(label) > 0
             target: usize = corr_function_index_for_callee(work, callee_expression)
             return ("callee-unresolved", 0) if target >= work.functions.count
+            return ("scoped-call", 0) if work.functions[target].scoped
             return ("callee-unchecked", 0) if work.functions[target].status != "checked"
             params: darray[Ast::ParamDecl] = []
             match work.functions[target].declaration:
@@ -239,7 +244,10 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                                 pass
                     return ("arity", 0) if params.count != actuals.count
                     formals: mutable darray[sview] = []
-                    for param in params |formals|:
+                    formal_types: mutable darray[sview] = []
+                    for param in params |formals, formal_types, work, pool|:
+                        typed: (name: sview, is_mutable: bool) = corr_type_name(work.taken, param.type_expression, false, pool)
+                        return ("parameter-type", 0) if sview_len(typed.name) == 0
                         formals.push(param.name)
                     callee_term: usize = corr_resolved_callable_term(pool, work, target)
                     call_term: usize = corr_call_term(pool, callee_term, &actuals)
@@ -247,6 +255,9 @@ def corr_apply_call(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
                     summary_names: mutable darray[sview] = []
                     summary_names.extend(formals)
                     summary_names.push("result")
+                    summary_types: mutable darray[sview] = []
+                    summary_types.extend(formal_types)
+                    summary_types.push(return_type_name.name)
                     summary_values: mutable darray[usize] = []
                     summary_values.extend(actuals)
                     summary_values.push(call_term)
@@ -359,11 +370,24 @@ def corr_expression_with_calls(pool: mutable CorrPool&, work: mutable CorrWork&,
 def corr_return(pool: mutable CorrPool&, work: mutable CorrWork&, returned: usize, state: mutable CorrState&, line: u32) -> sview:
     names: mutable darray[sview] = []
     values: mutable darray[usize] = []
+    types: mutable darray[sview] = []
     for parameter in work.parameters |pool, names, values|:
         names.push(parameter)
         values.push(corr_ident(pool, parameter))
+    types.extend(work.parameter_types)
     names.push("result")
     values.push(returned)
+    if work.active_function < work.functions.count:
+        match work.declarations[work.functions[work.active_function].declaration]:
+            Ast::Decl.Func(_, _, return_type, _, _, _, _):
+                if return_type is declared:
+                    typed: (name: sview, is_mutable: bool) = corr_type_name(work.taken, declared, false, pool)
+                    return "return-type" if sview_len(typed.name) == 0
+                    types.push(typed.name)
+                else:
+                    return "return-type"
+            _:
+                return "declaration"
     # Recording a failed or successful check mutates `work`, so do not iterate its `ensures`
     # field while passing the containing record by mutable reference.
     ensures: mutable darray[Ast::Expr] = []
@@ -387,7 +411,19 @@ def corr_walk_block(pool: mutable CorrPool&, work: mutable CorrWork&, declaratio
     return "nesting" if depth > CorrLimit::NESTING
     for index in start..<body.count |index, pool, work, declarations, body, state, in_loop, depth|:
         return "unreachable" if not state.live
-        reason: sview = corr_walk_statement(pool, work, declarations, body[index], state, in_loop, depth)
+        reason: mutable sview = ""
+        match body[index]:
+            Ast::Stmt.Expr(expression, position):
+                match expression:
+                    Ast::Expr.Call(_, _, _, _):
+                        reason <- corr_walk_statement(pool, work, declarations, body[index], state, in_loop, depth)
+                    _:
+                        return "statement" if index + 1 < body.count or in_loop
+                        computed: (reason: sview, value: usize) = corr_value(pool, work, declarations, expression, state, position.line)
+                        return computed.reason if sview_len(computed.reason) > 0
+                        reason <- corr_return(pool, work, computed.value, state, position.line)
+            _:
+                reason <- corr_walk_statement(pool, work, declarations, body[index], state, in_loop, depth)
         return reason if sview_len(reason) > 0
     return ""
 def corr_walk_statement(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, statement: Ast::Stmt, state: mutable CorrState&, in_loop: bool, depth: usize) -> sview:
@@ -538,6 +574,7 @@ def corr_walk_for(pool: mutable CorrPool&, work: mutable CorrWork&, declarations
 def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, function_index: usize) -> sview:
     work.seen.clear()
     work.parameters.clear()
+    work.parameter_types.clear()
     work.ensures.clear()
     work.active_owner_start <- work.functions[function_index].owner_start
     work.active_owner_count <- work.functions[function_index].owner_count
@@ -565,17 +602,19 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
                 return "name" if not corr_name_allowed(work, param.name)
                 work.seen.push(param.name)
                 work.parameters.push(param.name)
+                work.parameter_types.push(typed.name)
                 symbol: usize = corr_ident(pool, param.name)
                 return "budget" if not corr_declare_owned_type(pool, work, &state, param.name, typed.name, symbol, false, 0)
             return "budget" if not corr_source_constants_add_facts(pool, &state, work.source_constants)
             validation_names: mutable darray[sview] = []
             validation_values: mutable darray[usize] = []
+            validation_types: mutable darray[sview] = []
             validation_names.extend(state.names)
             validation_values.extend(state.values)
             validation_names.push("result") if not returns_void
             validation_values.push(corr_ident(pool, "result")) if not returns_void
             first: mutable usize = 0
-            for statement in body |pool, work, state, validation_names, validation_values, first|:
+            for statement in body |pool, work, state, validation_names, validation_values, validation_types, first|:
                 match statement:
                     Ast::Stmt.Contract(kind, predicate, _):
                         if kind == "requires":
@@ -589,6 +628,9 @@ def corr_walk_function(pool: mutable CorrPool&, work: mutable CorrWork&, declara
                         first <- first + 1
                     _:
                         break
+            if work.ensures.count == 0:
+                generated: darray[Ast::Expr] = corr_source_summary_ensures(pool, return_type, body, first)
+                work.ensures.extend(generated)
             reason: sview = corr_walk_block(pool, work, declarations, body, first, &state, false, 0)
             return reason if sview_len(reason) > 0
             if state.live:

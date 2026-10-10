@@ -214,6 +214,99 @@ extend ElisaProof:
                 return if proof_report_builtin_operator_impl_exists(report, enum_name, protocol)
             proof_add_const_enum_member_scalar_witnesses_in(report.source_declarations, facts, report, enum_name, type_expression, line, owner, position, 0)
 
+        def proof_const_enum_member_value_in_scope(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize) -> (types: usize, const_types: usize, members: usize, known: bool, value: i64):
+            return (2, 2, 2, false, 0) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            types: mutable usize = 0
+            const_types: mutable usize = 0
+            members: mutable usize = 0
+            known: mutable bool = false
+            value: mutable i64 = 0
+            for declaration in declarations |target, current, member_name, depth, types, const_types, members, known, value|:
+                match declaration:
+                    Ast::Decl.Module(module_name, body, _):
+                        nested_scope: mutable darray[sview] = []
+                        nested_scope.extend(current)
+                        nested_scope.push(module_name)
+                        nested: (types: usize, const_types: usize, members: usize, known: bool, value: i64) = proof_const_enum_member_value_in_scope(body, target, nested_scope, member_name, depth + 1)
+                        types <- types + nested.types
+                        const_types <- const_types + nested.const_types
+                        members <- members + nested.members
+                        if nested.known:
+                            known <- true
+                            value <- nested.value
+                    Ast::Decl.Scoped(body, _):
+                        nested: (types: usize, const_types: usize, members: usize, known: bool, value: i64) = proof_const_enum_member_value_in_scope(body, target, current, member_name, depth + 1)
+                        types <- types + nested.types
+                        const_types <- const_types + nested.const_types
+                        members <- members + nested.members
+                        if nested.known:
+                            known <- true
+                            value <- nested.value
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        if proof_enum_scope_matches(current, target) and target[target.count - 1] == enum_name:
+                            types <- types + 1
+                            const_types <- const_types + 1 if is_const
+                            for variant in variants |member_name, is_const, members, known, value|:
+                                if variant.name == member_name and variant.fields.count == 0:
+                                    members <- members + 1
+                                    if is_const:
+                                        match variant.value_expr:
+                                            Ast::Expr.IntLit(tag, _):
+                                                known <- true
+                                                value <- tag
+                                            _:
+                                                pass
+                    _:
+                        pass
+            return (types, const_types, members, known, value)
+
+        # Constructor relationships are emitted only when the source expression actually
+        # compares two exact constructors. The previous whole-domain expansion added every
+        # pair for each constructor mention, even when the proof never queried those pairs.
+        # Replay independently re-derives the exact enum owner and integer tags for this fact.
+        def proof_add_qualified_const_enum_member_pair(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, left: Ast::Expr, right: Ast::Expr, position: Ast::Pos) -> void:
+            match left:
+                Ast::Expr.Field(left_type, left_member, _):
+                    match right:
+                        Ast::Expr.Field(right_type, right_member, _):
+                            return if left_member == "" or right_member == "" or not proof_expr_equal(left_type, right_type)
+                            path: mutable darray[sview] = []
+                            return if not proof_enum_scope_path(left_type, &path, 0) or path.count < 2
+                            enum_name: sview = path[path.count - 1]
+                            return if proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+                            root_scope: darray[sview] = []
+                            left_value: (types: usize, const_types: usize, members: usize, known: bool, value: i64) = proof_const_enum_member_value_in_scope(report.source_declarations, path, root_scope, left_member, 0)
+                            right_value: (types: usize, const_types: usize, members: usize, known: bool, value: i64) = proof_const_enum_member_value_in_scope(report.source_declarations, path, root_scope, right_member, 0)
+                            return if left_value.types != 1 or left_value.const_types != 1 or left_value.members != 1 or not left_value.known
+                            return if right_value.types != 1 or right_value.const_types != 1 or right_value.members != 1 or not right_value.known
+                            operator: TokenKind = TokenKind.EqEq if left_value.value == right_value.value else TokenKind.BangEq
+                            comparison: Ast::Expr = Ast::Expr.Binary(left, operator, right, position)
+                            proof_add_traced_fact(facts, report, comparison, "const-enum-member-value", position.line, report.type_bounds.owner) if facts.count < PROOF_RETURN_FACT_STATE_ENTRY_CAP and not (any existing in facts where proof_expr_equal(existing, comparison))
+                        _:
+                            pass
+                _:
+                    pass
+
+        def proof_add_qualified_enum_pair_demands(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, depth: usize) -> void:
+            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Binary(left, operator, right, position):
+                    proof_add_qualified_const_enum_member_pair(facts, report, left, right, position) if operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    proof_add_qualified_enum_pair_demands(left, facts, report, depth + 1)
+                    proof_add_qualified_enum_pair_demands(right, facts, report, depth + 1)
+                Ast::Expr.Unary(_, operand, _) | Ast::Expr.Paren(operand, _):
+                    proof_add_qualified_enum_pair_demands(operand, facts, report, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    proof_add_qualified_enum_pair_demands(condition, facts, report, depth + 1)
+                    proof_add_qualified_enum_pair_demands(then_value, facts, report, depth + 1)
+                    proof_add_qualified_enum_pair_demands(else_value, facts, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_add_qualified_enum_pair_demands(callee, facts, report, depth + 1)
+                    for argument in arguments |facts, report, depth|:
+                        proof_add_qualified_enum_pair_demands(argument, facts, report, depth + 1)
+                _:
+                    pass
+
         def proof_add_qualified_enum_member_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
             return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             match expression:
@@ -237,49 +330,12 @@ extend ElisaProof:
                     proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, depth + 1)
                     proof_add_qualified_enum_member_witnesses(then_value, facts, report, line, owner, depth + 1)
                     proof_add_qualified_enum_member_witnesses(else_value, facts, report, line, owner, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_add_qualified_enum_member_witnesses(callee, facts, report, line, owner, depth + 1)
+                    for argument in arguments |facts, report, line, owner, depth|:
+                        proof_add_qualified_enum_member_witnesses(argument, facts, report, line, owner, depth + 1)
                 _:
                     pass
-
-        def proof_add_qualified_const_enum_member_values_in(declarations: darray[Ast::Decl]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, target: darray[sview]&, current: darray[sview]&, type_expression: Ast::Expr, position: Ast::Pos, depth: usize) -> void:
-            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |facts, report, target, current, type_expression, position, depth|:
-                match declaration:
-                    Ast::Decl.Module(module_name, body, _):
-                        nested_scope: mutable darray[sview] = []
-                        nested_scope.extend(current)
-                        nested_scope.push(module_name)
-                        proof_add_qualified_const_enum_member_values_in(body, facts, report, target, nested_scope, type_expression, position, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        proof_add_qualified_const_enum_member_values_in(body, facts, report, target, current, type_expression, position, depth + 1)
-                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
-                        if is_const and variants.count <= 16 and proof_enum_scope_matches(current, target) and target[target.count - 1] == enum_name:
-                            for first_index in 0..<variants.count |first_index, variants, facts, report, target, current, type_expression, position|:
-                                first: Ast::EnumVariant = variants[first_index]
-                                continue if first.fields.count != 0 or not proof_exact_const_enum_member_owner(type_expression, first.name, report.source_declarations).known
-                                first_value: (known: bool, value: i64) = match first.value_expr:
-                                    Ast::Expr.IntLit(value, _): (true, value)
-                                    _: (false, 0)
-                                continue if not first_value.known
-                                for second_index in first_index + 1..<variants.count |second_index, variants, facts, report, target, current, type_expression, position, first, first_value|:
-                                    second: Ast::EnumVariant = variants[second_index]
-                                    continue if second.fields.count != 0 or not proof_exact_const_enum_member_owner(type_expression, second.name, report.source_declarations).known
-                                    second_value: (known: bool, value: i64) = match second.value_expr:
-                                        Ast::Expr.IntLit(value, _): (true, value)
-                                        _: (false, 0)
-                                    continue if not second_value.known
-                                    member_operator: TokenKind = TokenKind.EqEq if first_value.value == second_value.value else TokenKind.BangEq
-                                    comparison: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Field(type_expression, first.name, position), member_operator, Ast::Expr.Field(type_expression, second.name, position), position)
-                                    proof_add_traced_fact(facts, report, comparison, "const-enum-member-value", position.line, report.type_bounds.owner) if not (any existing in facts where proof_expr_equal(existing, comparison))
-                    _:
-                        pass
-
-        def proof_add_qualified_const_enum_member_values(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, type_expression: Ast::Expr, position: Ast::Pos) -> void:
-            path: mutable darray[sview] = []
-            return if not proof_enum_scope_path(type_expression, &path, 0) or path.count == 0
-            enum_name: sview = path[path.count - 1]
-            return if proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
-            current_scope: darray[sview] = []
-            proof_add_qualified_const_enum_member_values_in(report.source_declarations, facts, report, path, current_scope, type_expression, position, 0)
 
         # Whether every payload field of the one payload enum named `name` is a plain value.
         # `visiting` already holds `name`, so a recursive mention is admitted coinductively.
