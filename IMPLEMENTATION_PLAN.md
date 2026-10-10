@@ -9160,6 +9160,39 @@ weaken compiler grants or use trusted suppression. Preserve the regression and i
 evidence, then rerun it as part of the full gate after the frozen run releases.
 
 
+### 23.27.86 Bounds and seeded-stress fixture migrations pass native controls (2026-10-10)
+
+Compiler commits `150dce6c`, `b9b26f0c`, and `92677246` update the bounds and seeded-stress
+harnesses to use the explicitly selected Stage1 product/runtime and to check that product's own
+provenance. Native evidence on the frozen external tuple passes the bounds fixture on Stage0 and
+Stage1 at O0 and O2, with valid accesses succeeding and out-of-range access trapping. Seed 7/15
+also passes all 15 cases on each stage, with zero failures or resource errors. These focused
+checks are qualified; the full compiler gate remains active and must rerun them after integration.
+
+
+### 23.27.87 AST parity check reports 28 structural differences (2026-10-10)
+
+`emit_ast_parity_smoke.sh` fails 28 of 582 fixture summaries. Differences include inferred or
+hidden region parameters, error-family and extern formatting, visible refined return types,
+statement counts in named-protocol/quantifier/reference/static-if cases, and scoped module
+declaration counts. These are AST-report structural differences, distinct from runtime behavior
+and diagnostic-span parity. After the frozen gate exits, classify each group against the intended
+AST contract and downstream serializer use. Preserve exact Stage0/Stage1 comparisons; do not
+bulk-regenerate the baseline without confirming every semantic and presentation change.
+
+
+### 23.27.88 Atomic fetch-add lowering emits a non-atomic call (2026-10-10)
+
+The isolated native atomic runner found a Stage1 LLVM lowering defect after the fixture received
+its explicit grants. In `atomic-stage1.ll`, `atomic_fetch_add_acqrel` calls internal `@fetch_add`
+with order code 3 instead of emitting an LLVM `atomicrmw add` with acquire-release ordering;
+exchange and compare-exchange lower correctly. The runner stops on this IR mismatch, so no native
+runtime pass is claimed. Treat this as a compiler correctness blocker: repair the typed atomic
+lowering, assert the emitted operation and ordering, then run the atomic runtime controls under
+the required thread sanitizer or equivalent concurrency checks. The source IR evidence is saved in
+the local recovery folder; do not weaken the grant or ordering checks.
+
+
 ### 23.27.85 Differential corpus exposes 85 Stage1 compile declines (2026-10-10)
 
 The long serial differential corpus completed with 849 programs: 359 matched, 0 behavioral
