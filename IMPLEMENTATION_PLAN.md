@@ -9267,17 +9267,19 @@ returns its expected value with Stage1 O0. The combined preview has not been bui
 the active gate.
 
 The latest isolated compiler branch is `codex/object-cache-integrity` at
-`4c798bdbaa3e445e66e22de08a95b5e6149f73cf`. The compiler agent reports that the latest codec
-control compiled, linked, and ran successfully at O2 with both Stage0 and Stage1. The controls cover
-historical encoder byte equality, two functions and a direct call under local grants, round trips,
-fingerprints, truncation, and corrupted-cache rejection. Generated logs and results are preserved
-in `codec-integrity-native-evidence-20261010-r1.tar.gz` in the local recovery directory. That archive
-also retains an earlier unsupported `-emit exe` invocation; the successful Stage0 path is the
-separate object build, link, and run. Gen2 validation is still pending and production reuse remains
-unwired; do not claim a qualified optimization or speedup. The reported `query_head_for` /
-`const_scope_owner` annotations still need an owning commit and gen2 validation. Keep the active
-qualification checkout unchanged until `full.exit` appears, then validate the preview and any new
-region annotations on the exact current compiler/runtime tuple before rerunning affected gates.
+`ac9bef5c9d4eceae3adccabddf0dbeb0b4a05ec9`, with source bundle
+`compiler-invalidation-controls-ac9bef5c.bundle` and native evidence
+`codec-native-evidence-ac9bef5c.tar.gz` in the recovery directory. The codec controls compiled,
+linked, and ran successfully at O2 with both Stage0 and Stage1, covering historical encoder byte
+equality, two functions and a direct call under local grants, round trips, fingerprints,
+truncation, and corrupted-cache rejection. The latest commits add controls for warm reuse after
+decode and for body-edit/options invalidation, but both remain unrun. No fresh compiler was built
+from this draft, production semantic replay remains false, and no performance was measured. Keep
+the codec experimental and do not claim a qualified optimization or speedup. The reported
+`query_head_for` / `const_scope_owner` annotations still need an owning commit and gen2 validation.
+Keep the active qualification checkout unchanged until `full.exit` appears, then validate the
+preview and any new region annotations on the exact current compiler/runtime tuple before rerunning
+affected gates.
 
 Continue in the high-ROI order from §23.27.71: finish and triage the exact-tuple compiler gate;
 qualify proof-consumer admission, direct API source obligations, exact Global grant enforcement,
