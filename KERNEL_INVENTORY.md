@@ -276,7 +276,7 @@ and blank lines. `scripts/test_kernel_inventory.py` checks the dependency claims
 
 | Tier | Modules | Lines | Role |
 |---|---|---|---|
-| Trusted kernel | `proof/kernel_core.elisa`, `proof/kernel_replay.elisa` and its include closure (including `proof/kernel_typed_literals.elisa`, `proof/kernel_typed_arithmetic.elisa`, `proof/kernel_contextual_constants.elisa`, and `proof/kernel_replay/*`) | 15,404 | Decides every certificate from arena terms alone. Every bare helper and module-qualified call resolves to a function defined in one of the kernel modules (checked). |
+| Trusted kernel | `proof/kernel_core.elisa`, `proof/kernel_replay.elisa` and its include closure (including `proof/kernel_typed_literals.elisa`, `proof/kernel_typed_arithmetic.elisa`, `proof/kernel_contextual_constants.elisa`, and `proof/kernel_replay/*`) | 15,404 | Decides every certificate from arena terms alone. Every bare helper and module-qualified call resolves to a function defined in one of the kernel modules; member calls are enumerated below (checked). |
 | Trusted certificate admission | `proof/certificate_admission.elisa` | 82 | Admits trace-certificate roots by kind and version tag. |
 | Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | 14,734 | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
 | Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | 29,525 | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
@@ -284,6 +284,26 @@ and blank lines. `scripts/test_kernel_inventory.py` checks the dependency claims
 | Trusted correspondence checker | `correspondence/*` | 3,116 | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | 12,512 | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair and portable I/O | 3,138 | Output and CLI. Fingerprints are binding guards only (limitation 2). |
+
+### Kernel member operations
+
+Member calls in the kernel resolve to these standard collection and integer-conversion operations.
+Their implementations remain part of the Elisa compiler/runtime trust base; adding another member
+call requires reviewing and updating this closed inventory.
+
+<!-- inventory:kernel-member-calls -->
+| Method | Primitive role |
+|---|---|
+| `clear` | collection mutation |
+| `extend` | collection mutation |
+| `i64` | integer conversion |
+| `pop` | collection mutation |
+| `push` | collection mutation |
+| `resize` | collection mutation |
+| `truncate` | collection mutation |
+| `u64` | integer conversion |
+| `usize` | integer conversion |
+<!-- /inventory:kernel-member-calls -->
 
 ### Host-side soundness-incident registry
 

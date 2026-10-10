@@ -6,6 +6,8 @@ from the implementation and requires exact equality, so a kind, rule, trace kind
 call cannot be added or removed without updating the reviewed inventory.
 """
 
+from __future__ import annotations
+
 import re
 import sys
 from pathlib import Path
@@ -222,6 +224,16 @@ def kernel_external_calls() -> set[str]:
     return kernel_call_target_violations(kernel)
 
 
+def kernel_member_calls(files: list[Path] | None = None) -> set[str]:
+    kernel = kernel_source_files() if files is None else files
+    calls: set[str] = set()
+    member_call = re.compile(r"\.([A-Za-z_]\w*)[ \t]*\(")
+    for path in kernel:
+        text = _mask_comments_and_strings(read(path))
+        calls.update(member_call.findall(text))
+    return calls
+
+
 KERNEL_CALL_SYNTAX = frozenset({
     "and", "assert", "cast", "elif", "else", "for", "if", "is", "match",
     "mutable", "not", "or", "return", "sizeof", "typeof", "when", "while",
@@ -313,6 +325,7 @@ def main() -> int:
         "resource-fact-free-leaves": resource_fact_free_leaves(),
         "replay-external-calls": replay_external_calls(),
         "correspondence-external-calls": correspondence_external_calls(),
+        "kernel-member-calls": kernel_member_calls(),
     }
     failures: list[str] = []
     public_producers = public_certificate_producers()

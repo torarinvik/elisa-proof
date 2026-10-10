@@ -9437,7 +9437,7 @@ field reads/writes to `examples/global_mutable_grants.elisa`,
 `scripts/test_direct_api_semantic_admission.py`. The direct API harness now constructs 21 negative
 inputs, 14 of them permission cases, and exercises both accepted field accesses across all three
 API routes. Python syntax, the 21/14 matrix-construction check, `git diff --check`, and the kernel
-inventory (10 tables, 228 entries) pass. The 41 Python-only benchmark/evidence unit tests also pass.
+inventory (11 tables, 237 entries) pass. The 41 Python-only benchmark/evidence unit tests also pass.
 The actual Stage1 parse/semantic diagnostics and proof replay for these new Elisa cases are not yet
 verified, and the source/test changes must remain uncommitted until the focused runtime gates pass.
 
@@ -9462,7 +9462,8 @@ checkout itself remains consolidated to one `main` branch and one worktree.
 The kernel-boundary inventory now follows the actual include closure of `kernel_replay.elisa` and
 checks every bare and module-qualified helper call against its defining kernel module. The previous
 check only recognized unqualified `proof_*` calls and omitted three root-level files included by the
-replay facade. Four Python tests cover include-closure discovery, local resolution, external-call
-rejection, and comment/string/operator false positives; they and the 10-table/228-entry inventory
-pass. This is a stronger static dependency guard, not a substitute for independently checking
-kernel semantics or replaying source-level proofs.
+replay facade. Five Python tests cover include-closure discovery, local resolution, external-call
+rejection, member-call detection, and comment/string/operator false positives; they and the
+11-table/237-entry inventory pass. The nine observed member operations are now explicitly listed as
+compiler/runtime primitives. This is a stronger static dependency guard, not a substitute for
+independently checking kernel semantics or replaying source-level proofs.

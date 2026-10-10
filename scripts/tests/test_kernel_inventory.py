@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from test_kernel_inventory import (  # noqa: E402
     kernel_call_target_violations,
+    kernel_member_calls,
     kernel_source_files,
 )
 
@@ -78,6 +79,18 @@ class KernelCallClosureTests(unittest.TestCase):
             return flag
 '''
         self.assertEqual(self.check_source(source), set())
+
+    def test_kernel_member_call_scanner_finds_receiver_methods(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "kernel.elisa"
+            path.write_text(
+                "extend ElisaProofKernelReplay:\n"
+                "    private:\n"
+                "        def checked(values: darray[i64]) -> void:\n"
+                "            values.push(1)\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(kernel_member_calls([path]), {"push"})
 
 
 if __name__ == "__main__":
