@@ -8630,3 +8630,25 @@ The coordinator reports that the r11 readiness check and both cold-mode warmups 
 measured pair has started. It is monitoring the five-minute per-process timeout because this
 compiler run is taking longer than the earlier r12 run. The shared compiler slot remains occupied
 and no paired timing result is available, so the proof build remains queued.
+
+### 23.27.64 Reject private-rejection pruning as a performance change; proceed with proof qualification (2026-10-10)
+
+The corrected, frozen r11/r14 A/B completed all 17 processes with byte-for-byte stdout/stderr
+parity and all 1,808 pinned identities unchanged. The candidate retained fewer owners in coverage,
+but did not improve end-to-end compilation time on this workload. Across three measured pairs per
+mode, cold median wall time was 58.443 s for r11 and 60.780 s for r14 (candidate/baseline ratio
+1.040; median paired ratio 1.023). Compact-reuse median wall time was 115.086 s for r11 and
+118.040 s for r14 (ratio 1.026; median paired ratio 1.023). Candidate child CPU time also regressed
+in both modes. This rejects r14 private-rejection pruning as a performance promotion for this
+workload; retain its source and qualification artifacts for analysis, and require a measured
+end-to-end win before adopting similar bookkeeping changes. It remains the pinned newest compiler
+for the queued proof correctness build, with no speedup claim.
+
+The compiler coordinator is proceeding with the separate frozen bulk8 coverage gate. Do not start
+proof compilation until that gate releases the shared Stage1 slot. Then build current proof and
+replay products at strict O2 against the exact r14 product/source/runtime, qualify the dynamic-array
+shadowing rule with the direct-API harness, and run focused package export plus independent replay
+for `early_return_index_guard.elisa`. Follow with the full Global grant matrix through both report
+routes, the direct-API qualified-global controls, portable replay, and the trust/runtime-mode
+adversarial gate. Keep each result scoped to the gate it actually passes; the current source fixes
+and grant fixtures remain unqualified until these fresh products pass.
