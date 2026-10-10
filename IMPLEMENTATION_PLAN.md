@@ -8854,6 +8854,13 @@ remaining differences. The differential and malformed-input workers remain activ
 the integrated candidate fully qualified or update the proof compiler pin while this failure and
 the remaining suite are unresolved.
 
+The active full suite has also reported `compile_time_smoke.sh` as failed before its timing
+ratio was measured: Stage1 exited 1 while compiling its own flattened driver source from stdin.
+This is a compile/correctness failure, not a performance regression measurement. After the current
+workers release, rerun this single check with stdout and stderr captured to identify the diagnostic
+(including any missing Global grant); preserve the exact compiler tuple and do not advance the
+proof pin until this failure and the full suite are resolved.
+
 The high-ROI queue remains: finish the integrated compiler gate; qualify direct API plus the
 Global.Read/Write matrix, source-goal mutation, export, and independent replay; then fix the next
 source-to-goal/replay defect; measure proof workloads only after correctness qualification.
