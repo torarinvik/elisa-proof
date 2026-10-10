@@ -8621,6 +8621,11 @@ proof compiler until the benchmark is terminal and the coordinator explicitly re
 
 The grant suite now also has a module-scoped `SharedState::counter` fixture: positive qualified
 read/write/read-modify-write cases and missing/wrong-grant refusals run through both report routes.
-These controls isolate compiler semantic permission admission; they do not claim proof-source
-correspondence for qualified globals. Static checks and fixture-selection validation pass; run the
-full grant matrix with the fresh strict-O2 proof/compiler pair before qualifying it.
+The direct-API mutation harness now has matching qualified read/write positives and missing-grant
+refusals. These controls isolate compiler semantic permission admission; they do not claim
+proof-source correspondence for qualified globals. Static checks and fixture-selection validation
+pass; run the full grant matrix with the fresh strict-O2 proof/compiler pair before qualifying it.
+
+The coordinator reports that the r11 readiness check passed and the A/B runner advanced into
+cold-mode warmups. The shared compiler slot remains occupied; no paired timing result is yet
+available, so the proof build remains queued.
