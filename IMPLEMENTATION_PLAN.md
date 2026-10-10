@@ -9293,8 +9293,11 @@ process is interrupted.
 ### 23.27.91 Interface parity triage and explicit-grant preview checkpoint (2026-10-10)
 
 The frozen integrated compiler candidate is still `2f68db2d046f9711d734edefe37db91d544b46ed`,
-based on the newest local compiler `main` snapshot `71e12c837ac9420f5e20154a76ce6a05f7d8b821`.
-Its uncached 596-check suite remains active; 43 failures are recorded so far, the documentation
+using compiler sources from local `main` commit `71e12c837ac9420f5e20154a76ce6a05f7d8b821`. The
+shared `main` ref has since advanced to `e3adb0b60a503243299eb9462eb234651442df9e` through two
+test-only fixture-grant commits (`d46d8bd2`, `e3adb0b6`); the checked diff contains no compiler,
+standard-library, or runtime changes. The live gate remains pinned to its frozen `2f68` tree. Its
+uncached 596-check suite remains active; 43 failures are recorded so far, the documentation
 emitter check is still running, and `full.exit` is absent. The count is an in-progress observation,
 not the final result. Keep this checkout and its compiler inputs frozen until the gate terminates.
 
