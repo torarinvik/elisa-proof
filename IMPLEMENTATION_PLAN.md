@@ -9060,3 +9060,31 @@ checks failed after §23.27.77:
 Keep the proof pin unchanged and the compiler candidate frozen until the complete gate exits.
 Then diagnose all failures, migrate the intended fixtures, and rerun focused plus full qualification
 on the exact newest Stage1/runtime tuple before advancing proof checks.
+
+
+### 23.27.79 Region, diagnostic-column, and dictionary fixtures add four failures (2026-10-10)
+
+The live compiler gate has now recorded 37 failing checks. Four more failures appeared after
+§23.27.78:
+
+- `diagnostic_columns_smoke.sh` reports 36 divergent columns across 858 fixtures (the retained
+  log records 604 agreeing, 129 line-only, and 36 diverged). This is separate from the duplicate
+  same-line diagnostic loss in §23.27.75. Keep column reporting enabled and repair the spans at
+  their source; do not hide differences by dropping columns or changing counts in bulk.
+- `dict_real_smoke.sh` fails 16 of 17 cases because frozen `elisacore_std/deque.elisa` lines 199,
+  207, and 215 return values tied to `__rg_d` through region-less result types. Synchronize the
+  authoritative core and vendored runtime with explicit region-polymorphic return ties. Preserve
+  lifetime safety; do not weaken the checker. One separate `optional_ref_deref` fixture also
+  lacks Global grants on dictionary creation and insertion.
+- `dict_ref_param_smoke.sh` fails five otherwise-positive fixtures because dictionary `put` and
+  `fill` calls lack scoped `Global{Read,Write}` grants. Add narrow grants and retain the intended
+  reference-parameter behavior.
+- `docs119_forms_smoke.sh` reports a parse-form regression, but its retained log only shows
+  affine-fixture column divergences and does not preserve the triggering parser diagnostic.
+  Re-capture the compiler output after the active run releases, then identify and repair the actual
+  parse regression before changing expectations.
+
+The compiler agent also reports that a root codec-integrity fixture passed Stage0 AST analysis,
+with native execution still pending. Treat that as a partial result, not qualification. The full
+compiler run remains active; keep its candidate frozen, preserve its output, and leave the proof
+pin unchanged until a complete run and exact-tuple postflight pass.
