@@ -47,25 +47,46 @@ def corr_collect_taken(declarations: darray[Ast::Decl]&, top_level: bool, taken:
                 pass
     return true
 
-# Every top-level function, in file order. A name declared anywhere else too, or twice, is
-# walked as unsupported; a name some other declaration takes is kept as a `blocked` entry, so a
-# call to it resolves to nothing and no variable may reuse it.
-def corr_collect_functions(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable CorrWork&) -> bool:
+def corr_collect_nested_functions(declarations: darray[Ast::Decl]&, owner: darray[sview]&, work: mutable CorrWork&, depth: usize) -> bool:
+    return false if depth > CorrLimit::NESTING
+    for declaration in declarations |owner, work, depth|:
+        match declaration:
+            Ast::Decl.Func(name, _, _, _, _, _, position):
+                return false if work.functions.count >= CorrLimit::FUNCTIONS or work.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count > CorrLimit::OWNER_SEGMENTS - work.owner_segments.count
+                owner_start: usize = work.owner_segments.count
+                work.owner_segments.extend(owner)
+                work.functions.push(CorrFunction{name: name, line: position.line, owner_start: owner_start, owner_count: owner.count, declaration: declaration, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+            Ast::Decl.Module(name, body, _):
+                next_owner: mutable darray[sview] = []
+                return false if not corr_source_module_path(name, &next_owner)
+                return false if work.module_owner_starts.count >= CorrLimit::FUNCTIONS or work.module_owner_segments.count > CorrLimit::OWNER_SEGMENTS or next_owner.count > CorrLimit::OWNER_SEGMENTS - work.module_owner_segments.count
+                work.module_owner_starts.push(work.module_owner_segments.count)
+                work.module_owner_counts.push(next_owner.count)
+                work.module_owner_segments.extend(next_owner)
+                return false if not corr_collect_nested_functions(body, &next_owner, work, depth + 1)
+            Ast::Decl.Scoped(body, _):
+                return false if not corr_collect_nested_functions(body, owner, work, depth + 1)
+            _:
+                pass
+    return true
+
+def corr_collect_functions(pool: mutable CorrPool&, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable CorrWork&) -> bool:
+    owner: mutable darray[sview] = []
+    return false if not corr_collect_source_constants(pool, declarations, &owner, &work.source_constants, 0)
+    return false if not corr_source_constants_mark_unique(&work.source_constants)
+    cast_checks: mutable usize = 0
+    return false if not corr_source_enum_override_pass(declarations, owner, &work.source_constants, 0, &cast_checks)
+    return false if not corr_source_enum_mark_unique(&work.source_constants)
     for annotation in annotations |work|:
         work.lemmas.push(annotation.name) if annotation.owner == "__lemma"
     taken: mutable darray[sview] = []
     return false if not corr_collect_taken(declarations, true, &taken, 0)
-    for index in 0..<declarations.count |index, declarations, work, taken|:
-        match declarations[index]:
-            Ast::Decl.Func(name, _, _, _, _, _, position):
-                return false if work.functions.count >= CorrLimit::FUNCTIONS
-                work.functions.push(CorrFunction{name: name, line: position.line, declaration: index, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
-            _:
-                pass
+    owner.clear()
+    return false if not corr_collect_nested_functions(declarations, &owner, work, 0)
     work.taken.extend(taken)
     for name in taken |work|:
         return false if work.functions.count >= CorrLimit::FUNCTIONS
-        work.functions.push(CorrFunction{name: name, line: 0, declaration: 0, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+        work.functions.push(CorrFunction{name: name, line: 0, owner_start: 0, owner_count: 0, declaration: Ast::Decl.Invalid, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
     return true
 
 def corr_hypothesis_held(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation) -> bool:
@@ -73,14 +94,251 @@ def corr_hypothesis_held(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, 
         return true if corr_node_equal(nodes, children, root, pool, work.obligation_facts[obligation.facts_start + index], 0)
     return false
 
-def corr_goal_matched(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorems: darray[CorrTheorem]&, hypotheses: darray[usize]&, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation, goal: usize, depth: usize) -> bool:
+def corr_theorem_has_source_fact(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorem: CorrTheorem, hypotheses: darray[usize]&, pool: CorrPool&, fact: usize) -> bool:
+    for index in 0..<theorem.hypotheses_count |index, nodes, children, theorem, hypotheses, pool, fact|:
+        return true if corr_node_equal(nodes, children, hypotheses[theorem.hypotheses_start + index], pool, fact, 0)
+    return false
+
+def corr_checked_call_summary_fact(pool: mutable CorrPool&, work: CorrWork&, fact: usize) -> bool:
+    return false if fact == 0 or fact >= pool.terms.count
+    equality: CorrTerm = pool.terms[fact]
+    return false if equality.kind != "binary" or equality.operator != "==" or equality.left == 0 or equality.left >= pool.terms.count
+    call: CorrTerm = pool.terms[equality.left]
+    return false if call.kind != "call" or call.left == 0 or call.left >= pool.terms.count
+    matches: mutable usize = 0
+    for index in 0..<work.functions.count |index, pool, work, call, matches|:
+        continue if work.functions[index].status != "checked" or not corr_function_identity_is_unique(work, index)
+        resolved: usize = corr_resolved_callable_term(pool, work, index)
+        matches <- matches + 1 if resolved != 0 and corr_equal(pool, resolved, call.left, 0)
+    return matches == 1
+
+def corr_guard_matches_short_circuit(pool: CorrPool&, operator: sview, left: usize, guard: usize) -> bool:
+    return false if left == 0 or guard == 0
+    return corr_equal(pool, left, guard, 0) if operator == "and"
+    return false if operator != "or" or guard >= pool.terms.count
+    guarded: CorrTerm = pool.terms[guard]
+    return guarded.kind == "unary" and guarded.operator == "not" and corr_equal(pool, guarded.left, left, 0)
+
+def corr_guarded_call_occurrences(pool: CorrPool&, term: usize, call: usize, guard: usize, allowed: bool, depth: usize, steps: mutable usize&, matches: mutable usize&) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or steps >= CorrLimit::REWRITE_STEPS or term == 0 or term >= pool.terms.count or call == 0 or call >= pool.terms.count
+    steps <- steps + 1
+    if corr_equal(pool, term, call, 0):
+        return false if not allowed
+        matches <- matches + 1
+        return true
+    node: CorrTerm = pool.terms[term]
+    right_allowed: mutable bool = allowed
+    if node.kind == "binary" and corr_guard_matches_short_circuit(pool, node.operator, node.left, guard):
+        right_allowed <- true
+    return false if node.left != 0 and not corr_guarded_call_occurrences(pool, node.left, call, guard, allowed, depth + 1, steps, matches)
+    return false if node.right != 0 and not corr_guarded_call_occurrences(pool, node.right, call, guard, right_allowed, depth + 1, steps, matches)
+    for index in 0..<node.args_count |index, pool, term, call, guard, allowed, right_allowed, depth, steps, matches|:
+        return false if not corr_guarded_call_occurrences(pool, pool.args[node.args_start + index], call, guard, right_allowed, depth + 1, steps, matches)
+    return true
+
+def corr_guarded_summary_hypothesis(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, goal: usize, pool: mutable CorrPool&, work: mutable CorrWork&, obligation: CorrObligation, hypothesis: usize, guarded_fact: mutable usize&) -> bool:
+    return false if hypothesis == 0 or hypothesis >= nodes.count
+    work.debug.guarded_candidates <- work.debug.guarded_candidates + 1
+    matches: mutable usize = 0
+    call_site_budget: mutable usize = 0
+    for index in 0..<obligation.facts_count |index, nodes, children, goal, pool, work, obligation, hypothesis, matches, guarded_fact, call_site_budget|:
+        fact_id: usize = work.obligation_facts[obligation.facts_start + index]
+        continue if fact_id == 0 or fact_id >= pool.terms.count
+        fact: CorrTerm = pool.terms[fact_id]
+        continue if fact.kind != "binary" or fact.operator != "=>" or fact.right == 0
+        work.debug.guarded_implications <- work.debug.guarded_implications + 1
+        continue if fact.right >= pool.terms.count
+        rhs: CorrTerm = pool.terms[fact.right]
+        work.debug.guarded_equality_rhs <- work.debug.guarded_equality_rhs + 1 if rhs.kind == "binary" and rhs.operator == "=="
+        continue if not corr_checked_call_summary_fact(pool, work, fact.right)
+        work.debug.guarded_checked <- work.debug.guarded_checked + 1
+        # `hypothesis` is a proof-arena node index, while `fact.right` is a CorrPool term index.
+        # Compare across arenas through the structural node matcher; never use one index in the
+        # other arena.
+        continue if not corr_node_equal(nodes, children, hypothesis, pool, fact.right, 0)
+        work.debug.guarded_source_matches <- work.debug.guarded_source_matches + 1
+        occurrences: mutable usize = 0
+        return false if not corr_guarded_call_occurrences(pool, goal, rhs.left, fact.left, false, 0, call_site_budget, &occurrences) or occurrences == 0
+        work.debug.guarded_site_matches <- work.debug.guarded_site_matches + 1
+        matches <- matches + 1
+        guarded_fact <- fact_id
+    work.debug.guarded_matches <- work.debug.guarded_matches + 1 if matches == 1
+    return matches == 1
+
+def corr_rewrite_guarded(pool: mutable CorrPool&, term: usize, summaries: darray[usize]&, active: darray[usize]&, depth: usize, budget: mutable usize&, debug: mutable CorrMatchDebug&) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count or budget >= CorrLimit::REWRITE_STEPS
+    budget <- budget + 1
+    debug.guarded_rewrite_steps <- debug.guarded_rewrite_steps + 1
+    replacement: mutable usize = 0
+    for equality_id in active |pool, term, summaries, active, depth, budget, replacement|:
+        return 0 if equality_id == 0 or equality_id >= pool.terms.count
+        equality: CorrTerm = pool.terms[equality_id]
+        continue if equality.kind != "binary" or equality.operator != "==" or equality.left == 0 or equality.right == 0
+        if corr_equal(pool, term, equality.left, 0):
+            debug.guarded_rewrite_term_matches <- debug.guarded_rewrite_term_matches + 1
+            return 0 if replacement != 0 and not corr_equal(pool, replacement, equality.right, 0)
+            replacement <- equality.right
+    if replacement != 0 and not corr_equal(pool, replacement, term, 0):
+        return corr_rewrite_guarded(pool, replacement, summaries, active, depth + 1, budget, debug)
+    node: CorrTerm = pool.terms[term]
+    left: mutable usize = node.left
+    right: mutable usize = node.right
+    changed: mutable bool = false
+    if node.left != 0:
+        left <- corr_rewrite_guarded(pool, node.left, summaries, active, depth + 1, budget, debug)
+        return 0 if left == 0
+        changed <- true if left != node.left
+    right_active: mutable darray[usize] = []
+    right_active.extend(active)
+    if node.kind == "binary":
+        for summary_id in summaries |pool, node, right_active|:
+            return 0 if summary_id == 0 or summary_id >= pool.terms.count
+            summary: CorrTerm = pool.terms[summary_id]
+            continue if summary.kind != "binary" or summary.operator != "=>" or summary.right == 0
+            if corr_guard_matches_short_circuit(pool, node.operator, node.left, summary.left):
+                debug.guarded_rewrite_activations <- debug.guarded_rewrite_activations + 1
+                right_active.push(summary.right) if not corr_fact_listed(pool, right_active, summary.right)
+    if node.right != 0:
+        right <- corr_rewrite_guarded(pool, node.right, summaries, right_active, depth + 1, budget, debug)
+        return 0 if right == 0
+        changed <- true if right != node.right
+    arguments: mutable darray[usize] = []
+    for index in 0..<node.args_count |index, pool, node, summaries, active, depth, budget, arguments, changed|:
+        original: usize = pool.args[node.args_start + index]
+        argument: usize = corr_rewrite_guarded(pool, original, summaries, active, depth + 1, budget, debug)
+        return 0 if argument == 0
+        arguments.push(argument)
+        changed <- true if argument != original
+    return term if not changed
+    if node.kind == "unary":
+        return corr_unary(pool, node.operator, left)
+    if node.kind == "binary":
+        return corr_binary(pool, node.operator, left, right)
+    if node.kind == "scope":
+        return corr_scope(pool, left, node.name)
+    if node.kind == "field":
+        return corr_field(pool, left, node.name)
+    if node.kind == "call":
+        return corr_call_term(pool, left, &arguments)
+    if node.kind == "tuple":
+        return corr_node_with_children(pool, "tuple", node.name, &arguments)
+    if node.kind == "if":
+        return 0 if arguments.count != 1
+        return corr_if(pool, left, right, arguments[0])
+    return 0
+
+def corr_flatten_and(pool: CorrPool&, term: usize, leaves: mutable darray[usize]&, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count
+    node: CorrTerm = pool.terms[term]
+    if node.kind == "binary" and node.operator == "and":
+        return corr_flatten_and(pool, node.left, leaves, depth + 1) and corr_flatten_and(pool, node.right, leaves, depth + 1)
+    return false if leaves.count >= CorrLimit::REWRITE_STEPS
+    leaves.push(term)
+    return true
+
+def corr_ordered_boolean_equal(pool: CorrPool&, left: usize, right: usize, depth: usize) -> bool:
+    return false if depth > CorrLimit::TERM_DEPTH or left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
+    return true if corr_equal(pool, left, right, 0)
+    left_node: CorrTerm = pool.terms[left]
+    right_node: CorrTerm = pool.terms[right]
+    return false if left_node.kind != "binary" or right_node.kind != "binary" or left_node.operator != right_node.operator
+    if left_node.operator == "and":
+        left_leaves: mutable darray[usize] = []
+        right_leaves: mutable darray[usize] = []
+        return false if not corr_flatten_and(pool, left, &left_leaves, 0) or not corr_flatten_and(pool, right, &right_leaves, 0) or left_leaves.count != right_leaves.count
+        for index in 0..<left_leaves.count |index, pool, left_leaves, right_leaves|:
+            return false if not corr_ordered_boolean_equal(pool, left_leaves[index], right_leaves[index], depth + 1)
+        return true
+    return corr_ordered_boolean_equal(pool, left_node.left, right_node.left, depth + 1) and corr_ordered_boolean_equal(pool, left_node.right, right_node.right, depth + 1)
+
+def corr_rewrite_obligation_goal(pool: mutable CorrPool&, goal: usize, guarded: darray[usize]&, direct: darray[usize]&, debug: mutable CorrMatchDebug&) -> usize:
+    active: mutable darray[usize] = []
+    budget: mutable usize = 0
+    guarded_goal: mutable usize = goal
+    if guarded.count > 0:
+        guarded_goal <- corr_rewrite_guarded(pool, goal, guarded, active, 0, &budget, debug)
+        return 0 if guarded_goal == 0
+    return guarded_goal if direct.count == 0
+    return corr_rewrite_source_term(pool, guarded_goal, direct, 0, &budget, false)
+
+def corr_rewritten_conclusion_matches(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, pool: CorrPool&, conclusion: usize, rewritten: usize) -> bool:
+    return corr_node_equal(nodes, children, conclusion, pool, rewritten, 0) or corr_ordered_boolean_equal(pool, conclusion, rewritten, 0)
+
+def corr_goal_matched(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorems: darray[CorrTheorem]&, hypotheses: darray[usize]&, pool: mutable CorrPool&, work: mutable CorrWork&, obligation: CorrObligation, goal: usize, depth: usize) -> bool:
     return false if depth > CorrLimit::TERM_DEPTH or goal == 0 or goal >= pool.terms.count
+    if depth == 0:
+        work.debug.theorems <- 0
+        work.debug.hypothesis_rejections <- 0
+        work.debug.source_equalities <- 0
+        work.debug.checked_call_equalities <- 0
+        work.debug.hypothesis_equalities <- 0
+        work.debug.rewritten_goals <- 0
+        work.debug.conclusion_matches <- 0
+        work.debug.obligation_facts <- obligation.facts_count
+        work.debug.obligation_equalities <- 0
+        work.debug.obligation_call_equalities <- 0
+        work.debug.theorem_hypotheses <- 0
+        work.debug.held_hypotheses <- 0
+        work.debug.guarded_facts <- 0
+        work.debug.guarded_candidates <- 0
+        work.debug.guarded_checked <- 0
+        work.debug.guarded_implications <- 0
+        work.debug.guarded_equality_rhs <- 0
+        work.debug.guarded_source_matches <- 0
+        work.debug.guarded_site_matches <- 0
+        work.debug.guarded_matches <- 0
+        work.debug.guarded_rewrite_steps <- 0
+        work.debug.guarded_rewrite_activations <- 0
+        work.debug.guarded_rewrite_term_matches <- 0
+        work.debug.unheld_scalar_type_calls <- 0
+        for index in 0..<obligation.facts_count |index, pool, work, obligation|:
+            fact: usize = work.obligation_facts[obligation.facts_start + index]
+            continue if fact == 0 or fact >= pool.terms.count
+            fact_term: CorrTerm = pool.terms[fact]
+            if fact_term.kind == "binary" and fact_term.operator == "==":
+                work.debug.obligation_equalities <- work.debug.obligation_equalities + 1
+                if fact_term.left > 0 and fact_term.left < pool.terms.count:
+                    work.debug.obligation_call_equalities <- work.debug.obligation_call_equalities + 1 if pool.terms[fact_term.left].kind == "call"
+            work.debug.guarded_facts <- work.debug.guarded_facts + 1 if fact_term.kind == "binary" and fact_term.operator == "=>"
     for theorem in theorems |nodes, children, hypotheses, pool, work, obligation, goal|:
-        if corr_node_equal(nodes, children, theorem.conclusion, pool, goal, 0):
-            held: mutable bool = true
-            for index in 0..<theorem.hypotheses_count |index, nodes, children, hypotheses, pool, work, obligation, theorem, held|:
-                held <- false if held and not corr_hypothesis_held(nodes, children, hypotheses[theorem.hypotheses_start + index], pool, work, obligation)
-            return true if held
+        work.debug.theorems <- work.debug.theorems + 1 if depth == 0
+        work.debug.theorem_hypotheses <- work.debug.theorem_hypotheses + theorem.hypotheses_count if depth == 0
+        held: mutable bool = true
+        guarded_facts: mutable darray[usize] = []
+        for index in 0..<theorem.hypotheses_count |index, nodes, children, hypotheses, pool, work, obligation, theorem, held, guarded_facts|:
+            hyp_id: usize = hypotheses[theorem.hypotheses_start + index]
+            hyp_held: mutable bool = corr_hypothesis_held(nodes, children, hyp_id, pool, work, obligation)
+            if not hyp_held:
+                guarded_fact: mutable usize = 0
+                hyp_held <- corr_guarded_summary_hypothesis(nodes, children, goal, pool, work, obligation, hyp_id, &guarded_fact)
+                guarded_facts.push(guarded_fact) if hyp_held and guarded_fact != 0
+                hyp_held <- corr_guarded_call_type_hypothesis(nodes, children, theorem, hypotheses, goal, pool, work, obligation, hyp_id) if not hyp_held
+            if not hyp_held and hyp_id < nodes.count:
+                hyp_node: ElisaProofKernelCore::ProofKernelNode = nodes[hyp_id]
+                if hyp_node.kind == "call" and hyp_node.left < nodes.count:
+                    callee_node: ElisaProofKernelCore::ProofKernelNode = nodes[hyp_node.left]
+                    work.debug.unheld_scalar_type_calls <- work.debug.unheld_scalar_type_calls + 1 if callee_node.kind == "ident" and callee_node.name == "__elisa_primitive_scalar_type"
+            work.debug.held_hypotheses <- work.debug.held_hypotheses + 1 if depth == 0 and hyp_held
+            held <- false if held and not hyp_held
+        work.debug.hypothesis_rejections <- work.debug.hypothesis_rejections + 1 if depth == 0 and not held
+        if held:
+            equalities: mutable darray[usize] = []
+            for index in 0..<obligation.facts_count |index, nodes, children, theorem, hypotheses, pool, work, obligation, equalities, guarded_facts|:
+                fact: usize = work.obligation_facts[obligation.facts_start + index]
+                continue if fact == 0 or fact >= pool.terms.count
+                fact_term: CorrTerm = pool.terms[fact]
+                continue if fact_term.kind != "binary" or fact_term.operator != "=="
+                work.debug.source_equalities <- work.debug.source_equalities + 1 if depth == 0
+                continue if not corr_checked_call_summary_fact(pool, work, fact)
+                work.debug.checked_call_equalities <- work.debug.checked_call_equalities + 1 if depth == 0
+                if corr_theorem_has_source_fact(nodes, children, theorem, hypotheses, pool, fact):
+                    equalities.push(fact)
+                    work.debug.hypothesis_equalities <- work.debug.hypothesis_equalities + 1 if depth == 0
+            rewritten_goal: usize = corr_rewrite_obligation_goal(pool, goal, guarded_facts, equalities, &work.debug)
+            work.debug.rewritten_goals <- work.debug.rewritten_goals + 1 if depth == 0 and rewritten_goal != 0 and rewritten_goal != goal
+            if rewritten_goal != 0 and corr_rewritten_conclusion_matches(nodes, children, pool, theorem.conclusion, rewritten_goal):
+                work.debug.conclusion_matches <- work.debug.conclusion_matches + 1 if depth == 0
+                return true
     node: CorrTerm = pool.terms[goal]
     return false if node.kind != "binary" or node.operator != "and"
     return corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.left, depth + 1) and corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.right, depth + 1)
@@ -89,6 +347,11 @@ def corr_push_function(out: mutable darray[u8]&, work: CorrWork&, function: Corr
     proof_push(out, ",") if not first
     proof_push(out, "{\"name\":")
     proof_push_json_string(out, function.name)
+    proof_push(out, ",\"owner\":[")
+    for index in 0..<function.owner_count |index, out, work, function|:
+        proof_push(out, ",") if index > 0
+        proof_push_json_string(out, work.owner_segments[function.owner_start + index])
+    proof_push(out, "]")
     proof_push(out, ",\"line\":")
     proof_push_json_i64(out, function.line.i64())
     proof_push(out, ",\"status\":")
@@ -148,6 +411,54 @@ def corr_push_result(out: mutable darray[u8]&, package: ProofPackageVerdict, sou
     proof_push_json_string(out, "complete" if exit_code == 0 else "partial" if checked > 0 else "not-established")
     proof_push(out, ",\"exit_code\":")
     proof_push_json_i64(out, exit_code)
+    proof_push(out, "},\"debug\":{\"theorems\":")
+    proof_push_json_i64(out, work.debug.theorems.i64())
+    proof_push(out, ",\"hypothesis_rejections\":")
+    proof_push_json_i64(out, work.debug.hypothesis_rejections.i64())
+    proof_push(out, ",\"source_equalities\":")
+    proof_push_json_i64(out, work.debug.source_equalities.i64())
+    proof_push(out, ",\"checked_call_equalities\":")
+    proof_push_json_i64(out, work.debug.checked_call_equalities.i64())
+    proof_push(out, ",\"hypothesis_equalities\":")
+    proof_push_json_i64(out, work.debug.hypothesis_equalities.i64())
+    proof_push(out, ",\"rewritten_goals\":")
+    proof_push_json_i64(out, work.debug.rewritten_goals.i64())
+    proof_push(out, ",\"conclusion_matches\":")
+    proof_push_json_i64(out, work.debug.conclusion_matches.i64())
+    proof_push(out, ",\"obligation_facts\":")
+    proof_push_json_i64(out, work.debug.obligation_facts.i64())
+    proof_push(out, ",\"obligation_equalities\":")
+    proof_push_json_i64(out, work.debug.obligation_equalities.i64())
+    proof_push(out, ",\"obligation_call_equalities\":")
+    proof_push_json_i64(out, work.debug.obligation_call_equalities.i64())
+    proof_push(out, ",\"theorem_hypotheses\":")
+    proof_push_json_i64(out, work.debug.theorem_hypotheses.i64())
+    proof_push(out, ",\"held_hypotheses\":")
+    proof_push_json_i64(out, work.debug.held_hypotheses.i64())
+    proof_push(out, ",\"guarded_facts\":")
+    proof_push_json_i64(out, work.debug.guarded_facts.i64())
+    proof_push(out, ",\"guarded_candidates\":")
+    proof_push_json_i64(out, work.debug.guarded_candidates.i64())
+    proof_push(out, ",\"guarded_checked\":")
+    proof_push_json_i64(out, work.debug.guarded_checked.i64())
+    proof_push(out, ",\"guarded_implications\":")
+    proof_push_json_i64(out, work.debug.guarded_implications.i64())
+    proof_push(out, ",\"guarded_equality_rhs\":")
+    proof_push_json_i64(out, work.debug.guarded_equality_rhs.i64())
+    proof_push(out, ",\"guarded_source_matches\":")
+    proof_push_json_i64(out, work.debug.guarded_source_matches.i64())
+    proof_push(out, ",\"guarded_site_matches\":")
+    proof_push_json_i64(out, work.debug.guarded_site_matches.i64())
+    proof_push(out, ",\"guarded_matches\":")
+    proof_push_json_i64(out, work.debug.guarded_matches.i64())
+    proof_push(out, ",\"guarded_rewrite_steps\":")
+    proof_push_json_i64(out, work.debug.guarded_rewrite_steps.i64())
+    proof_push(out, ",\"guarded_rewrite_activations\":")
+    proof_push_json_i64(out, work.debug.guarded_rewrite_activations.i64())
+    proof_push(out, ",\"guarded_rewrite_term_matches\":")
+    proof_push_json_i64(out, work.debug.guarded_rewrite_term_matches.i64())
+    proof_push(out, ",\"unheld_scalar_type_calls\":")
+    proof_push_json_i64(out, work.debug.unheld_scalar_type_calls.i64())
     proof_push(out, "},\"trust\":{\"kernel_replay\":\"every theorem is re-derived by the proof kernel from the package arena\",\"correspondence\":\"a checked function's obligations are re-derived from the source by this checker's reference semantics for its sequential subset and each is concluded by a replayed theorem whose hypotheses are facts of that semantics\",\"trusted\":[\"the proof kernel\",\"the Elisa parser and type checker\",\"the correspondence checker's reference semantics\"],\"not_established\":[\"termination\",\"arithmetic overflow\",\"functions outside the subset\"]}}\n")
 
 # Walks every function, matching each walked function's obligations as soon as it is walked so
@@ -156,7 +467,7 @@ def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, decla
     for index in 0..<work.functions.count |index, pool, work, declarations, nodes, children, theorems, hypotheses|:
         continue if work.functions[index].status == "blocked"
         work.functions[index].obligations_start <- work.obligations.count
-        if corr_function_index(work, work.functions[index].name) != index:
+        if not corr_function_identity_is_unique(work, index):
             work.functions[index].status <- "unsupported"
             work.functions[index].reason <- "name"
             continue
@@ -268,7 +579,7 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
     if sview_len(verdict.status) > 0:
         corr_push_result(out, verdict, source_admissible, theorem_list.count, replayed, &work, 0, 0, 0, 1)
         return 1
-    if not corr_collect_functions(file.top_decls, file.enum_annotations, &work):
+    if not corr_collect_functions(&pool, file.top_decls, file.enum_annotations, &work):
         corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, theorem_list.count, replayed, &work, 0, 0, 0, 1)
         return 1
     if source_admissible:

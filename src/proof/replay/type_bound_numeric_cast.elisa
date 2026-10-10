@@ -1,0 +1,69 @@
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_cast_hook_present(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |depth|:
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        return true if name == "__cast__"
+                    Ast::Decl.Extern(name, _, arity, _, callable, _, _, _):
+                        return true if name == "__cast__" and arity == 1 and callable
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_type_bound_cast_hook_present(nested, depth + 1)
+                    _:
+                        pass
+            return false
+
+        # A builtin integer cast's result has the target's primitive scalar and range type,
+        # regardless of whether the conversion preserves its receiver's value. Reconstruct the
+        # dispatch conditions independently so a method with the same spelling or a custom cast
+        # hook cannot authorize a type-bound fact.
+        def proof_replay_type_bound_numeric_cast_fact(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            marker_name: mutable sview = ""
+            marker_width: mutable i64 = 0
+            cast: mutable Ast::Expr = Ast::Expr.Invalid
+            match trace.expression:
+                Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, argument_names, _):
+                    marker_name <- name
+                    if name == "__elisa_primitive_scalar_type":
+                        return false if arguments.count != 1 or argument_names.count != 0
+                        cast <- arguments[0]
+                    elif name == "__elisa_signed_place_type_bound" or name == "__elisa_unsigned_place_type_bound":
+                        return false if arguments.count != 2 or argument_names.count != 0
+                        cast <- arguments[0]
+                        width: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        return false if not width.known
+                        marker_width <- width.value
+                    else:
+                        return false
+                _:
+                    return false
+            receiver: mutable Ast::Expr = Ast::Expr.Invalid
+            target: mutable sview = ""
+            match cast:
+                Ast::Expr.Call(Ast::Expr.Field(source, method, _), arguments, argument_names, _):
+                    return false if arguments.count != 0 or argument_names.count != 0
+                    receiver <- source
+                    target <- method
+                _:
+                    return false
+            target_type: Ast::Expr = Ast::Expr.Ident(target, Ast::expr_pos(cast))
+            signed_width: i64 = proof_signed_primitive_width(target_type)
+            unsigned_width: i64 = proof_unsigned_primitive_width(target_type)
+            return false if signed_width == 0 and unsigned_width == 0
+            return false if proof_expr_has_call(receiver) or proof_expr_has_move(receiver)
+            return false if proof_replay_type_bound_cast_hook_present(report.source_declarations, 0)
+            shadowed: mutable usize = 0
+            ignored_return: mutable Ast::Expr = Ast::Expr.Invalid
+            ignored_parameters: mutable darray[Ast::ParamDecl] = []
+            ignored_effects: mutable usize = 0
+            proof_replay_type_bound_find_callee(report.source_declarations, target, &shadowed, &ignored_return, &ignored_parameters, &ignored_effects, 0)
+            return false if shadowed != 0
+            if marker_name == "__elisa_primitive_scalar_type":
+                return true if marker_width == 0
+                return false
+            if marker_name == "__elisa_signed_place_type_bound":
+                return signed_width > 0 and marker_width == signed_width
+            if marker_name == "__elisa_unsigned_place_type_bound":
+                return unsigned_width > 0 and marker_width == unsigned_width
+            return false

@@ -34,6 +34,15 @@ def package(source):
     return path
 
 
+def refused_package(source):
+    result = subprocess.run([str(BINARY), "--package", str(source)], capture_output=True, text=True, timeout=300)
+    assert result.returncode != 0, (source, result.stdout[-400:], result.stderr[-400:])
+    report = json.loads(result.stdout)
+    assert report["source"]["admissible"] is False, report
+    assert report["theorems"] == [], report
+    return report
+
+
 def correspond(package_path, source, expected_exit):
     result = subprocess.run([str(BINARY), "--correspondence", str(package_path), str(source)], capture_output=True, text=True, timeout=300)
     assert result.returncode == expected_exit, (source, result.returncode, result.stdout[-1200:], result.stderr[-400:])
@@ -70,6 +79,74 @@ for example, expected in POSITIVE.items():
     assert report["package"]["status"] == "replayed" and report["source_admissible"] is True, report
     assert report["summary"]["coverage"] == "complete", report
     assert set(report["trust"]) == {"kernel_replay", "correspondence", "trusted", "not_established"}, report
+
+# A summary for a pure helper in the RHS of `or` is conditional on that branch. The current
+# correspondence checker preserves the source obligation but cannot normalize the source return
+# against the theorem's `result` term, so this remains an explicit unmatched gap.
+short_circuit_summary = write("short_circuit_summary", """def available(x: i64) -> bool:
+    ensure result == true
+    return true
+
+def caller() -> bool:
+    ensure result == true
+    return true or available(0)
+""")
+short_circuit_package = package(short_circuit_summary)
+expect(short_circuit_package, short_circuit_summary,
+       {"available": ("checked", None), "caller": ("unmatched", "unproved-obligation")}, 1)
+false_unevaluated_helper = write("false_unevaluated_helper", """def available(x: i64) -> bool:
+    ensure result == true
+    return false
+
+def caller() -> bool:
+    ensure result == true
+    return true or available(0)
+""")
+expect(short_circuit_package, false_unevaluated_helper,
+       {"available": ("unmatched", "unproved-obligation"),
+        "caller": ("unsupported", "callee-unchecked")}, 1)
+
+variable_divisor = write("variable_divisor", """def quotient(value: i64, divisor: i64) -> i64:
+    requires divisor > 0
+    ensure result == value / divisor
+    return value / divisor
+""")
+expect(package(variable_divisor), variable_divisor,
+       {"quotient": ("unsupported", "contract")}, 1)
+positive_divisor = write("positive_divisor", """def quotient(value: i64) -> i64:
+    ensure result == value / 20
+    return value / 20
+""")
+expect(package(positive_divisor), positive_divisor, {"quotient": ("checked", None)}, 0)
+half_nonnegative = write("half_nonnegative", """def half(x: i64) -> i64:
+    requires x >= 0
+    ensure result >= 0
+    return x / 2
+""")
+expect(package(half_nonnegative), half_nonnegative, {"half": ("checked", None)}, 0)
+checked_helper_summary = write("checked_helper_summary", """def one(x: i64) -> i64:
+    ensure result == 1
+    return 1
+
+def caller(x: i64) -> i64:
+    ensure result == 1
+    return one(x)
+""")
+checked_helper_package = package(checked_helper_summary)
+checked_helper_report = expect(checked_helper_package, checked_helper_summary,
+                               {"one": ("checked", None), "caller": ("checked", None)}, 0)
+assert checked_helper_report["source_admissible"] is True, checked_helper_report
+for name, divisor in (("zero_divisor", "0"), ("negative_divisor", "-1")):
+    refused_division = write(name, f"""def quotient(value: i64) -> i64:
+    ensure result == value / {divisor}
+    return value / {divisor}
+""")
+    if divisor == "0":
+        refused_report = refused_package(refused_division)
+        assert refused_report["source"]["admissible"] is False, refused_report
+    else:
+        expect(package(refused_division), refused_division,
+               {"quotient": ("unsupported", "contract")}, 1)
 
 # Mutations. Each package below replays in full; each source asks for something it does not prove.
 BRANCH = packages["branch_negation"]
@@ -280,11 +357,6 @@ UNSUPPORTED = {
         total <- total + 1
     return total
 """, "statement"),
-    "division": ("""def half(x: i64) -> i64:
-    requires x >= 0
-    ensure result >= 0
-    return x / 2
-""", "expression"),
     "mutable_parameter": ("""def bump(x: mutable i64) -> i64:
     ensure result >= 0
     return 0
@@ -315,14 +387,6 @@ UNSUPPORTED = {
         total <- total
     return 0
 """, "invariant"),
-    "nested_call": ("""def one(x: i64) -> i64:
-    ensure result == 1
-    return 1
-
-def two(x: i64) -> i64:
-    ensure result == 2
-    return one(x) + 1
-""", "expression"),
 }
 for name, (text, reason) in UNSUPPORTED.items():
     source = write(name, text)
@@ -332,7 +396,57 @@ for name, (text, reason) in UNSUPPORTED.items():
     assert found[-1]["obligations"] == 0 and found[-1]["unmatched"] == [], (name, report["functions"])
     assert report["summary"]["coverage"] == "not-established", report
 
-# A duplicate function name, one of them inside a module, resolves to neither.
+# Literal positive division is supported and checked against its own package above. An unrelated
+# package still replays but cannot discharge the source-derived return obligation.
+mismatched_division = write("mismatched_division", half_nonnegative.read_text())
+division_mismatch_report = expect(BRANCH, mismatched_division, {"half": UNMATCHED}, 1)
+assert division_mismatch_report["package"]["status"] == "replayed", division_mismatch_report
+assert division_mismatch_report["source_admissible"] is True, division_mismatch_report
+assert division_mismatch_report["functions"][0]["obligations"] == 1, division_mismatch_report
+assert division_mismatch_report["functions"][0]["unmatched"] == [
+    {"line": 4, "kind": "return-ensure"}
+], division_mismatch_report
+
+# A checked helper's declared i64 result contributes only the scalar and signed-width facts for
+# that exact resolved call. Its contract summary supplies the separate value equality.
+nested_call_source = write("nested_call", """def one(x: i64) -> i64:
+    ensure result == 1
+    return 1
+
+def two(x: i64) -> i64:
+    ensure result == 2
+    return one(x) + 1
+""")
+nested_call_package = package(nested_call_source)
+nested_call_report = expect(nested_call_package, nested_call_source,
+                            {"one": ("checked", None), "two": ("checked", None)}, 0)
+assert nested_call_report["source_admissible"] is True, nested_call_report
+nested_call_wrong_package = correspond(BRANCH, nested_call_source, 1)
+assert nested_call_wrong_package["package"]["status"] == "replayed", nested_call_wrong_package
+assert statuses(nested_call_wrong_package) == {
+    "one": UNMATCHED, "two": ("unsupported", "callee-unchecked")
+}, nested_call_wrong_package
+
+# Cross-owner nested helper summaries still lack a replayable source proof. Until that evidence is
+# available, package admission must fail closed instead of selecting a same-leaf declaration.
+qualified_helper_owner = write("qualified_helper_owner", """module Policy:
+    def one(x: i64) -> i64:
+        ensure result == 1
+        return 1
+
+    def two(x: i64) -> i64:
+        ensure result == 2
+        return one(x) + 1
+
+module Other:
+    def one(x: i64) -> bool:
+        ensure result == true
+        return true
+""")
+refused_package(qualified_helper_owner)
+
+# A shared leaf name in distinct owner paths is disambiguated by the source owner. The module
+# function has no obligations; the root declaration matches the root-anchored package.
 duplicate = write("duplicate", """module Inner:
     def nonzero_or_one(x: i64) -> i64:
         return 1
@@ -345,7 +459,42 @@ def nonzero_or_one(x: i64) -> i64:
         return x
 """)
 report = correspond(BRANCH, duplicate, 1)
-assert statuses(report) == {"nonzero_or_one": ("unsupported", "name")}, report
+assert report["source_admissible"] is True, report
+assert [(item["owner"], item["status"], item["reason"]) for item in report["functions"]] == [
+    (["Inner"], "unmatched", "no-obligations"), ([], "checked", None)
+], report
+
+# Same-owner duplicate declarations and an unqualified root call to two nested owners are refused
+# by source admission; neither can borrow whichever same-leaf declaration happened to be visited.
+duplicate_same_owner = write("duplicate_same_owner", """def value(x: i64) -> i64:
+    ensure result == 1
+    return 1
+
+def value(y: i64) -> i64:
+    ensure result == 1
+    return 1
+""")
+duplicate_report = correspond(BRANCH, duplicate_same_owner, 1)
+assert duplicate_report["package"]["status"] == "replayed" and not duplicate_report["source_admissible"], duplicate_report
+assert all(item["status"] != "checked" for item in duplicate_report["functions"]), duplicate_report
+
+ambiguous_helper = write("ambiguous_helper", """module Policy:
+    def helper(x: i64) -> i64:
+        ensure result == 1
+        return 1
+
+module Other:
+    def helper(x: i64) -> i64:
+        ensure result == 1
+        return 1
+
+def caller() -> i64:
+    ensure result == 1
+    return helper(0)
+""")
+ambiguous_report = correspond(BRANCH, ambiguous_helper, 1)
+assert ambiguous_report["package"]["status"] == "replayed" and not ambiguous_report["source_admissible"], ambiguous_report
+assert all(item["status"] != "checked" for item in ambiguous_report["functions"]), ambiguous_report
 
 # A lemma is a ghost declaration, not an executable function: it is never walked, even when its
 # obligations are proved. This source is admissible and its lemma's `ensure` is proved; the sweep
@@ -353,7 +502,7 @@ assert statuses(report) == {"nonzero_or_one": ("unsupported", "name")}, report
 lemma_source = ROOT / "examples/rejected_lemma_result.elisa"
 report = correspond(package(lemma_source), lemma_source, 1)
 assert report["source_admissible"] is True, report
-assert statuses(report) == {"returning_fact": ("unsupported", "lemma"), "unbound_result_fact": ("unsupported", "return-type")}, report
+assert statuses(report) == {"returning_fact": ("unsupported", "lemma"), "unbound_result_fact": ("unsupported", "statement")}, report
 
 # A type alias that renames a scalar type is not that scalar type.
 aliased = write("aliased", """alias i64 = i32
@@ -381,7 +530,7 @@ inadmissible = write("inadmissible", """def nonzero_or_one(x: i64) -> i64:
 report = correspond(BRANCH, inadmissible, 1)
 assert report["source_admissible"] is False and all(entry["status"] == "" for entry in report["functions"]), report
 
-# Budgets: nesting past the walker's bound is refused, not truncated.
+# Budgets: nesting past the source-admission bound is refused, not partially walked.
 deep_lines = ["def deep(x: i64) -> i64:", "    ensure result >= 0"]
 for depth in range(70):
     deep_lines.append("    " * (depth + 1) + "if x >= 0:")
@@ -389,7 +538,7 @@ deep_lines.append("    " * 71 + "return 0")
 deep_lines.append("    return 0")
 deep = write("deep", "\n".join(deep_lines) + "\n")
 report = correspond(BRANCH, deep, 1)
-assert statuses(report) == {"deep": ("unsupported", "nesting")}, report
+assert report["source_admissible"] is False and statuses(report) == {"deep": ("", None)}, report
 # A chain of locals composes into a value term deeper than the checker's term budget, although
 # each line is shallow enough for the compiler.
 chain = ["def chain(x: i64) -> i64:", "    ensure result >= 0", "    v0: i64 = x"]
@@ -397,7 +546,7 @@ chain += [f"    v{index + 1}: i64 = v{index} + 1" for index in range(140)]
 chain.append("    return 0")
 long_chain = write("long_chain", "\n".join(chain) + "\n")
 report = correspond(BRANCH, long_chain, 1)
-assert statuses(report) == {"chain": ("unsupported", "expression")}, report
+assert statuses(report) == {"chain": ("unsupported", "budget")}, report
 
 # Malformed packages: no obligation is weighed against a package that does not replay.
 source = ROOT / "examples/branch_negation.elisa"

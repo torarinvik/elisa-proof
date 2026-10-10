@@ -87,6 +87,11 @@ def corr_comparison_complement(operator: sview) -> sview:
 # of a failed comparison. Every recorded fact is a consequence of the branch taken.
 def corr_assume(pool: mutable CorrPool&, state: mutable CorrState&, condition: usize, holds: bool, depth: usize) -> bool:
     return false if depth > CorrLimit::TERM_DEPTH or condition == 0 or condition >= pool.terms.count
+    decision: (known: bool, value: bool, consistent: bool) = corr_boolean_fact_decision(pool, state, condition)
+    return false if not decision.consistent
+    if decision.known and decision.value != holds:
+        state.live <- false
+        return true
     node: CorrTerm = pool.terms[condition]
     if holds:
         return false if not corr_add_fact(state, condition)
@@ -153,6 +158,56 @@ def corr_resymbolize(pool: mutable CorrPool&, state: mutable CorrState&, changed
 def corr_fact_listed(pool: CorrPool&, facts: darray[usize]&, fact: usize) -> bool:
     for listed in facts |pool, fact|:
         return true if corr_equal(pool, listed, fact, 0)
+    return false
+
+# Resolve only exact source propositions that decide a Boolean term. This lets an admitted pure
+# call's checked `result == true` postcondition close the impossible false branch without
+# evaluating arbitrary predicates or treating a producer summary as authority.
+def corr_boolean_fact_decision(pool: CorrPool&, state: CorrState&, term: usize) -> (known: bool, value: bool, consistent: bool):
+    return (false, false, false) if term == 0 or term >= pool.terms.count
+    found: mutable bool = false
+    selected: mutable bool = false
+    for fact in state.facts |pool, state, term, found, selected|:
+        candidate_known: mutable bool = false
+        candidate: mutable bool = false
+        node: CorrTerm = pool.terms[fact]
+        if corr_equal(pool, fact, term, 0):
+            candidate_known <- true
+            candidate <- true
+        elif node.kind == "unary" and node.operator == "not" and corr_equal(pool, node.left, term, 0):
+            candidate_known <- true
+            candidate <- false
+        elif node.kind == "binary" and (node.operator == "==" or node.operator == "!="):
+            left_matches: bool = corr_equal(pool, node.left, term, 0)
+            right_matches: bool = corr_equal(pool, node.right, term, 0)
+            other: mutable usize = node.right if left_matches else node.left
+            if left_matches or right_matches:
+                if other < pool.terms.count and pool.terms[other].kind == "bool":
+                    candidate_known <- true
+                    candidate <- pool.terms[other].value != 0
+                    candidate <- not candidate if node.operator == "!="
+        if candidate_known:
+            return (true, selected, false) if found and selected != candidate
+            selected <- candidate
+            found <- true
+    return (found, selected, true)
+
+def corr_body_has_value_return(body: darray[Ast::Stmt]&, depth: usize) -> bool:
+    return true if depth > CorrLimit::NESTING
+    for statement in body |depth|:
+        match statement:
+            Ast::Stmt.Return(value, _):
+                return true if value is returned
+            Ast::Stmt.If(_, then_body, else_body, _):
+                return true if corr_body_has_value_return(then_body, depth + 1) or corr_body_has_value_return(else_body, depth + 1)
+            Ast::Stmt.For(_, _, _, _, _):
+                return true
+            Ast::Stmt.While(_, _, _):
+                return true
+            Ast::Stmt.Match(_, _, _):
+                return true
+            _:
+                pass
     return false
 
 # The state after an `if`: each branch's own declarations go out of scope, a variable the branches

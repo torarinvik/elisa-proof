@@ -11,14 +11,19 @@ const module CorrLimit:
     TERMS: usize = 262144
     TERM_SIZE: usize = 4096
     TERM_DEPTH: usize = 128
+    REWRITE_STEPS: usize = 16384
     FACTS: usize = 2048
     VARIABLES: usize = 512
     OBLIGATIONS: usize = 4096
     NESTING: usize = 64
     FUNCTIONS: usize = 4096
+    OWNER_SEGMENTS: usize = 262144
+    MODULE_PATH_BYTES: usize = 4096
+    SOURCE_CONSTANTS: usize = 256
+    SOURCE_ENUM_CHECKS: usize = 65536
 
 struct CorrTerm:
-    # "ident", "int", "bool", "unary", "binary", "call" (callee in `name`), or "tuple".
+    # "ident", "int", "bool", "unary", "binary", "if", "scope", "field", "call", or "tuple".
     kind: sview
     operator: sview
     value: i64
@@ -33,6 +38,32 @@ struct CorrTerm:
 struct CorrPool:
     terms: mutable darray[CorrTerm]
     args: mutable darray[usize]
+
+struct CorrMatchDebug:
+    theorems: mutable usize
+    hypothesis_rejections: mutable usize
+    source_equalities: mutable usize
+    checked_call_equalities: mutable usize
+    hypothesis_equalities: mutable usize
+    rewritten_goals: mutable usize
+    conclusion_matches: mutable usize
+    obligation_facts: mutable usize
+    obligation_equalities: mutable usize
+    obligation_call_equalities: mutable usize
+    theorem_hypotheses: mutable usize
+    held_hypotheses: mutable usize
+    guarded_facts: mutable usize
+    guarded_candidates: mutable usize
+    guarded_checked: mutable usize
+    guarded_implications: mutable usize
+    guarded_equality_rhs: mutable usize
+    guarded_source_matches: mutable usize
+    guarded_site_matches: mutable usize
+    guarded_matches: mutable usize
+    guarded_rewrite_steps: mutable usize
+    guarded_rewrite_activations: mutable usize
+    guarded_rewrite_term_matches: mutable usize
+    unheld_scalar_type_calls: mutable usize
 
 def corr_pool_new() -> CorrPool:
     pool: mutable CorrPool = CorrPool{terms: [], args: []}
@@ -65,6 +96,9 @@ def corr_unary(pool: mutable CorrPool&, operator: sview, operand: usize) -> usiz
 
 def corr_binary(pool: mutable CorrPool&, operator: sview, left: usize, right: usize) -> usize:
     return 0 if left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
+    # Keep the parsed association exactly. The package producer records helper-expanded results
+    # with their source tree shape, and the replayed theorem may relate that shape to another
+    # association. Reassociating here would make correspondence compare a different goal.
     size: usize = pool.terms[left].size + pool.terms[right].size + 1
     left_depth: usize = pool.terms[left].depth
     right_depth: usize = pool.terms[right].depth
@@ -87,7 +121,33 @@ def corr_node_with_children(pool: mutable CorrPool&, kind: sview, name: sview, c
 
 def corr_call(pool: mutable CorrPool&, callee: sview, arguments: darray[usize]&) -> usize:
     return 0 if sview_len(callee) == 0
-    return corr_node_with_children(pool, "call", callee, arguments)
+    callee_term: usize = corr_ident(pool, callee)
+    return corr_call_term(pool, callee_term, arguments)
+
+def corr_scope(pool: mutable CorrPool&, base: usize, member: sview) -> usize:
+    return 0 if base == 0 or sview_len(member) == 0 or base >= pool.terms.count
+    size: usize = pool.terms[base].size + 1
+    depth: usize = pool.terms[base].depth + 1
+    return corr_add(pool, "scope", "", 0, member, base, 0, 0, 0, size, depth)
+
+def corr_field(pool: mutable CorrPool&, base: usize, member: sview) -> usize:
+    return 0 if base == 0 or sview_len(member) == 0 or base >= pool.terms.count
+    size: usize = pool.terms[base].size + 1
+    depth: usize = pool.terms[base].depth + 1
+    return corr_add(pool, "field", "", 0, member, base, 0, 0, 0, size, depth)
+
+def corr_call_term(pool: mutable CorrPool&, callee: usize, arguments: darray[usize]&) -> usize:
+    return 0 if callee == 0 or callee >= pool.terms.count
+    size: mutable usize = pool.terms[callee].size + 2
+    depth: mutable usize = pool.terms[callee].depth + 1
+    for argument in arguments |pool, size, depth|:
+        return 0 if argument == 0 or argument >= pool.terms.count
+        size <- size + pool.terms[argument].size + 1
+        child_depth: usize = pool.terms[argument].depth + 2
+        depth <- child_depth if child_depth > depth
+    start: usize = pool.args.count
+    pool.args.extend(arguments)
+    return corr_add(pool, "call", "", 0, "", callee, 0, start, arguments.count, size, depth)
 
 def corr_call1(pool: mutable CorrPool&, callee: sview, argument: usize) -> usize:
     arguments: mutable darray[usize] = []
@@ -105,6 +165,18 @@ def corr_tuple2(pool: mutable CorrPool&, first: usize, second: usize) -> usize:
     elements.push(first)
     elements.push(second)
     return corr_node_with_children(pool, "tuple", "", &elements)
+
+def corr_if(pool: mutable CorrPool&, condition: usize, then_value: usize, else_value: usize) -> usize:
+    return 0 if condition == 0 or then_value == 0 or else_value == 0
+    return 0 if condition >= pool.terms.count or then_value >= pool.terms.count or else_value >= pool.terms.count
+    return 0 if pool.args.count >= CorrLimit::TERMS
+    size: usize = pool.terms[condition].size + pool.terms[then_value].size + pool.terms[else_value].size + 1
+    depth: mutable usize = pool.terms[condition].depth + 1
+    depth <- pool.terms[then_value].depth + 1 if pool.terms[then_value].depth > pool.terms[condition].depth
+    depth <- pool.terms[else_value].depth + 1 if pool.terms[else_value].depth > pool.terms[condition].depth and pool.terms[else_value].depth > pool.terms[then_value].depth
+    else_start: usize = pool.args.count
+    pool.args.push(else_value)
+    return corr_add(pool, "if", "", 0, "", condition, then_value, else_start, 1, size, depth)
 
 def corr_equal(pool: CorrPool&, left: usize, right: usize, depth: usize) -> bool:
     return false if depth > CorrLimit::TERM_DEPTH or left == 0 or right == 0 or left >= pool.terms.count or right >= pool.terms.count
@@ -125,6 +197,10 @@ def corr_mentions(pool: CorrPool&, term: usize, name: sview, depth: usize) -> bo
     return true if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count
     node: CorrTerm = pool.terms[term]
     return node.name == name if node.kind == "ident"
+    if node.kind == "call":
+        for index in 0..<node.args_count |index, pool, node, name, depth|:
+            return true if corr_mentions(pool, pool.args[node.args_start + index], name, depth + 1)
+        return false
     return true if node.left != 0 and corr_mentions(pool, node.left, name, depth + 1)
     return true if node.right != 0 and corr_mentions(pool, node.right, name, depth + 1)
     for index in 0..<node.args_count |index, pool, node, name, depth|:
@@ -141,6 +217,7 @@ def corr_binary_operator(operator: TokenKind) -> sview:
     return "+" if operator == TokenKind.Plus
     return "-" if operator == TokenKind.Minus
     return "*" if operator == TokenKind.Star
+    return "/" if operator == TokenKind.Slash
     return "==" if operator == TokenKind.EqEq
     return "!=" if operator == TokenKind.BangEq
     return "<" if operator == TokenKind.Lt
@@ -157,8 +234,7 @@ def corr_lookup(names: darray[sview]&, values: darray[usize]&, name: sview) -> u
         found <- values[index] if names[index] == name and index < values.count
     return found
 
-# The value of a call-free subset expression in an environment of symbolic values. Division and
-# remainder are left out: their obligations belong to other rules this checker does not model.
+# Basic call-free expression evaluation. Source constants use the stricter owner-aware evaluator.
 def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[sview]&, values: darray[usize]&, depth: usize) -> usize:
     return 0 if depth > CorrLimit::TERM_DEPTH
     match expression:
@@ -178,11 +254,17 @@ def corr_eval(pool: mutable CorrPool&, expression: Ast::Expr, names: darray[svie
             inner: usize = corr_eval(pool, operand, names, values, depth + 1)
             return corr_unary(pool, spelled, inner)
         Ast::Expr.Binary(left, operator, right, _):
+            return 0 if operator == TokenKind.Slash
             spelled: sview = corr_binary_operator(operator)
             return 0 if sview_len(spelled) == 0
             left_term: usize = corr_eval(pool, left, names, values, depth + 1)
             right_term: usize = corr_eval(pool, right, names, values, depth + 1)
             return corr_binary(pool, spelled, left_term, right_term)
+        Ast::Expr.If(condition, then_expression, else_expression, _):
+            condition_term: usize = corr_eval(pool, condition, names, values, depth + 1)
+            then_term: usize = corr_eval(pool, then_expression, names, values, depth + 1)
+            else_term: usize = corr_eval(pool, else_expression, names, values, depth + 1)
+            return corr_if(pool, condition_term, then_term, else_term)
         _:
             return 0
 
@@ -255,15 +337,23 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
     return false if depth > CorrLimit::TERM_DEPTH or root >= nodes.count or term == 0 or term >= pool.terms.count
     node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
     expected: CorrTerm = pool.terms[term]
+    return false if expected.args_start > pool.args.count or expected.args_count > pool.args.count - expected.args_start
     return false if node.kind != expected.kind or node.operator != expected.operator or node.secondary_name != ""
     if expected.kind == "ident" or expected.kind == "int" or expected.kind == "bool":
         return node.value == expected.value and node.name == expected.name and corr_node_leaf(node)
+    if expected.kind == "scope":
+        return node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
+    if expected.kind == "field":
+        return node.value == 0 and node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.name == expected.name and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     return false if node.value != 0 or node.name != ""
     if expected.kind == "unary":
         return node.right == 0 and node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     if expected.kind == "binary":
         return false if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0
         return corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1) and corr_node_equal(nodes, children, node.right, pool, expected.right, depth + 1)
+    if expected.kind == "if":
+        return false if node.children_start != 0 or node.children_count != 0 or expected.args_count != 1 or node.auxiliary == 0 or node.auxiliary >= nodes.count
+        return corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1) and corr_node_equal(nodes, children, node.right, pool, expected.right, depth + 1) and corr_node_equal(nodes, children, node.auxiliary, pool, pool.args[expected.args_start], depth + 1)
     return false if node.right != 0 or node.children_count != expected.args_count
     # A call records how many argument labels it was written with; every label is checked empty
     # below, so an all-positional call and one with all-empty labels denote the same term.
@@ -275,8 +365,7 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
             return false if not corr_node_equal(nodes, children, children[node.children_start + index], pool, pool.args[expected.args_start + index], depth + 1)
         return true
     return false if expected.kind != "call" or node.left >= nodes.count
-    callee: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
-    return false if callee.kind != "ident" or callee.operator != "" or callee.value != 0 or callee.name != expected.name or callee.secondary_name != "" or not corr_node_leaf(callee)
+    return false if not corr_node_equal(nodes, children, node.left, pool, expected.left, depth + 1)
     for index in 0..<expected.args_count |index, nodes, children, node, pool, expected, depth|:
         slot: usize = children[node.children_start + index]
         return false if slot >= nodes.count
@@ -285,3 +374,57 @@ def corr_node_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, child
         return false if argument.right != 0 or argument.auxiliary != 0 or argument.children_start != 0 or argument.children_count != 0
         return false if not corr_node_equal(nodes, children, argument.left, pool, pool.args[expected.args_start + index], depth + 1)
     return true
+
+# Rewrite only from source-derived equalities whose matching replayed theorem hypothesis has
+# already been checked. The caller filters `equalities`; this routine preserves argument order,
+# refuses conflicting rewrites, and bounds total traversal and term growth.
+def corr_rewrite_source_term(pool: mutable CorrPool&, term: usize, equalities: darray[usize]&, depth: usize, budget: mutable usize&, allow_root: bool) -> usize:
+    return 0 if depth > CorrLimit::TERM_DEPTH or term == 0 or term >= pool.terms.count or budget >= CorrLimit::REWRITE_STEPS
+    budget <- budget + 1
+    if allow_root:
+        replacement: mutable usize = 0
+        for equality in equalities |pool, term, depth, budget, replacement|:
+            return 0 if equality == 0 or equality >= pool.terms.count
+            fact: CorrTerm = pool.terms[equality]
+            continue if fact.kind != "binary" or fact.operator != "==" or fact.left == 0 or fact.right == 0
+            if corr_equal(pool, term, fact.left, 0):
+                return 0 if replacement != 0 and not corr_equal(pool, replacement, fact.right, 0)
+                replacement <- fact.right
+        if replacement != 0 and not corr_equal(pool, term, replacement, 0):
+            return corr_rewrite_source_term(pool, replacement, equalities, depth + 1, budget, true)
+    node: CorrTerm = pool.terms[term]
+    left: mutable usize = node.left
+    right: mutable usize = node.right
+    changed: mutable bool = false
+    if node.left != 0:
+        left <- corr_rewrite_source_term(pool, node.left, equalities, depth + 1, budget, true)
+        return 0 if left == 0
+        changed <- true if left != node.left
+    if node.right != 0:
+        right <- corr_rewrite_source_term(pool, node.right, equalities, depth + 1, budget, true)
+        return 0 if right == 0
+        changed <- true if right != node.right
+    arguments: mutable darray[usize] = []
+    for index in 0..<node.args_count |index, pool, node, equalities, depth, budget, arguments, changed|:
+        original: usize = pool.args[node.args_start + index]
+        argument: usize = corr_rewrite_source_term(pool, original, equalities, depth + 1, budget, true)
+        return 0 if argument == 0
+        arguments.push(argument)
+        changed <- true if argument != original
+    return term if not changed
+    if node.kind == "unary":
+        return corr_unary(pool, node.operator, left)
+    if node.kind == "binary":
+        return corr_binary(pool, node.operator, left, right)
+    if node.kind == "scope":
+        return corr_scope(pool, left, node.name)
+    if node.kind == "field":
+        return corr_field(pool, left, node.name)
+    if node.kind == "call":
+        return corr_call_term(pool, left, &arguments)
+    if node.kind == "tuple":
+        return corr_node_with_children(pool, "tuple", node.name, &arguments)
+    if node.kind == "if":
+        return 0 if arguments.count != 1
+        return corr_if(pool, left, right, arguments[0])
+    return 0
