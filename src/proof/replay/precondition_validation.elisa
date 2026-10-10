@@ -79,6 +79,47 @@ extend ElisaProof:
                     return false
             return false
 
+        # Replace one exact source term after its declaration-backed equality fact has been
+        # validated. This handles qualified constant paths as well as bare names; it never
+        # substitutes by the last path segment alone.
+        def proof_replay_precondition_replace_source_term(expression: Ast::Expr, source_term: Ast::Expr, replacement: Ast::Expr, depth: usize) -> Ast::Expr:
+            return Ast::Expr.Invalid if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            return replacement if proof_replay_expr_equal(expression, source_term)
+            match expression:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Ident(_, _):
+                    return expression
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_replay_precondition_replace_source_term(inner, source_term, replacement, depth + 1), position)
+                Ast::Expr.Unary(operator, operand, position):
+                    return Ast::Expr.Unary(operator, proof_replay_precondition_replace_source_term(operand, source_term, replacement, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_replay_precondition_replace_source_term(left, source_term, replacement, depth + 1), operator, proof_replay_precondition_replace_source_term(right, source_term, replacement, depth + 1), position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    rewritten_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten_arguments, source_term, replacement, depth|:
+                        rewritten_arguments.push(proof_replay_precondition_replace_source_term(argument, source_term, replacement, depth + 1))
+                    return Ast::Expr.Call(proof_replay_precondition_replace_source_term(callee, source_term, replacement, depth + 1), rewritten_arguments, argument_names, position)
+                Ast::Expr.Field(object, field, position):
+                    return Ast::Expr.Field(proof_replay_precondition_replace_source_term(object, source_term, replacement, depth + 1), field, position)
+                Ast::Expr.Scope(base, member, position):
+                    return Ast::Expr.Scope(proof_replay_precondition_replace_source_term(base, source_term, replacement, depth + 1), member, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_replay_precondition_replace_source_term(object, source_term, replacement, depth + 1), proof_replay_precondition_replace_source_term(index, source_term, replacement, depth + 1), position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    return Ast::Expr.If(proof_replay_precondition_replace_source_term(condition, source_term, replacement, depth + 1), proof_replay_precondition_replace_source_term(then_expression, source_term, replacement, depth + 1), proof_replay_precondition_replace_source_term(else_expression, source_term, replacement, depth + 1), position)
+                Ast::Expr.Array(elements, position):
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for element in elements |rewritten, source_term, replacement, depth|:
+                        rewritten.push(proof_replay_precondition_replace_source_term(element, source_term, replacement, depth + 1))
+                    return Ast::Expr.Array(rewritten, position)
+                Ast::Expr.Tuple(elements, position):
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for element in elements |rewritten, source_term, replacement, depth|:
+                        rewritten.push(proof_replay_precondition_replace_source_term(element, source_term, replacement, depth + 1))
+                    return Ast::Expr.Tuple(rewritten, position)
+                _:
+                    return Ast::Expr.Invalid
+
         def proof_replay_precondition_body_contract_matches(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]) -> bool:
             leading: mutable bool = true
             for statement in body |leading, report, trace|:
@@ -91,19 +132,16 @@ extend ElisaProof:
                             # recorded. Rebuild that normalization only from source-validated
                             # constant facts owned by this exact function; mutable or shadowed
                             # names have no such witness.
-                            names: mutable darray[sview] = []
-                            values: mutable darray[Ast::Expr] = []
-                            for candidate in report.traces.records |names, values, report, trace|:
+                            normalized: mutable Ast::Expr = requirement
+                            for candidate in report.traces.records |normalized, report, trace|:
                                 continue if candidate.name != trace.name or candidate.owner_line != trace.line
-                                continue if candidate.kind != "global-constant"
+                                continue if candidate.kind != "global-constant" and candidate.kind != "global-constant-qualified"
                                 continue if not proof_replay_global_constant_fact_is_valid(report, candidate)
                                 match candidate.expression:
-                                    Ast::Expr.Binary(Ast::Expr.Ident(constant_name, _), TokenKind.EqEq, constant_value, _):
-                                        names.push(constant_name)
-                                        values.push(constant_value)
+                                    Ast::Expr.Binary(source_term, TokenKind.EqEq, constant_value, _):
+                                        normalized <- proof_replay_precondition_replace_source_term(normalized, source_term, constant_value, 0)
                                     _:
                                         pass
-                            normalized: Ast::Expr = proof_replay_substitute_many(requirement, names, values)
                             return true if not proof_replay_expr_is_invalid(normalized) and proof_replay_expr_equal(normalized, trace.expression)
                             continue
                         else:

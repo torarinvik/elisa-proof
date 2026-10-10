@@ -13,7 +13,8 @@ accepted.
   liveness rule as a certificate's own fact, and a verdict memoized for one certificate is not
   reused for another.
 - An entry-precondition trace is accepted only while it matches a leading source requires clause
-  or a parameter refinement; changing the source contract invalidates its dependent certificate.
+  or a parameter refinement; validated qualified-constant substitution is replayed from its
+  exact source path, and changing the source contract invalidates its dependent certificate.
 - A call summary's precondition goal must have been proven at that call, not merely be a goal
   with the same text proven at another call.
 """
@@ -99,6 +100,15 @@ SOURCE_TEXT = (
     "    a: i64 = pos(n)\n"  # 65
     "    b: i64 = pos(n)\n"  # 66
     "    return b\n"  # 67
+    "\n"  # 68
+    "module Caps:\n"  # 69
+    "    public:\n"  # 70
+    "        const TOP: i64 = 10\n"  # 71
+    "\n"  # 72
+    "def bounded(x: i64) -> i64:\n"  # 73
+    "    requires x <= Caps::TOP\n"  # 74
+    "    ensure result <= 10\n"  # 75
+    "    return x\n"  # 76
 )
 
 HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
@@ -244,7 +254,7 @@ extend ElisaProof:
                 return index if trace.kind == "precondition" and trace.name == owner and trace.line == owner_line
             return report.traces.records.count
 
-        def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32) -> bool:
+        def test_scope_mutate_precondition(report: mutable ProofReport&, owner: sview, owner_line: u32, forged: Ast::Expr) -> bool:
             for index in 0..<report.source_declarations.count |index, report, owner, owner_line|:
                 match report.source_declarations[index]:
                     Ast::Decl.Func(name, parameters, return_type, body, annotations, attributes, position):
@@ -254,7 +264,6 @@ extend ElisaProof:
                         for statement_index in 0..<mutated_body.count |statement_index, mutated_body, changed|:
                             match mutated_body[statement_index]:
                                 Ast::Stmt.Contract("requires", _, contract_position):
-                                    forged: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", contract_position), TokenKind.Lt, Ast::Expr.IntLit(0, contract_position), contract_position)
                                     mutated_body[statement_index] <- Ast::Stmt.Contract("requires", forged, contract_position)
                                     changed <- true
                                 _:
@@ -354,15 +363,30 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return stop if stop != 0
 
     # Entry assumptions must be bound to a leading source requires or a retained type refinement.
+    qualified_precondition_index: usize = test_scope_precondition_index(report, "bounded", 73)
+    return 17 if qualified_precondition_index >= report.traces.records.count
+    qualified_precondition_trace: ProofFactTrace = report.traces.records[qualified_precondition_index]
+    test_scope_context(&report, 73, 76, 0)
+    return 18 if not proof_replay_boundary_trace_shape_valid(report, qualified_precondition_trace)
+    qualified_position: Ast::Pos = Ast::pos_at_line(74)
+    forged_qualified: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", qualified_position), TokenKind.Lt, Ast::Expr.Scope(Ast::Expr.Ident("Caps", qualified_position), "TOP", qualified_position), qualified_position)
+    report.traces.records[qualified_precondition_index] <- test_scope_trace(forged_qualified, qualified_precondition_trace.kind, qualified_precondition_trace.line, qualified_precondition_trace.name, qualified_precondition_trace.owner_line)
+    return 19 if proof_replay_boundary_trace_shape_valid(report, report.traces.records[qualified_precondition_index])
+    report.traces.records[qualified_precondition_index] <- qualified_precondition_trace
+    return 20 if not test_scope_mutate_precondition(&report, "bounded", 73, forged_qualified)
+    return 21 if proof_replay_boundary_trace_shape_valid(report, qualified_precondition_trace)
+
     precondition_index: usize = test_scope_precondition_index(report, "pos", 58)
-    return 17 if precondition_index >= report.traces.records.count
+    return 22 if precondition_index >= report.traces.records.count
     precondition_trace: ProofFactTrace = report.traces.records[precondition_index]
     test_scope_context(&report, 58, 60, 0)
-    return 18 if not proof_replay_boundary_trace_shape_valid(report, precondition_trace)
-    return 19 if not test_scope_mutate_precondition(&report, "pos", 58)
-    return 20 if proof_replay_boundary_trace_shape_valid(report, precondition_trace)
+    return 23 if not proof_replay_boundary_trace_shape_valid(report, precondition_trace)
+    pos_position: Ast::Pos = Ast::pos_at_line(59)
+    forged_pos: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("x", pos_position), TokenKind.Lt, Ast::Expr.IntLit(0, pos_position), pos_position)
+    return 24 if not test_scope_mutate_precondition(&report, "pos", 58, forged_pos)
+    return 25 if proof_replay_boundary_trace_shape_valid(report, precondition_trace)
     proof_replay_certificates(&report)
-    return 21 if report.replay_gaps == 0
+    return 26 if report.replay_gaps == 0
     return 128 + forged if SCOPE_MODE == 1
     return 0
 '''

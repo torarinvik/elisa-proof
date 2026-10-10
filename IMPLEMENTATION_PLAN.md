@@ -8356,3 +8356,22 @@ this witness. The focused refinement API can replay its theorem but currently re
 source-obligation-inventory refusal, covered by the harness. Continue from this local branch and
 commit, with source/replay trust mutations and complete current-product qualification ahead of any
 performance experiment. No Vast filesystem is needed to rebuild or run these checks.
+
+### 23.27.51 Bind entry preconditions to retained source before replay (2026-10-10)
+
+The replay boundary previously accepted every structurally valid `precondition` trace as an
+axiom. The validator now requires a unique owning function and matches the fact to a leading
+source `requires` clause or a parameter refinement reconstructed through unique type aliases.
+For normalized clauses, replay substitutes only exact terms from independently validated,
+owner-matched global-constant traces; qualified paths are matched as full source expressions, not
+by their final segment. Adversarial coverage mutates the serialized qualified precondition trace
+and the retained source clause, and requires the boundary validator to reject both. The direct API
+harness also mutates a refinement alias and requires a replay gap.
+
+Python syntax and whitespace checks pass, but no Elisa build or runtime replay gate has run for
+this change yet. The current public Elisa compiler is still `8f2023ce8a7d52358b733a0e812ff46293d45f10`
+(`git ls-remote origin/main`); its shared Stage1 slot is reserved for the active self-compile A/B.
+After the coordinator releases that slot, rebuild the strict O2 product and run the direct-API
+mutation harness, scope/context replay harness, Global grant suite, pure-contract replay suite,
+qualified-constant suite, and refinement-alias positives. Keep any unsupported normalization
+fail-closed and record regressions before resuming compiler performance comparisons.
