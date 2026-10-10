@@ -8993,3 +8993,26 @@ An isolated source audit located the line-parity defect: `append_parse_errors` c
 errors look identical. A candidate fix populates the parser line and column in each diagnostic;
 it is not integrated or qualified. Require a fresh seed and native reporter regression before
 including it, and preserve deduplication for genuinely identical same-location findings.
+
+
+### 23.27.76 Atomic and header fixtures expose removed API and missing-grant updates (2026-10-10)
+
+The same frozen run has now reported 26 failing checks. Three new fixture failures explain the
+increment from 23:
+
+- `atomic_invalid_order_smoke.sh` fails because `atomic_typed_order_parameter.elisa` still calls
+  the deliberately removed raw `load` operation. Migrate this regression to the typed
+  `AtomicCell[T]` API or a named protocol that owns the ordering invariant, keeping invalid-order
+  rejection cases intact.
+- `atomic_runtime_smoke.sh` stops in Stage0 because reads and writes of its global atomic counter
+  lack Global.Read/Global.Write. An isolated fixture candidate scopes those grants around the
+  actual operations rather than granting them across the entire signature; Stage0 semantic and
+  Stage1 check pass, but native multi-threaded execution is still pending.
+- `backend_header_smoke.sh` stops before generating the header because
+  `test/breadth/emit_header.elisa` calls `frontend_parser_parse_file` without the newly required
+  Global grants. Add a local grant around that call, then require the C-header comparison and C/C++
+  syntax checks to pass.
+
+Keep all three changes isolated until the frozen lane releases. Do not reintroduce raw atomics or
+broaden capabilities just to satisfy legacy fixtures. The proof pin remains unchanged; the full
+compiler suite and source/runtime postflight remain incomplete.
