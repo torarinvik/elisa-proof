@@ -26,6 +26,17 @@ SOURCE_LINES = [
     "def step(x: i64) -> i64:",
     "    return x + 1",
     "",
+    "struct Cell:",
+    "    value: i64",
+    "",
+    "def callback(value: i64) -> i64:",
+    "    return value",
+    "",
+    "def shadowed_callback(callback: fn(mutable Cell&) -> void, cell: mutable Cell) -> i64:",
+    "    prior: i64 = cell.value",
+    "    callback(&cell)",
+    "    return step(prior)",  # SHADOWED_CALLBACK_CALL
+    "",
     "def looped(n: i64) -> i64:",
     "    t: mutable i64 = 0",
     "    k: mutable i64 = 0",
@@ -163,7 +174,7 @@ TAGS = [
     "LOOP_BODY", "LOOP_ASSIGNED", "LOOP_AFTER", "BRANCH_AFTER", "BUMP_ASSIGN", "BUMP_CALL",
     "FOR_CALL", "MATCH_AFTER", "METHOD_AFTER", "SHADOW_CALL", "GUARD_CALL", "NESTED_CALL",
     "ELSE_AFTER", "COMPOUND_AFTER", "LENT_AFTER", "SHARED_AFTER", "ENCLOSED_CALL", "SIBLING_CALL", "LOOKED_AFTER",
-    "DECL_CALL", "REASSIGNED_CALL",
+    "DECL_CALL", "REASSIGNED_CALL", "SHADOWED_CALLBACK_CALL",
 ]
 
 
@@ -326,9 +337,9 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
     report: mutable ProofReport = proof_empty_report()
-    proof_check(file, &report)
+    (proof_check(file, &report) can Global{Read,Write})
 
     # A loop-body call reads the loop-rewritten actual at iteration entry.
     body: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "looped", LOOP_BODY, false)
@@ -456,6 +467,15 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     return 66 if not reassigned_call.known
     return 67 if test_loop_site_accepted(&report, "reassigned", reassigned_call.value)
     return 68 if test_loop_site_accepted(&report, "reassigned", test_loop_with_literal(reassigned_call.value, 0))
+
+    # A local callback shadows a same-spelled pure global function. Its mutable borrow can
+    # rewrite the earlier snapshot, so a forged field actual must not inherit that value.
+    shadowed_callback_call: (known: bool, value: Ast::Expr) = test_loop_find(&report.source_declarations, "shadowed_callback", SHADOWED_CALLBACK_CALL, false)
+    return 69 if not shadowed_callback_call.known
+    return 70 if not test_loop_site_accepted(&report, "shadowed_callback", shadowed_callback_call.value)
+    shadowed_position: Ast::Pos = Ast::expr_pos(shadowed_callback_call.value)
+    cell_value: Ast::Expr = Ast::Expr.Field(Ast::Expr.Ident("cell", shadowed_position), "value", shadowed_position)
+    return 71 if test_loop_site_accepted(&report, "shadowed_callback", test_loop_with_argument(shadowed_callback_call.value, cell_value))
     return 0
 '''
 
@@ -492,7 +512,7 @@ def main() -> None:
         result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=60)
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail; mutable-slot, same-name and sibling writes reset while enclosing calls do not; summary sites match raw text at the exact span; sole-declaration locals match only at their declaration value and forged/reassigned markers fail")
+    print("deterministic-call loop replay: loop, guard, for, nested-loop and join calls bind rewritten actuals at their reset point; pre-loop, in-loop, single-arm, stale-receiver, reassigned-raw, shadowed, shifted-span and wrong-owner markers fail; mutable-slot, shadowed higher-order callee, same-name and sibling writes reset while enclosing calls do not; summary sites match raw text at the exact span; sole-declaration locals match only at their declaration value and forged/reassigned markers fail")
 
 
 if __name__ == "__main__":

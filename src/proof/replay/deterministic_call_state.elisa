@@ -112,12 +112,26 @@ extend ElisaProof:
                         pass
             return true
 
+        # A call through a value in the current lexical scope is not resolved by the global
+        # declaration scan below. Treat it as effectful even when a same-spelled top-level
+        # function happens to be pure.
+        def proof_replay_deterministic_call_local_callee(bound_names: darray[sview]&, callee: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= 96
+            match callee:
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_deterministic_call_name_bound(bound_names, name)
+                Ast::Expr.Scope(prefix, _, _):
+                    return proof_replay_deterministic_call_local_callee(bound_names, prefix, depth + 1)
+                _:
+                    return false
+
         # A callee that cannot write any caller local: every source function the name could
         # resolve to (all same-spelled functions in any module, so no resolution is trusted)
         # has no mutable parameter. A by-value parameter receives a copy and a shared `T&`
         # borrow cannot be written through, so only a `mutable`/`lmut` slot reaches a caller
         # place. A name with no source function, or shared with any non-function, is unsafe.
-        def proof_replay_deterministic_callee_local_safe(declarations: darray[Ast::Decl]&, callee: Ast::Expr) -> bool:
+        def proof_replay_deterministic_callee_local_safe(declarations: darray[Ast::Decl]&, bound_names: darray[sview]&, callee: Ast::Expr) -> bool:
+            return false if proof_replay_deterministic_call_local_callee(bound_names, callee, 0)
             name: mutable sview = ""
             match callee:
                 Ast::Expr.Ident(callee_name, _):
@@ -146,12 +160,12 @@ extend ElisaProof:
                         pass
             return count
 
-        def proof_replay_deterministic_call_writes_nothing(declarations: darray[Ast::Decl]&, callee: Ast::Expr) -> bool:
+        def proof_replay_deterministic_call_writes_nothing(declarations: darray[Ast::Decl]&, bound_names: darray[sview]&, callee: Ast::Expr) -> bool:
             match callee:
                 Ast::Expr.Field(_, _, _):
                     return false
                 _:
-                    return proof_replay_deterministic_callee_local_safe(declarations, callee)
+                    return proof_replay_deterministic_callee_local_safe(declarations, bound_names, callee)
 
         # Whether a call with exactly the span `inner` occurs inside one of the expressions.
         # Forms not listed are not searched, so the answer errs toward "no".
@@ -186,7 +200,7 @@ extend ElisaProof:
         # borrow, a method call (its receiver), a call to anything but a local-safe function, or
         # a form this check does not model. The call at span `skip` (the one being matched) is not
         # itself counted; its arguments are.
-        def proof_replay_deterministic_expr_writes(declarations: darray[Ast::Decl]&, expression: Ast::Expr, skip: Ast::Pos, depth: usize) -> bool:
+        def proof_replay_deterministic_expr_writes(declarations: darray[Ast::Decl]&, bound_names: darray[sview]&, expression: Ast::Expr, skip: Ast::Pos, depth: usize) -> bool:
             return true if depth >= 96
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
@@ -203,71 +217,82 @@ extend ElisaProof:
                             match argument:
                                 Ast::Expr.Unary(operator, inner, _):
                                     if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut:
-                                        return true if proof_replay_deterministic_expr_writes(declarations, inner, skip, depth + 1)
+                                        return true if proof_replay_deterministic_expr_writes(declarations, bound_names, inner, skip, depth + 1)
                                     else:
-                                        return true if proof_replay_deterministic_expr_writes(declarations, argument, skip, depth + 1)
+                                        return true if proof_replay_deterministic_expr_writes(declarations, bound_names, argument, skip, depth + 1)
                                 _:
-                                    return true if proof_replay_deterministic_expr_writes(declarations, argument, skip, depth + 1)
+                                    return true if proof_replay_deterministic_expr_writes(declarations, bound_names, argument, skip, depth + 1)
                         return false
                     # A call's own write happens after all of its arguments are evaluated, so a
                     # call enclosing the matched one (`out.push(f(x))`) cannot change what the
                     # matched call reads; its receiver and arguments still count.
                     enclosing: bool = proof_replay_deterministic_span_within_any(arguments, skip)
-                    return true if not enclosing and not proof_replay_deterministic_call_writes_nothing(declarations, callee)
+                    return true if not enclosing and not proof_replay_deterministic_call_writes_nothing(declarations, bound_names, callee)
                     match callee:
                         Ast::Expr.Field(receiver, _, _):
-                            return true if proof_replay_deterministic_expr_writes(declarations, receiver, skip, depth + 1)
+                            return true if proof_replay_deterministic_expr_writes(declarations, bound_names, receiver, skip, depth + 1)
                         _:
                             pass
-                    return proof_replay_deterministic_exprs_write(declarations, arguments, skip, depth + 1)
+                    return proof_replay_deterministic_exprs_write(declarations, bound_names, arguments, skip, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return true if operator == TokenKind.Ampersand or operator == TokenKind.Mutable or operator == TokenKind.Lmut
-                    return proof_replay_deterministic_expr_writes(declarations, inner, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, inner, skip, depth + 1)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _):
-                    return proof_replay_deterministic_expr_writes(declarations, inner, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, inner, skip, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_replay_deterministic_expr_writes(declarations, left, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, right, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, left, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, bound_names, right, skip, depth + 1)
                 Ast::Expr.Field(object, _, _):
-                    return proof_replay_deterministic_expr_writes(declarations, object, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, object, skip, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_replay_deterministic_expr_writes(declarations, object, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, index, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, object, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, bound_names, index, skip, depth + 1)
                 Ast::Expr.If(condition, yes, no, _):
-                    return proof_replay_deterministic_expr_writes(declarations, condition, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, yes, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, no, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, condition, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, bound_names, yes, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, bound_names, no, skip, depth + 1)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _):
-                    return proof_replay_deterministic_exprs_write(declarations, elements, skip, depth + 1)
+                    return proof_replay_deterministic_exprs_write(declarations, bound_names, elements, skip, depth + 1)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return proof_replay_deterministic_expr_writes(declarations, base, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, predicate, skip, depth + 1)
+                    return proof_replay_deterministic_expr_writes(declarations, bound_names, base, skip, depth + 1) or proof_replay_deterministic_expr_writes(declarations, bound_names, predicate, skip, depth + 1)
                 _:
                     return true
 
-        def proof_replay_deterministic_exprs_write(declarations: darray[Ast::Decl]&, expressions: darray[Ast::Expr]&, skip: Ast::Pos, depth: usize) -> bool:
+        def proof_replay_deterministic_exprs_write(declarations: darray[Ast::Decl]&, bound_names: darray[sview]&, expressions: darray[Ast::Expr]&, skip: Ast::Pos, depth: usize) -> bool:
             return true if depth >= 96
-            for expression in expressions |declarations, skip, depth|:
-                return true if proof_replay_deterministic_expr_writes(declarations, expression, skip, depth + 1)
+            for expression in expressions |declarations, bound_names, skip, depth|:
+                return true if proof_replay_deterministic_expr_writes(declarations, bound_names, expression, skip, depth + 1)
             return false
 
         # Whether a nested body (a branch, a match arm) may change any binding visible after it.
         # Its own declarations are scoped to it; any assignment, write-capable expression or
         # loop counts, as does any statement form this check does not model.
-        def proof_replay_deterministic_statements_write(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, depth: usize) -> bool:
+        def proof_replay_deterministic_statements_write(declarations: darray[Ast::Decl]&, bound_names: darray[sview]&, body: darray[Ast::Stmt]&, depth: usize) -> bool:
             return true if depth >= 96
             no_skip: Ast::Pos = Ast::pos_at_line(0)
-            for statement in body |declarations, no_skip, depth|:
+            names: mutable darray[sview] = []
+            for bound_name in bound_names |bound_name, names|:
+                names.push(bound_name)
+            for statement in body |declarations, names, no_skip, depth|:
                 match statement:
-                    Ast::Stmt.VarDecl(_, _, initializer, _):
-                        return true if proof_replay_deterministic_expr_writes(declarations, initializer, no_skip, depth + 1)
+                    Ast::Stmt.VarDecl(local_name, _, initializer, _):
+                        return true if proof_replay_deterministic_expr_writes(declarations, names, initializer, no_skip, depth + 1)
+                        names.push(local_name)
                     Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _):
-                        return true if proof_replay_deterministic_expr_writes(declarations, value, no_skip, depth + 1)
+                        return true if proof_replay_deterministic_expr_writes(declarations, names, value, no_skip, depth + 1)
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_replay_deterministic_expr_writes(declarations, expression, no_skip, depth + 1)
+                        return true if proof_replay_deterministic_expr_writes(declarations, names, expression, no_skip, depth + 1)
                     Ast::Stmt.If(condition, yes, no, _):
-                        return true if proof_replay_deterministic_expr_writes(declarations, condition, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, yes, depth + 1) or proof_replay_deterministic_statements_write(declarations, no, depth + 1)
+                        return true if proof_replay_deterministic_expr_writes(declarations, names, condition, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, names, yes, depth + 1) or proof_replay_deterministic_statements_write(declarations, names, no, depth + 1)
                     Ast::Stmt.Match(value, arms, _):
-                        return true if proof_replay_deterministic_expr_writes(declarations, value, no_skip, depth + 1)
-                        for arm in arms |declarations, no_skip, depth|:
-                            return true if proof_replay_deterministic_expr_writes(declarations, arm.guard, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, arm.body, depth + 1)
+                        return true if proof_replay_deterministic_expr_writes(declarations, names, value, no_skip, depth + 1)
+                        for arm in arms |declarations, names, no_skip, depth|:
+                            arm_names: mutable darray[sview] = []
+                            for bound_name in names |bound_name, arm_names|:
+                                arm_names.push(bound_name)
+                            pattern_names: mutable darray[sview] = []
+                            return true if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
+                            for pattern_name in pattern_names |pattern_name, arm_names|:
+                                arm_names.push(pattern_name)
+                            return true if proof_replay_deterministic_expr_writes(declarations, arm_names, arm.guard, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, arm_names, arm.body, depth + 1)
                     Ast::Stmt.Block(_, _, _, nested, _):
-                        return true if proof_replay_deterministic_statements_write(declarations, nested, depth + 1)
+                        return true if proof_replay_deterministic_statements_write(declarations, names, nested, depth + 1)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
