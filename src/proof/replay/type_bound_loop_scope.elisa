@@ -1,0 +1,80 @@
+# Counting-loop type witnesses carry a source-position-tagged proof atom, so nested binders with
+# the same spelling remain distinct. Certificate replay also binds their use to the exact loop
+# body; the standalone fact-trace API has no consumer context and checks source origin only.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_goal_position_matches(expression: Ast::Expr, goal: Ast::Expr) -> bool:
+            return false if not proof_replay_expr_equal(expression, goal)
+            expression_position: Ast::Pos = Ast::expr_pos(expression)
+            goal_position: Ast::Pos = Ast::expr_pos(goal)
+            return expression_position.line == goal_position.line and expression_position.column == goal_position.column and expression_position.offset == goal_position.offset and expression_position.end_line == goal_position.end_line and expression_position.end_column == goal_position.end_column and expression_position.end_offset == goal_position.end_offset
+
+        def proof_replay_type_bound_consumer_source_site_in_body(body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for statement in body |certificate, matches, depth|:
+                match statement:
+                    Ast::Stmt.Block(kind, _, _, nested, block_position):
+                        if kind == "assert_by" and block_position.line == certificate.line and nested.count > 0:
+                            match nested[0]:
+                                Ast::Stmt.Contract(assert_kind, expression, _):
+                                    matches <- matches + 1 if assert_kind == "assert" and proof_replay_type_bound_goal_position_matches(expression, certificate.goal)
+                                _:
+                                    pass
+                        proof_replay_type_bound_consumer_source_site_in_body(nested, certificate, matches, depth + 1)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_replay_type_bound_consumer_source_site_in_body(then_body, certificate, matches, depth + 1)
+                        proof_replay_type_bound_consumer_source_site_in_body(else_body, certificate, matches, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _):
+                        proof_replay_type_bound_consumer_source_site_in_body(nested, certificate, matches, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |certificate, matches, depth|:
+                            proof_replay_type_bound_consumer_source_site_in_body(arm.body, certificate, matches, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                        proof_replay_type_bound_consumer_source_site_in_body(nested, certificate, matches, depth + 1)
+                    Ast::Stmt.Contract(_, expression, contract_position):
+                        matches <- matches + 1 if contract_position.line == certificate.line and proof_replay_type_bound_goal_position_matches(expression, certificate.goal)
+                    Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, _, _), expression_position):
+                        if callee == "assert" and expression_position.line == certificate.line and arguments.count == 1:
+                            matches <- matches + 1 if proof_replay_type_bound_goal_position_matches(arguments[0], certificate.goal)
+                    Ast::Stmt.Expr(_, _) | Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Assign(_, _, _, _) | Ast::Stmt.Return(_, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _) | Ast::Stmt.Invalid:
+                        pass
+
+        def proof_replay_type_bound_loop_consumer_in_scope(report: ProofReport&, trace: ProofFactTrace, loop_position: Ast::Pos, body: darray[Ast::Stmt]&) -> bool:
+            return true if report.trace_consumer_certificate_index == 0 and report.trace_owner_line == 0
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+            # The binder is introduced after the loop header, so a line-level certificate on
+            # that header cannot prove that the binder is in scope.
+            return false if certificate.line <= loop_position.line
+            attempt_matches: mutable usize = 0
+            for attempt in report.goal_attempts |certificate, attempt_matches|:
+                if attempt.has_certificate and attempt.certificate_index < report.certificates.count and attempt.certificate_index == report.trace_consumer_certificate_index - 1:
+                    return false if attempt.name != certificate.name or attempt.line != certificate.line
+                    return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
+                    attempt_matches <- attempt_matches + 1
+            return false if attempt_matches != 1
+            consumer_matches: mutable usize = 0
+            proof_replay_type_bound_consumer_source_site_in_body(body, certificate, consumer_matches, 0)
+            return consumer_matches > 0
+
+        def proof_replay_type_bound_loop_fact_in_body(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, matches: mutable usize&, valid: mutable bool&, consumer_valid: mutable bool&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for statement in body |report, trace, matches, valid, consumer_valid, depth|:
+                match statement:
+                    Ast::Stmt.For(_, variables, iterable, nested, position):
+                        if position.line == trace.line:
+                            matches <- matches + 1
+                            valid <- proof_replay_type_bound_counting_loop_fact(trace.expression, variables, iterable, position)
+                            consumer_valid <- proof_replay_type_bound_loop_consumer_in_scope(report, trace, position, nested)
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, depth + 1)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, then_body, matches, valid, consumer_valid, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, else_body, matches, valid, consumer_valid, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |report, trace, matches, valid, consumer_valid, depth|:
+                            proof_replay_type_bound_loop_fact_in_body(report, trace, arm.body, matches, valid, consumer_valid, depth + 1)
+                    _:
+                        pass

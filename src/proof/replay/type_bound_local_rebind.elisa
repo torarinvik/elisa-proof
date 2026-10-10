@@ -1,0 +1,70 @@
+# A loop self-update may resymbolize a mutable unsigned local. Its fresh symbol's range is
+# justified only by the exact live source binding and the local's declared unsigned type.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_unsigned_rebind_target(expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_type_bound_unsigned_rebind_target(inner, depth + 1)
+                Ast::Expr.Binary(Ast::Expr.Ident(name, _), operator, _, _):
+                    return name if operator == TokenKind.Plus or operator == TokenKind.Minus
+                    return ""
+                _:
+                    return ""
+
+        def proof_replay_type_bound_unsigned_rebind_fact(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&) -> bool:
+            symbol: mutable sview = ""
+            symbol_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            width: mutable i64 = 0
+            match trace.expression:
+                Ast::Expr.Call(Ast::Expr.Ident(marker, _), arguments, argument_names, _):
+                    return false if marker != "__elisa_unsigned_type_bound" or arguments.count != 2 or argument_names.count != 0
+                    match arguments[0]:
+                        Ast::Expr.Ident(name, position):
+                            symbol <- name
+                            symbol_position <- position
+                        _:
+                            return false
+                    match arguments[1]:
+                        Ast::Expr.IntLit(value, _):
+                            width <- value
+                        _:
+                            return false
+                _:
+                    return false
+            return false if not proof_internal_name_is_rebind(symbol) or width <= 0
+            binding_matches: mutable usize = 0
+            target: mutable sview = ""
+            for candidate in report.traces.records |trace, symbol, symbol_position, binding_matches, target, report|:
+                continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                match candidate.expression:
+                    Ast::Expr.Binary(Ast::Expr.Ident(candidate_symbol, _), TokenKind.EqEq, value, _):
+                        continue if candidate_symbol != symbol or not proof_replay_local_binding_pos_matches(candidate.expression, symbol_position)
+                        binding_matches <- binding_matches + 1
+                        return false if not proof_replay_local_binding_source_valid(report, candidate)
+                        target <- proof_replay_type_bound_unsigned_rebind_target(value, 0)
+                    _:
+                        pass
+            return false if binding_matches != 1 or target == ""
+            return false if any parameter in parameters where parameter.name == target
+            typed_source_matches: mutable usize = 0
+            for candidate in report.traces.records |report, trace, parameters, body, target, width, typed_source_matches|:
+                continue if candidate.kind != "type-bound" or candidate.name != trace.name
+                match candidate.expression:
+                    Ast::Expr.Call(Ast::Expr.Ident(marker, _), arguments, argument_names, _):
+                        continue if marker != "__elisa_unsigned_type_bound" or arguments.count != 2 or argument_names.count != 0
+                        match arguments[0]:
+                            Ast::Expr.Ident(name, _):
+                                continue if name != target
+                            _:
+                                continue
+                        match arguments[1]:
+                            Ast::Expr.IntLit(candidate_width, _):
+                                if candidate_width == width and proof_replay_type_bound_local_scalar_fact(report, parameters, body, candidate.expression, candidate.line):
+                                    typed_source_matches <- typed_source_matches + 1
+                            _:
+                                pass
+                    _:
+                        pass
+            return typed_source_matches == 1

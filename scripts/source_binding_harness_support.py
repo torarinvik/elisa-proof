@@ -14,6 +14,9 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
         (root / "src/proof/replay/source_binding_validation.elisa").resolve(): "source_binding_validation_test.elisa",
         (root / "src/proof/replay/source_binding_validation/immutable_bindings.elisa").resolve(): "immutable_bindings_test.elisa",
         (root / "src/proof/replay/deterministic_call_sites.elisa").resolve(): "deterministic_call_sites_test.elisa",
+        (root / "src/proof/replay/type_bound_loop_scope.elisa").resolve(): "type_bound_loop_scope_test.elisa",
+        (root / "src/proof/replay/type_bound_local_rebind.elisa").resolve(): "type_bound_local_rebind_test.elisa",
+        (root / "src/proof/replay/type_bound_validation.elisa").resolve(): "type_bound_validation_test.elisa",
     }
     includes = re.findall(r'^include "([^"]+)"$', replay_file.read_text(encoding="utf-8"), re.MULTILINE)
     if not includes:

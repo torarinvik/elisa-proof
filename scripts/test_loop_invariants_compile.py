@@ -126,7 +126,7 @@ def proof_test_local_binding_initializer_source(source_text: sview, owner: sview
     return false if owner_line == 0
     body: mutable darray[Ast::Stmt] = []
     owner_matches: mutable usize = 0
-    proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0)
+    (proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0) can Global{Read,Write})
     return false if owner_matches != 1
     for statement in body |report, target, owner, owner_line, expect_valid|:
         match statement:
@@ -136,8 +136,8 @@ def proof_test_local_binding_initializer_source(source_text: sview, owner: sview
                 trace: ProofFactTrace = ProofFactTrace{expression: expression, kernel_expression: 0, kind: "local-binding", line: position.line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
                 report.replay_owner_line <- owner_line
                 report.trace_owner_line <- position.line
-                immutable_source: bool = proof_replay_local_binding_immutable_declaration_source(report, trace)
-                widening_source: bool = proof_replay_local_binding_widening_cast_declaration_source(report, trace)
+                immutable_source: bool = (proof_replay_local_binding_immutable_declaration_source(report, trace) can Global{Read,Write})
+                widening_source: bool = (proof_replay_local_binding_widening_cast_declaration_source(report, trace) can Global{Read,Write})
                 accepted: bool = immutable_source or widening_source
                 return accepted == expect_valid
             _:
@@ -148,7 +148,7 @@ def proof_test_local_binding_initializer_source(source_text: sview, owner: sview
     fallback_trace: ProofFactTrace = ProofFactTrace{expression: fallback, kernel_expression: 0, kind: "local-binding", line: owner_line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
     report.replay_owner_line <- owner_line
     report.trace_owner_line <- owner_line
-    return not proof_replay_local_binding_immutable_declaration_source(report, fallback_trace)
+    return not (proof_replay_local_binding_immutable_declaration_source(report, fallback_trace) can Global{Read,Write})
 def proof_test_local_binding_spoofed_position_rejected(source_text: sview, owner: sview, target: sview) -> bool can Memory.Allocate, Abort.Panic:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
@@ -163,7 +163,7 @@ def proof_test_local_binding_spoofed_position_rejected(source_text: sview, owner
     return false if owner_line == 0
     body: mutable darray[Ast::Stmt] = []
     owner_matches: mutable usize = 0
-    proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0)
+    (proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0) can Global{Read,Write})
     return false if owner_matches != 1
     for statement in body |report, target, owner, owner_line|:
         match statement:
@@ -174,7 +174,7 @@ def proof_test_local_binding_spoofed_position_rejected(source_text: sview, owner
                 trace: ProofFactTrace = ProofFactTrace{expression: expression, kernel_expression: 0, kind: "local-binding", line: position.line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
                 report.replay_owner_line <- owner_line
                 report.trace_owner_line <- position.line
-                return not proof_replay_local_binding_immutable_declaration_source(report, trace)
+                return not (proof_replay_local_binding_immutable_declaration_source(report, trace) can Global{Read,Write})
             _:
                 pass
     return false
@@ -192,7 +192,7 @@ def proof_test_local_binding_statement_sink_rejected(source_text: sview, owner: 
     return false if owner_line == 0
     body: mutable darray[Ast::Stmt] = []
     owner_matches: mutable usize = 0
-    proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0)
+    (proof_replay_local_binding_find_owner(report.source_declarations, owner, owner_line, &body, &owner_matches, 0) can Global{Read,Write})
     return false if owner_matches != 1
     for statement in body |report, sink_kind, owner, owner_line|:
         match statement:
@@ -202,7 +202,7 @@ def proof_test_local_binding_statement_sink_rejected(source_text: sview, owner: 
                 trace: ProofFactTrace = ProofFactTrace{expression: expression, kernel_expression: 0, kind: "local-binding", line: position.line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
                 report.replay_owner_line <- owner_line
                 report.trace_owner_line <- position.line
-                return not proof_replay_local_binding_immutable_declaration_source(report, trace)
+                return not (proof_replay_local_binding_immutable_declaration_source(report, trace) can Global{Read,Write})
             Ast::Stmt.Assign(target_expression, _, value, position):
                 continue if sink_kind != "indexed-write"
                 target: sview = "values" if sink_kind == "indexed-write" else ""
@@ -211,7 +211,7 @@ def proof_test_local_binding_statement_sink_rejected(source_text: sview, owner: 
                 trace: ProofFactTrace = ProofFactTrace{expression: expression, kernel_expression: 0, kind: "local-binding", line: position.line, name: owner, dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0}
                 report.replay_owner_line <- owner_line
                 report.trace_owner_line <- position.line
-                return not proof_replay_local_binding_immutable_declaration_source(report, trace)
+                return not (proof_replay_local_binding_immutable_declaration_source(report, trace) can Global{Read,Write})
             Ast::Stmt.Return(value, position):
                 continue if sink_kind != "return"
                 expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("result", position), TokenKind.EqEq, value, position)
@@ -275,9 +275,9 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     rebind_consumer: usize = proof_test_trace_consumer(baseline, "bounded_counter", 9, rebind_index)
     return TEST_CONSUMER_CERTIFICATE_ERROR if init_consumer == 0 or rebind_consumer == 0
     baseline.trace_consumer_certificate_index <- init_consumer
-    return 104 if not proof_replay_fact_trace_entry(&baseline, init_index)
+    return 104 if not (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
     baseline.trace_consumer_certificate_index <- rebind_consumer
-    return 105 if not proof_replay_fact_trace_entry(&baseline, rebind_index)
+    return 105 if not (proof_replay_fact_trace_entry(&baseline, rebind_index) can Global{Read,Write})
     baseline.trace_consumer_certificate_index <- init_consumer
     baseline_source_declarations: darray[Ast::Decl] = baseline.source_declarations
 
@@ -285,7 +285,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     init_original: ProofFactTrace = baseline.traces.records[init_index]
     stale_trace: ProofFactTrace = ProofFactTrace{expression: init_original.expression, kernel_expression: init_original.kernel_expression, kind: init_original.kind, line: 11, name: init_original.name, dependency: init_original.dependency, premises_start: init_original.premises_start, premises_count: init_original.premises_count, kernel_premises_start: init_original.kernel_premises_start, kernel_premises_count: init_original.kernel_premises_count, summary_bindings_start: init_original.summary_bindings_start, summary_bindings_count: init_original.summary_bindings_count, summary_requires_start: init_original.summary_requires_start, summary_requires_count: init_original.summary_requires_count, summary_ensure_index: init_original.summary_ensure_index, owner_line: init_original.owner_line}
     baseline.traces.records[init_index] <- stale_trace
-    return 106 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 106 if (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
     baseline.traces.records[init_index] <- init_original
 
     # The RHS and source location do not identify a rebind witness without its exact fresh
@@ -304,7 +304,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     forged_rebind_trace: ProofFactTrace = ProofFactTrace{expression: forged_rebind_expression, kernel_expression: encoded_rebind.root, kind: rebind_original.kind, line: rebind_original.line, name: rebind_original.name, dependency: rebind_original.dependency, premises_start: rebind_original.premises_start, premises_count: rebind_original.premises_count, kernel_premises_start: rebind_original.kernel_premises_start, kernel_premises_count: rebind_original.kernel_premises_count, summary_bindings_start: rebind_original.summary_bindings_start, summary_bindings_count: rebind_original.summary_bindings_count, summary_requires_start: rebind_original.summary_requires_start, summary_requires_count: rebind_original.summary_requires_count, summary_ensure_index: rebind_original.summary_ensure_index, owner_line: rebind_original.owner_line}
     baseline.traces.records.push(forged_rebind_trace)
     baseline.trace_consumer_certificate_index <- rebind_consumer
-    return 116 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
+    return 116 if (proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1) can Global{Read,Write})
     # Restore the report after rejecting this independent forged-trace control.
     baseline.traces.records.pop()
 
@@ -313,7 +313,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     stale_rebind_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_and_replay(STALE_REBIND_SOURCE, &stale_rebind_bytes, &stale_rebind_report) can Global{Read,Write})
     baseline.source_declarations <- stale_rebind_report.source_declarations
-    return 117 if proof_replay_fact_trace_entry(&baseline, rebind_index)
+    return 117 if (proof_replay_fact_trace_entry(&baseline, rebind_index) can Global{Read,Write})
 
     # A same-spelled parameter or global constant would make the kernel identifier's binding
     # ambiguous even though a local declaration and assignment occur at the expected lines.
@@ -322,17 +322,17 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     (proof_test_parse_declarations(SHADOWED_PARAMETER_SOURCE, &shadowed_parameter_bytes, &shadowed_parameter_report) can Global{Read,Write})
     baseline.source_declarations <- shadowed_parameter_report.source_declarations
     baseline.trace_consumer_certificate_index <- init_consumer
-    return 118 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 118 if (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
     baseline.trace_consumer_certificate_index <- rebind_consumer
-    return 118 if proof_replay_fact_trace_entry(&baseline, rebind_index)
+    return 118 if (proof_replay_fact_trace_entry(&baseline, rebind_index) can Global{Read,Write})
     shadowed_global_bytes: mutable darray[u8] = []
     shadowed_global_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_declarations(SHADOWED_GLOBAL_SOURCE, &shadowed_global_bytes, &shadowed_global_report) can Global{Read,Write})
     baseline.source_declarations <- shadowed_global_report.source_declarations
     baseline.trace_consumer_certificate_index <- init_consumer
-    return 119 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 119 if (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
     baseline.trace_consumer_certificate_index <- rebind_consumer
-    return 119 if proof_replay_fact_trace_entry(&baseline, rebind_index)
+    return 119 if (proof_replay_fact_trace_entry(&baseline, rebind_index) can Global{Read,Write})
 
     # A forged equality at the right line is not the source initializer.
     forged_position: Ast::Pos = Ast::expr_pos(init_original.expression)
@@ -342,7 +342,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     forged_trace: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: encoded.root, kind: init_original.kind, line: init_original.line, name: init_original.name, dependency: init_original.dependency, premises_start: init_original.premises_start, premises_count: init_original.premises_count, kernel_premises_start: init_original.kernel_premises_start, kernel_premises_count: init_original.kernel_premises_count, summary_bindings_start: init_original.summary_bindings_start, summary_bindings_count: init_original.summary_bindings_count, summary_requires_start: init_original.summary_requires_start, summary_requires_count: init_original.summary_requires_count, summary_ensure_index: init_original.summary_ensure_index, owner_line: init_original.owner_line}
     baseline.traces.records.push(forged_trace)
     baseline.trace_consumer_certificate_index <- init_consumer
-    return 108 if proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1)
+    return 108 if (proof_replay_fact_trace_entry(&baseline, baseline.traces.records.count - 1) can Global{Read,Write})
     # Restore the report after rejecting this independent forged-trace control.
     baseline.traces.records.pop()
 
@@ -351,7 +351,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     stale_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_and_replay(STALE_INITIALIZER_SOURCE, &stale_bytes, &stale_report) can Global{Read,Write})
     baseline.source_declarations <- stale_report.source_declarations
-    return 109 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 109 if (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
 
     # The loop-entry consumer must match a source invariant. Editing that invariant rejects
     # the old certificate's use of this fact, even though the initializer equation remains true.
@@ -359,10 +359,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     unrelated_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_and_replay(UNRELATED_INVARIANT_SOURCE, &unrelated_bytes, &unrelated_report) can Global{Read,Write})
     baseline.source_declarations <- unrelated_report.source_declarations
-    return 110 if proof_replay_fact_trace_entry(&baseline, init_index)
+    return 110 if (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
     # Restoring the original source restores this genuine loop-entry fact and consumer.
     baseline.source_declarations <- baseline_source_declarations
-    return 147 if not proof_replay_fact_trace_entry(&baseline, init_index)
+    return 147 if not (proof_replay_fact_trace_entry(&baseline, init_index) can Global{Read,Write})
 
     false_bytes: mutable darray[u8] = []
     false_report: mutable ProofReport = proof_empty_report()
@@ -407,24 +407,24 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     shadowed_bytes: mutable darray[u8] = []
     shadowed_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_and_replay(SHADOWED_LOCAL_SOURCE, &shadowed_bytes, &shadowed_report) can Global{Read,Write})
-    return TEST_SHADOW_GATE_ERROR if not proof_test_local_binding_initializer_source(SHADOWED_LOCAL_SOURCE, "shadowed_local", "copy", false)
+    return TEST_SHADOW_GATE_ERROR if not (proof_test_local_binding_initializer_source(SHADOWED_LOCAL_SOURCE, "shadowed_local", "copy", false) can Global{Read,Write})
 
-    return TEST_CUSTOM_CAST_GATE_ERROR if not proof_test_local_binding_initializer_source(CUSTOM_CAST_SOURCE, "custom_cast_does_not_keep_source_bound", "converted", false)
-    return TEST_OVERLOADED_OPERATOR_GATE_ERROR if not proof_test_local_binding_initializer_source(OVERLOADED_OPERATOR_SOURCE, "overloaded_add_does_not_keep_source_bound", "converted", false)
+    return TEST_CUSTOM_CAST_GATE_ERROR if not (proof_test_local_binding_initializer_source(CUSTOM_CAST_SOURCE, "custom_cast_does_not_keep_source_bound", "converted", false) can Global{Read,Write})
+    return TEST_OVERLOADED_OPERATOR_GATE_ERROR if not (proof_test_local_binding_initializer_source(OVERLOADED_OPERATOR_SOURCE, "overloaded_add_does_not_keep_source_bound", "converted", false) can Global{Read,Write})
 
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_assignment", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_assignment", "assignment")
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_record_field", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_indexed_read", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_indexed_write", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_indexed_write", "indexed-write")
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_call", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_nested_call", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_branch_join", "copy", false)
-    return TEST_BINDING_SINK_MATRIX_ERROR if not proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_return", "return")
-    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_initializer_source(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy", true)
-    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not proof_test_local_binding_spoofed_position_rejected(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy")
-    return TEST_BINDING_NESTED_BUILTIN_ERROR if not proof_test_local_binding_initializer_source(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy", true)
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_assignment", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_assignment", "assignment") can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_record_field", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_indexed_read", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_indexed_write", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_indexed_write", "indexed-write") can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_call", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_nested_call", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_initializer_source(BINDING_SINK_SOURCE, "sink_branch_join", "copy", false) can Global{Read,Write})
+    return TEST_BINDING_SINK_MATRIX_ERROR if not (proof_test_local_binding_statement_sink_rejected(BINDING_SINK_SOURCE, "sink_return", "return") can Global{Read,Write})
+    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not (proof_test_local_binding_initializer_source(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy", true) can Global{Read,Write})
+    return TEST_BINDING_POSITIVE_CONTROL_ERROR if not (proof_test_local_binding_spoofed_position_rejected(SIMPLE_LOCAL_BINDING_SOURCE, "simple_local_binding", "copy") can Global{Read,Write})
+    return TEST_BINDING_NESTED_BUILTIN_ERROR if not (proof_test_local_binding_initializer_source(NESTED_BUILTIN_SOURCE, "nested_builtin_binding", "copy", true) can Global{Read,Write})
     nested_bytes: mutable darray[u8] = []
     nested_report: mutable ProofReport = proof_empty_report()
     (proof_test_parse_and_replay(NESTED_BUILTIN_SOURCE, &nested_bytes, &nested_report) can Global{Read,Write})

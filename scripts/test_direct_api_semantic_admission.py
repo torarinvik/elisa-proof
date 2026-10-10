@@ -3,6 +3,7 @@ import ast
 import json
 import os
 from pathlib import Path
+import re
 from source_binding_harness_support import run_source_binding_replay_harness
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,8 @@ constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def che
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const COUNTING_LOOP_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        return index\n    return 0\n") + "\n"
+constants += "const COUNTING_LOOP_TYPE_BOUND_SCOPE_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        assert true by:\n            assert true\n    assert true by:\n        assert true\n    return 0\n") + "\n"
+constants += "const LOOP_REBIND_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(limit: usize) -> usize:\n    ensure result <= limit\n    rounds: mutable usize = 0\n    while rounds < limit |rounds, limit|:\n        invariant rounds <= limit\n        rounds <- rounds + 1\n    return rounds\n") + "\n"
 constants += "const FIXED_ARRAY_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(values: i64[1], index: usize) -> i64:\n    requires index < 1\n    return values[index]\n") + "\n"
 constants += "const LOCAL_FIXED_ARRAY_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(index: usize) -> i64:\n    requires index < 1\n    values: i64[1] = [7]\n    return values[index]\n") + "\n"
 constants += "const LOCAL_SCALAR_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> u8:\n    ensure result == 7\n    status: u8 = 7\n    return status\n") + "\n"
@@ -282,6 +285,51 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             break
     return 225 if genuine_loop_type_bound >= report.traces.records.count
     return 226 if not (proof_replay_fact_trace_entry(&report, genuine_loop_type_bound) can Global{Read,Write})
+    (api_probe(COUNTING_LOOP_TYPE_BOUND_SCOPE_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    loop_scope_trace_index: mutable usize = report.traces.records.count
+    inside_loop_certificate: mutable usize = report.certificates.count
+    outside_loop_certificate: mutable usize = report.certificates.count
+    for index in 0..<report.traces.records.count |index, report, loop_scope_trace_index|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 2:
+            loop_scope_trace_index <- index
+            break
+    for index in 0..<report.certificates.count |index, report, inside_loop_certificate, outside_loop_certificate|:
+        certificate: ProofGoalCertificate = report.certificates[index]
+        if certificate.name == "checked" and certificate.line == 4:
+            inside_loop_certificate <- index
+        if certificate.name == "checked" and certificate.line == 6:
+            outside_loop_certificate <- index
+    return 239 if loop_scope_trace_index >= report.traces.records.count or inside_loop_certificate >= report.certificates.count or outside_loop_certificate >= report.certificates.count
+    loop_scope_trace: ProofFactTrace = report.traces.records[loop_scope_trace_index]
+    report.trace_owner_line <- report.certificates[inside_loop_certificate].line
+    report.trace_consumer_certificate_index <- inside_loop_certificate + 1
+    return 240 if not proof_replay_type_bound_source_valid(report, loop_scope_trace)
+    report.trace_owner_line <- report.certificates[outside_loop_certificate].line
+    report.trace_consumer_certificate_index <- outside_loop_certificate + 1
+    return 241 if proof_replay_type_bound_source_valid(report, loop_scope_trace)
+    forged_outside_attempt_index: mutable usize = report.goal_attempts.count
+    for index in 0..<report.goal_attempts.count |index, report, forged_outside_attempt_index, outside_loop_certificate|:
+        attempt: ProofGoalAttempt = report.goal_attempts[index]
+        if attempt.has_certificate and attempt.certificate_index == outside_loop_certificate:
+            forged_outside_attempt_index <- index
+            break
+    return 242 if forged_outside_attempt_index >= report.goal_attempts.count
+    saved_outside_attempt: ProofGoalAttempt = report.goal_attempts[forged_outside_attempt_index]
+    saved_outside_certificate: ProofGoalCertificate = report.certificates[outside_loop_certificate]
+    report.goal_attempts[forged_outside_attempt_index] <- ProofGoalAttempt{goal: saved_outside_attempt.goal, budget_exhausted: saved_outside_attempt.budget_exhausted, facts_start: saved_outside_attempt.facts_start, facts_count: saved_outside_attempt.facts_count, kernel_goal: saved_outside_attempt.kernel_goal, kernel_facts_start: saved_outside_attempt.kernel_facts_start, kernel_facts_count: saved_outside_attempt.kernel_facts_count, line: report.certificates[inside_loop_certificate].line, name: saved_outside_attempt.name, rule: saved_outside_attempt.rule, proven: saved_outside_attempt.proven, has_certificate: saved_outside_attempt.has_certificate, certificate_index: saved_outside_attempt.certificate_index}
+    report.certificates[outside_loop_certificate] <- ProofGoalCertificate{goal: saved_outside_certificate.goal, facts_start: saved_outside_certificate.facts_start, facts_count: saved_outside_certificate.facts_count, kernel_goal: saved_outside_certificate.kernel_goal, kernel_facts_start: saved_outside_certificate.kernel_facts_start, kernel_facts_count: saved_outside_certificate.kernel_facts_count, line: report.certificates[inside_loop_certificate].line, name: saved_outside_certificate.name, rule: saved_outside_certificate.rule, replayed: saved_outside_certificate.replayed}
+    report.trace_owner_line <- report.certificates[inside_loop_certificate].line
+    report.trace_consumer_certificate_index <- outside_loop_certificate + 1
+    return 243 if proof_replay_type_bound_source_valid(report, loop_scope_trace)
+    report.goal_attempts[forged_outside_attempt_index] <- saved_outside_attempt
+    report.certificates[outside_loop_certificate] <- saved_outside_certificate
+    report.trace_owner_line <- 0
+    report.trace_consumer_certificate_index <- 0
+    (api_probe(LOOP_REBIND_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    return 244 if report.failed != 0 or report.replay_gaps != 0 or report.certificates.count == 0
+    for certificate in report.certificates:
+        return 245 if not certificate.replayed
     (api_probe(FIXED_ARRAY_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
     genuine_array_type_bound: mutable usize = report.traces.records.count
     for index in 0..<report.traces.records.count |index, report, genuine_array_type_bound|:
@@ -331,8 +379,17 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 234 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
     return 0
 '''
+ast_nodes = (ROOT / "build/snapshot/Elisa-compiler/src/parser/ast_nodes.elisa").read_text()
+statement_nodes = ast_nodes.split("    enum Stmt is Node:", 1)[1].split("    enum Decl is Node:", 1)[0]
+statement_variants = set(re.findall(r"^        ([A-Z][A-Za-z0-9_]*)\b", statement_nodes, re.MULTILINE))
+type_bound_source = (ROOT / "src/proof/replay/type_bound_loop_scope.elisa").read_text()
+consumer_visitor = type_bound_source.split("def proof_replay_type_bound_consumer_source_site_in_body(", 1)[1].split("def proof_replay_type_bound_loop_consumer_in_scope(", 1)[0]
+visited_statement_variants = set(re.findall(r"Ast::Stmt\.([A-Z][A-Za-z0-9_]*)", consumer_visitor))
+unvisited_statement_variants = sorted(statement_variants - visited_statement_variants)
+if unvisited_statement_variants:
+    raise AssertionError(f"type-bound consumer scope visitor misses pinned AST statement variants: {unvisited_statement_variants}")
 run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Direct API semantic admission: source-goal identity, Global grants, source-bound refinements, and reused-state clearing pass")
+print("Direct API semantic admission: source-goal identity, loop-binder scope, Global grants, source-bound refinements, and reused-state clearing pass")

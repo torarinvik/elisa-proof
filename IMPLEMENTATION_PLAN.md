@@ -8487,3 +8487,54 @@ granted.
 Once queued again, run the repaired standalone direct-API harness once and stop on its first
 failure. Only after it passes should the candidate move to matched fresh proof/replay products,
 CLI controls, and independent replay validation.
+
+### 23.27.56 Scope counting-loop type witnesses to their certificate consumer (2026-10-10, focused gate qualified)
+
+The type-bound source validator authenticated the counting loop that produced an opaque,
+source-position-tagged binder witness, but certificate replay did not check that the consuming
+certificate occurred inside that loop's body. Certificate replay already sets the consumer
+certificate index, owner name and line before boundary-fact validation, so this is a narrow P0
+trust-boundary repair. Standalone `proof_replay_fact_trace_entry` remains a source-origin check
+because it has no consumer certificate.
+
+The source candidate verifies that the consumer certificate and its unique attempt agree on owner,
+line, proposition and exact source span, then locates that proposition in the originating loop
+body's source AST. It rejects partial context, header-line consumers and a forged post-loop
+certificate whose certificate and attempt lines are both rewritten. The direct-API regression keeps
+a positive in-loop consumer and negative post-loop and rewritten-line consumers. Its statement
+visitor checks every `Stmt` variant in the pinned parser snapshot. The focused direct-API harness
+passed, including unsigned while-loop self-update replay with no gaps. A strict O2 proof/replay pair
+was rebuilt together with fresh pinned Stage1 `8f2023ce8a7d52358b733a0e812ff46293d45f10`; the
+loop-invariants suite passed its targeted source-bound controls. See
+[`docs/evidence/2026-10-10-r008-counting-loop-consumer-scope.md`](docs/evidence/2026-10-10-r008-counting-loop-consumer-scope.md)
+for product identities and the exact remaining broad-suite failure. This qualifies the counting-loop
+consumer-scope subgate only; it does not close the broader type-bound provenance or P0 ledger.
+
+### 23.27.57 Fresh Stage1 selection and direct-API qualification (2026-10-10, resolved)
+
+The first harness attempt stopped in freshness preflight before compiling or running assertions.
+The default compiler checkout is at `b11e9121`, behind `origin/main` and carrying active edits;
+its installed Stage1 fails `source_tree_sha256`. This is a toolchain selection failure, not a proof
+candidate result. Do not bypass freshness with `ELISA_ALLOW_STALE_STAGE1`.
+
+The compiler authority identified a frozen product in
+`../local-compiler-optimization-20261009/parser-effect-template-working`. Its Stage1 freshness
+check passes; its checkout, proof `ELISA_COMPILER_REV`, and proof frontend snapshot all match
+`8f2023ce8a7d52358b733a0e812ff46293d45f10`. With the shared compiler slot released, the focused
+direct-API harness passed against this exact checkout, and matched strict O2 proof/replay products
+were built and exercised by the loop-invariants suite. No stale-stage1 override was used. The
+earlier failed preflight remains a toolchain-selection issue and is not part of the candidate result.
+
+### 23.27.58 Repair the dynamic-array upper-bound replay gap (2026-10-10, next high-ROI task)
+
+The broader portable replay suite reaches `examples/early_return_index_guard.elisa`, where the
+producer proves three obligations but source replay accepts resource-safety and `index-lower` while
+leaving `index-upper` as a gap. Package export therefore marks this positive example's source as
+inadmissible and the portable suite stops at its admissibility assertion. The same gap reproduces
+with an earlier matched proof/replay generation, so it is independent of the counting-loop consumer
+scope patch. The target is the source-authenticated dynamic-array `.count` upper bound used on the
+early-return control-flow branch, with a negative control for a resealed theorem that substitutes a
+nearby or unrelated bound. Once this focused rule is repaired, rerun this example's package export
+and independent replay first, then continue the portable suite to its next result. Keep the full
+portable replay gate open until all positives and refusal controls pass; do not weaken admissibility
+or accept producer-only proof status.
