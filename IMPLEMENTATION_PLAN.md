@@ -8850,18 +8850,23 @@ struct's freed darray buffer, so Stage1 rejection is intended despite its `.pos`
 `loop_element_type.neg` and `param_structural_type.neg` disagreements occur only in bare mode;
 both pass with the standard library, matching the documented bare-mode gap. The
 `affine_move_dict_record.neg` source is missing a `Global.Read/Write` grant on `d.put`, so Stage1
-stops before reaching the intended affine-move diagnostic. After the frozen gate exits, update
-that fixture with the required scoped grant and confirm the intended affine diagnostic. Keep the
-two bare-mode standard-library declines explicit. The differential and malformed-input workers
-remain active. Do not call the integrated candidate fully qualified or update the proof compiler
-pin while these failures and the remaining suite are unresolved.
+stops before reaching its intended no-false-positive check. After the frozen gate exits, add the
+required scoped grant and require the fixture to remain accepted. Keep only
+`local_field_view_bound_return.pos` classified as the intentional Stage1 safety rejection. The
+enum cases need a named, per-fixture Stage0 semantic plus Stage1 object fallback, leaving the
+native acceptance ratchet unchanged for all other fixtures. The two bare-only standard-library
+declines remain within the existing bare-mode allowance. The differential and malformed-input
+workers remain active. Do not call the integrated candidate fully qualified or update the proof
+compiler pin while these failures and the remaining suite are unresolved.
 
 The active full suite has also reported `compile_time_smoke.sh` as failed before its timing
 ratio was measured: Stage1 exited 1 while compiling its own flattened driver source from stdin.
-This is a compile/correctness failure, not a performance regression measurement. After the current
-workers release, rerun this single check with stdout and stderr captured to identify the diagnostic
-(including any missing Global grant); preserve the exact compiler tuple and do not advance the
-proof pin until this failure and the full suite are resolved.
+This is a compile/correctness failure, not a performance regression measurement. The compiler
+coordinator suspects that flattening the driver into stdin loses authenticated include-origin
+metadata, causing a correct Stage1 refusal; it is reviewing a path-preserving harness migration.
+After the current workers release, capture stdout and stderr and validate that diagnosis. Keep the
+exact compiler tuple and do not advance the proof pin until this failure and the full suite are
+resolved.
 
 The high-ROI queue remains: finish the integrated compiler gate; qualify direct API plus the
 Global.Read/Write matrix, source-goal mutation, export, and independent replay; then fix the next
