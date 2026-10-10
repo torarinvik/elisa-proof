@@ -8652,3 +8652,36 @@ for `early_return_index_guard.elisa`. Follow with the full Global grant matrix t
 routes, the direct-API qualified-global controls, portable replay, and the trust/runtime-mode
 adversarial gate. Keep each result scoped to the gate it actually passes; the current source fixes
 and grant fixtures remain unqualified until these fresh products pass.
+
+### 23.27.65 Pin proof qualification to the newest full-driver candidate; prioritize runtime trust boundary (2026-10-10)
+
+The proof compiler pin is now `02516ea6a69cd2ef1201ea08377c1f83a26ff8f5`, the newest available
+candidate. Its r16 Stage1 product is
+`qualification-capture-token-header-bulk8-driver-r16/elisac-stage1`, SHA-256
+`26244abdf1bcbb889ced21c1b4acda0e06641b4bd940a838f289d0a536eacb2b`. The matching runtime object
+is SHA-256 `347899678c59a997302d9b9afa57a755eaace0d60da48a9100c42a097afe9d85`. Both are copied into
+`build/toolchains/02516ea6-r16-proof/`; Stage1 provenance verification and the proof build-manifest
+resolver confirm the exact compiler revision. The r16 full-driver gate passed object build, hooks,
+link, cold check, and capture-reuse check, with unchanged inputs and 2,506 invocation reports
+reused. This is correctness and coverage evidence, not a performance claim.
+
+The frozen r17 comparison is measuring r14 against r16 on identical source revision `02516ea6`,
+with 1,799 pinned inputs. It is running on the local Mac; its compiler slot remains reserved until
+the coordinator reports a terminal result and explicitly releases it. No timing result is available
+yet. Do not start proof compilation before that release. Then use the pinned r16 product/runtime
+above for the strict-O2 proof and replay build, dynamic-array shadowing/direct-API controls, focused
+export and independent replay, the complete function/module/direct-API Global grant matrix, and
+portable replay.
+
+Source audit on the pinned compiler found that `runtime_std_enabled` treats any byte occurrence of
+`def arena_alloc(` in source, including a comment or string, or presence of
+`ELISA_STAGE1_RUNTIME_STD` as a trusted-unit signal. Confirmed consumers skip the raw atomic and
+raw concurrency surface passes, suppress implicit typed-reference and grown-parameter checks in
+region-tied returns, and skip the unmodelable-decreases check. The panic and pointer-cast checkers
+receive or forward the option but the audit found no conditional bypass in their current code.
+Mutable-global authority receives the separate `enforce_mutable_global_grants` option; this source
+audit does not establish a Global.Read/Write bypass. Reproduce the comment, string, forged-declaration,
+mixed-runtime/application, and environment controls after the slot is released. The compiler-side
+repair must bind runtime exceptions to authenticated per-declaration source origin; text markers
+and ambient environment alone must not grant trusted-runtime treatment. Keep this P0 open until
+adversarial Stage1, Stage0-parity, and Global-grant controls pass.
