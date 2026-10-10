@@ -8924,13 +8924,30 @@ The live run then added three failures. `loop_smoke.sh` stops compiling its sour
 (alongside their existing `Unsafe`, `Atomics`, and other effect grants). `scope_binding_smoke.sh`
 reports 80 of 83 cases passing; its three global array, dictionary, and reference cases stop in
 Stage0 on missing Global.Read/Global.Write grants before their scope assertions run. These are
-additional fixtures to migrate while preserving the grant rule. `runtime drift guard (elisacore_std
-in sync)` also failed, but `run_all.sh` has not retained a per-check log or diagnostic for it yet;
-inspect the runner's captured result after the suite exits. Seventeen checks have failed so far,
-and the rest of the suite remains active. Keep the compiler candidate frozen and proof pin
-unchanged until the final result and tuple postflight.
+additional fixtures to migrate while preserving the grant rule. `runtime drift guard
+(elisacore_std in sync)` also failed. Its captured log and a read-only rerun with the exact
+`ELISA_CORE` path from the gate confirm that 15 vendored runtime files differ from the canonical
+Stage0 runtime: arena, collections (`.elisa` and `.elisai`), deque, JSON, runtime prelude, runtime
+strings, heap, profiler hooks, runtime, packed-store modules, and the WASM component runtime.
+Sample differences change effect contracts and scoped safety code. Do not blindly run the guard's
+copy command against either tree while the compiler gate is active; establish the authoritative
+runtime revision and synchronize both copies through a reviewed source change before
+qualification.
 
-After the run completes, fix only the concrete causes: add scoped grants to valid fixtures and
-their helper contracts, resolve the closure effect mismatch, then reproduce the two dictionary
-declines with diagnostics, and diagnose the runtime drift guard. Rerun each affected check and the
-full gate on the same Stage1/runtime tuple before building or qualifying proof products.
+The full run then failed `seeded stress` and `lexer parity`, bringing the observed count to
+nineteen. Seeded stress reports 0/15 passing. Its positive programs fail with missing global
+read/write grants; its deliberately malformed variants fail first on the same missing grants, so
+they never reach the intended module-private diagnostic. Update the generator to include correct
+grants in both forms while retaining the private-access mutation as the decisive negative. The
+lexer parity log's hard error is a non-exhaustive match over `Lexer.TokenKind` in
+`test/fixtures/lexer/token_model_cases.elisa:55`, missing `Lexer.TokenKind.Label`; add the new
+variant to that test model. Other missing Unsafe-grant diagnostics in the generated lexer harness
+are warnings, not the cause of this failure.
+
+Nineteen checks have failed so far; the rest of the suite remains active. Keep the compiler
+candidate frozen and proof pin unchanged until the final result and tuple postflight. After the
+run completes, synchronize the authoritative runtime sources, add scoped grants to valid
+fixtures and helper contracts, preserve grants in seeded stress positives and negatives, resolve
+the closure effect mismatch, and reproduce the two dictionary declines with diagnostics. Rerun
+each affected check and the full gate on the same Stage1/runtime tuple before building or
+qualifying proof products.
