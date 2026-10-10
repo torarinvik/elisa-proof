@@ -8841,18 +8841,20 @@ Stage1/runtime pair.
 The suite passed `self_host_gen3_smoke.sh` (including the gen3-to-gen4 fixpoint) and
 `resolve_smoke.sh`, but `driver_acceptance_smoke.sh` failed its old ratchet: 13 disagreements
 against a bare limit of 6 and 12 against a with-stdlib limit of 0. Ten are hierarchical enum
-payload cases whose Stage1 positive/negative behavior has a dedicated regression suite. The
+payload cases that Stage0's native backend declines even though Stage0 semantic checking and
+Stage1 object generation accept them; the dedicated regression suite checks that exact pair.
+After the frozen run, use a per-fixture semantic-oracle fallback for only these named cases,
+keeping native comparison for every other fixture instead of raising the aggregate baseline. The
 `local_field_view_bound_return.pos` file is deliberately unsafe: it returns a view into a local
 struct's freed darray buffer, so Stage1 rejection is intended despite its `.pos` suffix. The
 `loop_element_type.neg` and `param_structural_type.neg` disagreements occur only in bare mode;
 both pass with the standard library, matching the documented bare-mode gap. The
 `affine_move_dict_record.neg` source is missing a `Global.Read/Write` grant on `d.put`, so Stage1
 stops before reaching the intended affine-move diagnostic. After the frozen gate exits, update
-that fixture with the required scoped grant, confirm the intended affine diagnostic, document the
-two intentional Stage1 safety rejections, and set the ratchets to the explicitly observed
-remaining differences. The differential and malformed-input workers remain active. Do not call
-the integrated candidate fully qualified or update the proof compiler pin while this failure and
-the remaining suite are unresolved.
+that fixture with the required scoped grant and confirm the intended affine diagnostic. Keep the
+two bare-mode standard-library declines explicit. The differential and malformed-input workers
+remain active. Do not call the integrated candidate fully qualified or update the proof compiler
+pin while these failures and the remaining suite are unresolved.
 
 The active full suite has also reported `compile_time_smoke.sh` as failed before its timing
 ratio was measured: Stage1 exited 1 while compiling its own flattened driver source from stdin.
