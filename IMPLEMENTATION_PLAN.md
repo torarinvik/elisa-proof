@@ -8384,3 +8384,33 @@ The coordinator has the Stage1 slot back after this bounded trust gate. Still ru
 Global grant, pure-contract, qualified-constant, and refinement-alias CLI suites against the clean
 checkpoint product before returning to matched compiler performance trials. Keep unsupported
 normalization fail-closed and preserve exact denial diagnostics.
+
+### 23.27.52 Authenticate generic type-bound traces before replay (2026-10-10, qualification open)
+
+A source-only audit confirmed that `proof_replay_fact_trace_entry` reached the boundary-shape
+validator, where a structurally valid `type-bound` trace with `owner_line == 0` fell through as
+trusted. The public audit API therefore accepted a source-unjustified fact such as `value < value`
+when its AST and kernel encoding agreed. A cast/receiver equality could also pass from selector
+shape alone without replay reconstructing the widening source site. This remains a P0 trust-boundary
+issue.
+
+The local candidate now reconstructs parameter widths/ranges, scalar constants, fixed-array bounds
+and witnesses, top-level scalar-local witnesses, literal counting-loop witnesses, and direct call
+result types from retained source declarations. It fails closed for generic unsupported traces and
+rejects cast-identity facts pending exact widening-site reconstruction. It also fixes the replay
+entry-point grant required by `src/replay_main.elisa`. A strict O2 build of both products succeeded
+with the newest pinned compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`; the direct-API
+semantic-admission harness passed, including forged self-bound/cast/array/scalar-width negatives,
+and the Global grant and qualified-constant-pins suites passed. Build products and manifests are
+available locally under `build/`.
+
+Qualification is incomplete and this candidate must not be treated as a finished P0 fix. The
+Global-constant relevance suite still has a replay gap in
+`module_u32_scoped_constant_branch.elisa`; qualified-constant CLI coverage exposes loop/rebind
+type-bound forms that still need exact source reconstruction; and
+`qualified_constant_call_domain.elisa` has one remaining unproven source goal despite zero replay
+gaps. The pure-contract impure-control fixture now accepts the expected Global permission refusal
+as well as the explicit unsupported-call refusal. Continue by grouping the remaining producers by
+source shape, adding source-backed validators and adversarial tests, then rerun the focused CLI
+suites. Keep unsupported facts fail-closed and keep the task P0 open until the valid-proof coverage
+regressions are resolved.

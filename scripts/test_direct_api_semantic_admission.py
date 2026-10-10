@@ -62,6 +62,12 @@ constants += "const GLOBAL_MUTABLE_REFERENCE_API_SOURCE: sview = " + json.dumps(
 constants += "const GLOBAL_MUTABLE_INDEX_API_SOURCE: sview = " + json.dumps("global mutable api_values: i64[1] = [0]\nglobal mutable api_index: usize = 0\ndef checked() -> void can[Global.Read, Global.Write]:\n    can Global{Read,Write}:\n        if api_index < 1:\n            api_values[api_index] <- 1\n") + "\n"
 constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
+constants += "const PARAMETER_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
+constants += "const COUNTING_LOOP_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        return index\n    return 0\n") + "\n"
+constants += "const FIXED_ARRAY_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(values: i64[1], index: usize) -> i64:\n    requires index < 1\n    return values[index]\n") + "\n"
+constants += "const LOCAL_FIXED_ARRAY_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(index: usize) -> i64:\n    requires index < 1\n    values: i64[1] = [7]\n    return values[index]\n") + "\n"
+constants += "const LOCAL_SCALAR_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> u8:\n    ensure result == 7\n    status: u8 = 7\n    return status\n") + "\n"
+constants += "const FIXED_ARRAY_NO_BOUND_API_SOURCE: sview = " + json.dumps("def checked(values: i64[1], index: usize) -> i64:\n    return values[index]\n") + "\n"
 constants += "const INVALID_API_SOURCES: sview[17] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
 constants += "const INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS: sview[10] = [" + ", ".join(map(json.dumps, (effect for effect, _ in global_grant_expectations))) + "]\n"
 constants += "const INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS: sview[10] = [" + ", ".join(map(json.dumps, (global_name for _, global_name in global_grant_expectations))) + "]\n"
@@ -244,6 +250,85 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             return 204 if report.goal_attempts.count == 0 or report.certificates.count == 0
             return 205 if proof_report_source_admission_invariants_consistent(report)
     return 218 if not (api_refinement_precondition_mutation_probe(&source, &report, &diagnostics) can Global{Read,Write})
+    (api_probe(PARAMETER_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    genuine_type_bound: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, genuine_type_bound|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 1:
+            genuine_type_bound <- index
+            break
+    return 219 if genuine_type_bound >= report.traces.records.count
+    return 220 if not (proof_replay_fact_trace_entry(&report, genuine_type_bound) can Global{Read,Write})
+    forged_position: Ast::Pos = Ast::pos_at_line(1)
+    forged_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("value", forged_position), TokenKind.Lt, Ast::Expr.Ident("value", forged_position), forged_position)
+    forged_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_expression, &report, "checked")
+    return 221 if not forged_encoding.known
+    report.traces.records.push(ProofFactTrace{expression: forged_expression, kernel_expression: forged_encoding.root, kind: "type-bound", line: 1, name: "checked", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
+    return 222 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
+    cast_arguments: darray[Ast::Expr] = []
+    cast_names: darray[sview] = []
+    cast_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident("value", forged_position), "i32", forged_position), cast_arguments, cast_names, forged_position)
+    forged_cast: Ast::Expr = Ast::Expr.Binary(cast_call, TokenKind.EqEq, Ast::Expr.Ident("value", forged_position), forged_position)
+    forged_cast_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_cast, &report, "checked")
+    return 223 if not forged_cast_encoding.known
+    report.traces.records.push(ProofFactTrace{expression: forged_cast, kernel_expression: forged_cast_encoding.root, kind: "type-bound", line: 1, name: "checked", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
+    return 224 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
+    (api_probe(COUNTING_LOOP_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    genuine_loop_type_bound: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, genuine_loop_type_bound|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 2:
+            genuine_loop_type_bound <- index
+            break
+    return 225 if genuine_loop_type_bound >= report.traces.records.count
+    return 226 if not (proof_replay_fact_trace_entry(&report, genuine_loop_type_bound) can Global{Read,Write})
+    (api_probe(FIXED_ARRAY_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    genuine_array_type_bound: mutable usize = report.traces.records.count
+    for index in 0..<report.traces.records.count |index, report, genuine_array_type_bound|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 3:
+            genuine_array_type_bound <- index
+            break
+    return 227 if genuine_array_type_bound >= report.traces.records.count
+    return 228 if not (proof_replay_fact_trace_entry(&report, genuine_array_type_bound) can Global{Read,Write})
+    (api_probe(LOCAL_FIXED_ARRAY_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    local_array_type_bound_count: mutable usize = 0
+    for index in 0..<report.traces.records.count |index, report, local_array_type_bound_count|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 3:
+            local_array_type_bound_count <- local_array_type_bound_count + 1
+            return 229 if not (proof_replay_fact_trace_entry(&report, index) can Global{Read,Write})
+    return 230 if local_array_type_bound_count == 0
+    local_extent_position: Ast::Pos = Ast::pos_at_line(3)
+    local_count: Ast::Expr = Ast::Expr.Field(Ast::Expr.Ident("values", local_extent_position), "count", local_extent_position)
+    forged_local_extent: Ast::Expr = Ast::Expr.Binary(local_count, TokenKind.EqEq, Ast::Expr.IntLit(2, local_extent_position), local_extent_position)
+    forged_local_extent_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(forged_local_extent, &report, "checked")
+    return 231 if not forged_local_extent_encoding.known
+    report.traces.records.push(ProofFactTrace{expression: forged_local_extent, kernel_expression: forged_local_extent_encoding.root, kind: "type-bound", line: 3, name: "checked", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
+    return 232 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
+    (api_probe(LOCAL_SCALAR_TYPE_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    local_scalar_type_bounds: mutable usize = 0
+    for index in 0..<report.traces.records.count |index, report, local_scalar_type_bounds|:
+        trace: ProofFactTrace = report.traces.records[index]
+        if trace.kind == "type-bound" and trace.line == 3:
+            local_scalar_type_bounds <- local_scalar_type_bounds + 1
+            return 235 if not (proof_replay_fact_trace_entry(&report, index) can Global{Read,Write})
+    return 236 if local_scalar_type_bounds == 0
+    wrong_local_width_position: Ast::Pos = Ast::pos_at_line(3)
+    wrong_local_width_arguments: darray[Ast::Expr] = [Ast::Expr.Ident("status", wrong_local_width_position), Ast::Expr.IntLit(64, wrong_local_width_position)]
+    wrong_local_width_names: darray[sview] = []
+    wrong_local_width: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", wrong_local_width_position), wrong_local_width_arguments, wrong_local_width_names, wrong_local_width_position)
+    wrong_local_width_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(wrong_local_width, &report, "checked")
+    return 237 if not wrong_local_width_encoding.known
+    report.traces.records.push(ProofFactTrace{expression: wrong_local_width, kernel_expression: wrong_local_width_encoding.root, kind: "type-bound", line: 3, name: "checked", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
+    return 238 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
+    (api_probe(FIXED_ARRAY_NO_BOUND_API_SOURCE, &source, &report, &diagnostics, 1) can Global{Read,Write})
+    missing_bound_position: Ast::Pos = Ast::pos_at_line(2)
+    missing_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("index", missing_bound_position), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident("values", missing_bound_position), "count", missing_bound_position), missing_bound_position)
+    missing_bound_encoding: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(missing_bound, &report, "checked")
+    return 233 if not missing_bound_encoding.known
+    report.traces.records.push(ProofFactTrace{expression: missing_bound, kernel_expression: missing_bound_encoding.root, kind: "type-bound", line: 2, name: "checked", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
+    return 234 if (proof_replay_fact_trace_entry(&report, report.traces.records.count - 1) can Global{Read,Write})
     return 0
 '''
 run_source_binding_replay_harness(

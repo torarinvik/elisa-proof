@@ -1,0 +1,538 @@
+# Reconstruct a narrow parameter-type fact subset from retained declarations. Generic
+# `type-bound` rows are report input and must not be axioms just because their payload is empty.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_parameter_fact(report: ProofReport&, parameter: Ast::ParamDecl, expression: Ast::Expr, position: Ast::Pos) -> bool:
+            return false if parameter.name == ""
+            term: Ast::Expr = Ast::Expr.Ident(parameter.name, position)
+            unsigned_width: i64 = proof_unsigned_type_width(parameter.type_expression, report.source_declarations, 0)
+            if unsigned_width > 0:
+                return true if proof_replay_expr_equal(expression, proof_unsigned_type_marker(parameter.name, unsigned_width, position))
+                lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, term, position)
+                return true if proof_replay_expr_equal(expression, lower)
+                if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                    upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
+                    return true if proof_replay_expr_equal(expression, upper)
+            signed_width: i64 = proof_signed_type_width(parameter.type_expression, report.source_declarations, 0)
+            if signed_width > 0:
+                return true if proof_replay_expr_equal(expression, proof_signed_type_marker(term, signed_width, position))
+                if signed_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                    maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(signed_width)
+                    upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(maximum, position), position)
+                    return true if proof_replay_expr_equal(expression, upper)
+                    magnitude: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(maximum, position), position)
+                    floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+                    lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
+                    return true if proof_replay_expr_equal(expression, lower)
+            scalar_kind: i64 = proof_scalar_type_kind(parameter.type_expression, report.source_declarations, 0)
+            return true if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_expr_equal(expression, proof_scalar_type_marker(parameter.name, position))
+            return false
+
+        def proof_replay_type_bound_scalar_constant_type(type_expression: Ast::Expr) -> bool:
+            match type_expression:
+                Ast::Expr.Ident(type_name, _):
+                    return type_name == "i8" or type_name == "i16" or type_name == "i32" or type_name == "i64" or type_name == "isize" or type_name == "int" or type_name == "u8" or type_name == "u16" or type_name == "u32" or type_name == "u64" or type_name == "usize" or type_name == "uint" or type_name == "bool" or type_name == "char"
+                _:
+                    return false
+
+        def proof_replay_type_bound_scalar_constant_lookup(report: ProofReport&, declarations: darray[Ast::Decl]&, wanted_scope: darray[sview]&, current_scope: darray[sview]&, constant_name: sview, marker_name: sview, marker_width: i64, matches: mutable usize&, valid: mutable bool&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            in_scope: bool = proof_replay_global_constant_scope_equal(wanted_scope, current_scope)
+            for declaration in declarations |report, wanted_scope, current_scope, constant_name, marker_name, marker_width, matches, valid, depth, in_scope|:
+                match declaration:
+                    Ast::Decl.Const(candidate_name, candidate_type, _, is_mutable, position):
+                        if in_scope and candidate_name == constant_name:
+                            matches <- matches + 1
+                            signed_width: i64 = proof_signed_type_width(candidate_type, report.source_declarations, 0)
+                            unsigned_width: i64 = proof_unsigned_type_width(candidate_type, report.source_declarations, 0)
+                            scalar: bool = proof_replay_type_bound_scalar_constant_type(candidate_type)
+                            if marker_name == "__elisa_primitive_scalar_type":
+                                valid <- not is_mutable and scalar
+                            elif marker_name == "__elisa_signed_type_bound" or marker_name == "__elisa_signed_place_type_bound":
+                                valid <- not is_mutable and signed_width > 0 and marker_width == signed_width
+                            elif marker_name == "__elisa_unsigned_type_bound":
+                                valid <- not is_mutable and unsigned_width > 0 and marker_width == unsigned_width
+                            else:
+                                valid <- false
+                    Ast::Decl.Module(module_name, nested, _):
+                        next_scope: mutable darray[sview] = proof_replay_global_constant_scope_with_module(current_scope, module_name)
+                        proof_replay_type_bound_scalar_constant_lookup(report, nested, wanted_scope, &next_scope, constant_name, marker_name, marker_width, matches, valid, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_scalar_constant_lookup(report, nested, wanted_scope, current_scope, constant_name, marker_name, marker_width, matches, valid, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_find_owner(declarations: darray[Ast::Decl]&, name: sview, owner_line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |name, owner_line, matches, parameters, body, position, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, candidate_parameters, _, candidate_body, _, _, candidate_position):
+                        if candidate == name and candidate_position.line == owner_line:
+                            matches <- matches + 1
+                            parameters <- candidate_parameters
+                            body <- candidate_body
+                            position <- candidate_position
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_find_owner(nested, name, owner_line, matches, parameters, body, position, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_unique_owner_line(declarations: darray[Ast::Decl]&, name: sview, owner_line: mutable u32&, matches: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |name, owner_line, matches, depth|:
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, position):
+                        if candidate == name:
+                            matches <- matches + 1
+                            owner_line <- position.line
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_unique_owner_line(nested, name, owner_line, matches, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_scalar_constant_fact(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "type-bound" or trace.name == "" or trace.line == 0
+            marker_name: mutable sview = ""
+            marker_width: mutable i64 = 0
+            term: mutable Ast::Expr = Ast::Expr.Invalid
+            match trace.expression:
+                Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, argument_names, _):
+                    marker_name <- name
+                    if name == "__elisa_primitive_scalar_type":
+                        return false if arguments.count != 1 or argument_names.count != 0
+                        term <- arguments[0]
+                    elif name == "__elisa_signed_type_bound" or name == "__elisa_signed_place_type_bound" or name == "__elisa_unsigned_type_bound":
+                        return false if arguments.count != 2 or argument_names.count != 0
+                        term <- arguments[0]
+                        width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        return false if not width_value.known
+                        marker_width <- width_value.value
+                    else:
+                        return false
+                _:
+                    return false
+            return false if marker_name == ""
+            owner_line: mutable u32 = 0
+            owner_matches_by_name: mutable usize = 0
+            proof_replay_type_bound_unique_owner_line(report.source_declarations, trace.name, &owner_line, &owner_matches_by_name, 0)
+            return false if owner_matches_by_name != 1
+            return false if report.replay_owner_line != 0 and report.replay_owner_line != 4294967295 and report.replay_owner_line != owner_line
+            owner_matches: mutable usize = 0
+            owner_parameters: mutable darray[Ast::ParamDecl] = []
+            owner_body: mutable darray[Ast::Stmt] = []
+            owner_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            proof_replay_type_bound_find_owner(report.source_declarations, trace.name, owner_line, &owner_matches, &owner_parameters, &owner_body, &owner_position, 0)
+            return false if owner_matches != 1
+            current_scope: mutable darray[sview] = []
+            module_name: mutable sview = ""
+            module_matches: mutable usize = 0
+            proof_replay_module_at_function_line(report.source_declarations, owner_line, "", &module_name, &module_matches, 0)
+            return false if module_matches != 1
+            current_scope <- proof_replay_global_constant_scope_with_module(current_scope, module_name) if module_name != ""
+            wanted_scope: mutable darray[sview] = []
+            constant_name: mutable sview = ""
+            qualified: mutable bool = false
+            reference_path: mutable darray[sview] = []
+            match term:
+                Ast::Expr.Ident(name, _):
+                    constant_name <- name
+                    wanted_scope.extend(current_scope)
+                Ast::Expr.Scope(_, _, _):
+                    return false if not proof_replay_qualified_path(term, &reference_path, 0) or reference_path.count < 2
+                    constant_name <- reference_path[reference_path.count - 1]
+                    for index in 0..<reference_path.count - 1 |index, reference_path, wanted_scope|:
+                        wanted_scope.push(reference_path[index])
+                    qualified <- true
+                _:
+                    return false
+            return false if constant_name == ""
+            shadow_name: sview = reference_path[0] if qualified else constant_name
+            return false if any parameter in owner_parameters where parameter.name == shadow_name
+            return false if proof_replay_source_body_declares(report.source_declarations, owner_body, shadow_name)
+            matches: mutable usize = 0
+            valid: mutable bool = false
+            proof_replay_type_bound_scalar_constant_lookup(report, report.source_declarations, &wanted_scope, &current_scope, constant_name, marker_name, marker_width, &matches, &valid, 0)
+            matches == 1 and valid
+
+        def proof_replay_type_bound_parameter_declaration(report: ProofReport&, trace: ProofFactTrace, declarations: darray[Ast::Decl]&, owner_line: u32, matches: mutable usize&, valid: mutable bool&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |report, trace, owner_line, matches, valid, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        if name == trace.name and position.line == owner_line:
+                            matches <- matches + 1
+                            return if trace.line != position.line
+                            for parameter in parameters |report, trace, valid, position|:
+                                valid <- true if proof_replay_type_bound_parameter_fact(report, parameter, trace.expression, position)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_parameter_declaration(report, trace, nested, owner_line, matches, valid, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_counting_loop_fact(expression: Ast::Expr, variables: darray[sview]&, iterable: Ast::Expr, position: Ast::Pos) -> bool:
+            return false if variables.count != 1 or variables[0] == ""
+            range: Ast::Expr = proof_loop_range_base(iterable)
+            match range:
+                Ast::Expr.Binary(low, operator, high, _):
+                    return false if operator != TokenKind.RangeLt and operator != TokenKind.RangeLe
+                    binder: Ast::Expr = proof_loop_binder_value(variables[0], position)
+                    scalar: Ast::Expr = proof_scalar_term_marker(binder, position)
+                    return true if proof_replay_expr_equal(expression, scalar)
+                    match low:
+                        Ast::Expr.IntLit(low_value, _):
+                            match high:
+                                Ast::Expr.IntLit(high_value, _):
+                                    if low_value >= 0 and high_value >= low_value and high_value < 2147483647:
+                                        signed: Ast::Expr = proof_signed_place_marker(binder, 32, position)
+                                        return true if proof_replay_expr_equal(expression, signed)
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_replay_type_bound_loop_fact_in_body(trace: ProofFactTrace, body: darray[Ast::Stmt]&, matches: mutable usize&, valid: mutable bool&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for statement in body |trace, matches, valid, depth|:
+                match statement:
+                    Ast::Stmt.For(_, variables, iterable, nested, position):
+                        if position.line == trace.line:
+                            matches <- matches + 1
+                            valid <- proof_replay_type_bound_counting_loop_fact(trace.expression, variables, iterable, position)
+                        proof_replay_type_bound_loop_fact_in_body(trace, nested, matches, valid, depth + 1)
+                    Ast::Stmt.If(_, then_body, else_body, _):
+                        proof_replay_type_bound_loop_fact_in_body(trace, then_body, matches, valid, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_body(trace, else_body, matches, valid, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_type_bound_loop_fact_in_body(trace, nested, matches, valid, depth + 1)
+                    Ast::Stmt.Match(_, arms, _):
+                        for arm in arms |trace, matches, valid, depth|:
+                            proof_replay_type_bound_loop_fact_in_body(trace, arm.body, matches, valid, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_index_use(expression: Ast::Expr, array_identifier: sview, index_identifier: sview, line: u32, depth: usize) -> usize:
+            return 0 if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Index(Ast::Expr.Ident(object_name, _), Ast::Expr.Ident(subscript_identifier, _), position):
+                    return 1 if object_name == array_identifier and subscript_identifier == index_identifier and position.line == line
+                    return 0
+                Ast::Expr.IndexN(Ast::Expr.Ident(object_name, _), arguments, position):
+                    return 1 if object_name == array_identifier and arguments.count == 1 and proof_ident_name(arguments[0]) == index_identifier and position.line == line
+                    return 0
+                Ast::Expr.Index(object, index, _):
+                    return proof_replay_type_bound_index_use(object, array_identifier, index_identifier, line, depth + 1) + proof_replay_type_bound_index_use(index, array_identifier, index_identifier, line, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    count: mutable usize = proof_replay_type_bound_index_use(object, array_identifier, index_identifier, line, depth + 1)
+                    for argument in arguments |array_identifier, index_identifier, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_identifier, line, depth + 1)
+                    return count
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Field(inner, _, _):
+                    return proof_replay_type_bound_index_use(inner, array_identifier, index_identifier, line, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_replay_type_bound_index_use(left, array_identifier, index_identifier, line, depth + 1) + proof_replay_type_bound_index_use(right, array_identifier, index_identifier, line, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    count: mutable usize = proof_replay_type_bound_index_use(callee, array_identifier, index_identifier, line, depth + 1)
+                    for argument in arguments |array_identifier, index_identifier, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_identifier, line, depth + 1)
+                    return count
+                Ast::Expr.StaticEffectCall(_, _, _, arguments, _, _):
+                    count: mutable usize = 0
+                    for argument in arguments |array_identifier, index_identifier, line, depth, count|:
+                        count <- count + proof_replay_type_bound_index_use(argument, array_identifier, index_identifier, line, depth + 1)
+                    return count
+                Ast::Expr.If(condition, yes, no, _):
+                    return proof_replay_type_bound_index_use(condition, array_identifier, index_identifier, line, depth + 1) + proof_replay_type_bound_index_use(yes, array_identifier, index_identifier, line, depth + 1) + proof_replay_type_bound_index_use(no, array_identifier, index_identifier, line, depth + 1)
+                Ast::Expr.Block(nested, value, _, _):
+                    return proof_replay_type_bound_index_use_body(nested, array_identifier, index_identifier, line, depth + 1) + proof_replay_type_bound_index_use(value, array_identifier, index_identifier, line, depth + 1)
+                _:
+                    return 0
+
+        def proof_replay_type_bound_index_use_body(body: darray[Ast::Stmt]&, array_identifier: sview, index_identifier: sview, line: u32, depth: usize) -> usize:
+            return 0 if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            count: mutable usize = 0
+            for statement in body |array_identifier, index_identifier, line, depth, count|:
+                match statement:
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        count <- count + proof_replay_type_bound_index_use(initializer, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        count <- count + proof_replay_type_bound_index_use(target, array_identifier, index_identifier, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use(value, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _):
+                        count <- count + proof_replay_type_bound_index_use(expression, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        count <- count + proof_replay_type_bound_index_use(condition, array_identifier, index_identifier, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use_body(yes, array_identifier, index_identifier, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use_body(no, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        count <- count + proof_replay_type_bound_index_use(condition, array_identifier, index_identifier, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use_body(nested, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        count <- count + proof_replay_type_bound_index_use(iterable, array_identifier, index_identifier, line, depth + 1)
+                        count <- count + proof_replay_type_bound_index_use_body(nested, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        count <- count + proof_replay_type_bound_index_use_body(nested, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        count <- count + proof_replay_type_bound_index_use(expression, array_identifier, index_identifier, line, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        count <- count + proof_replay_type_bound_index_use(subject, array_identifier, index_identifier, line, depth + 1)
+                        for arm in arms |array_identifier, index_identifier, line, depth, count|:
+                            count <- count + proof_replay_type_bound_index_use(arm.guard, array_identifier, index_identifier, line, depth + 1)
+                            count <- count + proof_replay_type_bound_index_use_body(arm.body, array_identifier, index_identifier, line, depth + 1)
+                    _:
+                        pass
+            return count
+
+        # Fixed-array access can import `index < object.count` after proving the same index
+        # below the source-declared literal extent. Reconstruct the array extent, the unsigned
+        # index precondition, and the exact source subscript; the trace itself carries no trusted
+        # premises.
+        def proof_replay_type_bound_fixed_array_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            match expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(bound_parameter_name, _), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(array_binding_name, _), "count", _), _):
+                    return false if bound_parameter_name == "" or array_binding_name == "" or bound_parameter_name == array_binding_name
+                    return false if proof_replay_type_bound_index_use_body(body, array_binding_name, bound_parameter_name, line, 0) != 1
+                    extent: mutable i64 = -1
+                    parameter_matches: mutable usize = 0
+                    for parameter in parameters |array_binding_name, extent, parameter_matches|:
+                        if parameter.name == array_binding_name:
+                            parameter_matches <- parameter_matches + 1
+                            extent <- proof_replay_global_mutable_array_literal_extent(parameter.type_expression, 0)
+                    if parameter_matches == 1 and extent >= 0:
+                        return false if proof_replay_source_body_declares(report.source_declarations, body, array_binding_name)
+                        return false if proof_replay_source_body_touches(report.source_declarations, body, array_binding_name, true, 0)
+                        return proof_replay_global_mutable_array_bound_precondition(report, parameters, body, expression, extent, line)
+                    return false if parameter_matches != 0
+                    return false if any parameter in parameters where parameter.name == array_binding_name
+                    return false if not proof_replay_source_single_declaration(report.source_declarations, body, array_binding_name)
+                    local_extent: mutable i64 = -1
+                    local_declaration_index: mutable usize = body.count
+                    local_matches: mutable usize = 0
+                    for body_index in 0..<body.count |body_index, body, array_binding_name, line, local_extent, local_declaration_index, local_matches|:
+                        match body[body_index]:
+                            Ast::Stmt.VarDecl(local_name, local_type, _, local_position):
+                                if local_name == array_binding_name:
+                                    local_matches <- local_matches + 1
+                                    local_extent <- proof_replay_global_mutable_array_literal_extent(local_type, 0)
+                                    local_declaration_index <- body_index if local_position.line < line
+                            _:
+                                pass
+                    return false if local_matches != 1 or local_extent < 0 or local_declaration_index >= body.count
+                    after_declaration: mutable darray[Ast::Stmt] = []
+                    for body_index in local_declaration_index + 1..<body.count |body_index, body, after_declaration|:
+                        after_declaration.push(body[body_index])
+                    return false if proof_replay_source_body_touches(report.source_declarations, after_declaration, array_binding_name, true, 0)
+                    return proof_replay_global_mutable_array_bound_precondition(report, parameters, body, expression, local_extent, line)
+                _:
+                    return false
+
+        def proof_replay_type_bound_find_callee(declarations: darray[Ast::Decl]&, wanted: sview, matches: mutable usize&, return_type: mutable Ast::Expr&, parameters: mutable darray[Ast::ParamDecl]&, effect_count: mutable usize&, depth: usize) -> void:
+            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |wanted, matches, return_type, parameters, effect_count, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, candidate_parameters, candidate_return_type, _, candidate_effects, _, _):
+                        if name == wanted:
+                            matches <- matches + 1
+                            return_type <- candidate_return_type
+                            parameters <- candidate_parameters
+                            effect_count <- candidate_effects.count
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        matches <- matches + 1 if name == wanted
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_find_callee(nested, wanted, matches, return_type, parameters, effect_count, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_call_result_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr) -> bool:
+            marker: mutable sview = ""
+            call: mutable Ast::Expr = Ast::Expr.Invalid
+            width: mutable i64 = 0
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, argument_names, _):
+                    marker <- marker_name
+                    if marker == "__elisa_primitive_scalar_type":
+                        return false if arguments.count != 1 or argument_names.count != 0
+                        call <- arguments[0]
+                    elif marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound" or marker == "__elisa_unsigned_type_bound":
+                        return false if arguments.count != 2 or argument_names.count != 0
+                        call <- arguments[0]
+                        width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        return false if not width_value.known
+                        width <- width_value.value
+                    else:
+                        return false
+                _:
+                    return false
+            call_name: mutable sview = ""
+            call_arguments: mutable darray[Ast::Expr] = []
+            call_argument_names: mutable darray[sview] = []
+            match call:
+                Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, argument_names, _):
+                    call_name <- name
+                    call_arguments <- arguments
+                    call_argument_names <- argument_names
+                _:
+                    return false
+            return false if call_name == "" or call_argument_names.count != 0 and call_argument_names.count != call_arguments.count
+            return false if any parameter in parameters where parameter.name == call_name
+            return false if proof_replay_source_body_declares(report.source_declarations, body, call_name)
+            return false if not proof_replay_deterministic_call_source_contains_statements(body, call, 0)
+            callee_matches: mutable usize = 0
+            return_type: mutable Ast::Expr = Ast::Expr.Invalid
+            callee_parameters: mutable darray[Ast::ParamDecl] = []
+            callee_effect_count: mutable usize = 0
+            proof_replay_type_bound_find_callee(report.source_declarations, call_name, &callee_matches, &return_type, &callee_parameters, &callee_effect_count, 0)
+            return false if callee_matches != 1 or callee_parameters.count != call_arguments.count or callee_effect_count != 0
+            signed_width: i64 = proof_signed_type_width(return_type, report.source_declarations, 0)
+            unsigned_width: i64 = proof_unsigned_type_width(return_type, report.source_declarations, 0)
+            if marker == "__elisa_primitive_scalar_type":
+                return proof_replay_type_bound_scalar_constant_type(return_type) or signed_width > 0 or unsigned_width > 0
+            if marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound":
+                return signed_width > 0 and width == signed_width
+            return marker == "__elisa_unsigned_type_bound" and unsigned_width > 0 and width == unsigned_width
+
+        def proof_replay_type_bound_fixed_array_element(type_expression: Ast::Expr) -> Ast::Expr:
+            match type_expression:
+                Ast::Expr.Index(element, _, _):
+                    return element if proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
+                    return Ast::Expr.Invalid
+                Ast::Expr.IndexN(Ast::Expr.Ident("array", _), arguments, _):
+                    return arguments[0] if arguments.count == 2 and proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
+                    return Ast::Expr.Invalid
+                _:
+                    return Ast::Expr.Invalid
+
+        def proof_replay_type_bound_local_array_witness(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            candidate_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, candidate_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
+                        continue if extent < 0
+                        root: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        count: Ast::Expr = Ast::Expr.Field(root, "count", position)
+                        matches: mutable bool = false
+                        matches <- true if proof_replay_expr_equal(expression, Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_builtin_index_marker(root, position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_scalar_term_marker(count, position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position))
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
+                        element_name: sview = proof_ident_name(element)
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        if element_scalar:
+                            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                            for protocol in protocols |expression, root, position, matches|:
+                                expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
+                                matches <- true if proof_replay_expr_equal(expression, expected_operator)
+                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                            expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
+                            matches <- true if proof_replay_expr_equal(expression, expected_element)
+                        candidate_matches <- candidate_matches + 1 if matches
+                    _:
+                        pass
+            return candidate_matches == 1
+
+        # Scalar locals retain source type witnesses at their declaration site. Resolve the
+        # exact unique binding before accepting a width marker so a later shadow or forged local
+        # type cannot borrow the trace.
+        def proof_replay_type_bound_local_scalar_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            candidate_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, candidate_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        term: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        unsigned_width: i64 = proof_unsigned_type_width(local_type, report.source_declarations, 0)
+                        if unsigned_width > 0:
+                            expected_unsigned: Ast::Expr = proof_unsigned_type_marker(local_name, unsigned_width, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, expected_unsigned)
+                            lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, term, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, lower)
+                            if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                                upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, upper)
+                        signed_width: i64 = proof_signed_type_width(local_type, report.source_declarations, 0)
+                        if signed_width > 0:
+                            expected_signed: Ast::Expr = proof_signed_type_marker(term, signed_width, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, expected_signed)
+                            if signed_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                                maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(signed_width)
+                                upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(maximum, position), position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, upper)
+                                magnitude: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(maximum, position), position)
+                                floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+                                lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, lower)
+                        scalar_kind: i64 = proof_scalar_type_kind(local_type, report.source_declarations, 0)
+                        candidate_matches <- candidate_matches + 1 if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_expr_equal(expression, proof_scalar_type_marker(local_name, position))
+                    _:
+                        pass
+            return candidate_matches == 1
+
+        def proof_replay_type_bound_local_array_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            valid_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, valid_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
+                        continue if extent < 0
+                        root: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        count: Ast::Expr = Ast::Expr.Field(root, "count", position)
+                        expected_extent: Ast::Expr = Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_extent)
+                        expected_index: Ast::Expr = proof_builtin_index_marker(root, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_index)
+                        expected_count_scalar: Ast::Expr = proof_scalar_term_marker(count, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_count_scalar)
+                        expected_count_unsigned: Ast::Expr = proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_count_unsigned)
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
+                        element_name: sview = proof_ident_name(element)
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        if element_scalar:
+                            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                            for protocol in protocols |expression, root, position, valid_matches|:
+                                expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
+                                valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_operator)
+                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                            expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
+                            valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_element)
+                    _:
+                        pass
+            return valid_matches == 1
+
+        def proof_replay_type_bound_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            return false if trace.kind != "type-bound" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
+            return true if proof_replay_type_bound_scalar_constant_fact(report, trace)
+            owner_line: mutable u32 = 0
+            proof_replay_owner_function_line(report.source_declarations, trace.name, trace.line, &owner_line, 0)
+            return false if owner_line == 0
+            matches: mutable usize = 0
+            valid: mutable bool = false
+            proof_replay_type_bound_parameter_declaration(report, trace, report.source_declarations, owner_line, matches, valid, 0)
+            return true if matches == 1 and valid
+            owner_parameters: mutable darray[Ast::ParamDecl] = []
+            function_body: mutable darray[Ast::Stmt] = []
+            owner_matches: mutable usize = 0
+            owner_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            proof_replay_type_bound_find_owner(report.source_declarations, trace.name, owner_line, &owner_matches, &owner_parameters, &function_body, &owner_position, 0)
+            return false if owner_matches != 1
+            return true if proof_replay_type_bound_call_result_fact(report, owner_parameters, function_body, trace.expression)
+            return true if proof_replay_type_bound_local_scalar_fact(report, owner_parameters, function_body, trace.expression, trace.line)
+            return true if proof_replay_type_bound_local_array_witness(report, owner_parameters, function_body, trace.expression, trace.line)
+            return true if proof_replay_type_bound_local_array_fact(report, owner_parameters, function_body, trace.expression, trace.line)
+            return true if proof_replay_type_bound_fixed_array_fact(report, owner_parameters, function_body, trace.expression, trace.line)
+            loop_matches: mutable usize = 0
+            loop_valid: mutable bool = false
+            proof_replay_type_bound_loop_fact_in_body(trace, function_body, loop_matches, loop_valid, 0)
+            return loop_matches == 1 and loop_valid

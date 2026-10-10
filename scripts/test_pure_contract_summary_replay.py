@@ -97,7 +97,8 @@ def main() -> None:
     check_replay_is_gap_free("wrong-helper-condition", wrong_condition)
 
     # Effectful helpers and wrappers around them are not logical call summaries. The
-    # unsupported source contract must remain visible and cannot manufacture a fact.
+    # unsupported source contract must remain visible and cannot manufacture a fact. Global
+    # mutable access in the helper is also rejected unless the source grants its effects.
     impure = report(
         "global mutable ticks: i64 = 0\n\n"
         "def impure_predicate(c: i64) -> bool:\n"
@@ -113,6 +114,9 @@ def main() -> None:
     assert impure["status"] != "proved", impure["summary"]
     assert any(
         finding["kind"] == "contract-call-unsupported"
+        for finding in impure["findings"]
+    ) or any(
+        finding["kind"] == "semantic-permission-ungranted"
         for finding in impure["findings"]
     ), impure["findings"]
     leaked = [
