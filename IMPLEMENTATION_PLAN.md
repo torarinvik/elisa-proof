@@ -9243,7 +9243,9 @@ cases individually after the frozen run releases.
 ### 23.27.90 Local continuation checkpoint: preserve the frozen gate and stage fixes separately (2026-10-10)
 
 The integrated compiler candidate remains frozen at `2f68db2d046f9711d734edefe37db91d544b46ed`
-while its uncached 596-check gate runs locally. The latest log records 41 failed checks; the
+while its uncached 596-check gate runs locally. It descends from current compiler `main`
+`71e12c837ac9420f5e20154a76ce6a05f7d8b821`, verified as the newest local main snapshot on
+2026-10-10. The latest log records 41 failed checks; the
 malformed-input fuzzer passed, the 849-program differential corpus completed with zero behavioral
 mismatches, and emitter parity sweeps are still active. `build/cache-diagnostic-integration/full.exit`
 does not yet exist. This count is an in-progress snapshot, not the final gate result. Preserve the
