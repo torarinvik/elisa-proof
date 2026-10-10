@@ -8554,7 +8554,7 @@ same-source correctness parity for report-capture reuse, but capture was slower 
 no speedup is claimed. The first matched proof/replay build reached the r11 compiler but exposed a
 lifetime rejection where AST-backed region names were retained in resource snapshots, plus explicit
 `Global{Read,Write}` grant requirements for copying those names. Resource snapshots now retain the
-permanent arena's owning `cstr` for active/protected region labels and use explicit grants at copy
+permanent arena's stable `cstr` pointers for active/protected region labels and use explicit grants at copy
 sites; static checks pass, but the source fix is still uncompiled.
 
 Next gate: wait for the compiler coordinator to release the single Stage1 timing slot, then select
