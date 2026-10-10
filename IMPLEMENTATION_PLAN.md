@@ -9038,3 +9038,25 @@ Four further checks fail in the active suite, bringing the known total to 30:
 After the frozen run releases, add local capabilities to these positive fixtures and retain the
 intended block-expression, bounds, object, and trace assertions. No compiler source or proof pin
 has changed; focused and full qualification are still required.
+
+
+### 23.27.78 C-string, deque, and cross-module checks add three failures (2026-10-10)
+
+The frozen 596-check compiler run has now recorded 33 failures and is still active. Three more
+checks failed after §23.27.77:
+
+- `cstr_ref_return_smoke.sh` reaches its intended pass-through case but Stage1 rejects the
+  `int_to_string_scratch` call for lacking `can[Global{Read,Write}]`. Add the narrow local grant
+  to the generated fixture and preserve its C-string reference-return and LLVM emission checks.
+- `deque_real_smoke.sh` rejects both `push_at` and `count` before execution because their fixtures
+  still call the removed raw atomic `load` and `store` operations. Migrate to `AtomicCell[T]` or a
+  named protocol that owns the memory-order invariant; retain the deque behavior checks and do not
+  restore the raw API.
+- `cross_module_fallible_return_smoke.sh` exits nonzero with an empty retained per-test log. Its
+  shell harness suppresses the first Stage0 and Stage1 diagnostics, so the cause is not yet known.
+  After the frozen run releases, capture both compiler diagnostics and repair the fixture or
+  harness only after identifying the actual failure.
+
+Keep the proof pin unchanged and the compiler candidate frozen until the complete gate exits.
+Then diagnose all failures, migrate the intended fixtures, and rerun focused plus full qualification
+on the exact newest Stage1/runtime tuple before advancing proof checks.
