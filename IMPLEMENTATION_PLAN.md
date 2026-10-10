@@ -8568,7 +8568,7 @@ source before qualification. Do not report the replay gap fixed until all these 
 
 The strict-O2 proof/replay build on proof commit `1067ba3ed541a4dee88e08266866358c8b4ef8fa`, using the matched r11 Stage1 product and runtime, cleared the earlier `region_view` mutability diagnostic but emitted no object. The backend declined three constructs: the cstr `.sview()` call in `proof_resource_finish@472`, the guard-fact match statement in `proof_index_upper_guard_array@53`, and the guard-statement match in `proof_replay_type_bound_dynamic_array_guard_fact@57`.
 
-The current source-only repair uses the explicit `sview(ptr, start, length)` constructor inside the existing narrow trusted Unsafe block and converts the two reported statement matches into value-producing `match` helpers. This aligns the code with Elisa's expression style and preserves the same exact source conditions. `git diff --check`, Python syntax validation for the direct-API harness, and `scripts/check_source_length.py` pass. The repair remains uncompiled and unqualified.
+The current source-only repair uses the explicit `sview(ptr, start, length)` constructor inside the existing narrow trusted Unsafe block and converts the two reported statement matches into value-producing `match` expressions, keeping the producer-side fact scan short-circuiting. This aligns the code with Elisa's expression style and preserves the same exact source conditions. `git diff --check`, Python syntax validation for the direct-API harness, and `scripts/check_source_length.py` pass. The repair remains uncompiled and unqualified.
 
 ### 23.27.61 Preserve and qualify the private-rejection pruning candidate on the newest compiler (2026-10-10, shared slot held)
 
