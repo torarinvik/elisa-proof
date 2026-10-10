@@ -9158,3 +9158,20 @@ Stage1 both pass the native controls at O0 and O2: zero-byte and small allocatio
 the `usize`-maximum byte request traps as expected. This is a narrow test migration; it does not
 weaken compiler grants or use trusted suppression. Preserve the regression and its four-mode
 evidence, then rerun it as part of the full gate after the frozen run releases.
+
+
+### 23.27.85 Differential corpus exposes 85 Stage1 compile declines (2026-10-10)
+
+The long serial differential corpus completed with 849 programs: 359 matched, 0 behavioral
+mismatches, 85 newly declined by Stage1 against a baseline of zero, and 405 skipped because
+Stage0 could not arbitrate. The declines span EASM smoke programs, dictionary and reference/view
+fixtures, borrow/alias cases, and `region_owner_lookup_smoke`. The corpus harness suppresses
+per-case diagnostics, so the cause cannot yet be assigned reliably between newly enforced
+Global/effect contracts and compiler regressions.
+
+After the full gate releases, rerun representative listed cases with Stage1 diagnostics enabled,
+group the declines by root cause, migrate only valid fixtures with narrow grants, and fix any true
+checker regression. Preserve the zero-mismatch result and baseline of zero unexplained declines;
+do not ratchet all 85 failures away. The complete captured corpus log is
+`build/cache-diagnostic-integration/full-logs/behavioural_differential_corpus__ratchet_.log` in
+the frozen compiler worktree.
