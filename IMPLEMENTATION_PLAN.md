@@ -9110,3 +9110,16 @@ The compiler agent confirms the fuzzer and serial differential worker are both s
 the candidate and proof pin frozen, preserve the complete final logs and status, and do not install
 the candidate until the paired standard-library lifetime repairs and exact-tuple qualification
 are complete.
+
+
+### 23.27.81 Effect-type-reference fixtures need scoped parser grants (2026-10-10)
+
+The frozen compiler gate has reached 39 failing checks and is still active. Its latest failure,
+`effect_type_reference_smoke.sh`, stops before its type-reference assertions because both calls to
+`frontend_parse` in `test/breadth/effect_type_reference.elisa` (lines 8 and 49) lack the required
+`Global{Read,Write}` capability. Add the narrow grants, preserving the intended effect-type
+reference coverage and all missing-grant negative controls.
+
+The malformed-input fuzzer and serial differential corpus remain active. Continue to hold the
+compiler candidate and proof pin until the complete run exits and the exact Stage1/runtime tuple
+passes its postflight.
