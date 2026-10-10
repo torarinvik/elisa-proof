@@ -9136,3 +9136,14 @@ positive, not proof of an Elisa parser regression. Preserve the real parser diag
 the probe to provide module/include context or explicitly classify source fragments; do not
 suppress errors or modify valid compiler source semantics. The updated isolated harness reports
 each failing filename and reporter output and is saved in compiler branch `codex/object-cache-integrity`.
+
+
+### 23.27.83 Syntax breadth probe repaired with actual declaration context (2026-10-10)
+
+An isolated test-only change now fixes the fragment false positive from §23.27.82. Commit
+`b00e5f54` prepends the real `Diagnostic` declaration from `semantic_types.elisa` before parsing
+the `check_typestate_flow.elisa` fragment. The existing native reporter accepts the contextual
+valid fixture (P0) and rejects a deliberately injected semicolon sibling (P1). The change does not
+skip or suppress parser checks, alter the breadth ratchet, or rewrite compiler source. A source
+scan found no other parse errors. Preserve this repair in the isolated branch and integrate only
+after the frozen full gate releases; its codec native execution remains a separate pending check.
