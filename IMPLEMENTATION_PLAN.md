@@ -8843,12 +8843,16 @@ The suite passed `self_host_gen3_smoke.sh` (including the gen3-to-gen4 fixpoint)
 against a bare limit of 6 and 12 against a with-stdlib limit of 0. Ten are hierarchical enum
 payload cases whose Stage1 positive/negative behavior has a dedicated regression suite. The
 `local_field_view_bound_return.pos` file is deliberately unsafe: it returns a view into a local
-struct's freed darray buffer, so Stage1 rejection is intended despite its `.pos` suffix. Three
-other negative-fixture declines (`loop_element_type`, `param_structural_type`, and
-`affine_move_dict_record`) still need confirmation against their focused tests before updating
-the acceptance ratchet or marking them deliberate Stage1 declines. The differential and malformed
-input workers remain active. Do not call the integrated candidate fully qualified or update the
-proof compiler pin while this failure and the remaining suite are unresolved.
+struct's freed darray buffer, so Stage1 rejection is intended despite its `.pos` suffix. The
+`loop_element_type.neg` and `param_structural_type.neg` disagreements occur only in bare mode;
+both pass with the standard library, matching the documented bare-mode gap. The
+`affine_move_dict_record.neg` source is missing a `Global.Read/Write` grant on `d.put`, so Stage1
+stops before reaching the intended affine-move diagnostic. After the frozen gate exits, update
+that fixture with the required scoped grant, confirm the intended affine diagnostic, document the
+two intentional Stage1 safety rejections, and set the ratchets to the explicitly observed
+remaining differences. The differential and malformed-input workers remain active. Do not call
+the integrated candidate fully qualified or update the proof compiler pin while this failure and
+the remaining suite are unresolved.
 
 The high-ROI queue remains: finish the integrated compiler gate; qualify direct API plus the
 Global.Read/Write matrix, source-goal mutation, export, and independent replay; then fix the next
