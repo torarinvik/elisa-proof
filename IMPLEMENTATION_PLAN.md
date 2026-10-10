@@ -9257,13 +9257,21 @@ standard-library deque region-return failures, missing scoped Global grants, and
 environment failure also remain to be triaged from their retained logs; do not bulk-update
 baselines or weaken lifetime/effect checks.
 
-Compiler commit `8d7cfca2` (rename the shadowing SMC error binding and strengthen the native region
-owner fixture) is preserved in `codex/object-cache-integrity` at `3273199e84ae6738a19453371e5671dc17bbddc2`
-and in its local recovery bundle. It is not yet in the frozen candidate. Keep that qualification
-checkout unchanged; after `full.exit` appears, port the fix and the pending `query_head_for` /
-`const_scope_owner` region annotations onto the exact integration base, then run gen2 and the
-focused native regressions before the affected full gate. The incremental snapshot codec in that
-branch remains experimental and unqualified, with no production reuse or speedup claim.
+The SMC binding rename and region-owner regression in compiler commit `8d7cfca2` are already
+present in the frozen candidate as patch-equivalent commit `ec3ef1fe`; a trial cherry-pick was
+empty. A separate post-gate preview branch, `codex/merged-origin-smc-fix-preview`, is now at
+`52650a15` and adds the narrow `Global{Read,Write}` grant to the affine dictionary move acceptance
+fixture. The compiler agent reports that this fixture emits O0 objects successfully with both
+Stage0 and Stage1; the preview itself has not been built or included in the active gate.
+
+The latest isolated compiler branch is `codex/object-cache-integrity` at
+`43b2e6c772824474e2403ee45d71be79f2d9246e`. Its earlier codec snapshot passed a native O0 control;
+the compiler agent reports native O2 control passing on the later codec draft. Gen2 validation is
+still pending and production reuse remains unwired; do not claim a qualified optimization or
+speedup. The reported `query_head_for` / `const_scope_owner` annotations still need an owning commit
+and gen2 validation. Keep the active qualification checkout unchanged until `full.exit` appears,
+then validate the preview and any new region annotations on the exact current compiler/runtime
+tuple before rerunning affected gates.
 
 Continue in the high-ROI order from §23.27.71: finish and triage the exact-tuple compiler gate;
 qualify proof-consumer admission, direct API source obligations, exact Global grant enforcement,
