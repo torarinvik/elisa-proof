@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-10. **Section 23.27.71 is the authoritative high-ROI status and execution queue.** An isolated compiler region-contract candidate has passed a fresh O3 Stage1 seed, Stage1-to-gen2 self-compile, and focused compiler regressions on LLVM 23.1.2. Its fixes are now imported into an integrated compiler candidate whose own full qualification is active. The proof-consumer changes remain unqualified on that final compiler/runtime pair. Prioritize integrated runtime-origin and Global.Read/Write qualification, then proof-consumer admission and kernel replay gaps, then measured common-path performance. Earlier sections retain historical evidence and design detail; consult 23.27.71 for current status and completion gates.
+Status: refreshed 2026-10-10. **Section 23.27.90 is the current full-gate status; §23.27.71 remains the authoritative high-ROI execution order.** The integrated compiler candidate has a live uncached 596-check qualification with 41 failures recorded so far; the malformed-input fuzzer passed, while emitter checks continue. The completed differential corpus has zero behavioral mismatches but 85 Stage1 compile declines, of which 21 borrow-exclusivity negatives are now independently covered and 64 remain untriaged. The proof compiler pin and proof-consumer changes remain unqualified on the final matched compiler/runtime pair. Prioritize finishing the exact-tuple compiler gate, triaging its real failures, qualifying proof-consumer admission and kernel replay, then measuring common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.90 for the ordered backlog and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9238,3 +9238,35 @@ all 43 probes on the latest isolated fixture tree, including explicit negative d
 accepted O0/O2 no-alias programs. Commit `2cd6d00a` retains Stage0 and Stage1 compile logs for
 remaining declines. Keep the corpus baseline at zero unexplained declines and triage the other 64
 cases individually after the frozen run releases.
+
+
+### 23.27.90 Local continuation checkpoint: preserve the frozen gate and stage fixes separately (2026-10-10)
+
+The integrated compiler candidate remains frozen at `2f68db2d046f9711d734edefe37db91d544b46ed`
+while its uncached 596-check gate runs locally. The latest log records 41 failed checks; the
+malformed-input fuzzer passed, the 849-program differential corpus completed with zero behavioral
+mismatches, and emitter parity sweeps are still active. `build/cache-diagnostic-integration/full.exit`
+does not yet exist. This count is an in-progress snapshot, not the final gate result. Preserve the
+candidate and all test outputs until the gate exits.
+
+The differential corpus reported 85 Stage1 compile declines against a zero-decline baseline.
+Twenty-one are now separately verified borrow-exclusivity negatives with targeted diagnostic
+checks and no object output; the other 64 remain unexplained. Keep them out of acceptance ratchets
+until each has an evidence-backed classification. The diagnostic-column and AST parity failures,
+standard-library deque region-return failures, missing scoped Global grants, and pinned-Skia
+environment failure also remain to be triaged from their retained logs; do not bulk-update
+baselines or weaken lifetime/effect checks.
+
+Compiler commit `8d7cfca2` (rename the shadowing SMC error binding and strengthen the native region
+owner fixture) is preserved in `codex/object-cache-integrity` at `3273199e84ae6738a19453371e5671dc17bbddc2`
+and in its local recovery bundle. It is not yet in the frozen candidate. Keep that qualification
+checkout unchanged; after `full.exit` appears, port the fix and the pending `query_head_for` /
+`const_scope_owner` region annotations onto the exact integration base, then run gen2 and the
+focused native regressions before the affected full gate. The incremental snapshot codec in that
+branch remains experimental and unqualified, with no production reuse or speedup claim.
+
+Continue in the high-ROI order from §23.27.71: finish and triage the exact-tuple compiler gate;
+qualify proof-consumer admission, direct API source obligations, exact Global grant enforcement,
+kernel replay and package ingress; then measure performance only on correctness-qualified
+workloads. The existing local checkpoints and compiler bundles preserve the work if the current
+process is interrupted.
