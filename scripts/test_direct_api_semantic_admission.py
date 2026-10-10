@@ -1,4 +1,4 @@
-"""Direct APIs gate semantic admission and bind parameter-return source goals."""
+"""Direct APIs gate semantic admission and bind source-owned proof obligations."""
 import ast
 import json
 import os
@@ -71,6 +71,8 @@ constants += "const GLOBAL_QUALIFIED_READ_API_SOURCE: sview = " + json.dumps("mo
 constants += "const GLOBAL_QUALIFIED_WRITE_API_SOURCE: sview = " + json.dumps("module SharedState:\n    public:\n        global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        SharedState::api_counter <- 1\n") + "\n"
 constants += "const PARAMETER_RETURN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    ensure result == 7\n    return value\n") + "\n"
+constants += "const SOURCE_ASSERT_BY_POSITIVE_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_positive.elisa").read_text()) + "\n"
+constants += "const SOURCE_ASSERT_BY_NESTED_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_module.elisa").read_text()) + "\n"
 constants += "const PARAMETER_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
 constants += "const COUNTING_LOOP_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        return index\n    return 0\n") + "\n"
 constants += "const COUNTING_LOOP_TYPE_BOUND_SCOPE_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        assert true by:\n            assert true\n    assert true by:\n        assert true\n    return 0\n") + "\n"
@@ -103,6 +105,18 @@ def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofRep
     else:
         (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, "checked") can Global{Read,Write})
     (proof_replay_certificates(report) can Global{Read,Write})
+
+def api_probe_before_replay(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
+    source.clear()
+    for index in 0..<sview_len(text) |index, text, source|:
+        source.push(sview_at(text, index))
+    source.push(0)
+    file: mutable Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
+    diagnostics.clear()
+    if route == 0:
+        (proof_check(file, report) can Global{Read,Write})
+    else:
+        (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
 
 def api_global_array_replay_probe(source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, tamper: usize) -> void can Memory.Allocate, Abort.Panic:
     (api_probe(GLOBAL_INDEXED_READ_API_SOURCE, source, report, diagnostics, route) can Global{Read,Write})
@@ -196,6 +210,16 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     report: mutable ProofReport = proof_empty_report()
     diagnostics: mutable darray[Semantic::Diagnostic] = []
     for route in 0..<3 |route, source, report, diagnostics|:
+        if route < 2:
+            (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+            return 247 if report.failed != 0 or report.findings.count != 0 or report.replayed != 0
+            (proof_replay_certificates(&report) can Global{Read,Write})
+            return 248 if report.replay_gaps != 0 or not proof_report_source_admission_invariants_consistent(report)
+            (api_probe_before_replay(SOURCE_ASSERT_BY_NESTED_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+            return 249 if not any finding in report.findings where finding.kind == "source-obligation-inventory" and finding.status == "unsupported"
+            return 250 if report.replayed != 0
+            (proof_replay_certificates(&report) can Global{Read,Write})
+            return 251 if proof_report_source_admission_invariants_consistent(report)
         for index in 0..<19 |index, route, source, report, diagnostics|:
             (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 170 if report.certificates.count == 0 or report.proven == 0
@@ -406,8 +430,8 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     dynamic_bound_trace: ProofFactTrace = report.traces.records[dynamic_bound_index]
     return 241 if not (proof_replay_fact_trace_entry(&report, dynamic_bound_index) can Global{Read,Write})
     nearby_position: Ast::Pos = Ast::pos_at_line(5)
-    nearby_count: Ast::Expr = Ast::Binary(Ast::Expr.Field(Ast::Expr.Ident("values", nearby_position), "count", nearby_position), TokenKind.Minus, Ast::Expr.IntLit(1, nearby_position), nearby_position)
-    nearby_bound: Ast::Expr = Ast::Binary(Ast::Expr.Ident("index", nearby_position), TokenKind.Lt, nearby_count, nearby_position)
+    nearby_count: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Field(Ast::Expr.Ident("values", nearby_position), "count", nearby_position), TokenKind.Minus, Ast::Expr.IntLit(1, nearby_position), nearby_position)
+    nearby_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("index", nearby_position), TokenKind.Lt, nearby_count, nearby_position)
     nearby_trace: ProofFactTrace = ProofFactTrace{expression: nearby_bound, kernel_expression: dynamic_bound_trace.kernel_expression, kind: "type-bound", line: dynamic_bound_trace.line, name: dynamic_bound_trace.name, dependency: dynamic_bound_trace.dependency, premises_start: dynamic_bound_trace.premises_start, premises_count: dynamic_bound_trace.premises_count, kernel_premises_start: dynamic_bound_trace.kernel_premises_start, kernel_premises_count: dynamic_bound_trace.kernel_premises_count, summary_bindings_start: dynamic_bound_trace.summary_bindings_start, summary_bindings_count: dynamic_bound_trace.summary_bindings_count, summary_requires_start: dynamic_bound_trace.summary_requires_start, summary_requires_count: dynamic_bound_trace.summary_requires_count, summary_ensure_index: dynamic_bound_trace.summary_ensure_index, owner_line: dynamic_bound_trace.owner_line}
     return 242 if (proof_replay_type_bound_source_valid(report, nearby_trace) can Global{Read,Write})
     unrelated_bound: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("index", nearby_position), TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident("other", nearby_position), "count", nearby_position), nearby_position)
@@ -436,4 +460,4 @@ run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Direct API semantic admission: source-goal identity, loop-binder scope, Global grants, source-bound refinements, and reused-state clearing pass")
+print("Direct API semantic admission: source-goal and assert-by identity, loop-binder scope, Global grants, source-bound refinements, and reused-state clearing pass")

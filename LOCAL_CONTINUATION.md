@@ -147,3 +147,63 @@ support now makes a test-only public copy of `differences_and_facts.elisa`; prod
 and the trace equality assertion remain unchanged. This source-only repair is unqualified. Do not
 run Stage1 until the compiler coordinator grants a new slot after authority r4, then freeze the
 updated runner/support hashes and manifest before one retry.
+
+## Current local work — 2026-10-10
+
+The active proof branch remains `codex/vast-local-checkpoint-20261009`. The tracked compiler pin
+is still `02516ea6a69cd2ef1201ea08377c1f83a26ff8f5`, and the pre-existing snapshot is restored at
+`757c231e327ed5a2420be8a855a6abb0ac59d0ed`. A temporary attempt against the newer compiler
+candidate `be29c719a5109737d6dd34f6e8c47c29dbebe1be` used Stage1
+`b43d9cc9199b18e8fe8d063a6bbad193254e9334e79f67bc80a6dd2a885ba204` and runtime
+`e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`; the temporary pin and
+snapshot were restored when that attempt ended.
+
+The compiler worktree has since advanced to `0f05b710e3be7890331ee9be82f06d89acafda20` for
+test-only self-resolution/runtime-interface fixture updates; the six-file diff from `be29c719`
+does not change compiler or standard-library sources. The same Stage1/runtime pair passes the
+freshness check. The compiler coordinator reports self-resolution passed and its full suite is
+still running. Public upstream `main` remains `71e12c837ac9420f5e20154a76ce6a05f7d8b821`; the
+local candidate contains newer unmerged runtime-origin and grant work on top of it. The next
+proof snapshot should use candidate revision `0f05b710` after the compiler coordinator releases
+the slot, with runtime imports mapped to the candidate root's canonical `elisacore_std`.
+
+The unfinished proof change closes a direct-API source-inventory gap for whole-source Boolean
+`assert ... by:` targets. Both whole-source APIs now check source-to-attempt coverage before
+replay, and the final non-focused report invariant requires replayed source coverage. The CLI's
+duplicate inventory gate was removed. The test-only harness adds positive and nested-module
+cases. The harness source resolver now uses pinned semantic compiler sources and the matched
+compiler root's canonical `elisacore_std` path, following the compiler's authenticated runtime
+origin policy and verifies the canonical/pinned standard-library source manifests match. Five
+proof helpers returning views into state/function-table arrays now declare
+explicit `@r` region-polymorphic contracts. All of these edits are **uncompiled and unqualified**;
+`git diff --check`, Python syntax checks, and the source-length limit pass.
+
+The failed harness attempt's exact invocation and diagnostics are in
+`build/direct-api-assert-by-attempt-stage1-20261010.log` (ignored build evidence). Its copied
+standard-library diagnostics were caused by the harness resolving `elisacore_std` from the
+proof snapshot rather than the compiler executable's canonical root. The generated harness also
+contained two stale `Ast.Binary` constructors; those are corrected. Five proof-specific region
+return diagnostics drove the explicit lifetime contracts above. The compiler coordinator has
+restarted its full suite and asked that no further proof build run until the worker releases the
+slot. On release, confirm the exact new Stage1/runtime tuple, rerun the harness once, then
+continue with proof strict-check/build, grant admission, source mutation, and independent replay
+gates. Do not advance the proof pin from the candidate seed or focused checks alone.
+
+## Compiler region-return follow-up — 2026-10-10
+
+The compiler coordinator reported 43 region-tied return diagnostics in gen2 self-compile. The
+isolated compiler worktree
+`../local-compiler-optimization-20261009/region-contract-fixes-working` is fast-forwarded to
+`0f05b710e3be7890331ee9be82f06d89acafda20`; its parent `merged-origin-qualification-working`
+remains untouched while its full qualification gate runs. The worktree contains uncommitted,
+signature-only explicit `@r` ties across 36 helper declarations, covering all 43 reported source
+locations without copying strings or allocating in lookup loops. Static diagnostic-to-signature
+coverage and `git diff --check` pass. Do not run a compiler yet: the coordinator requested that
+the active full gate keep the compiler slot until release.
+
+The current source list also shows one `elisac_includes.elisa:134` auto-region escape in
+`merged-origin-qualification-working/build/gen3_check/gen2.log`, separate from the 43-line
+hard-diagnostic list. It remains unresolved pending coordinator triage. After the gate releases,
+build and self-compile from the isolated branch, repair any remaining lifetime errors, then send
+the validated region commit to the compiler coordinator for review. The proof pin and snapshot
+remain unchanged.

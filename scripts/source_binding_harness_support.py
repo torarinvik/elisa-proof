@@ -1,5 +1,6 @@
 """Build test-only replay harnesses without widening production helper visibility."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -59,6 +60,16 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
     return "\n".join(expanded)
 
 
+def _elisa_source_manifest(root: Path) -> dict[str, str]:
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and path.suffix in {".elisa", ".elisai"}
+    }
+
+
 def run_source_binding_replay_harness(
     root: Path,
     fixture: Path,
@@ -78,6 +89,15 @@ def run_source_binding_replay_harness(
     if snapshot_revision != pinned_frontend_revision:
         raise SystemExit(
             f"pinned frontend snapshot mismatch: snapshot={snapshot_revision} expected={pinned_frontend_revision}"
+        )
+    canonical_std = compiler_root / "elisacore_std"
+    pinned_std = frontend_snapshot / "elisacore_std"
+    canonical_std_manifest = _elisa_source_manifest(canonical_std)
+    pinned_std_manifest = _elisa_source_manifest(pinned_std)
+    if not pinned_std_manifest or canonical_std_manifest != pinned_std_manifest:
+        raise SystemExit(
+            f"canonical standard library does not match pinned compiler revision {snapshot_revision}: "
+            f"{canonical_std} vs {pinned_std}"
         )
     freshness = subprocess.run(
         ["bash", str(freshness_script), str(stage1)],
@@ -131,7 +151,10 @@ def run_source_binding_replay_harness(
             directory = Path(temporary)
             source_path = directory / "bounded_counter_source_replay.elisa"
             executable = directory / "bounded_counter_source_replay"
-            harness = harness.replace("../../Elisa-compiler/", str(frontend_snapshot.resolve()) + "/").replace(
+            canonical_std = (compiler_root / "elisacore_std").resolve()
+            harness = harness.replace(
+                "../../Elisa-compiler/elisacore_std/", str(canonical_std) + "/"
+            ).replace("../../Elisa-compiler/", str(frontend_snapshot.resolve()) + "/").replace(
                 'include "../src/', 'include "../../src/'
             )
             source_path.write_text(harness, encoding="utf-8")

@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-09. **Section 23.27 is the authoritative high-ROI execution queue.** Prioritize mandatory Global.Read/Write enforcement, source/replay and kernel trust gaps, complete current-product qualification, then measured common-path performance. Fresh compiler builds now work; the previous build-blocker ordering is superseded. The latest 48-failure baseline ran only through test part 09 and does not constitute a complete matrix. Earlier sections retain historical evidence and design detail; consult 23.27 for current status and completion gates.
+Status: refreshed 2026-10-10. **Section 23.27 is the authoritative high-ROI execution queue.** Prioritize authentic runtime/global-grant enforcement and a complete current compiler/proof qualification, then close source-to-goal and kernel replay gaps, then measured common-path performance. The newest local compiler candidate has passed focused compiler checks but still has an active full-driver gate; its proof-consumer integration remains unqualified. Earlier sections retain historical evidence and design detail; consult 23.27 for current status and completion gates.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -8718,3 +8718,91 @@ The guarded Stage 0 → Stage 1 seed passed using `/Users/torarinvikbjarko/Docum
 Portable local recovery files are `local-compiler-optimization-20261009/backups/elisa-compiler-region-contract-fixes-20261010.bundle` (complete history through `be29c719`, SHA-256 `7f5c1a43f3bbbf85da09b7da3ddd7f4d41858f1ecbf6349c852843207f81d8cc`) and `local-compiler-optimization-20261009/backups/region-contract-stage1-20261010.tar.gz` (product, provenance, runtime object, and seed log). The bundle was verified.
 
 Keep P0 open. This focused checkpoint does not complete proof-driver/replay qualification or the resumed full parity matrix, so do not advance the proof compiler pin or describe kernel qualification as complete. Resume from the branch and product above, run those remaining gates on the same compiler/runtime tuple, and preserve the current high-ROI queue: verified-build admission and authentic runtime privileges first, then whole-system kernel and replay correctness, then measured common-path performance.
+
+
+### 23.27.69 Direct-API assert-by inventory gate and local compiler integration (2026-10-10)
+
+A source-admission audit found that whole-source Boolean `assert ... by:` inventory was checked
+by the CLI after replay, but `proof_check` and
+`proof_check_with_semantic_diagnostics` did not independently require every inventoried target
+to have a matching proof attempt. The shared final report invariant also omitted assert-by
+coverage for non-focused reports. The current uncommitted proof change moves attempt-stage
+coverage into both whole-source APIs and includes replayed assert-by coverage in the final
+non-focused admission invariant. The CLI's duplicate final inventory gate is removed. The direct
+API regression harness now includes a supported positive source and an unsupported nested-module
+source, checks findings before replay, and checks final admission after replay. Its test-only AST
+constructors were corrected to the current `Ast::Expr.Binary` spelling.
+
+This is **unqualified**. One attempted harness build used the newest available local Stage1
+candidate at compiler source `be29c719a5109737d6dd34f6e8c47c29dbebe1be` (Stage1 SHA-256
+`b43d9cc9199b18e8fe8d063a6bbad193254e9334e79f67bc80a6dd2a885ba204`, runtime SHA-256
+`e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`). It failed before running
+the harness assertions. The emitted diagnostics included two stale `Ast.Binary` references, now
+fixed in the test, plus region-tied returns in proof sources. The apparent standard-library
+region and removed-raw-concurrency errors were caused by the harness importing a snapshot copy
+outside the candidate executable's canonical compiler root; the compiler coordinator confirmed
+the new origin policy correctly treated that path as ordinary application source. The complete
+attempt and diagnostic list are saved at `build/direct-api-assert-by-attempt-stage1-20261010.log`.
+The harness now routes standard-library includes through the matched compiler root while
+retaining pinned semantic sources, and compares every `.elisa`/`.elisai` source hash against
+the pinned standard-library snapshot before compiling.
+Five proof helpers that return views into resource-state or function-table arrays now declare
+explicit region-polymorphic result contracts. These are source changes only; they have not been
+compiled. The proof compiler pin and prior snapshot were restored after the failed test. A
+compiler full-suite run is active under the compiler coordinator; do not launch another proof
+build until that worker releases the slot and the resulting exact Stage1/runtime tuple is
+confirmed.
+
+The compiler candidate advanced to `0f05b710e3be7890331ee9be82f06d89acafda20` with test-only
+self-resolution/runtime-interface fixture updates; the diff from `be29c719` contains only six
+test files. Its unchanged Stage1/runtime pair passes the freshness check. The compiler
+coordinator reports self-resolution passed and the full suite is continuing. A direct
+`git ls-remote` check confirms public compiler `main` remains
+`71e12c837ac9420f5e20154a76ce6a05f7d8b821`; the newer unmerged candidate contains the runtime
+origin and grant work on top of that base.
+
+**Updated high-ROI order:**
+
+1. **P0 — Finish authentic runtime-origin and Global.Read/Write qualification on one matched
+   compiler/runtime pair.** Complete Stage0 seed/self-host, runtime-origin spoof controls,
+   region/lifetime fixes, strict global-grant reporter and imported-method controls, and the
+   compiler's full test suite. Do not advance the proof pin based on a seed or focused grant run.
+2. **P0 — Qualify proof-consumer admission on that exact pair.** Strict-check and build the proof
+   product with semantic sources pinned and runtime standard-library imports resolved from the
+   matching compiler root; run the direct-API assert-by regression, CLI/API Global grant matrix, source-goal
+   mutation controls, fresh export/replay, and portable replay. The assert-by API change remains
+   open until it compiles and all positive, omission, duplicate, false-claim, nested-scope, and
+   unreplayed-certificate controls pass.
+3. **P1 — Repair the next shared source/replay trust defect.** Resume the ordered failure ledger,
+   prioritizing stale or omitted source facts, loop/call witnesses, and remaining dynamic-array
+   bounds. Require a source mutation, genuine positive, exact negative, and independent replay for
+   each repaired rule.
+4. **P2 — Rebaseline and optimize common paths.** Keep performance changes behind current-product
+   correctness qualification; require paired workload measurements and identical complete
+   semantic/trust projections before claiming a speedup.
+
+The immediate next action is to wait for the compiler coordinator's current full-suite result,
+then run one proof harness on its freshly confirmed product. This priority change supersedes
+older instructions to build immediately on `be29c719`; it does not close P0 or establish
+proof-assistant performance parity with Lean, Dafny, or F*.
+
+
+### 23.27.70 Compiler region-return repair is isolated and awaiting qualification (2026-10-10)
+
+The compiler coordinator's gen2 self-compile surfaced 43 real region-tied return diagnostics in
+backend and driver helpers. To keep the active full gate's checkout untouched, the region repair
+is isolated in `region-contract-fixes-working`, fast-forwarded from `be29c719` to current
+candidate `0f05b710`. It adds 36 explicit region-polymorphic signatures for the 43 sites, tying
+returned `sview`/optional-`sview` values to the backing `StructTable`, `FnTable`, `GenericTable`,
+`Scope`, or `Ast::File`. It makes no copies or scratch allocations. A static audit maps every
+reported line to a changed signature, and `git diff --check` passes. No compiler was run because
+the candidate's current full qualification gate still owns the local worker. The patch is
+uncommitted and unqualified; keep it out of the active candidate until a fresh build and
+self-compile pass.
+
+The accompanying `build/gen3_check/gen2.log` also contains an `elisac_includes.elisa:134`
+auto-region escape outside the 43-line hard-diagnostic list. Treat it as an unresolved separate
+gate item unless the compiler coordinator confirms it is stale/already fixed. After the worker
+releases, compile the isolated region branch with the newest matched Stage1/runtime, repair any
+remaining accurate lifetime diagnostics, and require a successful gen2 self-compile before
+promoting the commit. Do not solve these errors with runtime trust exemptions or bulk copies.
