@@ -8951,3 +8951,31 @@ fixtures and helper contracts, preserve grants in seeded stress positives and ne
 the closure effect mismatch, and reproduce the two dictionary declines with diagnostics. Rerun
 each affected check and the full gate on the same Stage1/runtime tuple before building or
 qualifying proof products.
+
+
+### 23.27.75 Diagnostic and adversarial checks add four more failures (2026-10-10)
+
+The frozen 596-check run has now reported 23 failures and remains active. Four checks were added
+after the grant-fixture and runtime findings in §23.27.74:
+
+- `diagnostic breadth baseline` reports 68 changed or missing per-fixture counts. Do not
+  wholesale regenerate the ratchet. Review each changed fixture against its intended positive or
+  negative outcome, account for new Global/effect findings, and retain all independently expected
+  diagnostics before updating a baseline.
+- `diagnostic line parity` has one defect out of 672 messages: Stage0 and Stage1 both report four
+  messages for `region_param_container_return_semicolon_refusal`, but one location differs or a
+  repeat is missing. Trace the location mapping and preserve the zero-defect ratchet.
+- `adversarial_escape_smoke.sh` rejects two positive fixtures. `dict_get_ref_before_put.pos`
+  calls dictionary `put` twice without Global.Read/Write grants. `call_protocol_view.pos` has a
+  `Named` protocol whose effect contract does not permit the implementation's
+  `Unsafe.PointerArithmetic` and `Unsafe.RawExtern` use. Add the missing dictionary grants; for
+  the protocol case, either make the implementation safe or express the effect contract and
+  caller capability explicitly while preserving the lifetime assertion. Do not add a `trusted`
+  escape merely to pass it.
+- `amm_placement_soundness_smoke.sh` reports that Stage0 rejects `amm_drop_type_move`. The source
+  writes global mutable `drops` in `__drop__` and reads it in `main` without Global.Write/Read;
+  add the scoped capabilities so the fixture can reach its exact drop-count and placement check.
+
+Re-run these focused checks and the full gate on the synchronized compiler/runtime pair after the
+active workers release. The proof pin remains unchanged, and no compiler source has been edited
+in this proof worktree.
