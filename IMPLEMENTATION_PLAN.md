@@ -8894,3 +8894,33 @@ resolution and include-smoke success, but is not qualified with three known gate
 remaining workers incomplete. Continue with the high-ROI order in §23.27.72 after the full run:
 resolve the compiler gate, then qualify the direct API and Global grant matrix plus export and
 independent replay on the exact resulting compiler/runtime pair.
+
+
+### 23.27.74 Full compiler gate exposes grant-fixture migration and one closure effect mismatch (2026-10-10)
+
+As the same frozen suite progressed, eleven additional checks failed. The packed sparse/dense
+word-bounds tests stop in their valid Stage0 fixtures because calls to runtime helpers lack
+explicit `Abort`, `Memory`, and `Unsafe.RawExtern` grants; the compiler then reports that the
+unsafe-permission audit failed. Eight other checks stop before their intended behavior because
+valid fixtures call helpers that now require `Global{Read,Write}`: arena allocation overflow,
+arena runtime lifecycle, concurrent arena cache access, runtime string allocation, runtime string
+view safety, sview representation safety, destroyed-view lifetime, and region-pool release
+lifetime. The emitted diagnostics name calls such as `arena_alloc`, `concat2`, `string_view_copy`,
+dictionary `put`, `arena_reset`, and `acquire`; the concurrent arena fixture also reads and writes
+global mutable state without either grant. These failures are consistent with the requested
+capability enforcement and must be handled by migrating valid fixtures and helper signatures so
+their positive safety checks can run. Preserve the missing-grant negative controls and do not
+weaken the checker to make legacy fixtures pass.
+
+`sview_relocation_smoke.sh` is a separate issue: Stage1 rejects the positive fixture
+`sview_closure_unrelated_growth_live.elisa` because `reader` expects `fn() -> i64`, while the
+inferred closure has `fn() -> i64 can[Unsafe]`. Diagnose the source annotation or effect inference
+after the gate releases; this is not explained by Global grants. Together with the previously
+recorded driver-acceptance, compile-time, and dictionary-differential failures, fourteen checks
+have failed so far. The rest of the full suite remains active and may reveal more. Keep the
+compiler candidate frozen and the proof pin unchanged until the final result and tuple postflight.
+
+After the run completes, fix only the concrete causes: add scoped grants to valid fixtures and
+their helper contracts, resolve the closure effect mismatch, then reproduce the two dictionary
+declines with diagnostics. Rerun each affected check and the full gate on the same Stage1/runtime
+tuple before building or qualifying proof products.
