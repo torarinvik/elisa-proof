@@ -9123,3 +9123,16 @@ reference coverage and all missing-grant negative controls.
 The malformed-input fuzzer and serial differential corpus remain active. Continue to hold the
 compiler candidate and proof pin until the complete run exits and the exact Stage1/runtime tuple
 passes its postflight.
+
+
+### 23.27.82 Docs syntax triage identifies a fragment-context false positive (2026-10-10)
+
+Post-gate triage of `docs119_forms_smoke.sh` found the reported parse error at
+`src/semantic/check_typestate_flow.elisa:180`, where a struct copy uses `..base`. The breadth
+harness parses each source file standalone through the raw parser, so this compiler source
+fragment is missing declarations normally supplied by its enclosing include context; whole
+compiler self-host parsing and fixpoint checks pass. Treat this as a likely harness-context false
+positive, not proof of an Elisa parser regression. Preserve the real parser diagnostic and repair
+the probe to provide module/include context or explicitly classify source fragments; do not
+suppress errors or modify valid compiler source semantics. The updated isolated harness reports
+each failing filename and reporter output and is saved in compiler branch `codex/object-cache-integrity`.
