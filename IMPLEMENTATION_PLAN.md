@@ -8422,8 +8422,9 @@ regressions are resolved.
 
 ### 23.27.53 Fixed-array literal replay candidate: complete AST use walk, qualification queued (2026-10-10)
 
-The fixed-array literal-index candidate is now at proof commit `110c89a0`, following the source-only
-candidate checkpoint `7fdb1d31`. The replay source-use walk descends through nested indexing,
+The fixed-array literal-index candidate is at `110c89a0`, with its AST coverage regression at
+`3422c2c5` and this plan update at `c1d06e52`, following the source-only checkpoint `7fdb1d31`.
+The replay source-use walk descends through nested indexing,
 parenthesized array names, collection and record literals, calls, branches, matches, lambdas, and
 block/control-flow expressions. The direct-API harness now checks the visitor against all 35
 `Ast::Expr` variants in the pinned compiler snapshot, so adding a parser variant requires an
@@ -8432,11 +8433,12 @@ This closes a source-walk omission where a direct outer index with a different s
 a matching nested access. The harness includes parenthesized and nested-array positives plus a
 forged `2 < values.count` trace against source `values[1]`.
 
-`git diff --check`, Python bytecode compilation of the harness, and `scripts/check_source_length.py`
-pass. No candidate build or direct-API assertion has run. The product pair currently saved under
-`build/` predates commits `7fdb1d31` and `110c89a0` and cannot qualify them. Stage1 remains reserved
-for the compiler agent's common-source performance control, followed by its isolated authority
-report-reuse candidate; that agent has queued this fixed-array qualification after those runs.
+`git diff --check`, Python bytecode compilation of the harness, `scripts/check_source_length.py`,
+and the persisted 35-variant coverage check pass. No candidate build or direct-API assertion has run.
+The product pair currently saved under `build/` predates commits `7fdb1d31` and `110c89a0` and
+cannot qualify them. The compiler coordinator has assigned the next serial Stage1 slot to a frozen,
+repaired authority report-reuse r2 native qualification. Keep this proof candidate queued until its
+owner explicitly releases the shared compiler slot.
 
 After explicit Stage1 release, build a matched strict O2 proof/replay pair with newest pinned
 Elisa-compiler `8f2023ce8a7d52358b733a0e812ff46293d45f10`. Run the expanded direct-API mutation
@@ -8445,3 +8447,17 @@ pair. Count the candidate as valid only with fully proven positive cases, zero r
 refusal of the forged trace. Then rerun the CLI/API Global grant and qualified-constant controls
 before returning to the ordered kernel failure ledger. Keep this replay gap and the broader P0
 trust objective open until those gates pass.
+
+### 23.27.54 Shared Stage1 queue: proof candidate preserved behind authority r2 gate (2026-10-10)
+
+The compiler coordinator assigned the next serial Stage1 slot to a frozen, repaired authority
+report-reuse r2 native qualification. This is a single bounded correctness gate for the compiler
+candidate, not permission to overlap another build. The fixed-array replay candidate remains
+source-committed and queued; do not build until the authority owner explicitly releases Stage1.
+
+The fixed-array candidate is ready for the next proof slot on the pinned newest compiler. Its
+current proof HEAD is `c1d06e52`; the AST coverage regression runs before the direct-API harness and
+the helper contains positives for direct, parenthesized, and nested literal indexing plus a forged
+bound refusal. After the authority gate completes, build current proof/replay products and run the
+standalone mutation harness and fixed-array CLI regression before any performance qualification.
+Both the authority optimization and the replay fix retain their own independent result gates.
