@@ -27,18 +27,18 @@ extend ElisaProof:
             report.trace_owner_line <- 9
             proof_replay_scalar_copy_bound_source(report, trace)
 
-def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void:
+def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     bytes.clear()
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     bytes: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    parse_source(__SOURCE__, &bytes, &report)
+    (parse_source(__SOURCE__, &bytes, &report) can Global{Read,Write})
     trace_count: usize = report.traces.records.count
     for index in 0..<trace_count |report|:
         candidate: ProofFactTrace = report.traces.records[index]
@@ -64,7 +64,7 @@ def main() -> i64:
                 return 6 if source_gate(&report, forged)
                 alias_bytes: mutable darray[u8] = []
                 alias_report: mutable ProofReport = proof_empty_report()
-                parse_source(__ALIAS_SOURCE__, &alias_bytes, &alias_report)
+                (parse_source(__ALIAS_SOURCE__, &alias_bytes, &alias_report) can Global{Read,Write})
                 return 7 if source_gate(&alias_report, candidate)
                 return 0
             _:

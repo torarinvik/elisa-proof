@@ -20,25 +20,17 @@ struct CorrTheorem:
     hypotheses_start: usize
     hypotheses_count: usize
 
-def corr_collect_taken(declarations: darray[Ast::Decl]&, taken: mutable darray[sview]&, functions: mutable darray[Ast::Decl]&, scoped: mutable darray[bool]&, owner_starts: mutable darray[usize]&, owner_counts: mutable darray[usize]&, owners: mutable darray[sview]&, path: mutable darray[sview]&, depth: usize, inside_scoped: bool) -> bool:
+def corr_collect_taken(declarations: darray[Ast::Decl]&, taken: mutable darray[sview]&, depth: usize) -> bool:
     return false if depth > CorrLimit::NESTING
-    for declaration in declarations |taken, functions, scoped, owner_starts, owner_counts, owners, path, depth, inside_scoped|:
+    for declaration in declarations |taken, depth|:
         match declaration:
-            Ast::Decl.Func(name, _, _, _, _, _, _):
-                return false if functions.count >= CorrLimit::FUNCTIONS
-                functions.push(declaration)
-                scoped.push(inside_scoped)
-                owner_starts.push(owners.count)
-                owner_counts.push(path.count)
-                owners.extend(path)
+            Ast::Decl.Func(_, _, _, _, _, _, _):
+                pass
             Ast::Decl.Module(name, body, _):
                 taken.push(name)
-                path.push(name)
-                nested_ok: bool = corr_collect_taken(body, taken, functions, scoped, owner_starts, owner_counts, owners, path, depth + 1, inside_scoped)
-                path <- path.truncate(path.count - 1)
-                return false if not nested_ok
+                return false if not corr_collect_taken(body, taken, depth + 1)
             Ast::Decl.Scoped(body, _):
-                return false if not corr_collect_taken(body, taken, functions, scoped, owner_starts, owner_counts, owners, path, depth + 1, true)
+                return false if not corr_collect_taken(body, taken, depth + 1)
             Ast::Decl.Extern(name, _, _, _, _, _, _, _):
                 taken.push(name)
             Ast::Decl.Const(name, _, _, _, _):
@@ -55,15 +47,15 @@ def corr_collect_taken(declarations: darray[Ast::Decl]&, taken: mutable darray[s
                 pass
     return true
 
-def corr_collect_nested_functions(declarations: darray[Ast::Decl]&, owner: darray[sview]&, work: mutable CorrWork&, depth: usize) -> bool:
+def corr_collect_nested_functions(declarations: darray[Ast::Decl]&, owner: darray[sview]&, work: mutable CorrWork&, depth: usize, inside_scoped: bool) -> bool:
     return false if depth > CorrLimit::NESTING
-    for declaration in declarations |owner, work, depth|:
+    for declaration in declarations |owner, work, depth, inside_scoped|:
         match declaration:
             Ast::Decl.Func(name, _, _, _, _, _, position):
                 return false if work.functions.count >= CorrLimit::FUNCTIONS or work.owner_segments.count > CorrLimit::OWNER_SEGMENTS or owner.count > CorrLimit::OWNER_SEGMENTS - work.owner_segments.count
                 owner_start: usize = work.owner_segments.count
                 work.owner_segments.extend(owner)
-                work.functions.push(CorrFunction{name: name, line: position.line, owner_start: owner_start, owner_count: owner.count, declaration: declaration, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+                work.functions.push(CorrFunction{name: name, line: position.line, owner_start: owner_start, owner_count: owner.count, scoped: inside_scoped, declaration: declaration, status: "", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
             Ast::Decl.Module(name, body, _):
                 next_owner: mutable darray[sview] = []
                 return false if not corr_source_module_path(name, &next_owner)
@@ -71,15 +63,16 @@ def corr_collect_nested_functions(declarations: darray[Ast::Decl]&, owner: darra
                 work.module_owner_starts.push(work.module_owner_segments.count)
                 work.module_owner_counts.push(next_owner.count)
                 work.module_owner_segments.extend(next_owner)
-                return false if not corr_collect_nested_functions(body, &next_owner, work, depth + 1)
+                return false if not corr_collect_nested_functions(body, &next_owner, work, depth + 1, inside_scoped)
             Ast::Decl.Scoped(body, _):
-                return false if not corr_collect_nested_functions(body, owner, work, depth + 1)
+                return false if not corr_collect_nested_functions(body, owner, work, depth + 1, true)
             _:
                 pass
     return true
 
 def corr_collect_functions(pool: mutable CorrPool&, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable CorrWork&) -> bool:
     owner: mutable darray[sview] = []
+    return false if not corr_collect_source_types(pool, declarations, &owner, 0)
     for annotation in annotations |work|:
         if annotation.owner == "__proof_int_type" or annotation.owner == "__proof_numeric_suffix" or annotation.owner == "__numeric_literal_sort" or annotation.owner == "__numeric_literal_sort_column" or annotation.owner == "__numeric_literal_sort_text":
             return false if work.source_constants.annotations.count >= CorrLimit::SOURCE_ENUM_CHECKS
@@ -92,13 +85,13 @@ def corr_collect_functions(pool: mutable CorrPool&, declarations: darray[Ast::De
     for annotation in annotations |work|:
         work.lemmas.push(annotation.name) if annotation.owner == "__lemma"
     taken: mutable darray[sview] = []
-    return false if not corr_collect_taken(declarations, true, &taken, 0)
+    return false if not corr_collect_taken(declarations, &taken, 0)
     owner.clear()
-    return false if not corr_collect_nested_functions(declarations, &owner, work, 0)
+    return false if not corr_collect_nested_functions(declarations, &owner, work, 0, false)
     work.taken.extend(taken)
     for name in taken |work|:
         return false if work.functions.count >= CorrLimit::FUNCTIONS
-        work.functions.push(CorrFunction{name: name, line: 0, owner_start: 0, owner_count: 0, declaration: Ast::Decl.Invalid, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
+        work.functions.push(CorrFunction{name: name, line: 0, owner_start: 0, owner_count: 0, scoped: false, declaration: Ast::Decl.Invalid, status: "blocked", reason: "", obligations_start: 0, obligations_count: 0, matched: 0})
     return true
 
 def corr_hypothesis_held(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, pool: CorrPool&, work: CorrWork&, obligation: CorrObligation) -> bool:
@@ -355,128 +348,8 @@ def corr_goal_matched(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, chi
     return false if node.kind != "binary" or node.operator != "and"
     return corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.left, depth + 1) and corr_goal_matched(nodes, children, theorems, hypotheses, pool, work, obligation, node.right, depth + 1)
 
-def corr_push_function(out: mutable darray[u8]&, work: CorrWork&, function: CorrFunction, first: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    proof_push(out, ",") if not first
-    proof_push(out, "{\"name\":")
-    proof_push_json_string(out, function.name)
-    proof_push(out, ",\"owner\":[")
-    for index in 0..<function.owner_count |index, out, work, function|:
-        proof_push(out, ",") if index > 0
-        proof_push_json_string(out, work.owner_segments[function.owner_start + index])
-    proof_push(out, "]")
-    proof_push(out, ",\"line\":")
-    proof_push_json_i64(out, function.line.i64())
-    proof_push(out, ",\"status\":")
-    proof_push_json_string(out, function.status)
-    proof_push(out, ",\"reason\":")
-    if sview_len(function.reason) > 0:
-        proof_push_json_string(out, function.reason)
-    else:
-        proof_push(out, "null")
-    proof_push(out, ",\"obligations\":")
-    proof_push_json_i64(out, function.obligations_count.i64())
-    proof_push(out, ",\"matched\":")
-    proof_push_json_i64(out, function.matched.i64())
-    proof_push(out, ",\"unmatched\":[")
-    written: mutable usize = 0
-    for index in 0..<function.obligations_count |index, out, work, function, written|:
-        obligation: CorrObligation = work.obligations[function.obligations_start + index]
-        continue if sview_len(obligation.kind) == 0
-        proof_push(out, ",") if written > 0
-        proof_push(out, "{\"line\":")
-        proof_push_json_i64(out, obligation.line.i64())
-        proof_push(out, ",\"kind\":")
-        proof_push_json_string(out, obligation.kind)
-        proof_push(out, "}")
-        written <- written + 1
-    proof_push(out, "]}")
+include "./matcher_output.elisa"
 
-def corr_push_result(out: mutable darray[u8]&, package: ProofPackageVerdict, source_admissible: bool, source_identity_match: bool, theorems: usize, replayed: usize, work: CorrWork&, checked: usize, unmatched: usize, unsupported: usize, exit_code: i64) -> void can[Memory.Allocate, Abort.Panic]:
-    proof_push(out, "{\"format\":")
-    proof_push_json_string(out, CORR_RESULT_FORMAT)
-    proof_push(out, ",\"package\":{\"status\":")
-    proof_push_json_string(out, package.status)
-    proof_push(out, ",\"reason\":")
-    if sview_len(package.reason) > 0:
-        proof_push_json_string(out, package.reason)
-    else:
-        proof_push(out, "null")
-    proof_push(out, ",\"theorems\":")
-    proof_push_json_i64(out, theorems.i64())
-    proof_push(out, ",\"replayed\":")
-    proof_push_json_i64(out, replayed.i64())
-    proof_push(out, "},\"source_admissible\":")
-    proof_push(out, "true" if source_admissible else "false")
-    proof_push(out, ",\"source_identity\":")
-    proof_push_json_string(out, "exact-match" if source_identity_match else "not-matched")
-    proof_push(out, ",\"functions\":[")
-    first: mutable bool = true
-    for function in work.functions |out, work, first|:
-        continue if function.status == "blocked"
-        corr_push_function(out, work, function, first)
-        first <- false
-    proof_push(out, "],\"summary\":{\"checked\":")
-    proof_push_json_i64(out, checked.i64())
-    proof_push(out, ",\"unmatched\":")
-    proof_push_json_i64(out, unmatched.i64())
-    proof_push(out, ",\"unsupported\":")
-    proof_push_json_i64(out, unsupported.i64())
-    proof_push(out, ",\"coverage\":")
-    proof_push_json_string(out, "complete" if exit_code == 0 else "partial" if checked > 0 else "not-established")
-    proof_push(out, ",\"exit_code\":")
-    proof_push_json_i64(out, exit_code)
-    proof_push(out, "},\"debug\":{\"theorems\":")
-    proof_push_json_i64(out, work.debug.theorems.i64())
-    proof_push(out, ",\"hypothesis_rejections\":")
-    proof_push_json_i64(out, work.debug.hypothesis_rejections.i64())
-    proof_push(out, ",\"source_equalities\":")
-    proof_push_json_i64(out, work.debug.source_equalities.i64())
-    proof_push(out, ",\"checked_call_equalities\":")
-    proof_push_json_i64(out, work.debug.checked_call_equalities.i64())
-    proof_push(out, ",\"hypothesis_equalities\":")
-    proof_push_json_i64(out, work.debug.hypothesis_equalities.i64())
-    proof_push(out, ",\"rewritten_goals\":")
-    proof_push_json_i64(out, work.debug.rewritten_goals.i64())
-    proof_push(out, ",\"conclusion_matches\":")
-    proof_push_json_i64(out, work.debug.conclusion_matches.i64())
-    proof_push(out, ",\"obligation_facts\":")
-    proof_push_json_i64(out, work.debug.obligation_facts.i64())
-    proof_push(out, ",\"obligation_equalities\":")
-    proof_push_json_i64(out, work.debug.obligation_equalities.i64())
-    proof_push(out, ",\"obligation_call_equalities\":")
-    proof_push_json_i64(out, work.debug.obligation_call_equalities.i64())
-    proof_push(out, ",\"theorem_hypotheses\":")
-    proof_push_json_i64(out, work.debug.theorem_hypotheses.i64())
-    proof_push(out, ",\"held_hypotheses\":")
-    proof_push_json_i64(out, work.debug.held_hypotheses.i64())
-    proof_push(out, ",\"guarded_facts\":")
-    proof_push_json_i64(out, work.debug.guarded_facts.i64())
-    proof_push(out, ",\"guarded_candidates\":")
-    proof_push_json_i64(out, work.debug.guarded_candidates.i64())
-    proof_push(out, ",\"guarded_checked\":")
-    proof_push_json_i64(out, work.debug.guarded_checked.i64())
-    proof_push(out, ",\"guarded_implications\":")
-    proof_push_json_i64(out, work.debug.guarded_implications.i64())
-    proof_push(out, ",\"guarded_equality_rhs\":")
-    proof_push_json_i64(out, work.debug.guarded_equality_rhs.i64())
-    proof_push(out, ",\"guarded_source_matches\":")
-    proof_push_json_i64(out, work.debug.guarded_source_matches.i64())
-    proof_push(out, ",\"guarded_site_matches\":")
-    proof_push_json_i64(out, work.debug.guarded_site_matches.i64())
-    proof_push(out, ",\"guarded_matches\":")
-    proof_push_json_i64(out, work.debug.guarded_matches.i64())
-    proof_push(out, ",\"guarded_rewrite_steps\":")
-    proof_push_json_i64(out, work.debug.guarded_rewrite_steps.i64())
-    proof_push(out, ",\"guarded_rewrite_activations\":")
-    proof_push_json_i64(out, work.debug.guarded_rewrite_activations.i64())
-    proof_push(out, ",\"guarded_rewrite_term_matches\":")
-    proof_push_json_i64(out, work.debug.guarded_rewrite_term_matches.i64())
-    proof_push(out, ",\"unheld_scalar_type_calls\":")
-    proof_push_json_i64(out, work.debug.unheld_scalar_type_calls.i64())
-    proof_push(out, "},\"trust\":{\"kernel_replay\":\"every theorem is re-derived by the proof kernel from the package arena\",\"correspondence\":\"a checked function's obligations are re-derived from the source by this checker's reference semantics for its sequential subset and each is concluded by a replayed theorem whose hypotheses are facts of that semantics\",\"trusted\":[\"the proof kernel\",\"the Elisa parser and type checker\",\"the correspondence checker's reference semantics\"],\"not_established\":[\"termination\",\"arithmetic overflow\",\"functions outside the subset\"]}}\n")
-
-# Walks every function, matching each walked function's obligations as soon as it is walked so
-# that its status is known to the functions after it.
 def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, declarations: darray[Ast::Decl]&, nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, theorems: darray[CorrTheorem]&, hypotheses: darray[usize]&) -> void:
     for index in 0..<work.functions.count |index, pool, work, declarations, nodes, children, theorems, hypotheses|:
         continue if work.functions[index].status == "blocked"
@@ -489,7 +362,7 @@ def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, decla
             work.functions[index].status <- "unsupported"
             work.functions[index].reason <- "lemma"
             continue
-        reason: sview = corr_walk_function(pool, work, work.declarations, index)
+        reason: sview = corr_walk_function(pool, work, declarations, index)
         if sview_len(reason) > 0:
             # A partial walk's obligations are discarded with it.
             work.obligations <- work.obligations.truncate(work.functions[index].obligations_start)
@@ -513,10 +386,39 @@ def corr_check_functions(pool: mutable CorrPool&, work: mutable CorrWork&, decla
             work.functions[index].status <- "unmatched"
             work.functions[index].reason <- "no-obligations" if count == 0 else "unproved-obligation"
 
-def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissible: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
+def corr_source_identity_matches[@r](root: JsonValueHandle[r], expanded_source: sview, root_path: darray[u8]&, source_map: ProofSourceMap&, source_fingerprint: u32) -> bool:
+    source: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "source")
+    return false if not source.known
+    source_path: (known: bool, value: sview) = proof_package_string_field(source.value, "path")
+    path_view: sview = ElisaProofJson::bytes_range_ref(root_path, 0, root_path.count)
+    return false if not source_path.known or source_path.value != path_view
+    source_size: (known: bool, value: usize) = proof_package_index_field(source.value, "bytes")
+    return false if not source_size.known or source_size.value != sview_len(expanded_source)
+    expanded: (known: bool, value: sview) = proof_package_source_text_field(source.value, "expanded")
+    return false if not expanded.known or sview_len(expanded.value) != sview_len(expanded_source)
+    for index in 0..<sview_len(expanded_source) |index, expanded, expanded_source|:
+        return false if sview_at(expanded.value, index) != sview_at(expanded_source, index)
+    fingerprint: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(source.value, "fingerprint")
+    fingerprint_value: (known: bool, value: usize) = proof_package_index_field(fingerprint.value, "value")
+    return false if not fingerprint.known or not fingerprint_value.known or fingerprint_value.value != source_fingerprint.usize()
+    files: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(source.value, "files")
+    return false if not files.known or files.count == 0 or source_map.files.count == 0
+    path_start: mutable usize = 0
+    for index in 0..<files.count |index, files, source_map, path_start|:
+        path_end: mutable usize = path_start
+        while path_end < source_map.files.count and source_map.files[path_end] != 0 |path_end, source_map, path_start|:
+            path_end <- path_end + 1
+        return false if path_end >= source_map.files.count
+        expected_path: sview = ElisaProofJson::bytes_range_ref(source_map.files, path_start, path_end - path_start)
+        entry: JsonValueHandle[r] = try ElisaProofJson::at(files.value, index.i64()) else ElisaProofJson::null_value(root)
+        packaged_path: (known: bool, value: sview) = proof_package_string_value(entry)
+        return false if not packaged_path.known or packaged_path.value != expected_path
+        path_start <- path_end + 1
+    return path_start == source_map.files.count
+
+def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, expanded_source: sview, root_path: darray[u8]&, source_map: ProofSourceMap&, source_fingerprint: u32, source_admissible: bool, out: mutable darray[u8]&) -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     pool: mutable CorrPool = corr_pool_new()
     work: mutable CorrWork = corr_work_empty()
-    type_path: mutable darray[sview] = []
     arena: mutable Arena = zeroed
     # Correspondence is a second package ingress; apply the portable reader's lexical bounds
     # before either path asks the shared JSON parser to construct its DOM.
@@ -557,7 +459,7 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
     node_count: usize = nodes.count
     child_count: usize = children.count
     if not (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&nodes, &children) can Global{Read,Write}):
-        corr_push_result(out, proof_package_malformed("arena-inadmissible"), source_admissible, 0, 0, &work, 0, 0, 0, 1)
+        corr_push_result(out, proof_package_malformed("arena-inadmissible"), source_admissible, true, 0, 0, &work, 0, 0, 0, 1)
         return 1
     theorem_keys: darray[sview] = ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
     workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
@@ -598,10 +500,10 @@ def corr_replay_and_check(input: darray[u8]&, file: Ast::File&, source_admissibl
         corr_push_result(out, verdict, source_admissible, true, theorem_list.count, replayed, &work, 0, 0, 0, 1)
         return 1
     if not corr_collect_functions(&pool, file.top_decls, file.enum_annotations, &work):
-        corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, theorem_list.count, replayed, &work, 0, 0, 0, 1)
+        corr_push_result(out, ProofPackageVerdict{status: "replayed", reason: ""}, source_admissible, true, theorem_list.count, replayed, &work, 0, 0, 0, 1)
         return 1
     if source_admissible:
-        corr_check_functions(&pool, &work, work.declarations, &nodes, &children, &theorems, &hypotheses)
+        corr_check_functions(&pool, &work, file.top_decls, &nodes, &children, &theorems, &hypotheses)
     checked_count: mutable usize = 0
     unmatched_count: mutable usize = 0
     unsupported_count: mutable usize = 0

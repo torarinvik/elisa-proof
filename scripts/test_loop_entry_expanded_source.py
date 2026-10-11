@@ -41,18 +41,18 @@ extend ElisaProof:
         def entry_gate(report: ProofReport&, trace: ProofFactTrace) -> bool:
             proof_replay_loop_entry_certificate(report, trace)
 
-def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void:
+def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     bytes.clear()
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     bytes: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    parse_source(__SOURCE__, &bytes, &report)
+    (parse_source(__SOURCE__, &bytes, &report) can Global{Read,Write})
     prepare(&report)
     preservation_seen: mutable bool = false
     for index in 0..<report.certificates.count |report, preservation_seen|:
@@ -103,7 +103,7 @@ controls = {
 lines = []
 for index, (name, text) in enumerate(controls.items(), 10):
     lines += [f"other_{index}: mutable ProofReport = proof_empty_report()",
-              f"parse_source({json.dumps(text)}, &bytes, &other_{index})",
+              f"(parse_source({json.dumps(text)}, &bytes, &other_{index}) can Global{{Read,Write}})",
               f"return {index} if expanded_gate(&other_{index}, trace, certificate)"]
 harness = harness.replace("__SOURCE__", json.dumps(source)).replace("__CONTROLS__", "\n            ".join(lines))
 with tempfile.TemporaryDirectory(prefix="loop-entry-source-controls-") as temporary:

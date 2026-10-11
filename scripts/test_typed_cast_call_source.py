@@ -61,17 +61,17 @@ extend ElisaProof:
             report.trace_owner_line <- __CALL_LINE__ + 1
             proof_replay_summary_direct_call_source_site(report, trace, call)
 
-def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void:
+def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     original_bytes: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    parse_source(__SOURCE__, &original_bytes, &report)
+    (parse_source(__SOURCE__, &original_bytes, &report) can Global{Read,Write})
     proof_replay_certificates(&report)
     return 1 if report.certificates.count != 36 or report.replay_gaps != 0
     for certificate in report.certificates:
@@ -90,7 +90,7 @@ lines = []
 for index, (name, text) in enumerate(controls.items(), 10):
     lines += [f'bytes_{index}: mutable darray[u8] = []',
               f'other_{index}: mutable ProofReport = proof_empty_report()',
-              f'parse_source({json.dumps(text)}, &bytes_{index}, &other_{index})',
+              f'(parse_source({json.dumps(text)}, &bytes_{index}, &other_{index}) can Global{{Read,Write}})',
               f'return {index} if source_site(&other_{index}, trace, call)']
 harness = harness.replace('__SOURCE__', json.dumps(source)).replace('__CONTROLS__', '\n        '.join(lines))
 harness = harness.replace('__OWNER_LINE__', str(owner_line)).replace('__CALL_LINE__', str(call_line))

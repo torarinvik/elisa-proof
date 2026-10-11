@@ -92,7 +92,7 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
                       compiler / "build/runtime", tools):
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
-                 "link_flags.sh", "platform.sh", "build_manifest.py", "compiler_environment.py",
+                 "link_flags.sh", "platform.sh", "build_manifest.py", "build_manifest_hashes.py", "compiler_environment.py",
                  "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")

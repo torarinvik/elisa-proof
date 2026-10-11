@@ -1,5 +1,7 @@
 """Differentially exercise the scalar-witness name index with a fresh Stage1 compiler."""
 
+from __future__ import annotations
+
 import hashlib
 from pathlib import Path
 import os

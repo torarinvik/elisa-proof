@@ -27,18 +27,18 @@ harness = prefix + constructor + r'''
             report.trace_owner_line <- 8
             proof_replay_branch_scalar_bound_source(report, trace)
 
-def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void:
+def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     bytes.clear()
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     bytes: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    parse_source(__SOURCE__, &bytes, &report)
+    (parse_source(__SOURCE__, &bytes, &report) can Global{Read,Write})
     for index in 0..<report.traces.records.count |report, bytes|:
         candidate: ProofFactTrace = report.traces.records[index]
         continue if candidate.kind != "branch-join"
@@ -75,7 +75,7 @@ controls = {
 lines = []
 for index, (name, text) in enumerate(controls.items(), 10):
     lines += [f"other_{index}: mutable ProofReport = proof_empty_report()",
-              f"parse_source({json.dumps(text)}, &bytes, &other_{index})",
+              f"(parse_source({json.dumps(text)}, &bytes, &other_{index}) can Global{{Read,Write}})",
               f"return {index} if source_gate(&other_{index}, candidate)"]
 harness = harness.replace("__SOURCE__", json.dumps(source)).replace("__CONTROLS__", "\n                ".join(lines))
 with tempfile.TemporaryDirectory(prefix="branch-source-controls-") as temporary:

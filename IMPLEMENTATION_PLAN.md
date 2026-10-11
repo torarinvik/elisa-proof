@@ -9519,21 +9519,36 @@ record-field reads/writes. The candidate reduces authority edge visits from 16,3
 (256 worklist visits) and from 65,536 to 1,280 at N=256 (512 worklist visits). Telemetry-only
 counters are disabled outside the measured span.
 
-Three full-source paired runs were output/hash-parity clean and measured −2.67% median wall / −4.80%
-CPU for `-emit check`, and −4.41% wall / −6.02% CPU for O0 object emission. The comparison used
-baseline Stage1 SHA `35dd969dd436d8b89ae4f8d7ab8afeeec4ed6aad36e5506f228a2a1e00de22f9` (10,100,184
-bytes) and candidate Stage1 SHA
-`7343dc18f47d029537f16e0e3c3dadb470311ddd3a5dbaafb2bdfd639c288436` (8,471,512 bytes), both with
-runtime SHA `e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`. Their build recipes
-differ and their provenance does not identify the bootstrap compiler. Both products also reached the
-fixed point in two fast scans, with zero queue visits on the full compiler, so this run does not
-establish that the worklist caused those deltas. A bounded N=128/N=256 Global-chain screen did enter
-the queue and passed all
-24 compile/link harness checks. Across three timed pairs, the candidate product arm was −7.5% wall /
-−4.5% CPU at N=128 and −8.2% wall / −10.6% CPU at N=256 against its baseline arm. Its median wall
-times were 24.76 ms and 30.35 ms; corresponding Rust times were 1,026.41 ms and 1,028.22 ms, while
-Zig Debug was 23–34× slower on these fixtures. These are scoped product-arm results, not general
-language comparisons.
+The first full-source and Global-chain timings used Stage1 products built with different recipes and
+bootstrap provenance. Although their output/object hashes matched, the apparent 7–8% Global-chain
+lead was a bootstrap-build artifact and is not a valid optimization result. A follow-up rebuilt the
+`a84089fdcaab3d79a23f01354df9f2b54b20a212` baseline and worklist candidate
+`d27f614a85aa142159ecb8fb9c89354d12658241` from the same Stage1 seed, runtime, LLVM 23.1.2,
+and recipe:
+seed product SHA-256
+`3dad82d7aebfa7cf9cfb14deeeb9e8e91d5180ba2491845d2a5d0ea79fb5fe20` (seed source
+`b9f16f53a8c2538c42462b3ec28a404fa9270d82`), runtime SHA-256
+`e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`, recipe fingerprint
+`d18588c634684edc43a79f4e25e5f40250d36e5c7ecb36d74bfb2eab474a2bc3`, baseline product SHA-256
+`d86fa6c295e29aaecfc9ae1a7fc76869e274c645a3bcd2df50999b2f450292e9`, and candidate product
+SHA-256 `7343dc18f47d029537f16e0e3c3dadb470311ddd3a5dbaafb2bdfd639c288436`.
+The exact trial record is
+`/private/tmp/elisa-rust-zig-bench-20261011/matched-seed-run/bounded-results/trials.json`;
+the baseline build provenance is
+`/private/tmp/elisa-same-seed-baseline-a840/build/same-seed-baseline-build.json`;
+the workload manifest is `/private/tmp/elisa-rust-zig-bench-20261011/corpus/corpus.json`
+(SHA-256 `44718544f9434d2043a52b1bf89e867278f085e566f787f358bc7d9a4ca32360`). Three rotated
+baseline/candidate pairs at N=128 and N=256 used `-permissive -emit obj -O0` and two warmups per
+arm and size. All 12 measured compile and harness checks passed: objects emitted and linked, exact
+expected output matched, stderr was empty, and every per-size object hash matched between arms. The
+paired-median candidate
+delta was −0.015% wall / +0.438% CPU at N=128 and +2.068% wall / +2.479% CPU at N=256. This is
+effectively flat at N=128 and slightly slower at N=256; the worklist reduces authority edge visits
+substantially on the chain but has no demonstrated end-to-end timing gain. The compiler-source
+full workload also reached its fixed point in two fast scans with zero queue visits, so it does not
+exercise the fallback worklist. The earlier full-source product-arm timings and record/generic
+product-arm comparisons remain exploratory because their product builds were not seed-matched; do
+not use them for causal or broad performance claims.
 
 The record-aggregate N=128/N=256 and generic-instantiation N=128/N=256 sets completed 32 warmups
 and 48 measured builds; every object passed the common C harness. Candidate product-arm medians beat
@@ -9563,10 +9578,11 @@ Global.Read/Write checks; then run the record-field grant controls and direct AP
 the exact pinned compiler; only then resume broad corpus/performance work. The compiler's corrected
 worklist timing and any later compiler candidates remain separate evidence.
 
-The cleanup audit found no further safe compiler branch/worktree deletion. Compiler `main` has 69
-local branches and 85 worktrees: 40 dirty and 45 clean; seven clean worktrees are at commits already
-contained in `main`, while the remaining clean worktrees preserve baselines or unique work. All five
-already-contained non-main branch refs are checked out, and all eleven branch refs without a
-worktree have unique commits. `git worktree prune --dry-run` reports no stale registrations. Keep
-those active, dirty, baseline, or uniquely committed checkouts. The proof repository itself remains
-one `main` branch and one worktree.
+The cleanup audit removed six patch-equivalent backup refs; no further safe compiler branch/worktree
+deletion was identified. The latest inventory has 63 local branches and 88 worktrees: 41 dirty and
+47 clean; seven clean worktrees are at commits already contained in `main`, while the remaining
+clean worktrees preserve baselines or unique work. All five already-contained non-main branch refs
+are checked out, and all five remaining branch refs without a worktree have unique commits.
+`git worktree prune --dry-run` reports no stale registrations. Keep those active, dirty, baseline,
+or uniquely committed checkouts. The proof repository itself remains one `main` branch and one
+worktree.

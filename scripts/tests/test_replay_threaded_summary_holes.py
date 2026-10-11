@@ -192,13 +192,13 @@ extend ElisaProof:
 using Ast
 using ElisaProof
 
-def test_threaded_check(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
+def test_threaded_check(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic, Global.Read, Global.Write:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
 # 0: stop at the first failure; 1: run every probe and report accepted forgeries as 64 + mask.
 const HOLES_MODE: i64 = HOLES_MODE_PLACEHOLDER
@@ -209,11 +209,11 @@ def test_threaded_forged(accepted: bool, bit: i64, forged: mutable i64&) -> i64:
     forged <- forged + bit if (forged / bit) % 2 == 0
     return 0
 
-def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     text: sview = "SOURCE_TEXT_PLACEHOLDER"
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    test_threaded_check(text, &source, &report)
+    (test_threaded_check(text, &source, &report) can Global{Read,Write})
     forged: mutable i64 = 0
     stop: mutable i64 = 0
 
@@ -244,7 +244,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
     # S must not also be defined by a local binding.
     defined: mutable ProofReport = proof_empty_report()
     defined_source: mutable darray[u8] = []
-    test_threaded_check(text, &defined_source, &defined)
+    (test_threaded_check(text, &defined_source, &defined) can Global{Read,Write})
     defined_trace: ProofFactTrace = defined.traces.records[test_threaded_summary(&defined, "lent", 9)]
     position: Ast::Pos = Ast::expr_pos(call)
     binding: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.EqEq, Ast::Expr.IntLit(9, position), position)

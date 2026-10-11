@@ -27,18 +27,18 @@ harness = prefix + constructor + r'''
             report.trace_owner_line <- 15
             proof_replay_index_copy_equality_source(report, trace)
 
-def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void:
+def parse_source(text: sview, bytes: mutable darray[u8]&, report: mutable ProofReport&) -> void can[Memory.Allocate, Global.Read, Global.Write]:
     bytes.clear()
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     bytes: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    parse_source(__SOURCE__, &bytes, &report)
+    (parse_source(__SOURCE__, &bytes, &report) can Global{Read,Write})
     trace_count: usize = report.traces.records.count
     for index in 0..<trace_count |report|:
         candidate: ProofFactTrace = report.traces.records[index]
@@ -73,7 +73,7 @@ controls = {
 lines = []
 for number, (name, changed) in enumerate(controls.items(), 10):
     lines += ["other_bytes: mutable darray[u8] = []", "other_report: mutable ProofReport = proof_empty_report()"] if number == 10 else []
-    lines += [f"parse_source({json.dumps(changed)}, &other_bytes, &other_report)", f"return {number} if source_gate(&other_report, candidate)"]
+    lines += [f"(parse_source({json.dumps(changed)}, &other_bytes, &other_report) can Global{{Read,Write}})", f"return {number} if source_gate(&other_report, candidate)"]
 harness = harness.replace("__SOURCE__", json.dumps(source)).replace("__CONTROLS__", "\n                ".join(lines))
 with tempfile.TemporaryDirectory(prefix="index-copy-equality-source-") as temporary:
     path = Path(temporary) / "main.elisa"

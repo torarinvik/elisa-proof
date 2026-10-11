@@ -252,13 +252,13 @@ extend ElisaProof:
 using Ast
 using ElisaProof
 
-def test_holes_check(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic:
+def test_holes_check(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&) -> void can Memory.Allocate, Abort.Panic, Global.Read, Global.Write:
     source.clear()
     for index in 0..<sview_len(text) |index, text, source|:
         source.push(sview_at(text, index))
     source.push(0)
-    file: Ast::File = frontend_parse(&source[0])
-    proof_check(file, report)
+    file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
+    (proof_check(file, report) can Global{Read,Write})
 
 # 0: stop at the first failure; 1: run every probe and report accepted forgeries as 64 + mask
 # (used to show each probe catches its hole on an unfixed tree); 2: only the cyclic probe.
@@ -271,11 +271,11 @@ def test_holes_forged(accepted: bool, bit: i64, forged: mutable i64&) -> i64:
     forged <- forged + bit if (forged / bit) % 2 == 0
     return 0
 
-def main() -> i64 can[Memory.Allocate, Abort.Panic]:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     text: sview = "SOURCE_TEXT_PLACEHOLDER"
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
-    test_holes_check(text, &source, &report)
+    (test_holes_check(text, &source, &report) can Global{Read,Write})
     forged: mutable i64 = 0
     stop: mutable i64 = 0
 
@@ -304,7 +304,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
         # The same symbol bound to 5 at line 7 and to 7 at line 8 would prove 5 == 7.
         collided: mutable ProofReport = proof_empty_report()
         collided_source: mutable darray[u8] = []
-        test_holes_check(text, &collided_source, &collided)
+        (test_holes_check(text, &collided_source, &collided) can Global{Read,Write})
         test_holes_rename(&collided, "two", 8, symbol8, symbol7)
         collided7: ProofFactTrace = collided.traces.records[test_holes_rebind_binding(&collided, "two", 7)]
         collided8: ProofFactTrace = collided.traces.records[test_holes_rebind_binding(&collided, "two", 8)]
@@ -353,7 +353,7 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
         # replay must answer instead of recursing until the stack is gone.
         cyclic: mutable ProofReport = proof_empty_report()
         cyclic_source: mutable darray[u8] = []
-        test_holes_check(text, &cyclic_source, &cyclic)
+        (test_holes_check(text, &cyclic_source, &cyclic) can Global{Read,Write})
         cyclic_summary: usize = test_holes_summary_trace(&cyclic, "two", 7, "k")
         return 10 if cyclic_summary >= cyclic.traces.records.count
         result_slot: usize = cyclic.traces.records[cyclic_summary].summary_bindings_start + 1

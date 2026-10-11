@@ -21,15 +21,15 @@ include "../src/proof/tactics.elisa"
 
 extend ElisaProof:
     public:
-        def test_summary_local_binding_source(report: ProofReport&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:
-            matches: mutable usize = PROOF_REPLAY_LOCAL_CALL_NO_MATCH
-            found: mutable bool = false
-            return proof_replay_summary_local_call_declarations(report.source_declarations, owner, owner_line, local_name, binding_position, call, &matches, &found, 0) and found and matches == PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH
+        def test_summary_local_binding_source(report: mutable ProofReport&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, call: Ast::Expr) -> bool:
+            report.replay_owner_line <- owner_line
+            report.trace_owner_line <- Ast::expr_pos(call).line
+            return proof_replay_summary_local_alias_valid(report, owner, local_name, binding_position, call)
 
         def test_summary_argument_order_replay() -> bool:
             report: mutable ProofReport = proof_empty_report()
-            report.executable_parameters.push("first")
-            report.executable_parameters.push("second")
+            report.executables.parameters.push("first")
+            report.executables.parameters.push("second")
             report.traces.summary_names.push("first")
             report.traces.summary_names.push("second")
             position: Ast::Pos = Ast::pos_at_line(1)
@@ -88,11 +88,13 @@ extend ElisaProof:
             callback_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("callback", position), arguments, names, position)
             bound_names: mutable darray[sview] = ["callback"]
             bound_values: mutable darray[Ast::Expr] = [Ast::Expr.Absent]
-            return false if proof_replay_deterministic_call_source_expression(callback_call, callback_call, &bound_names, &bound_values)
+            cast_sites: darray[Ast::Expr] = []
+            declarations: darray[Ast::Decl] = []
+            return false if proof_replay_deterministic_call_source_expression(&cast_sites, &declarations, callback_call, callback_call, &bound_names, &bound_values, 0)
             qualified_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Scope(Ast::Expr.Ident("Namespace", position), "callback", position), arguments, names, position)
             namespace_names: mutable darray[sview] = ["Namespace"]
             namespace_values: mutable darray[Ast::Expr] = [Ast::Expr.Absent]
-            return false if proof_replay_deterministic_call_source_expression(qualified_call, qualified_call, &namespace_names, &namespace_values)
+            return false if proof_replay_deterministic_call_source_expression(&cast_sites, &declarations, qualified_call, qualified_call, &namespace_names, &namespace_values, 0)
 
             body: mutable darray[Ast::Stmt] = []
             branch_write: Ast::Stmt = Ast::Stmt.Assign(Ast::Expr.Ident("value", Ast::pos_at_line(1)), TokenKind.Assign, Ast::Expr.IntLit(1, Ast::pos_at_line(1)), Ast::pos_at_line(1))
@@ -100,23 +102,23 @@ extend ElisaProof:
             body.push(Ast::Stmt.Expr(callback_call, position))
             empty_names: mutable darray[sview] = ["value"]
             empty_values: mutable darray[Ast::Expr] = [Ast::Expr.IntLit(0, Ast::pos_at_line(1))]
-            return false if not proof_replay_deterministic_call_source_expression(callback_call, callback_call, &empty_names, &empty_values)
-            source_walk: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(&body, callback_call, 10, &empty_names, &empty_values, 0)
+            return false if not proof_replay_deterministic_call_source_expression(&cast_sites, &declarations, callback_call, callback_call, &empty_names, &empty_values, 0)
+            source_walk: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(&cast_sites, &declarations, &body, callback_call, 10, &empty_names, &empty_values, 0)
             return not source_walk.known
 
         def test_trace_with_expression(original: ProofFactTrace, expression: Ast::Expr) -> ProofFactTrace:
             return ProofFactTrace{expression: expression, kernel_expression: original.kernel_expression, kind: original.kind, line: original.line, name: original.name, dependency: original.dependency, premises_start: original.premises_start, premises_count: original.premises_count, kernel_premises_start: original.kernel_premises_start, kernel_premises_count: original.kernel_premises_count, summary_bindings_start: original.summary_bindings_start, summary_bindings_count: original.summary_bindings_count, summary_requires_start: original.summary_requires_start, summary_requires_count: original.summary_requires_count, summary_ensure_index: original.summary_ensure_index, owner_line: original.owner_line}
 
-        def test_call_result_binding_replay() -> i64:
+        def test_call_result_binding_replay() -> i64 can[Global.Read, Global.Write]:
             text: sview = "def ordered_call(first: u8, second: u8) -> u8:\n    ensure result == first\n    return first\n\ndef call_result_owner(first: u8, second: u8) -> u8:\n    requires first <= 10\n    requires second <= 10\n    ensure result == first\n    answer: u8 = ordered_call(first, second)\n    return answer\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
                 source.push(sview_at(text, index))
             source.push(0)
-            file: Ast::File = frontend_parse(&source[0])
+            file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
             report: mutable ProofReport = proof_empty_report()
-            proof_check(file, &report)
-            proof_replay_certificates(&report)
+            (proof_check(file, &report) can Global{Read,Write})
+            (proof_replay_certificates(&report) can Global{Read,Write})
             owner: (found: bool, line: u32) = test_owner_function_line(report.source_declarations, "call_result_owner", 0)
             return 1 if not owner.found
             trace_index: mutable usize = report.traces.records.count
@@ -169,7 +171,7 @@ extend ElisaProof:
             for index in 0..<sview_len(overload_text) |index, overload_text, overload_source|:
                 overload_source.push(sview_at(overload_text, index))
             overload_source.push(0)
-            overload_file: Ast::File = frontend_parse(&overload_source[0])
+            overload_file: Ast::File = (frontend_parse(&overload_source[0]) can Global{Read,Write})
             report.source_declarations.extend(overload_file.top_decls)
             overload_refused: bool = not proof_replay_call_result_binding_valid(report, original)
             report.source_declarations <- saved_declarations
@@ -186,23 +188,23 @@ extend ElisaProof:
         def test_summary_source_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
             return proof_replay_summary_source_call(report, trace, summary)
 
-        def test_chained_summary_replay_stages() -> i64:
+        def test_chained_summary_replay_stages() -> i64 can[Global.Read, Global.Write]:
             text: sview = "def domain_status(value: bool) -> u8:\n    ensure result <= 9\n    return 9 if value\n    return 0\n\ndef domain_choice(status: u8) -> u8:\n    ensure result >= 0\n    return status\n\ndef caller(value: bool) -> u8:\n    ensure result >= 0\n    status: u8 = domain_status(value)\n    return domain_choice(status)\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(text) |index, text, source|:
                 source.push(sview_at(text, index))
             source.push(0)
-            file: Ast::File = frontend_parse(&source[0])
+            file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
             report: mutable ProofReport = proof_empty_report()
-            proof_check(file, &report)
-            proof_replay_certificates(&report)
+            (proof_check(file, &report) can Global{Read,Write})
+            (proof_replay_certificates(&report) can Global{Read,Write})
             owner: (found: bool, line: u32) = test_owner_function_line(report.source_declarations, "caller", 0)
             return 1 if not owner.found
             for trace in report.traces.records |trace, report, owner|:
                 continue if trace.kind != "function-summary" or trace.name != "caller" or trace.dependency != "domain_choice"
                 summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
                 found_summary: mutable bool = false
-                for candidate in report.executable_summaries |candidate, summary, found_summary, trace|:
+                for candidate in report.executables.summaries |candidate, summary, found_summary, trace|:
                     if candidate.name == trace.dependency and candidate.line == trace.owner_line:
                         summary <- candidate
                         found_summary <- true
@@ -228,12 +230,12 @@ extend ElisaProof:
             for offset in 0..<summary.parameters_count |offset, report, trace, parameter_names, parameter_values|:
                 parameter_names.push(report.traces.summary_names[trace.summary_bindings_start + offset])
                 parameter_values.push(report.traces.summary_values[trace.summary_bindings_start + offset])
-            expression: mutable Ast::Expr = report.executable_ensures[summary.ensures_start + trace.summary_ensure_index]
+            expression: mutable Ast::Expr = report.executables.ensures[summary.ensures_start + trace.summary_ensure_index]
             expression <- proof_replay_substitute_many(expression, parameter_names, parameter_values)
             expression <- proof_replay_substitute(expression, "result", Ast::Expr.Ident(local_name, local_position))
             return (not proof_replay_expr_is_invalid(expression), expression)
 
-        def test_forged_local_call_result_refused(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, owner_line: u32, local_name: sview, local_position: Ast::Pos) -> bool:
+        def test_forged_local_call_result_refused(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, owner_line: u32, local_name: sview, local_position: Ast::Pos) -> bool can[Global.Read, Global.Write]:
             return false if trace.summary_bindings_start > report.traces.summary_values.count or trace.summary_bindings_count > report.traces.summary_values.count - trace.summary_bindings_start
             return false if trace.summary_bindings_start > report.traces.summary_names.count or trace.summary_bindings_count > report.traces.summary_names.count - trace.summary_bindings_start
             return false if summary.parameters_count >= trace.summary_bindings_count
@@ -251,18 +253,18 @@ extend ElisaProof:
             forged_trace: ProofFactTrace = ProofFactTrace{expression: local_result.expression, kernel_expression: encoded.root, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: binding_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
             report.replay_owner_line <- owner_line
             report.traces.records.push(forged_trace)
-            return not proof_replay_fact_trace_entry(report, report.traces.records.count - 1)
+            return not (proof_replay_fact_trace_entry(report, report.traces.records.count - 1) can Global{Read,Write})
 
-        def test_literal_call_binding_replay() -> i64:
+        def test_literal_call_binding_replay() -> i64 can[Global.Read, Global.Write]:
             source_text: sview = "def signed_identity(value: i64) -> i64:\n    requires value >= 0\n    ensure result == value\n    return value\n\ndef literal_argument_owner() -> i64:\n    return 1 if signed_identity(7) != 7\n    return 0\n"
             source: mutable darray[u8] = []
             for index in 0..<sview_len(source_text) |index, source_text, source|:
                 source.push(sview_at(source_text, index))
             source.push(0)
-            file: Ast::File = frontend_parse(&source[0])
+            file: Ast::File = (frontend_parse(&source[0]) can Global{Read,Write})
             report: mutable ProofReport = proof_empty_report()
-            proof_check(file, &report)
-            proof_replay_certificates(&report)
+            (proof_check(file, &report) can Global{Read,Write})
+            (proof_replay_certificates(&report) can Global{Read,Write})
             return 11 if report.replay_gaps != 0
             owner: (found: bool, line: u32) = test_owner_function_line(report.source_declarations, "literal_argument_owner", 0)
             return 2 if not owner.found
@@ -364,7 +366,7 @@ extend ElisaProof:
         def test_summary_overload_is_unsupported(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return not proof_replay_summary_overload_is_unique(report, trace)
 
-        def test_owner_summary_trace_replay_status(report: mutable ProofReport&, owner: sview, dependency: sview, owner_line: u32, minimum_count: usize) -> usize:
+        def test_owner_summary_trace_replay_status(report: mutable ProofReport&, owner: sview, dependency: sview, owner_line: u32, minimum_count: usize) -> usize can[Global.Read, Global.Write]:
             report.replay_owner_line <- owner_line
             matched: mutable usize = 0
             for index in 0..<report.traces.records.count |index, report, owner, dependency, matched|:
@@ -372,7 +374,7 @@ extend ElisaProof:
                 continue if trace.kind != "function-summary" or trace.name != owner or trace.dependency != dependency
                 summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
                 summary_found: mutable bool = false
-                for candidate in report.executable_summaries |candidate, trace, summary, summary_found|:
+                for candidate in report.executables.summaries |candidate, trace, summary, summary_found|:
                     if candidate.name == dependency and candidate.line == trace.owner_line:
                         summary <- candidate
                         summary_found <- true
@@ -382,7 +384,7 @@ extend ElisaProof:
                 return 3 if not source_call.known
                 return 4 if not proof_replay_deterministic_call_source_site(report, trace, source_call.call)
                 if not proof_replay_summary_call_arguments_match(report, trace, summary, source_call.call):
-                    return 8 if proof_replay_fact_trace_entry(report, index)
+                    return 8 if (proof_replay_fact_trace_entry(report, index) can Global{Read,Write})
                     return 5
                 match source_call.call:
                     Ast::Expr.Call(callee, _, _, _):
@@ -390,7 +392,7 @@ extend ElisaProof:
                     _:
                         return 7
                 matched <- matched + 1
-                return 8 if not proof_replay_fact_trace_entry(report, index)
+                return 8 if not (proof_replay_fact_trace_entry(report, index) can Global{Read,Write})
             return 0 if matched >= minimum_count else 9
 
         def test_owner_summary_trace_count(report: ProofReport&, owner: sview, dependency: sview) -> usize:

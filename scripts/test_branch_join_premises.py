@@ -15,15 +15,15 @@ prefix = template.split("extend ElisaProof:", 1)[0]
 prefix = prefix.replace("../../Elisa-compiler/", str(FRONTEND.resolve()) + "/")
 prefix = prefix.replace("../src/", str(ROOT / "src") + "/")
 harness = prefix + r'''
-def main() -> i64:
+def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     text: sview = "def keep_or_replace(flag: bool, slot: usize, best: usize) -> usize:\n    requires best <= 8\n    requires slot < 8\n    ensure result <= 8\n    b: mutable usize = best\n    if flag:\n        b <- slot\n    b\n"
     bytes: mutable darray[u8] = []
     for index in 0..<sview_len(text) |bytes|:
         bytes.push(sview_at(text, index))
     bytes.push(0)
-    file: Ast::File = frontend_parse(&bytes[0])
+    file: Ast::File = (frontend_parse(&bytes[0]) can Global{Read,Write})
     report: mutable ProofReport = proof_empty_report()
-    proof_check(file, &report)
+    (proof_check(file, &report) can Global{Read,Write})
     report.replay_owner_line <- 1
     report.trace_owner_line <- 8
     widened: mutable bool = false
@@ -35,10 +35,10 @@ def main() -> i64:
         match trace.expression:
             Ast::Expr.Binary(left, operator, right, _):
                 if proof_ident_name(left) == "best":
-                    return 1 if not proof_replay_fact_trace_entry(&report, index)
+                    return 1 if not (proof_replay_fact_trace_entry(&report, index) can Global{Read,Write})
                     widened <- true
                 if operator == TokenKind.EqEq and proof_ident_name(left) == "b" and proof_ident_name(right) == "b":
-                    return 2 if not proof_replay_fact_trace_entry(&report, index)
+                    return 2 if not (proof_replay_fact_trace_entry(&report, index) can Global{Read,Write})
                     reflexive <- true
             _:
                 pass

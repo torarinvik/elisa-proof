@@ -44,10 +44,8 @@ include "../src/proof/tactics.elisa"
 include "../src/proof/check.elisa"
 include "../src/proof/kernel_replay.elisa"
 include "../src/proof/replay.elisa"
-
 using Ast
 using ElisaProof
-
 extend ElisaProof:
     public:
         def proof_test_initializer_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
