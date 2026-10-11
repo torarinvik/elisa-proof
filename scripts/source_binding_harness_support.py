@@ -76,6 +76,77 @@ def _elisa_source_manifest(root: Path) -> dict[str, str]:
     }
 
 
+def _grant_global_effects_to_harness_calls(source: str) -> str:
+    """Add local Global grants to test-only parser and proof API call expressions.
+
+    The proof APIs intentionally carry Global effects. Older standalone replay harnesses omitted
+    their local grants. Qualify only their call expressions, leaving the fixture source strings,
+    function contracts, and return/control-flow structure untouched.
+    """
+    code = bytearray(b"\x01") * len(source)
+    in_string = False
+    in_comment = False
+    escaped = False
+    for index, char in enumerate(source):
+        if in_comment:
+            code[index] = 0
+            if char == "\n":
+                in_comment = False
+        elif in_string:
+            code[index] = 0
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            code[index] = 0
+            in_string = True
+        elif char == "#":
+            code[index] = 0
+            in_comment = True
+
+    wrappers = []
+    for match in re.finditer(r"\b(?:frontend_parse|proof_[A-Za-z0-9_]+)\s*\(", source):
+        if not all(code[index] for index in range(match.start(), match.end())):
+            continue
+        line_start = source.rfind("\n", 0, match.start()) + 1
+        if re.search(r"\bdef\s+$", source[line_start:match.start()]):
+            continue
+        open_paren = source.find("(", match.start(), match.end())
+        depth = 0
+        close_paren = None
+        for index in range(open_paren, len(source)):
+            if not code[index]:
+                continue
+            if source[index] == "(":
+                depth += 1
+            elif source[index] == ")":
+                depth -= 1
+                if depth == 0:
+                    close_paren = index
+                    break
+        if close_paren is None:
+            raise AssertionError(f"unterminated test harness call at offset {match.start()}")
+        if re.match(r"\s*can\s+Global\{Read,Write\}", source[close_paren + 1:]):
+            continue
+        wrappers.append((match.start(), close_paren + 1))
+
+    insertions: dict[int, list[str]] = {}
+    for start, end in wrappers:
+        insertions.setdefault(start, []).append("(")
+        insertions.setdefault(end, []).append(" can Global{Read,Write})")
+    pieces = []
+    cursor = 0
+    for offset in sorted(insertions):
+        pieces.append(source[cursor:offset])
+        pieces.extend(insertions[offset])
+        cursor = offset
+    pieces.append(source[cursor:])
+    return "".join(pieces)
+
+
 def run_source_binding_replay_harness(
     root: Path,
     fixture: Path,
@@ -173,6 +244,7 @@ def run_source_binding_replay_harness(
             ).replace("../../Elisa-compiler/", str(frontend_snapshot.resolve()) + "/").replace(
                 'include "../src/', 'include "../../src/'
             )
+            harness = _grant_global_effects_to_harness_calls(harness)
             source_path.write_text(harness, encoding="utf-8")
             compiled = subprocess.run(
                 [str(stage1_wrapper), "-emit", "exe", "-O0", "-o", str(executable), str(source_path)],

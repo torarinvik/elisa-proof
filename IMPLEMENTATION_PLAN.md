@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-11. **Section 23.27.98 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is pinned to compiler `ac2b23ef`. The strict O2 build, direct API admission, mutable-global grant matrix, and fixed-array literal replay regression pass on this tuple. Nested temporary-array indexing remains explicitly refused with one `expression-unsupported` finding and zero replay gaps. The compiler dependency scan now stops at the first changed callee; its fresh Stage1 build and seven-case callee-field smoke pass, but this micro-optimization has no paired timing result. The earlier 12-case PGS A/B remains exploratory and non-qualifying. These focused checks do not close the full proof suite or frozen compiler matrix recorded in §23.27.93. Next, complete source-admission and independent replay qualification on the same tuple, then measure common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.98 for the ordered backlog and current status.
+Status: refreshed 2026-10-11. **Section 23.27.99 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is now pinned to compiler `98d3a5c6` with a matching exported frontend snapshot. Compiler `main` and `origin/main` contain the incremental grant-authority cache optimization; its correctness and cache-control gates pass. The exact PGS correctness gate passes, while its Mac timing remains exploratory, effectively flat, and non-qualifying. The first body-edit comparison mismatched warm-cache candidate and cache-disabled baseline, so it does not isolate the commit. The corrected seven-pair cache-on comparison was effectively flat (106.24 ms baseline vs 107.80 ms candidate median) and non-qualifying; no speedup claim is supported. The strict O2 proof build and direct-API harness pass on compiler `98d3a5c6` with LLVM 23.1.2. Homebrew now reports LLVM 23.1.3 as current, so the Stage1/proof build and Global-grant matrix still need requalification after that toolchain refresh. Nested temporary-array indexing remains explicitly refused with one `expression-unsupported` finding and zero replay gaps. The focused loop source-binding harness compiles with operation-local Global grants but still reports replay gaps, consistent with the known loop replay issue. These focused checks do not close the full proof suite or frozen compiler matrix recorded in §23.27.93. Next, rebuild and rerun proof controls with the refreshed toolchain, diagnose the loop replay gap, then target larger measured semantic costs. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.99 for the ordered backlog and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9667,3 +9667,74 @@ exact compiler/runtime pair; retain the nested-array refusal until its bounds ar
 then run the matched PGS performance matrix for the short-circuit change. Preserve the existing
 non-qualifying label on the earlier exploratory A/B and do not advance the professional-performance
 claim without a reproducible qualifying run.
+
+### 23.27.99 Compiler cache gain merged; latest proof pin and replay follow-up (2026-10-11)
+
+Compiler `main` and `origin/main` now point to `98d3a5c61337bbd27652b4347a181bb5a5dd4c6f`, which
+includes the incremental grant-authority cache optimization. A fresh Stage1 at this revision passed
+provenance checks, and `test/parity/incremental_ga_cache_control.sh` passed on `main`. The exact
+12-case PGS correctness gate passed for baseline `01ddacf7` and candidate `ac2b23ef`, with matching
+stdout/stderr hashes and unchanged pinned inputs/products. The subsequent 12-case, 108-measurement
+Mac A/B is exploratory and non-qualifying (`timing_eligible=false`); paired medians are effectively
+flat across cases. It supports no speedup claim for `ac2b23ef` or current compiler `main`. The
+reports are retained at
+`/private/tmp/elisa-pgs-index-01dd-ac2b-correctness-final-20261011/summary.json` and
+`/private/tmp/elisa-pgs-index-01dd-ac2b-exploratory-ab-final-20261011/summary.json`.
+The merged `codex/incremental-ga-safe-skip` branch and its candidate worktree have been removed;
+the detached `pgs-baseline-01dd` checkout remains because the retained comparison artifacts name
+its exact source and product.
+
+The first 1,024-helper body-edit A/B compared the warm-cache `98d3a5c6` path with caching disabled
+on `ac2b23ef`; its 89.31 ms vs 45.59 ms medians describe cache-path overhead, not the source delta.
+The corrected cache-on comparison used trusted `Abort.Panic` helper facts to distinguish the rule.
+It passed exact stdout/stderr and emitted-object parity, with 0 grant-walk skips on `ac2b23ef` and
+2,046 on `98d3a5c6`. Seven exploratory Mac pairs were effectively flat: 106.24 ms baseline vs
+107.80 ms candidate median (+1.47% wall, +2.04% CPU), with four pairs faster on the candidate.
+The run is non-qualifying (`timing_eligible=false`) and supports no speedup claim. The artifact is
+`/private/tmp/elisa-incremental-cache-panic-scale-20261011-mac-exploratory-ab-98d-ac2-n01024/results.json`.
+
+The proof compiler pin and exported frontend snapshot now both identify `98d3a5c6`. The shared
+source-binding harness support adds local `can Global{Read,Write}` grants to parser and proof API
+call expressions in test-only harnesses, preserving fixture strings and function control flow.
+Python syntax, the transformer smoke check, and `git diff --check` pass. The focused loop replay
+harness compiles and executes against the latest snapshot, but returns diagnostic 212 because
+`report.replay_gaps` is nonzero; the earlier partial matrix also found loop replay gaps. Keep this
+as an unresolved kernel/replay reliability issue and do not count the harness as passing. No broad
+proof matrix was rerun.
+
+After moving the pin, `scripts/build.sh` completed a strict O2 build successfully. Its manifest
+records proof source tree `893d86a79a4d0196e9c4479c85a7ca3dd8ecda074937916b003df0593dbf0bca`,
+frontend revision `98d3a5c61337bbd27652b4347a181bb5a5dd4c6f`, fresh Stage1 SHA-256
+`f3697e5068d4980a67fae0c8235e7fcce927f3de2329d061649e738b9ef6859a`, runtime SHA-256
+`e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`, and proof executable
+SHA-256 `9666a0e2f820db17d3f282271452fac5e60817fe4e8fbed45514be9cd6d20289`. The build was strict
+and source-clean for `src/`. The direct-API semantic-admission harness passed with the clean isolated
+`98d3a5c6` Stage1 product (`c11786d4...`, LLVM 23.1.2), covering source-goal/assert-by identity,
+loop-binder scope, Global grants, refinements, and reused-state clearing. Homebrew later refreshed its
+stable LLVM formula to 23.1.3, so rebuild the Stage1/proof pair and rerun this control plus the
+Global-grant binary matrix before treating the tuple as current toolchain qualification.
+
+**Next high-return order:** use the performance task's refreshed LLVM 23.1.3 Stage1 to rebuild the
+strict O2 proof product and rerun the direct-API and Global-grant controls. Diagnose the loop replay
+gap as a separate kernel task, preserving its failing control while the cause is isolated. The
+corrected cache-on comparison skips 2,046 grant walks but shows no end-to-end speedup at this scale;
+prioritize the next bottleneck only after measuring its contribution on a representative workload.
+Keep exploratory PGS timing non-qualifying and retain only worktrees needed for validated baselines
+or unique unmerged commits.
+
+
+### 23.27.100 Latest compiler pin and strict proof requalification (2026-10-11)
+
+Compiler `main` and `origin/main` now point to `2efa1ca55182678a3624dc339695c247ffd14bb6`, the PhaseTimer duration fix. Its task owner reports the deterministic PhaseTimer regression passed all six mode/optimization combinations; the authority A/B inputs were kept separate. A clean detached Stage1 was built from this exact revision with LLVM 23.1.3. Provenance and freshness checks passed. Stage1 SHA-256 is `0f38f113af443508292b7d17c85423ffad776ffbcc4bdda456127b39b4058811`, and the matching runtime SHA-256 is `e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`; `otool` confirms the product links `libLLVM.23.1.dylib` version 23.1.3.
+
+Proof `main` pins to that compiler revision. `scripts/build.sh` completed a strict O2 build with proof binary SHA-256 `ef7e9aea00772b2f1e7c4b9925f5a348071aecb244a2c35c4b0a1ec916b77785`. The build manifest records Stage1 SHA-256 `0f38f113af443508292b7d17c85423ffad776ffbcc4bdda456127b39b4058811`, runtime SHA-256 `e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`, frontend revision `2efa1ca55182678a3624dc339695c247ffd14bb6`, and proof source tree digest `893d86a79a4d0196e9c4479c85a7ca3dd8ecda074937916b003df0593dbf0bca`.
+
+The Global mutable grant matrix passed: reads and writes are checked separately, and both report routes reject missing or incorrect grants. The direct API semantic-admission controls also passed for source-goal/assert-by identity, loop-binder scope, Global grants, source-bound refinements, and reused-state clearing. Python syntax checks, the source-binding include relocation test, and `git diff --check` passed.
+
+The focused loop witness replay test still fails with replay gaps. A diagnostic rerun found the first unreplayed item is certificate 10 of 17, for `looped` at source line 28, the `while y < Limits::TOP` condition. The nine stale-source mutation checks do not run until the baseline replay succeeds. Keep the failing control visible; do not accept or conceal the gap until the loop-condition certificate is soundly replayed.
+
+The separate authority slot/head reuse experiment compared parent source fingerprint `0a5de6816c215519a9fe5a6ca4cde1fc26cbb9dd7b8c04e9771766bf23f423f6` with working-tree candidate fingerprint `beaa1cfa0695df41578d09a5af972ae9c1a2a9b02c553caba05bb1ee58b47b73`, using the same build recipe, Stage1 revision `98d3a5c6`, and LLVM 23.1.3. All ten builds succeeded, compiler/input pins remained stable, and each emitted object had SHA-256 `65040e5632a9090d97de4bf06250c9d29bec262ca53455330ddcf8573f017f8d`. Across five pairs the candidate median was 101.720 seconds wall / 102.142 seconds child CPU versus 105.472 / 104.459 seconds for the parent; the candidate was faster in four pairs. Host load ranged about 3.2–6.9, so this remains exploratory and non-qualifying. Do not claim a speedup or merge the working-tree candidate as a validated performance gain. The raw run is preserved at `/private/tmp/elisa-authority-ab-98d-20261011/summary.json` and `/private/tmp/elisa-authority-ab-98d-20261011/samples.csv`.
+
+Keep unrelated active compiler work out of this proof integration: the authority candidate in `src/semantic/check_global_authority.elisa` and cross-language benchmark edits are owned by other tasks, including an expression-loop edit in `sieve.elisa`. Do not stage, reset, or commit those files from this task. The next proof priority is to isolate the line-28 replay gap; the compiler candidate timing requires a controlled, qualifying comparison before promotion.
+
+The linked-worktree audit found 96 compiler worktrees (48 dirty, 48 clean) and 62 local branches before preserving the dangling region-owner fix as `codex/region-owner-smc-fix`. `git worktree prune --dry-run` found no stale metadata. The merged local branch tips all have dirty linked worktrees; the clean detached checkouts are toolchain or benchmark baselines named by retained evidence, including the new clean `2efa1ca5` checkout whose Stage1/runtime paths are recorded in the proof build manifest. Unmerged branch tips contain unique commits. No worktree or branch was removed because each remaining candidate is active, dirty, unique, or referenced by validation evidence; revisit after those tasks release their checkouts and artifacts can be reproduced from stable installed products.

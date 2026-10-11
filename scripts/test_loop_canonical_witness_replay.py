@@ -106,7 +106,13 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     replaced: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
     proof_test_parse_and_replay(LOOP_CANONICAL_SOURCE, &original, &report)
-    return 210 if report.failed != 0 or report.certificates.count != 17 or report.replay_gaps != 0
+    return 210 if report.failed != 0
+    return 211 if report.certificates.count != 17
+    if report.replay_gaps != 0:
+        for index in 0..<report.certificates.count |index, report|:
+            certificate: ProofGoalCertificate = report.certificates[index]
+            return 220 + index.i64() if not certificate.replayed
+        return 239
     initial_gate: i64 = proof_test_loop_source_gate(&report)
     return initial_gate if initial_gate != 0
     identity: i64 = proof_test_loop_identity_key(&report)
