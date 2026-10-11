@@ -9597,8 +9597,9 @@ invalidation, generated-input, and corruption controls pass. The published-index
 24-check baseline/candidate correctness gate also passes. No timing run was collected, so the index
 is qualified for correctness only; it has no measured speedup claim.
 
-Proof `main` remains at `62a4cf55698fde30b2d01f49e92d47f37d148731`, four commits ahead of its
-remote-tracking branch. Its working-tree pin is being updated to the exact compiler revision above.
+Proof `main` retains source baseline `62a4cf55698fde30b2d01f49e92d47f37d148731`; documentation-only
+updates record this consolidation. Its working-tree pin is being updated to the exact compiler
+revision above.
 The strict proof build and the mutable-global grant matrix pass against that Stage1 product. The
 direct API harness now resolves nested replay includes and omits the three runtime modules that
 Stage1 injects automatically. It compiles, but execution still fails at return 229 while replaying
@@ -9612,10 +9613,11 @@ Keep the proof pin and harness adjustments uncommitted until the return-229 prov
 explained and the full direct API gate passes. The immediate high-ROI order is: diagnose and fix the
 local fixed-array source-replay admission without weakening source or kernel checks; rerun the exact
 Stage1 proof, Global grant, and direct API gates; then commit the proof pin and test fixes together.
-After that, re-audit the outstanding `8d7cfca` backend/region-owner change and the pending
-`query_head_for` / `const_scope_owner` region annotations against current compiler `main` before
-integrating them. Resume performance comparisons only with an approved Linux benchmark host and
-seed-matched Stage1 products.
+The separate `8d7cfca` backend/region-owner commit was re-audited: its rename is superseded by
+`resolved_error_family(...)` on current compiler `main`, its native owner-lookup smoke passes there,
+and cherry-picking it produced no unique changes. The `query_head_for` / `const_scope_owner` region
+annotations still need an exact commit and validation report before integration. Resume performance
+comparisons only with an approved Linux benchmark host and seed-matched Stage1 products.
 
 The compiler cleanup removed two duplicate temporary seed worktrees, a second clean checkout at
 the retained `37a322e7` scoped-type baseline, and an obsolete generated Stage1 checkout. The current
