@@ -1,6 +1,7 @@
 # Factored helpers retained by the branch integration.
 def proof_report_source_admissible(report: ProofReport&, import_failed: bool, semantic_errors: u32) -> bool:
-    return proof_report_source_admissible_with_replay(report, import_failed, semantic_errors, proof_replay_certificates_complete(report))
+    # This compatibility API has no replay receipt, so it cannot establish replay completion.
+    return proof_report_source_admissible_with_replay(report, import_failed, semantic_errors, false)
 
 def proof_report_source_semantically_admissible(report: ProofReport&, import_failed: bool, semantic_errors: u32) -> bool:
     # Open but well-formed goals may still be repaired one at a time. A source whose
@@ -15,7 +16,8 @@ def proof_report_source_admissible_with_replay(report: ProofReport&, import_fail
     return proof_report_source_semantically_admissible(report, import_failed, semantic_errors) and replay_complete
 
 def proof_report_source_complete(report: ProofReport&, import_failed: bool, semantic_errors: u32) -> bool:
-    return proof_report_source_complete_with_replay(report, import_failed, semantic_errors, proof_replay_certificates_complete(report))
+    # This compatibility API has no replay receipt, so it cannot establish replay completion.
+    return proof_report_source_complete_with_replay(report, import_failed, semantic_errors, false)
 
 def proof_report_source_complete_with_replay(report: ProofReport&, import_failed: bool, semantic_errors: u32, replay_complete: bool) -> bool:
     return false if proof_report_source_has_unresolved_checks(report, import_failed, semantic_errors)
@@ -26,13 +28,13 @@ def proof_report_verification_state(report: ProofReport&, import_failed: bool, s
     # while this field gives agents the precise reason a run did not establish a theorem.
     # Disproof has priority over unsupported/unknown because it carries a concrete violated
     # obligation; unsupported has priority over a residual unknown proof hole.
-    return proof_report_verification_state_with_replay(report, import_failed, semantic_errors, proof_replay_certificates_complete(report))
+    return proof_report_verification_state_with_replay(report, import_failed, semantic_errors, false)
 
 def proof_report_engine_state(report: ProofReport&) -> sview:
     # What the proof engine itself concluded, apart from front-end diagnostics and import
     # failures: a front-end refusal leaves `verification_state` open even when every
     # obligation was proven and replayed, and this says so (BACKLOG K-07).
-    return proof_report_engine_state_with_replay(report, proof_replay_certificates_complete(report))
+    return proof_report_engine_state_with_replay(report, false)
 
 def proof_trace_is_trusted_boundary(trace: ProofFactTrace) -> bool:
     return trace.kind != "proof-step" and trace.kind != "lemma-step" and trace.kind != "loop-invariant-step" and trace.kind != "unit-resolution" and trace.kind != "branch-conjunct" and trace.kind != "branch-join" and trace.kind != "lemma-summary" and trace.kind != "function-summary"
@@ -49,10 +51,10 @@ def proof_report_trusted_boundary_count(report: ProofReport&) -> u32:
 def proof_push_json_report_summary(buffer: mutable darray[u8]&, report: ProofReport&, import_failed: bool, semantic_errors: u32, semantic_visible: u32, source_bytes: usize, source_fingerprint: u32) -> void can[Memory.Allocate, Abort.Panic]:
     replay_work: mutable usize = 0
     replayed_goals: mutable darray[bool] = []
-    replay_complete: bool = proof_replay_attempt_statuses_and_complete_with_work(report, &replayed_goals, &replay_work)
-    proof_push_json_report_summary_with_replay(buffer, report, import_failed, semantic_errors, semantic_visible, source_bytes, source_fingerprint, replayed_goals, replay_complete, &replay_work)
+    replayed_certificates: mutable darray[bool] = []
+    proof_push_json_report_summary_with_replay(buffer, report, import_failed, semantic_errors, semantic_visible, source_bytes, source_fingerprint, replayed_goals, replayed_certificates, 0, false, false, &replay_work)
 
-def proof_push_json_report_summary_with_replay(buffer: mutable darray[u8]&, report: ProofReport&, import_failed: bool, semantic_errors: u32, semantic_visible: u32, source_bytes: usize, source_fingerprint: u32, replayed_goals: darray[bool]&, replay_complete: bool, replay_work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_report_summary_with_replay(buffer: mutable darray[u8]&, report: ProofReport&, import_failed: bool, semantic_errors: u32, semantic_visible: u32, source_bytes: usize, source_fingerprint: u32, replayed_goals: darray[bool]&, replayed_certificates: darray[bool]&, replayed_certificate_count: u32, certificate_status_snapshot_complete: bool, replay_complete: bool, replay_work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
     verdict: mutable sview = "proved"
     verdict <- "failed" if proof_report_source_has_unresolved_checks(report, import_failed, semantic_errors)
     verdict <- "proved_with_replay_gaps" if verdict == "proved" and not replay_complete
@@ -79,7 +81,10 @@ def proof_push_json_report_summary_with_replay(buffer: mutable darray[u8]&, repo
     proof_push(buffer, "}},\"source_obligation_inventory\":{\"coverage\":\"partial\",\"supported_subset\":\"source-wide-unique literal ensure/return cases plus Boolean-literal assert-by targets and proof steps, plus nonliteral assert-by targets and proof steps whose checked term is structurally identical to source, in top-level function bodies, direct if/match branches, and direct while/for loop bodies, matched by exact source span and owner name; alias-changing substitutions, nested loop/branch paths and scoped assert-by/proof steps are unsupported\",\"whole_program\":false},\"trust\":{\"trusted_boundary_facts\":")
     proof_push_number(buffer, proof_report_trusted_boundary_count(report))
     proof_push(buffer, ",\"trusted_assumptions\":[],\"kernel_replayed_certificates\":")
-    proof_push_number(buffer, report.replayed)
+    if certificate_status_snapshot_complete:
+        proof_push_number(buffer, replayed_certificate_count)
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, "},\"summary\":{\"declarations\":")
     proof_push_number(buffer, report.declarations)
     proof_push(buffer, ",\"obligations\":")
@@ -107,15 +112,8 @@ def proof_semantic_diagnostic_visible(diagnostic: Semantic::Diagnostic, report: 
     return true
 
 def proof_report_discharges_return(report: ProofReport&, name: sview, line: u32) -> bool:
-    return false if name == "" or line == 0
-    for finding in report.findings |name, line|:
-        return false if finding.name == name or finding.line == line
-    discharged: mutable bool = false
-    for attempt in report.goal_attempts |report, name, line, discharged|:
-        if attempt.name == name and attempt.line == line:
-            return false if not attempt.proven or not proof_replay_attempt_certificate_replayed(report, attempt)
-            discharged <- true
-    return discharged
+    # This compatibility API has no receipt, so report fields cannot establish a discharge.
+    false
 
 def proof_report_discharges_return_with_replayed(report: ProofReport&, name: sview, line: u32, replayed_goals: darray[bool]&, replay_work: mutable usize&) -> bool:
     return false if name == "" or line == 0
@@ -199,10 +197,10 @@ def proof_dependency_index_goal_contains(goal_ids: darray[usize]&, start: usize,
 def proof_push_json_report(buffer: mutable darray[u8]&, report: ProofReport&, semantic_diagnostics: darray[Semantic::Diagnostic]&, semantic_visible: u32, import_failed: bool, semantic_errors: u32, source_bytes: usize, source_fingerprint: u32, source_map: ProofSourceMap&, focus_function: sview) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read]:
     replay_work: mutable usize = 0
     replayed_goals: mutable darray[bool] = []
-    replay_complete: bool = proof_replay_attempt_statuses_and_complete_with_work(report, &replayed_goals, &replay_work)
-    proof_push_json_report_with_replay(buffer, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map, focus_function, replayed_goals, replay_complete, &replay_work)
+    replayed_certificates: mutable darray[bool] = []
+    proof_push_json_report_with_replay(buffer, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map, focus_function, replayed_goals, replayed_certificates, 0, false, false, 0, false, &replay_work)
 
-def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: ProofReport&, semantic_diagnostics: darray[Semantic::Diagnostic]&, semantic_visible: u32, import_failed: bool, semantic_errors: u32, source_bytes: usize, source_fingerprint: u32, source_map: ProofSourceMap&, focus_function: sview, replayed_goals: darray[bool]&, replay_complete: bool, replay_work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read]:
+def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: ProofReport&, semantic_diagnostics: darray[Semantic::Diagnostic]&, semantic_visible: u32, import_failed: bool, semantic_errors: u32, source_bytes: usize, source_fingerprint: u32, source_map: ProofSourceMap&, focus_function: sview, replayed_goals: darray[bool]&, replayed_certificates: darray[bool]&, replayed_certificate_count: u32, certificate_status_snapshot_complete: bool, replay_complete: bool, replay_gap_count: u32, replay_gap_snapshot_available: bool, replay_work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read]:
     report_start: usize = buffer.count
     origin_work: mutable usize = report.traces.lookup_work_used
     verdict: mutable sview = "proved"
@@ -250,7 +248,10 @@ def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: Proo
     proof_push(buffer, ",\"trust\":{\"trusted_boundary_facts\":")
     proof_push_number(buffer, trusted_boundaries)
     proof_push(buffer, ",\"kernel_replayed_certificates\":")
-    proof_push_number(buffer, report.replayed)
+    if certificate_status_snapshot_complete:
+        proof_push_number(buffer, replayed_certificate_count)
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, ",\"boundary_facts\":[")
     boundary_index: mutable usize = 0
     for trace in report.traces.records |buffer, boundary_index|:
@@ -286,9 +287,11 @@ def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: Proo
     proof_push_number(buffer, semantic_errors)
     proof_push(buffer, "},\"declaration_details\":[")
     source_clean: bool = not import_failed and semantic_errors == 0
+    declaration_identity_statuses: darray[bool] = proof_report_declaration_identity_statuses(report)
     for index in 0..<report.declaration_details.count |index, report, buffer, replayed_goals, replay_work|:
         proof_push(buffer, ",") if index > 0
-        proof_push_json_declaration(buffer, report, report.declaration_details[index], source_clean, replayed_goals, replay_work)
+        declaration_identity_unambiguous: bool = index < declaration_identity_statuses.count and declaration_identity_statuses[index]
+        proof_push_json_declaration(buffer, report, report.declaration_details[index], source_clean, declaration_identity_unambiguous, replayed_goals, replay_work)
     proof_push(buffer, "],\"semantic_diagnostics\":[")
     semantic_index: mutable usize = 0
     for diagnostic in semantic_diagnostics |diagnostic, report, buffer, semantic_index|:
@@ -299,9 +302,15 @@ def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: Proo
     proof_push(buffer, "],\"replay\":{\"certificates\":")
     proof_push_number(buffer, report.certificates.count.u32())
     proof_push(buffer, ",\"replayed\":")
-    proof_push_number(buffer, report.replayed)
+    if certificate_status_snapshot_complete:
+        proof_push_number(buffer, replayed_certificate_count)
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, ",\"gaps\":")
-    proof_push_number(buffer, report.replay_gaps)
+    if replay_gap_snapshot_available:
+        proof_push_number(buffer, replay_gap_count)
+    else:
+        proof_push(buffer, "null")
     proof_push(buffer, "},\"kernel\":{\"format\":\"elisa-proof-kernel-v1\",\"independent_replay\":true,\"nodes\":[")
     for index in 0..<report.kernel.nodes.count |index, report, buffer|:
         proof_push(buffer, ",") if index > 0
@@ -551,7 +560,13 @@ def proof_push_json_report_with_replay(buffer: mutable darray[u8]&, report: Proo
         proof_push(buffer, ",\"rule\":")
         proof_push_json_string(buffer, certificate.rule)
         proof_push(buffer, ",\"replayed\":")
-        proof_push(buffer, "true" if certificate.replayed else "false")
+        if certificate_status_snapshot_complete and index < replayed_certificates.count:
+            if replayed_certificates[index]:
+                proof_push(buffer, "true")
+            else:
+                proof_push(buffer, "false")
+        else:
+            proof_push(buffer, "null")
         proof_push(buffer, ",\"kernel_goal\":")
         proof_push_number(buffer, certificate.kernel_goal.u32())
         proof_push(buffer, ",\"kernel_facts_start\":")

@@ -10,6 +10,17 @@
 # loop too, because its entry and preservation are checked by their own certificates.
 extend ElisaProof:
     private:
+        # Per-query costs for the legacy immutable-local check and its preflight sizing walk.
+        const PROOF_REPLAY_LOOP_ENTRY_LOCAL_QUERY_COMPARISONS: usize = 2
+        const PROOF_REPLAY_LOOP_ENTRY_SIZING_STATEMENT_COST: usize = 1
+        const PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS: usize = 1
+        const PROOF_REPLAY_LOOP_ENTRY_TYPE_PREDICATE_WALKS: usize = 2
+        const PROOF_REPLAY_LOOP_ENTRY_DECLARATION_SCAN_MULTIPLIER: usize = 12
+        const PROOF_REPLAY_LOOP_ENTRY_LOCAL_AST_SCAN_MULTIPLIER: usize = 8
+        # The stable-parameter classifier performs two type predicates and, when needed,
+        # the integer-layer query: at most four type-AST walks per queried formal.
+        const PROOF_REPLAY_LOOP_ENTRY_TYPE_AST_QUERY_MULTIPLIER: usize = 4
+
         # Signed locals may be expanded to their initializer in an entry goal.
         # Reconstruct that expansion from an effect-free source prefix only;
         # unsigned locals keep their names and their separately replayed bindings.
@@ -59,11 +70,44 @@ extend ElisaProof:
             source_work <- source_work + query_work
             query_complete
 
-        def proof_replay_loop_entry_reserve_stable_identifier(name: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, source_work: mutable usize&, work_limit: usize) -> bool:
+        # Charge only the formal type ASTs reached by this identifier query. The caller has
+        # already reserved the bounded declaration/name scan; this helper adds the exact type
+        # traversal cost and combines duplicate formal names conservatively.
+        def proof_replay_loop_entry_owner_parameter_type_cost(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, declaration_work: usize, source_work: mutable usize&, parameter_type_work: mutable usize&, matches: mutable usize&, work_limit: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or source_work > work_limit
+            # Precharge the full declaration/name/formal scan before searching the owner.
+            if depth == 0:
+                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
+            for declaration in declarations |owner, owner_line, parameter_name, declaration_work, source_work, parameter_type_work, matches, work_limit, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            for parameter in parameters |parameter_name, source_work, parameter_type_work, matches, work_limit|:
+                                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, sview_len(parameter.name), work_limit)
+                                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, sview_len(parameter_name), work_limit)
+                                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS, work_limit)
+                                if parameter.name == parameter_name:
+                                    before_type: usize = source_work
+                                    return false if not proof_replay_summary_expr_charge_with_limit(parameter.type_expression, source_work, work_limit)
+                                    parameter_type_work <- parameter_type_work + source_work - before_type
+                                    matches <- matches + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_loop_entry_owner_parameter_type_cost(nested, owner, owner_line, parameter_name, declaration_work, source_work, parameter_type_work, matches, work_limit, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_loop_entry_reserve_stable_identifier(name: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, replay_parameter_type_work: mutable usize&, source_work: mutable usize&, work_limit: usize) -> bool:
             return true if name == ""
             return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
             parameter: bool = proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
             if parameter:
+                parameter_type_work: mutable usize = 0
+                parameter_matches: mutable usize = 0
+                return false if not proof_replay_loop_entry_owner_parameter_type_cost(declarations, owner, owner_line, name, declaration_work, source_work, &parameter_type_work, &parameter_matches, work_limit, 0)
+                return false if parameter_matches == 0
+                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, parameter_type_work, PROOF_REPLAY_LOOP_ENTRY_TYPE_AST_QUERY_MULTIPLIER, work_limit)
+                replay_parameter_type_work <- replay_parameter_type_work + parameter_type_work
                 return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
                 immutable_integer: bool = proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
                 return false if not proof_replay_loop_entry_touch_query_with_limit(declarations, owner_body, name, false, source_work, work_limit)
@@ -77,44 +121,73 @@ extend ElisaProof:
                 return true
             name_bytes: usize = sview_len(name)
             target_bytes: usize = sview_len(target)
-            return false if name_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return false if target_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - name_bytes
-            compare_cost: usize = name_bytes + target_bytes + 1
+            return false if name_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - PROOF_REPLAY_LOOP_ENTRY_LOCAL_QUERY_COMPARISONS
+            return false if target_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - name_bytes - PROOF_REPLAY_LOOP_ENTRY_LOCAL_QUERY_COMPARISONS
+            # Each VarDecl compares its spelling with both `name` and `target`.
+            compare_cost: usize = name_bytes + target_bytes + PROOF_REPLAY_LOOP_ENTRY_LOCAL_QUERY_COMPARISONS
             return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, owner_body.count, compare_cost, work_limit)
+            # `prior_immutable_local` also compares every stored VarDecl name with both
+            # query names. Include those bytes per candidate; query-name lengths alone
+            # under-reserve bodies containing long local identifiers.
+            # This cost-inspection pass traverses the statements once as well.
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, owner_body.count, PROOF_REPLAY_LOOP_ENTRY_SIZING_STATEMENT_COST, work_limit)
+            for statement in owner_body |statement, source_work, work_limit, name_bytes|:
+                match statement:
+                    Ast::Stmt.VarDecl(local, type_expression, _, _):
+                        local_name_bytes: usize = sview_len(local)
+                        return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, PROOF_REPLAY_LOOP_ENTRY_LOCAL_QUERY_COMPARISONS, local_name_bytes, work_limit)
+                        # The sizing pass compares the local against `name` to decide
+                        # whether the legacy query will inspect its type.
+                        return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS, name_bytes, work_limit)
+                        return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS, local_name_bytes, work_limit)
+                        return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS, PROOF_REPLAY_LOOP_ENTRY_SIZING_NAME_COMPARISONS, work_limit)
+                        if local == name:
+                            # The semantic query checks both integer-ness and mutability
+                            # for every same-named declaration, including duplicates.
+                            for _ in 0..<PROOF_REPLAY_LOOP_ENTRY_TYPE_PREDICATE_WALKS |type_expression, source_work, work_limit|:
+                                return false if not proof_replay_summary_expr_charge_with_limit(type_expression, source_work, work_limit)
+                    _:
+                        pass
             true
 
         # The stable initializer can ask whether each identifier is shadowed and
         # whether a mutable parameter is written. Reserve only the paths its source
         # binding can take, including call-slot/declaration work for mutable parameters.
-        def proof_replay_loop_entry_reserve_stable_name_queries(expression: Ast::Expr, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, source_work: mutable usize&, work_limit: usize, depth: usize) -> bool:
+        def proof_replay_loop_entry_reserve_stable_name_queries(expression: Ast::Expr, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, replay_parameter_type_work: mutable usize&, replay_index_copy_type_work: mutable usize&, source_work: mutable usize&, work_limit: usize, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
             match expression:
                 Ast::Expr.Ident(name, _):
                     return true if name == target
-                    return proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit)
+                    return proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, source_work, work_limit)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    return proof_replay_loop_entry_reserve_stable_name_queries(inner, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return proof_replay_loop_entry_reserve_stable_name_queries(inner, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
                 Ast::Expr.Binary(left, _, right, _):
-                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(left, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
-                    return proof_replay_loop_entry_reserve_stable_name_queries(right, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(left, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
+                    return proof_replay_loop_entry_reserve_stable_name_queries(right, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
                 Ast::Expr.If(condition, then_value, else_value, _):
-                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(condition, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
-                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(then_value, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
-                    return proof_replay_loop_entry_reserve_stable_name_queries(else_value, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(condition, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(then_value, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
+                    return proof_replay_loop_entry_reserve_stable_name_queries(else_value, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, depth + 1)
                 Ast::Expr.Index(Ast::Expr.Ident(name, _), Ast::Expr.IntLit(index, _), _):
                     return true if index < 0
+                    parameter_type_work: mutable usize = 0
+                    parameter_matches: mutable usize = 0
+                    return false if not proof_replay_loop_entry_owner_parameter_type_cost(declarations, owner, owner_line, name, declaration_work, source_work, &parameter_type_work, &parameter_matches, work_limit, 0)
+                    # The replay-side index-copy check walks each matching formal type once
+                    # through `proof_replay_index_copy_element` (bounded to 32 wrappers).
+                    replay_index_copy_type_work <- replay_index_copy_type_work + parameter_type_work
                     proof_replay_loop_entry_touch_query_with_limit(declarations, owner_body, name, false, source_work, work_limit)
                 Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(name, _), method, _), arguments, _, _):
                     return true if arguments.count != 0 or (method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize")
                     return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
                     return true if proof_replay_local_binding_cast_hook_present(declarations, 0)
-                    proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit)
+                    proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, replay_parameter_type_work, source_work, work_limit)
                 _:
                     pass
             return true
 
-        def proof_replay_loop_entry_expansion_reserve(report: ProofReport&, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, goal: Ast::Expr, source_work: mutable usize&, work_limit: usize) -> bool:
+        def proof_replay_loop_entry_expansion_reserve(report: ProofReport&, owner: sview, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, goal: Ast::Expr, source_work: mutable usize&, work_limit: usize) -> bool:
             return false if body.count > 4096 or source_work > work_limit or work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             invariant_start: usize = source_work
             return false if not proof_replay_summary_expr_charge_with_limit(invariant, source_work, work_limit)
@@ -128,11 +201,12 @@ extend ElisaProof:
             source_work <- source_work + declaration_scan_work
             return false if not declaration_scan_complete
             declaration_work <- declaration_scan_work
-            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 2, declaration_work, work_limit)
             local_count: mutable usize = 0
             local_name_work: mutable usize = 0
             local_ast_work: mutable usize = 0
-            for statement in body |statement, source_work, local_count, local_name_work, local_ast_work|:
+            replay_parameter_type_work: mutable usize = 0
+            replay_index_copy_type_work: mutable usize = 0
+            for statement in body |statement, report, owner, source_work, local_count, local_name_work, local_ast_work, owner_body, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, work_limit|:
                 return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
                 match statement:
                     Ast::Stmt.VarDecl(name, type_expression, initializer, _):
@@ -144,22 +218,26 @@ extend ElisaProof:
                         before_initializer: usize = source_work
                         return false if not proof_replay_summary_expr_charge_with_limit(initializer, source_work, work_limit)
                         local_ast_work <- local_ast_work + source_work - before_initializer
-                        return false if not proof_replay_loop_entry_reserve_stable_name_queries(initializer, report.source_declarations, trace.name, report.replay_owner_line, owner_body, name, declaration_work, source_work, work_limit, 0)
+                        return false if not proof_replay_loop_entry_reserve_stable_name_queries(initializer, report.source_declarations, owner, report.replay_owner_line, owner_body, name, declaration_work, replay_parameter_type_work, replay_index_copy_type_work, source_work, work_limit, 0)
                     _:
                         pass
+            # Reserve the second set of at-most-four type-AST walks performed by the later
+            # stable-initializer replay; the matching-formal helper above charged preflight.
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, replay_parameter_type_work, PROOF_REPLAY_LOOP_ENTRY_TYPE_AST_QUERY_MULTIPLIER, work_limit)
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, replay_index_copy_type_work, 1, work_limit)
             # The later stable-initializer walk visits the same local AST once.
             return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, local_ast_work, work_limit)
             # The later prefix scan in `expanded_goal` runs once even when there
             # are no local candidates for the per-local reservation to cover.
             return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, body.count, work_limit)
             per_local_scan_work: mutable usize = 0
-            return false if not proof_replay_loop_entry_expansion_work_charge_product(&per_local_scan_work, declaration_work, 12, work_limit)
-            return false if local_ast_work > work_limit / 8
-            return false if not proof_replay_loop_entry_expansion_work_charge_product(&per_local_scan_work, declaration_work, local_ast_work * 8, work_limit)
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(&per_local_scan_work, declaration_work, PROOF_REPLAY_LOOP_ENTRY_DECLARATION_SCAN_MULTIPLIER, work_limit)
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, local_count, per_local_scan_work, work_limit)
+            return false if local_ast_work > work_limit / PROOF_REPLAY_LOOP_ENTRY_LOCAL_AST_SCAN_MULTIPLIER
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, declaration_work, local_ast_work * PROOF_REPLAY_LOOP_ENTRY_LOCAL_AST_SCAN_MULTIPLIER, work_limit)
             substitution_work: mutable usize = 0
             return false if not proof_replay_loop_entry_expansion_work_charge_product(&substitution_work, invariant_work, local_count, work_limit)
             return false if not proof_replay_loop_entry_expansion_work_charge_product(&substitution_work, invariant_work, local_name_work, work_limit)
-            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, local_count, per_local_scan_work, work_limit)
             proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, substitution_work, work_limit)
 
         def proof_replay_loop_entry_expanded_goal(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr) -> bool:
@@ -170,7 +248,7 @@ extend ElisaProof:
             proof_replay_loop_entry_expanded_goal_with_limit(report, trace, certificate, body, owner_body, invariant, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
 
         def proof_replay_loop_entry_expanded_goal_with_limit(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, source_work: mutable usize&, work_limit: usize) -> bool:
-            return false if not proof_replay_loop_entry_expansion_reserve(report, body, owner_body, invariant, certificate.goal, source_work, work_limit)
+            return false if not proof_replay_loop_entry_expansion_reserve(report, trace.name, body, owner_body, invariant, certificate.goal, source_work, work_limit)
             names: mutable darray[sview] = []
             values: mutable darray[Ast::Expr] = []
             found: mutable bool = false

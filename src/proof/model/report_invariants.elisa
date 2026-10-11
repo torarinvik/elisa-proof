@@ -214,6 +214,7 @@ extend ElisaProof:
         def proof_report_source_admission_invariants_consistent(report: ProofReport&) -> bool:
             return proof_report_source_admission_failure(report) == ""
 
+    private:
         # Global accounting and declaration structure protect every local query. Whole-source
         # coverage is intentionally kept out of this predicate so an unrelated open claim does
         # not suppress a separately source-bound goal.
@@ -235,28 +236,39 @@ extend ElisaProof:
                 return certificate.name == expected.name and certificate.line == attempt.line and certificate.rule == attempt.rule and proof_source_literal_ensure_goal_matches(certificate.goal, expected)
             return true
 
-        # Only claims that can be independently matched to the parsed source authorize a
-        # selected goal. General postconditions and frame rows remain unknown until replay issues
-        # a receipt bound to their source predicate; sparse generic rows need producer provenance.
-        def proof_report_goal_source_admissible(report: ProofReport&, goal_id: usize, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
-            return false if goal_id >= report.goal_attempts.count or import_failed or semantic_errors != 0
-            return false if not proof_report_source_structure_consistent(report)
+        def proof_report_obligation_event_for_goal(report: ProofReport&, goal_id: usize) -> (found: bool, entry: ProofObligationEntry):
+            low: mutable usize = 0
+            high: mutable usize = report.obligation_inventory.count
+            while low < high |low, high, report, goal_id|:
+                middle: usize = low + (high - low) / 2
+                entry: ProofObligationEntry = report.obligation_inventory[middle]
+                if goal_id < entry.attempts_start:
+                    high <- middle
+                else:
+                    attempt_offset: usize = goal_id - entry.attempts_start
+                    if attempt_offset < entry.attempts_count:
+                        return (true, entry)
+                    low <- middle + 1
+            empty: ProofObligationEntry = ProofObligationEntry{identity: 0, attempts_start: 0, attempts_count: 0, proven: false, source_line: 0, source_name: "", source_kind: "", source_obligation_index: 0}
+            (false, empty)
+
+    private:
+        # Validate a single goal after the caller has checked report-wide structure. Batch
+        # clients use this core so a theorem with several goals pays for structural validation
+        # once rather than once per goal.
+        def proof_report_goal_source_admissible_after_structure(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
+            return false if goal_id >= report.goal_attempts.count
             attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-            matching_events: mutable usize = 0
-            selected: mutable ProofObligationEntry = ProofObligationEntry{identity: 0, attempts_start: 0, attempts_count: 0, proven: false, source_line: 0, source_name: "", source_kind: "", source_obligation_index: 0}
-            for index in 0..<report.obligation_inventory.count |index, report, goal_id, matching_events, selected|:
-                entry: ProofObligationEntry = report.obligation_inventory[index]
-                if goal_id >= entry.attempts_start and goal_id - entry.attempts_start < entry.attempts_count:
-                    matching_events <- matching_events + 1
-                    selected <- entry
-            return false if matching_events != 1
+            selected_event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, goal_id)
+            return false if not selected_event.found
+            selected: ProofObligationEntry = selected_event.entry
             event_admitted: mutable bool = false
             if selected.source_kind == "postcondition":
-                return false if selected.source_name != attempt.name or proof_report_source_postcondition_owner_count(report.source_declarations, selected.source_name, selected.source_line, selected.source_obligation_index) != 1
+                return false if selected.source_name != attempt.name
                 literal_matches: mutable usize = 0
                 literal_attempt_matches: mutable bool = false
                 for expected in literal_ensure_inventory |selected, report, goal_id, literal_matches, literal_attempt_matches|:
-                    if expected.name == selected.source_name:
+                    if expected.name == selected.source_name and expected.contract_line == selected.source_line:
                         literal_matches <- literal_matches + 1
                         literal_attempt_matches <- proof_report_source_literal_ensure_goal_attempt_admitted(expected, report, goal_id)
                 event_admitted <- literal_matches == 1 and selected.source_obligation_index == 0 and literal_attempt_matches
@@ -274,6 +286,17 @@ extend ElisaProof:
                     return false if finding.kind == "contract-proposition-type" or finding.kind == "parse-error" or finding.kind == "arithmetic-safety-refuted" or finding.kind == "semantic-permission-ungranted"
             return true
 
+    public:
+        # Only claims matched to parser-origin inventories authorize a selected goal. Callers
+        # must pass inventories frozen before AST augmentation; replay receipts currently record
+        # replay status and do not establish source correspondence. General postconditions and
+        # frame rows remain unknown until a source-bound claim path validates their exact predicate.
+        def proof_report_goal_source_admissible(report: ProofReport&, goal_id: usize, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
+            return false if goal_id >= report.goal_attempts.count or import_failed or semantic_errors != 0
+            return false if not proof_report_source_structure_consistent(report)
+            proof_report_goal_source_admissible_after_structure(report, goal_id, literal_ensure_inventory, assert_by_inventory)
+
+    public:
         def proof_source_parameter_name_count(parameters: darray[Ast::ParamDecl]&, name: sview) -> usize:
             count: mutable usize = 0
             for parameter in parameters |count, name|:

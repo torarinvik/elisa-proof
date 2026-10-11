@@ -258,7 +258,9 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     # Freeze the source obligation inventories before typed-source augmentation or
     # refinement-contract rewriting can mutate the parser-owned AST.
     source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
-    source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
+    source_assert_by_goals: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
+    if goal_json_output or proof_text_output or proof_check_output or theorem_json_output:
+        source_assert_by_goals <- proof_source_assert_by_inventory(file.top_decls)
     proof_push_source_int_types(&file, tokens, source, source_bytes)
     # `pass` reaches the AST as the same invalid statement that error recovery leaves for a
     # dropped construct. Keep the lexer's `pass` offsets so the checker can tell them apart.
@@ -278,6 +280,11 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     parse_failed: bool = file.errors.count > 0 or stray_nul_line > 0
     replay_work: mutable usize = 0
     replayed_goals: mutable darray[bool] = []
+    replayed_certificates: mutable darray[bool] = []
+    replayed_certificate_count: mutable u32 = 0
+    certificate_status_snapshot_complete: mutable bool = false
+    replay_gap_snapshot_available: mutable bool = false
+    replay_gap_count: mutable u32 = 0
     replay_complete: mutable bool = false
     if parse_failed:
         for parse_error in file.errors |report|:
@@ -296,8 +303,14 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         for refusal in refinement_refusals.findings |report|:
             report.proof_obligation(false)
             proof_add_finding(&report, refusal.kind, refusal.line, refusal.name, refusal.message)
-        (proof_replay_certificates(&report) can Global{Read,Write})
-        replay_complete <- proof_replay_attempt_statuses_and_complete_with_work(report, &replayed_goals, &replay_work)
+        replay_receipt: ProofReplayReceipt = (proof_replay_certificates(&report) can Global{Read,Write})
+        replay_complete <- proof_replay_receipt_is_complete(replay_receipt)
+        replay_gap: (available: bool, count: u32) = proof_replay_receipt_gap_count(replay_receipt)
+        replay_gap_snapshot_available <- replay_gap.available
+        replay_gap_count <- replay_gap.count
+        replay_complete <- false if not proof_replay_receipt_attempt_statuses_with_work(replay_receipt, &replayed_goals, &replay_work)
+        certificate_status_snapshot_complete <- proof_replay_receipt_certificate_statuses_and_count_with_work(replay_receipt, &replayed_certificates, &replayed_certificate_count, &replay_work)
+        replay_complete <- false if not certificate_status_snapshot_complete
         # R-004 bounded source-derived admission. This reads the parser-owned AST directly;
         # unlike source_declarations/declaration_details/obligation_inventory, it cannot be
         # co-edited by the proof scheduler. Focused runs have an explicitly narrower scope.
@@ -347,7 +360,9 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         semantic_errors <- semantic_errors + 1 if Semantic::diagnostic_severity(diagnostic) == 1
     source_complete: bool = proof_report_source_complete_with_replay(report, import_failed, semantic_errors, replay_complete)
     source_admissible: bool = proof_report_source_admissible_with_replay(report, import_failed, semantic_errors, replay_complete)
-    goal_source_admissible: bool = proof_report_goal_source_admissible(report, focused_goal_id, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals)
+    goal_source_admissible: mutable bool = false
+    if goal_json_output or proof_text_output:
+        goal_source_admissible <- proof_report_goal_source_admissible(report, focused_goal_id, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals)
     if goal_json_output:
         goal_replayed: bool = proof_output_cached_replay_status(replayed_goals, focused_goal_id)
         focused: mutable darray[u8] = []
@@ -392,7 +407,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         return proof_goal_route_exit(report, focused_goal_id, goal_source_admissible, goal_replayed)
     if theorem_json_output:
         catalog: mutable darray[u8] = []
-        proof_push_json_theorem_catalog_with_replayed(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible, replayed_goals, &replay_work)
+        proof_push_json_theorem_catalog_with_replayed(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals, replayed_goals, &replay_work)
         proof_write(catalog)
         return proof_route_exit(true, source_admissible)
     if package_output:
@@ -492,12 +507,12 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         return (ElisaProofCliTactics::run(slots, script_slot, script_is_text, report, source_bytes, source_fingerprint, source_complete, source_admissible) can Global{Read,Write})
     if summary_json_output:
         summary: mutable darray[u8] = []
-        proof_push_json_report_summary_with_replay(&summary, report, import_failed, semantic_errors, semantic_visible, source_bytes, source_fingerprint, replayed_goals, replay_complete, &replay_work)
+        proof_push_json_report_summary_with_replay(&summary, report, import_failed, semantic_errors, semantic_visible, source_bytes, source_fingerprint, replayed_goals, replayed_certificates, replayed_certificate_count, certificate_status_snapshot_complete, replay_complete, &replay_work)
         proof_write(summary)
         return 1 if not source_complete else 0
     if json_output:
         json: mutable darray[u8] = []
-        (proof_push_json_report_with_replay(&json, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map, focused_function_name, replayed_goals, replay_complete, &replay_work) can Global.Read)
+        (proof_push_json_report_with_replay(&json, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map, focused_function_name, replayed_goals, replayed_certificates, replayed_certificate_count, certificate_status_snapshot_complete, replay_complete, replay_gap_count, replay_gap_snapshot_available, &replay_work) can Global.Read)
         proof_write(json)
         return 1 if not source_complete else 0
     confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = proof_output_confirmation_counts(report, replayed_goals)
@@ -545,10 +560,13 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     proof_push_number(&output, semantic_visible)
     proof_push(&output, "\n")
     proof_push(&output, "  certificate replay: ")
-    proof_push_number(&output, report.replayed)
-    proof_push(&output, " replayed, ")
-    proof_push_number(&output, report.replay_gaps)
-    proof_push(&output, " gaps\n")
+    if certificate_status_snapshot_complete and replay_gap_snapshot_available:
+        proof_push_number(&output, replayed_certificate_count)
+        proof_push(&output, " replayed, ")
+        proof_push_number(&output, replay_gap_count)
+        proof_push(&output, " gaps\n")
+    else:
+        proof_push(&output, "unknown\n")
     proof_push(&output, "  source-neutral kernel: ")
     proof_push_number(&output, report.kernel.nodes.count.u32())
     proof_push(&output, " nodes, format elisa-proof-kernel-v1\n")
