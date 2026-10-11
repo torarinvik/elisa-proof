@@ -152,6 +152,9 @@ proof: a candidate is admitted solely when the checked engine solves the goal *a
 replays the certificate it produced. The response states `candidates`, `tried` and `exhaustive`;
 `exhaustive` is false when a candidate wins early or a search cap truncates discovery. A returned
 rewrite step uses `by rewrite N` or `by rewriteback N`, where `N` is a zero-based context-fact index.
+Before serializing the tactic context, repair caps it at 512 facts and preflights each AST against
+a 256 KiB state budget, a 32,768-item traversal budget and a 64-level depth limit. If any cap is
+reached, it returns no candidate and marks the search non-exhaustive.
 `unrepaired` means no proof was found in the searched candidate space and never
 that the goal is false. A source that is not admissible (it failed to parse, import, type-check or
 form its propositions) is not searched: the status is `inadmissible` and the script is null, since

@@ -1,5 +1,21 @@
 extend ElisaProof:
     private:
+        # The trace index is a bounded cache, separate from canonical proof nodes. Reserve at
+        # most two slots per admitted trace so large reports stay indexed without a full table.
+        const PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 2
+        const PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 8
+        const PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET * 8
+
+        # One report-wide budget covers hash probes and owner-chain walks during a replay batch.
+        # A per-lookup cap alone would still multiply by the number of certificate facts.
+        def proof_replay_trace_lookup_charge(report: mutable ProofReport&) -> bool:
+            return false if report.kernel.budget_exhausted
+            if report.traces.lookup_work_used >= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                proof_kernel_budget_note(report, "replay-trace-lookup")
+                return false
+            report.traces.lookup_work_used <- report.traces.lookup_work_used + 1
+            return true
+
         # Fact provenance is keyed by the owner name before exact expression/kernel equality is
         # checked. Hashes only select a probe path; the stored sview comparison remains the
         # authority, so collisions cannot admit a fact for another owner.
@@ -11,19 +27,21 @@ extend ElisaProof:
 
         def proof_replay_trace_index_capacity(count: usize) -> usize:
             return 0 if count == 0
-            # The open-addressed table grows geometrically. Reject a count whose next power of
-            # two would itself exceed the canonical report bound instead of overflowing or
-            # allocating a table larger than the arena budget.
-            return 0 if count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET / 2
+            return 0 if count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            target: usize = count * 2
             capacity: mutable usize = 1
-            while capacity < count:
-                return 0 if capacity > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET / 2
+            while capacity < target:
+                # `target` is already under the explicit slot budget. Use it directly when the
+                # next geometric step would cross that bound; open addressing only needs modulo.
+                return target if capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET / 2
                 capacity <- capacity * 2
             return capacity
 
         def proof_replay_build_fact_trace_index(report: mutable ProofReport&) -> void:
             count: usize = report.traces.records.count
             sentinel: usize = count
+            report.traces.lookup_work_used <- 0
+            return if report.kernel.budget_exhausted
             report.traces.index_hashes.clear()
             report.traces.index_values.clear()
             report.traces.next_indices.clear()
@@ -45,12 +63,20 @@ extend ElisaProof:
                 report.traces.index_values[slot] <- sentinel
                 slot <- slot + 1
             index <- 0
-            while index < count:
+            work: mutable usize = 0
+            while index < count |index, report, sentinel, capacity, work|:
                 owner: sview = report.traces.records[index].name
                 hash: u32 = proof_replay_owner_hash(owner)
                 probe_slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
-                while probes < capacity:
+                while probes < capacity |report, hash, owner, index, probe_slot, probes, capacity, work, sentinel|:
+                    if work >= PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET:
+                        report.traces.index_hashes.clear()
+                        report.traces.index_values.clear()
+                        report.traces.next_indices.clear()
+                        proof_kernel_budget_note(report, "replay-fact-index")
+                        return
+                    work <- work + 1
                     current: usize = report.traces.index_values[probe_slot]
                     if current == sentinel:
                         report.traces.index_hashes[probe_slot] <- hash
@@ -64,10 +90,11 @@ extend ElisaProof:
                     probes <- probes + 1
                 index <- index + 1
 
-        def proof_replay_fact_trace_head(report: ProofReport&, owner: sview) -> usize:
+        def proof_replay_fact_trace_head(report: mutable ProofReport&, owner: sview) -> usize:
             count: usize = report.traces.records.count
             capacity: usize = report.traces.index_values.count
             return count if capacity == 0
+            return count if report.kernel.budget_exhausted
             # These arrays are an optimization, not authoritative report data. If a caller has
             # mutated one of them independently, abandon the index rather than dereferencing a
             # mismatched hash/next slot and turning malformed input into a replay crash.
@@ -76,6 +103,7 @@ extend ElisaProof:
             slot: mutable usize = (hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
             while probes < capacity |probes, slot, hash, owner, report, capacity, count|:
+                return count if not proof_replay_trace_lookup_charge(report)
                 index: usize = report.traces.index_values[slot]
                 return count if index >= count
                 return index if report.traces.index_hashes[slot] == hash and report.traces.records[index].name == owner
@@ -88,9 +116,10 @@ extend ElisaProof:
         # exposed to revalidation callers, so a mutated link must not become an infinite loop or
         # an out-of-range dereference. Invalid and non-decreasing links terminate the chain; the
         # caller then fails to find the requested provenance rather than trusting malformed data.
-        def proof_replay_trace_chain_next(report: ProofReport&, current: usize) -> usize:
+        def proof_replay_trace_chain_next(report: mutable ProofReport&, current: usize) -> usize:
             count: usize = report.traces.records.count
             return count if current >= count or current >= report.traces.next_indices.count
+            return count if not proof_replay_trace_lookup_charge(report)
             next: usize = report.traces.next_indices[current]
             return count if next >= count or next >= current
             return next

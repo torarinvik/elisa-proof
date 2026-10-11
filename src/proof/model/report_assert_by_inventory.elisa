@@ -3,9 +3,14 @@
 # Split from report_invariants.elisa, which includes this file.
 extend ElisaProof:
     # Second independent R-004 slice: goals and checked proof steps inside `assert … by:`
-    # blocks. Store only copied scalar source identity/value data;
-    # never retain a mutable report row or an AST subtree that the checker may rewrite.
+    # blocks. Inventory entries are transient and carry the parsed source expression only so
+    # this admission pass can compare it structurally with the reported, substituted goal.
     private:
+        # Source admission must scale with the proof kernel's accepted AST size. The walker
+        # counts expressions, statements, and list entries, so use the same broad node ceiling
+        # rather than rejecting otherwise valid large source files at the report-list limit.
+        const PROOF_SOURCE_ASSERT_BY_WORK_LIMIT: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+
         def proof_source_assert_by_is_assert_callee(expression: Ast::Expr) -> bool:
             match expression:
                 Ast::Expr.Ident(name, _) | Ast::Expr.Scope(_, name, _):
@@ -13,292 +18,343 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_source_assert_by_candidate(function_name: sview, scope_supported: bool, statement: Ast::Stmt) -> (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool):
+        def proof_source_assert_by_candidate(function_name: sview, scope_supported: bool, statement: Ast::Stmt) -> (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr):
             match statement:
                 Ast::Stmt.Block(kind, _, _, body, block_position):
-                    return (false, false, "", 0, 0, 0, false) if kind != "assert_by"
-                    return (true, false, function_name, block_position.line, block_position.line, block_position.offset, false) if body.count == 0
+                    return (false, false, "", 0, 0, 0, false, Ast::Expr.Invalid) if kind != "assert_by"
+                    return (true, false, function_name, block_position.line, block_position.line, block_position.offset, false, Ast::Expr.Invalid) if body.count == 0
                     match body[0]:
                         Ast::Stmt.Contract(contract_kind, expression, contract_position):
                             match expression:
                                 Ast::Expr.BoolLit(value, position):
-                                    return (true, scope_supported and contract_kind == "assert", function_name, contract_position.line, position.line, position.offset, value)
+                                    supported: bool = scope_supported and contract_kind == "assert"
+                                    source_goal: Ast::Expr = expression if supported else Ast::Expr.Invalid
+                                    return (true, supported, function_name, contract_position.line, position.line, position.offset, value, source_goal)
                                 _:
-                                    # Keep every source goal visible. Until the report inventory
-                                    # can authenticate the checker’s scoped substitutions, a
-                                    # dynamic proposition is explicitly unsupported and source
-                                    # admission fails closed instead of omitting its obligation.
+                                    # Admit dynamic goals when the checker preserves the source
+                                    # proposition structurally. Substituted aliases that change
+                                    # the term fail the structural source check below.
                                     position: Ast::Pos = Ast::expr_pos(expression)
-                                    return (true, false, function_name, contract_position.line, position.line, position.offset, false)
+                                    supported: bool = scope_supported and contract_kind == "assert"
+                                    source_goal: Ast::Expr = expression if supported else Ast::Expr.Invalid
+                                    return (true, supported, function_name, contract_position.line, position.line, position.offset, false, source_goal)
                         _:
-                            return (true, false, function_name, block_position.line, block_position.line, block_position.offset, false)
+                            return (true, false, function_name, block_position.line, block_position.line, block_position.offset, false, Ast::Expr.Invalid)
                 _:
-                    return (false, false, "", 0, 0, 0, false)
+                    return (false, false, "", 0, 0, 0, false, Ast::Expr.Invalid)
 
-        def proof_source_assert_by_add_expression(function_name: sview, attempt_line: u32, scope_supported: bool, expression: Ast::Expr, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&) -> void:
+        def proof_source_assert_by_add_expression(function_name: sview, attempt_line: u32, scope_supported: bool, expression: Ast::Expr, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> void:
+            source_goal: Ast::Expr = expression if scope_supported else Ast::Expr.Invalid
             match expression:
                 Ast::Expr.BoolLit(value, position):
-                    inventory.push((function_name, attempt_line, position.line, position.offset, value, scope_supported))
+                    inventory.push((function_name, attempt_line, position.line, position.offset, value, source_goal, scope_supported))
                 _:
-                    # Do not silently drop a proof assertion just because its proposition is
-                    # nonliteral. The source location remains inventoried, but admission stays
-                    # closed until its substituted goal can be bound independently.
+                    # Dynamic proof assertions remain visible and are checked structurally
+                    # against their source expression by the final coverage pass.
                     position: Ast::Pos = Ast::expr_pos(expression)
-                    inventory.push((function_name, attempt_line, position.line, position.offset, false, false))
+                    inventory.push((function_name, attempt_line, position.line, position.offset, false, source_goal, scope_supported))
 
         # Scan nested expressions too: block expressions, lambdas, matches and recovery arms
         # can own statement lists containing assert-by blocks. Such nested executable scopes are
         # inventoried as unsupported rather than silently disappearing from the source walk.
-        def proof_source_assert_by_collect_expression(function_name: sview, expression: Ast::Expr, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, depth: usize) -> void:
+        def proof_source_assert_by_collect_expression(function_name: sview, expression: Ast::Expr, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, work: mutable usize&) -> void:
+            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+            work <- work + 1
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
-                inventory.push((function_name, 0, 0, 0, false, false))
+                inventory.push((function_name, 0, 0, 0, false, Ast::Expr.Invalid, false))
                 return
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
-                    proof_source_assert_by_collect_expression(function_name, callee, inventory, depth + 1)
-                    for argument in arguments |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, callee, inventory, depth + 1, work)
+                    for argument in arguments |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1, work)
                 Ast::Expr.StaticEffectCall(effect_type, _, _, arguments, _, _):
-                    proof_source_assert_by_collect_expression(function_name, effect_type, inventory, depth + 1)
-                    for argument in arguments |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, effect_type, inventory, depth + 1, work)
+                    for argument in arguments |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1, work)
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
-                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1, work)
                 Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _):
-                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, index, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, index, inventory, depth + 1, work)
                 Ast::Expr.Slice(object, low, high, _):
-                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, low, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, high, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, low, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, high, inventory, depth + 1, work)
                 Ast::Expr.IndexN(object, arguments, _):
-                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1)
-                    for argument in arguments |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, object, inventory, depth + 1, work)
+                    for argument in arguments |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, argument, inventory, depth + 1, work)
                 Ast::Expr.Unary(_, operand, _):
-                    proof_source_assert_by_collect_expression(function_name, operand, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, operand, inventory, depth + 1, work)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, element, inventory, depth + 1)
+                    for element in elements |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, element, inventory, depth + 1, work)
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, entry.key, inventory, depth + 1)
-                        proof_source_assert_by_collect_expression(function_name, entry.value, inventory, depth + 1)
+                    for entry in entries |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, entry.key, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_expression(function_name, entry.value, inventory, depth + 1, work)
                 Ast::Expr.Construct(type_expression, fields, _):
-                    proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1)
-                    for field in fields |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, field.value, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1, work)
+                    for field in fields |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, field.value, inventory, depth + 1, work)
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    proof_source_assert_by_collect_expression(function_name, base, inventory, depth + 1)
-                    for field in fields |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, field.value, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, base, inventory, depth + 1, work)
+                    for field in fields |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, field.value, inventory, depth + 1, work)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, then_expression, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, else_expression, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, then_expression, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, else_expression, inventory, depth + 1, work)
                 Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
-                    proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1)
-                    for arm in arms |function_name, inventory, depth|:
-                        proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1)
-                        proof_source_assert_by_collect_body(function_name, false, arm.body, inventory, depth + 1, false, false)
+                    proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1, work)
+                    for arm in arms |function_name, inventory, depth, work|:
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                        proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_body(function_name, false, arm.body, inventory, depth + 1, false, false, work)
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, body, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, body, inventory, depth + 1, work)
                 Ast::Expr.Refinement(base, predicate, _):
-                    proof_source_assert_by_collect_expression(function_name, base, inventory, depth + 1)
-                    proof_source_assert_by_collect_expression(function_name, predicate, inventory, depth + 1)
+                    proof_source_assert_by_collect_expression(function_name, base, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_expression(function_name, predicate, inventory, depth + 1, work)
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    proof_source_assert_by_collect_expression(function_name, guarded, inventory, depth + 1)
-                    proof_source_assert_by_collect_body(function_name, false, recovery, inventory, depth + 1, false, false)
+                    proof_source_assert_by_collect_expression(function_name, guarded, inventory, depth + 1, work)
+                    proof_source_assert_by_collect_body(function_name, false, recovery, inventory, depth + 1, false, false, work)
                 Ast::Expr.Lambda(_, body, _):
-                    proof_source_assert_by_collect_body(function_name, false, body, inventory, depth + 1, false, false)
+                    proof_source_assert_by_collect_body(function_name, false, body, inventory, depth + 1, false, false, work)
                 Ast::Expr.Block(statements, value, _, _):
-                    proof_source_assert_by_collect_body(function_name, false, statements, inventory, depth + 1, false, false)
-                    proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1)
-                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    proof_source_assert_by_collect_body(function_name, false, statements, inventory, depth + 1, false, false, work)
+                    proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1, work)
+                Ast::Expr.Invalid:
+                    position: Ast::Pos = Ast::expr_pos(expression)
+                    inventory.push((function_name, position.line, position.line, position.offset, false, Ast::Expr.Invalid, false))
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
                     pass
                 _:
                     position: Ast::Pos = Ast::expr_pos(expression)
-                    inventory.push((function_name, position.line, position.line, position.offset, false, false))
+                    inventory.push((function_name, position.line, position.line, position.offset, false, Ast::Expr.Invalid, false))
 
         # This mirrors the proof-step forms that actually create proposition attempts.
         # Other statements are recursively scanned for nested block expressions; if one owns
         # assert-by source, it is recorded with supported=false until scope identity is modeled.
-        def proof_source_assert_by_collect_steps(function_name: sview, scope_supported: bool, body: darray[Ast::Stmt]&, start: usize, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, depth: usize) -> void:
+        def proof_source_assert_by_collect_steps(function_name: sview, scope_supported: bool, body: darray[Ast::Stmt]&, start: usize, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, work: mutable usize&) -> void:
+            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
-                inventory.push((function_name, 0, 0, 0, false, false))
+                inventory.push((function_name, 0, 0, 0, false, Ast::Expr.Invalid, false))
                 return
             return if start >= body.count
-            for index in start..<body.count |index, body, function_name, scope_supported, inventory, depth|:
+            work <- work + 1
+            for index in start..<body.count |index, body, function_name, scope_supported, inventory, depth, work|:
+                return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                work <- work + 1
                 statement: Ast::Stmt = body[index]
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
+                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1, work)
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
                         proof_source_assert_by_add_expression(function_name, position.line, scope_supported, expression, inventory) if kind == "assert"
-                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1)
                     Ast::Stmt.Expr(expression, position):
+                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1, work)
+                        return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
                         match expression:
                             Ast::Expr.Call(callee, arguments, _, _):
                                 if proof_source_assert_by_is_assert_callee(callee):
                                     proof_source_assert_by_add_expression(function_name, position.line, scope_supported, arguments[0], inventory) if arguments.count == 1
-                                    inventory.push((function_name, position.line, position.line, position.offset, false, false)) if arguments.count != 1
+                                    inventory.push((function_name, position.line, position.line, position.offset, false, Ast::Expr.Invalid, false)) if arguments.count != 1
                             _:
                                 pass
-                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1)
                     Ast::Stmt.Block(kind, _, _, nested, _):
                         if kind == "assert_by":
-                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool) = proof_source_assert_by_candidate(function_name, false, statement)
-                            inventory.push((candidate.name, candidate.attempt_line, candidate.goal_line, candidate.goal_offset, candidate.expected_value, candidate.supported)) if candidate.found
-                            proof_source_assert_by_collect_steps(function_name, false, nested, 1, inventory, depth + 1)
+                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr) = proof_source_assert_by_candidate(function_name, false, statement)
+                            inventory.push((candidate.name, candidate.attempt_line, candidate.goal_line, candidate.goal_offset, candidate.expected_value, candidate.source_goal, candidate.supported)) if candidate.found
+                            proof_source_assert_by_collect_steps(function_name, false, nested, 1, inventory, depth + 1, work)
                         else:
-                            proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false)
+                            proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
-                        proof_source_assert_by_collect_body(function_name, false, then_body, inventory, depth + 1, false, false)
-                        proof_source_assert_by_collect_body(function_name, false, else_body, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_body(function_name, false, then_body, inventory, depth + 1, false, false, work)
+                        proof_source_assert_by_collect_body(function_name, false, else_body, inventory, depth + 1, false, false, work)
                     Ast::Stmt.While(condition, nested, _):
-                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
-                        proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.For(_, _, iterable, nested, _):
-                        proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1)
-                        proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1)
-                        for arm in arms |function_name, inventory, depth|:
-                            proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1)
-                            proof_source_assert_by_collect_body(function_name, false, arm.body, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1, work)
+                        for arm in arms |function_name, inventory, depth, work|:
+                            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                            proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1, work)
+                            proof_source_assert_by_collect_body(function_name, false, arm.body, inventory, depth + 1, false, false, work)
                     Ast::Stmt.VarDecl(_, type_expression, value, _):
-                        proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1)
-                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1, work)
                     Ast::Stmt.Assign(target, _, value, _):
-                        proof_source_assert_by_collect_expression(function_name, target, inventory, depth + 1)
-                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, target, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1, work)
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            proof_source_assert_by_collect_expression(function_name, returned, inventory, depth + 1)
+                            proof_source_assert_by_collect_expression(function_name, returned, inventory, depth + 1, work)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
-                        inventory.push((function_name, 0, 0, 0, false, false))
+                        inventory.push((function_name, 0, 0, 0, false, Ast::Expr.Invalid, false))
 
-        def proof_source_assert_by_collect_body(function_name: sview, scope_supported: bool, body: darray[Ast::Stmt]&, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, depth: usize, allow_direct_branch: bool, allow_direct_loop: bool) -> void:
+        def proof_source_assert_by_collect_body(function_name: sview, scope_supported: bool, body: darray[Ast::Stmt]&, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, allow_direct_branch: bool, allow_direct_loop: bool, work: mutable usize&) -> void:
+            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
-                inventory.push((function_name, 0, 0, 0, false, false))
+                inventory.push((function_name, 0, 0, 0, false, Ast::Expr.Invalid, false))
                 return
-            for statement in body |function_name, scope_supported, inventory, depth, allow_direct_branch, allow_direct_loop|:
+            work <- work + 1
+            for statement in body |function_name, scope_supported, inventory, depth, allow_direct_branch, allow_direct_loop, work|:
+                return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                work <- work + 1
                 match statement:
                     Ast::Stmt.Block(kind, _, _, nested, _):
                         if kind == "assert_by":
-                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool) = proof_source_assert_by_candidate(function_name, scope_supported, statement)
-                            inventory.push((candidate.name, candidate.attempt_line, candidate.goal_line, candidate.goal_offset, candidate.expected_value, candidate.supported)) if candidate.found
                             if nested.count > 0:
                                 match nested[0]:
                                     Ast::Stmt.Contract(_, expression, _):
-                                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1)
+                                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1, work)
                                     _:
                                         pass
-                            proof_source_assert_by_collect_steps(function_name, scope_supported, nested, 1, inventory, depth + 1)
+                            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr) = proof_source_assert_by_candidate(function_name, scope_supported, statement)
+                            inventory.push((candidate.name, candidate.attempt_line, candidate.goal_line, candidate.goal_offset, candidate.expected_value, candidate.source_goal, candidate.supported)) if candidate.found
+                            proof_source_assert_by_collect_steps(function_name, scope_supported, nested, 1, inventory, depth + 1, work)
                         else:
                             block_scope_supported: bool = scope_supported and kind == ""
-                            proof_source_assert_by_collect_body(function_name, block_scope_supported, nested, inventory, depth + 1, allow_direct_branch and kind == "", allow_direct_loop and kind == "")
+                            proof_source_assert_by_collect_body(function_name, block_scope_supported, nested, inventory, depth + 1, allow_direct_branch and kind == "", allow_direct_loop and kind == "", work)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
                         # Only a direct function-body branch gets branch coverage. A nested
                         # branch would need its full path in the report identity, which the
                         # current goal-attempt model does not carry; keep it visible, unsupported.
                         branch_supported: bool = scope_supported and allow_direct_branch
-                        proof_source_assert_by_collect_body(function_name, branch_supported, then_body, inventory, depth + 1, false, false)
-                        proof_source_assert_by_collect_body(function_name, branch_supported, else_body, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_body(function_name, branch_supported, then_body, inventory, depth + 1, false, false, work)
+                        proof_source_assert_by_collect_body(function_name, branch_supported, else_body, inventory, depth + 1, false, false, work)
                     Ast::Stmt.While(condition, nested, _):
-                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, condition, inventory, depth + 1, work)
                         # The loop body has a unique enclosing function and each assert-by
                         # proposition retains its exact imported offset. Only loops reached
                         # directly from that function body are covered; their nested control
                         # flow lacks path identity in ProofGoalAttempt and remains unsupported.
                         loop_body_supported: bool = scope_supported and allow_direct_loop
-                        proof_source_assert_by_collect_body(function_name, loop_body_supported, nested, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_body(function_name, loop_body_supported, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.For(_, _, iterable, nested, _):
-                        proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, iterable, inventory, depth + 1, work)
                         loop_body_supported: bool = scope_supported and allow_direct_loop
-                        proof_source_assert_by_collect_body(function_name, loop_body_supported, nested, inventory, depth + 1, false, false)
+                        proof_source_assert_by_collect_body(function_name, loop_body_supported, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, scrutinee, inventory, depth + 1, work)
                         branch_supported: bool = scope_supported and allow_direct_branch
-                        for arm in arms |function_name, branch_supported, inventory, depth|:
-                            proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1)
-                            proof_source_assert_by_collect_body(function_name, branch_supported, arm.body, inventory, depth + 1, false, false)
+                        for arm in arms |function_name, branch_supported, inventory, depth, work|:
+                            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                            proof_source_assert_by_collect_expression(function_name, arm.guard, inventory, depth + 1, work)
+                            proof_source_assert_by_collect_body(function_name, branch_supported, arm.body, inventory, depth + 1, false, false, work)
                     Ast::Stmt.Expr(expression, _):
-                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1, work)
                     Ast::Stmt.VarDecl(_, type_expression, value, _):
-                        proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1)
-                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, type_expression, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1, work)
                     Ast::Stmt.Assign(target, _, value, _):
-                        proof_source_assert_by_collect_expression(function_name, target, inventory, depth + 1)
-                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, target, inventory, depth + 1, work)
+                        proof_source_assert_by_collect_expression(function_name, value, inventory, depth + 1, work)
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            proof_source_assert_by_collect_expression(function_name, returned, inventory, depth + 1)
+                            proof_source_assert_by_collect_expression(function_name, returned, inventory, depth + 1, work)
                     Ast::Stmt.Contract(_, expression, _):
-                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1)
+                        proof_source_assert_by_collect_expression(function_name, expression, inventory, depth + 1, work)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
-                        inventory.push((function_name, 0, 0, 0, false, false))
+                        inventory.push((function_name, 0, 0, 0, false, Ast::Expr.Invalid, false))
 
     private:
-        def proof_source_assert_by_collect_declarations(declarations: darray[Ast::Decl]&, scope_supported: bool, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, depth: usize) -> void:
+        def proof_source_assert_by_collect_declarations(declarations: darray[Ast::Decl]&, scope_supported: bool, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, work: mutable usize&) -> void:
+            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
-                inventory.push(("", 0, 0, 0, false, false))
+                inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
                 return
-            for declaration in declarations |scope_supported, inventory, depth|:
+            work <- work + 1
+            for declaration in declarations |scope_supported, inventory, depth, work|:
+                return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                work <- work + 1
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, _):
-                        proof_source_assert_by_collect_body(name, scope_supported, body, inventory, depth + 1, true, true)
+                        proof_source_assert_by_collect_body(name, scope_supported, body, inventory, depth + 1, true, true, work)
                     # Names in nested namespaces are intentionally marked unsupported until
                     # source and attempt identities include the full namespace path.
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_source_assert_by_collect_declarations(nested, false, inventory, depth + 1)
-                    _:
+                        proof_source_assert_by_collect_declarations(nested, false, inventory, depth + 1, work)
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _):
                         pass
+                    Ast::Decl.Invalid:
+                        inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
+                    _:
+                        inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
 
-        def proof_source_assert_by_focused_function_is_scheduled(report: ProofReport&, name: sview, line: u32) -> bool:
+        def proof_source_assert_by_focused_function_is_scheduled(report: ProofReport&, name: sview, line: u32, work: mutable usize&) -> bool:
             return true if report.focused_function == "" or report.focused_function == name
-            for summary in report.declaration_details |report, name, line|:
+            for summary in report.declaration_details |report, name, line, work|:
+                return false if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                work <- work + 1
                 return summary.verification_reason != "not-requested" if summary.name == name and summary.line == line
             return false
 
-        def proof_source_assert_by_collect_focused_declarations(declarations: darray[Ast::Decl]&, scope_supported: bool, report: ProofReport&, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, depth: usize) -> void:
+        def proof_source_assert_by_collect_focused_declarations(declarations: darray[Ast::Decl]&, scope_supported: bool, report: ProofReport&, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, work: mutable usize&) -> void:
+            return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
-                inventory.push(("", 0, 0, 0, false, false))
+                inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
                 return
-            for declaration in declarations |scope_supported, report, inventory, depth|:
+            work <- work + 1
+            for declaration in declarations |scope_supported, report, inventory, depth, work|:
+                return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+                work <- work + 1
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, position):
-                        if proof_source_assert_by_focused_function_is_scheduled(report, name, position.line):
-                            proof_source_assert_by_collect_body(name, scope_supported, body, inventory, depth + 1, true, true)
+                        if proof_source_assert_by_focused_function_is_scheduled(report, name, position.line, work):
+                            proof_source_assert_by_collect_body(name, scope_supported, body, inventory, depth + 1, true, true, work)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_source_assert_by_collect_focused_declarations(nested, false, report, inventory, depth + 1)
-                    _:
+                        proof_source_assert_by_collect_focused_declarations(nested, false, report, inventory, depth + 1, work)
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _):
                         pass
+                    Ast::Decl.Invalid:
+                        inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
+                    _:
+                        inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
 
     public:
-        def proof_source_assert_by_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]:
-            inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = []
-            proof_source_assert_by_collect_declarations(declarations, true, inventory, 0)
+        def proof_source_assert_by_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]:
+            inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
+            work: mutable usize = 0
+            proof_source_assert_by_collect_declarations(declarations, true, inventory, 0, &work)
+            inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false)) if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             return inventory
 
-        def proof_source_assert_by_inventory_has_unsupported(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&) -> bool:
+        def proof_source_assert_by_inventory_has_unsupported(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
             for expected in inventory:
                 return true if not expected.supported
             return false
 
         def proof_source_assert_by_focused_coverage(report: ProofReport&) -> bool:
-            inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = []
-            proof_source_assert_by_collect_focused_declarations(report.source_declarations, true, report, &inventory, 0)
+            inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
+            work: mutable usize = 0
+            proof_source_assert_by_collect_focused_declarations(report.source_declarations, true, report, &inventory, 0, &work)
+            inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false)) if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             return proof_source_assert_by_coverage(inventory, report)
 
     private:
-        def proof_source_assert_by_inventory_find(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, goal: Ast::Expr) -> usize:
+        def proof_source_assert_by_inventory_find(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal: Ast::Expr) -> usize:
             position: Ast::Pos = Ast::expr_pos(goal)
             low: mutable usize = 0
             high: mutable usize = inventory.count
@@ -312,20 +368,24 @@ extend ElisaProof:
             return low if inventory[low].goal_offset == position.offset and inventory[low].goal_line == position.line
             return inventory.count
 
-        def proof_source_assert_by_goal_has_identity(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)) -> bool:
+        def proof_source_assert_by_goal_has_identity(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)) -> bool:
             position: Ast::Pos = Ast::expr_pos(goal)
-            return position.line == expected.goal_line and position.offset == expected.goal_offset
+            source_position: Ast::Pos = Ast::expr_pos(expected.source_goal)
+            return false if position.line != expected.goal_line or position.offset != expected.goal_offset
+            return false if source_position.line != expected.goal_line or source_position.offset != expected.goal_offset
+            return position.line == source_position.line and position.column == source_position.column and position.offset == source_position.offset and position.end_line == source_position.end_line and position.end_column == source_position.end_column and position.end_offset == source_position.end_offset
 
-        def proof_source_assert_by_goal_matches(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)) -> bool:
+        def proof_source_assert_by_goal_matches(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)) -> bool:
             return false if not expected.supported or not proof_source_assert_by_goal_has_identity(goal, expected)
-            match goal:
-                Ast::Expr.BoolLit(actual_value, position):
-                    return actual_value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
+            return false if not proof_expr_equal(goal, expected.source_goal)
+            match expected.source_goal:
+                Ast::Expr.BoolLit(source_value, position):
+                    return source_value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
                 _:
-                    return false
+                    return true
 
     private:
-        def proof_source_assert_by_coverage_inner(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, report: ProofReport&, require_replayed: bool) -> bool:
+        def proof_source_assert_by_coverage_inner(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&, require_replayed: bool) -> bool:
             matched: mutable darray[bool] = []
             previous_offset: mutable u32 = 0
             has_previous: mutable bool = false
@@ -338,7 +398,7 @@ extend ElisaProof:
             for attempt in report.goal_attempts |inventory, matched, report|:
                 expected_index: usize = proof_source_assert_by_inventory_find(inventory, attempt.goal)
                 if expected_index < inventory.count and attempt.name == inventory[expected_index].name:
-                    expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool) = inventory[expected_index]
+                    expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool) = inventory[expected_index]
                     return false if matched[expected_index]
                     matched[expected_index] <- true
                     return false if attempt.rule != "goal" or attempt.line != expected.attempt_line or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
@@ -353,11 +413,11 @@ extend ElisaProof:
     public:
         # Before replay, bind source targets and proof steps to their produced attempts and
         # certificate claims. Replay remains an explicit API operation for compatibility.
-        def proof_source_assert_by_attempt_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, report: ProofReport&) -> bool:
+        def proof_source_assert_by_attempt_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&) -> bool:
             return proof_source_assert_by_coverage_inner(inventory, report, false)
 
         # Final admission additionally requires every certificate to have been replayed.
         # Direct if/match branches and loops preserve the function owner; unsupported nested
         # control paths and scopes fail closed until their path identity is modeled.
-        def proof_source_assert_by_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)]&, report: ProofReport&) -> bool:
+        def proof_source_assert_by_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&) -> bool:
             return proof_source_assert_by_coverage_inner(inventory, report, true)

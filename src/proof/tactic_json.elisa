@@ -133,6 +133,21 @@ extend ElisaProof:
                 annotations.push(Ast::EnumAnnotation{owner: "__contract_quantifier", name: name.value, line: line})
             return true
 
+        def proof_tactic_json_action_fields_valid(action: sview, has_argument: bool, has_secondary: bool, has_argument_index: bool) -> bool:
+            if action == "have":
+                return has_argument and not has_secondary and not has_argument_index
+            if action == "instantiate":
+                return has_argument and not has_secondary and has_argument_index
+            if action == "rewrite":
+                return not has_argument and not has_secondary if has_argument_index
+                return has_argument and has_secondary
+            if action == "rewriteback":
+                return has_argument_index and not has_argument and not has_secondary
+            if action == "apply":
+                return not has_argument and not has_secondary
+            return false if has_argument or has_secondary or has_argument_index
+            return action == "assumption" or action == "exact" or action == "decide" or action == "intro" or action == "simp" or action == "split" or action == "cases" or action == "left" or action == "right"
+
         def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&, source_bound: bool) -> bool can[Global.Read, Global.Write]:
             return false if action == "split" or action == "cases"
             return false if (proof_float_mode can Global.Read) and action != "assumption" and action != "exact"
@@ -141,6 +156,8 @@ extend ElisaProof:
             return (proof_tactic_exact(state, annotations) can Global{Read,Write}) if action == "exact"
             return (proof_tactic_decide(state, annotations) can Global{Read,Write}) if action == "decide"
             return proof_tactic_intro(state) if action == "intro"
+            return false if action == "apply" and (has_argument or has_secondary)
+            return proof_tactic_apply_from_fact(state, argument_index, annotations) if action == "apply" and has_argument_index
             return proof_tactic_apply(state, annotations) if action == "apply"
             return (proof_tactic_simplify_source_bound(state, annotations) can Global{Read,Write}) if source_bound and action == "simp"
             return (proof_tactic_simplify(state, annotations) can Global{Read,Write}) if action == "simp"
@@ -262,6 +279,8 @@ extend ElisaProof:
                 expected_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(item, "accepted")
                 expected: (known: bool, value: bool) = proof_tactic_json_bool(expected_field.value) if expected_field.known else (true, true)
                 return invalid if (argument_field.known and not argument.known) or (secondary_field.known and not secondary.known) or (index_field.known and (not parsed_index.known or parsed_index.value < 0)) or (expected_field.known and not expected.known)
+                return invalid if not proof_tactic_json_action_fields_valid(action.value, argument_field.known, secondary_field.known, index_field.known)
+                before_action_count: usize = state.action_count
                 actual: mutable bool = false
                 if action.value == "split" or action.value == "cases":
                     return invalid if not allow_branch
@@ -293,6 +312,10 @@ extend ElisaProof:
                         branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and (proof_tactic_kernel_branch_transition_replay(state, left_branch_state, right_branch_state, annotations) can Global{Read,Write})
                 else:
                     actual <- (proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound) can Global{Read,Write})
+                # Every well-formed action, including a rejected one, must leave a replayable
+                # trace entry. Otherwise an unknown action paired with `accepted: false` could
+                # be silently treated as a no-op and disappear from both replay passes.
+                return invalid if state.action_count != before_action_count + 1
                 # A refused action is a well-formed script whose claimed outcome is false; report it
                 # separately from malformed input so a client can tell which part to repair.
                 contradicted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, action_count: state.action_count, accepted_count: accepted_count, reason: "tactic action outcome contradicted the script's expected acceptance"}
