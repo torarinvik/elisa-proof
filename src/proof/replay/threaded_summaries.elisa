@@ -25,7 +25,9 @@ extend ElisaProof:
 
         # The unique source declaration of the callee and whether it may thread.
         def proof_replay_thread_callee_find(declarations: darray[Ast::Decl]&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
+                found <- 2
+                return
             for declaration in declarations |name, line, found, safe, mutable_slots, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate, parameters, return_type, _, effects, _, position):
@@ -46,7 +48,10 @@ extend ElisaProof:
 
         # Declarations of `local_name` in an owner body: (count, any of them a reference).
         def proof_replay_thread_local_declarations(body: darray[Ast::Stmt]&, local_name: sview, count: mutable usize&, reference: mutable bool&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
+                count <- 2
+                reference <- true
+                return
             for statement in body |local_name, count, reference, depth|:
                 match statement:
                     Ast::Stmt.VarDecl(name, type_expression, initializer, _):
@@ -101,11 +106,23 @@ extend ElisaProof:
         # Validate a summary's threaded bindings against its callee and source call. Returns an
         # inactive, valid plan when the summary threads nothing.
         def proof_replay_summary_threading(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, call: Ast::Expr) -> ProofReplayThreading can[Memory.Allocate, Abort.Panic]:
+            source_work: mutable usize = 0
+            return proof_replay_summary_threading_with_work(report, trace, summary, call, &source_work)
+
+        def proof_replay_summary_threading_with_work(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, call: Ast::Expr, source_work: mutable usize&) -> ProofReplayThreading can[Memory.Allocate, Abort.Panic]:
+            return proof_replay_threading_none(false) if not proof_replay_summary_expr_charge_with_work(call, source_work)
             first: usize = trace.summary_bindings_start + summary.parameters_count + 1
             count: mutable usize = 0
             while first + count < trace.summary_bindings_start + trace.summary_bindings_count and first + count < report.traces.summary_names.count and report.traces.summary_names[first + count] == "__threaded_state" |count, first, trace, report|:
+                return proof_replay_threading_none(false) if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 count <- count + 1
             return proof_replay_threading_none(true) if count == 0
+            return proof_replay_threading_none(false) if not proof_replay_mutable_local_trace_work_charge(report, source_work, count)
+            return proof_replay_threading_none(false) if report.source_region_param_lines.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.source_region_param_lines.count
+            for slot_index in 0..<count |slot_index, source_work, report, trace|:
+                return proof_replay_threading_none(false) if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, source_work)
             invalid: ProofReplayThreading = proof_replay_threading_none(false)
             found: mutable usize = 0
             safe: mutable bool = false
@@ -122,6 +139,10 @@ extend ElisaProof:
                     return invalid
             body: mutable darray[Ast::Stmt] = []
             return invalid if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+            body_cost: mutable usize = 0
+            return invalid if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)
+            return invalid if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / count
+            source_work <- source_work + body_cost * count
             plan: mutable ProofReplayThreading = proof_replay_threading_none(true)
             for index in 0..<count |index, mutable_slots, arguments, summary, report, trace, first, body, plan, invalid|:
                 slot: usize = mutable_slots[index]
@@ -143,7 +164,8 @@ extend ElisaProof:
                 plan.slots.push(slot)
             # Parameters, from here on, name the callee's formals.
             plan.parameters.clear()
-            for slot in plan.slots |plan, report, summary|:
+            for slot in plan.slots |plan, report, summary, invalid|:
+                return invalid if summary.parameters_start > report.executables.parameters.count or slot >= report.executables.parameters.count - summary.parameters_start
                 plan.parameters.push(report.executables.parameters[summary.parameters_start + slot])
             for symbol in plan.symbols |report, trace, invalid|:
                 return invalid if not proof_replay_thread_symbol_fresh(report, trace, symbol)
@@ -250,6 +272,11 @@ extend ElisaProof:
         # symbol denoting the value it had: its new value is the call's exit symbol. Only a summary
         # of that very call whose threading validates names the local.
         def proof_replay_thread_call_resymbolized(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_thread_call_resymbolized_with_work(report, owner, statement, local_name, &source_work)
+
+        def proof_replay_thread_call_resymbolized_with_work(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_mutable_local_statement_work_charge(statement, source_work, 0)
             call: Ast::Expr = proof_replay_thread_statement_call(statement, local_name)
             callee_name: mutable sview = ""
             arguments: mutable darray[Ast::Expr] = []
@@ -260,14 +287,20 @@ extend ElisaProof:
                 _:
                     return false
             return false if callee_name == ""
+            return false if not proof_replay_summary_expr_charge_with_work(call, source_work)
+            return false if not proof_replay_mutable_local_trace_work_charge(report, source_work, 1)
             line: u32 = Ast::expr_pos(call).line
-            for candidate in report.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line|:
+            for candidate in report.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line, source_work|:
                 continue if candidate.kind != "function-summary" or candidate.name != owner or candidate.line != line or candidate.dependency != callee_name
-                continue if proof_replay_trace_owner_function_line(report, candidate.name, candidate.line) != report.replay_owner_line
-                for summary in report.executables.summaries |summary, candidate, report, call, arguments, local_name|:
+                continue if proof_replay_trace_owner_function_line_with_work(report, candidate.name, candidate.line, source_work) != report.replay_owner_line
+                return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + report.executables.summaries.count
+                for summary in report.executables.summaries |summary, candidate, report, call, arguments, local_name, source_work|:
+                    return false if sview_len(summary.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                    source_work <- source_work + sview_len(summary.name)
                     continue if summary.name != candidate.dependency or (candidate.owner_line != 0 and summary.line != candidate.owner_line)
                     continue if not summary.verified
-                    threading: ProofReplayThreading = proof_replay_summary_threading(report, candidate, summary, call)
+                    threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, candidate, summary, call, source_work)
                     continue if not threading.valid
                     for slot in threading.slots |slot, arguments, local_name|:
                         return true if slot < arguments.count and proof_replay_thread_argument_local(arguments[slot]) == local_name

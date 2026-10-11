@@ -5,18 +5,58 @@ extend ElisaProof:
     private:
         const PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT: usize = 127
 
+        def proof_replay_precondition_work_add(work: mutable usize&, amount: usize) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + amount
+            return true
+
+        def proof_replay_precondition_expr_repetition_charge(expression: Ast::Expr, repetitions: usize, work: mutable usize&) -> bool:
+            return true if repetitions == 0
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost(expression, &cost, work, 0)
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / repetitions
+            work <- work + cost * repetitions
+            return true
+
         def proof_replay_precondition_source_tree_charge(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
-            if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
-                return false
+            return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + declarations.count
             for declaration in declarations |work, depth|:
                 match declaration:
-                    Ast::Decl.Alias(_, target, _):
+                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                        return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + parameters.count
+                        for parameter in parameters |work|:
+                            return false if sview_len(parameter.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + sview_len(parameter.name)
+                            return false if not proof_replay_summary_expr_charge_with_work(parameter.type_expression, work)
+                            return false if parameter.has_default and not proof_replay_summary_expr_charge_with_work(parameter.default_value, work)
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Import(name, _) | Ast::Decl.Law(name, _, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                    Ast::Decl.Alias(name, target, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
                         return false if not proof_replay_summary_expr_charge_with_work(target, work)
-                    Ast::Decl.Enum(_, variants, _, _, _):
+                    Ast::Decl.Enum(name, variants, _, _, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
                         return false if variants.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                         work <- work + variants.count
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        for variant in variants |work|:
+                            return false if sview_len(variant.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + sview_len(variant.name)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        return false if not proof_replay_precondition_source_tree_charge(nested, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_precondition_source_tree_charge(nested, work, depth + 1)
                     _:
                         pass
@@ -38,60 +78,72 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_replay_precondition_type_alias_count(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
+        def proof_replay_precondition_type_alias_count(declarations: darray[Ast::Decl]&, name: sview, work: mutable usize&, depth: usize) -> usize:
             return 2 if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
             count: mutable usize = 0
-            for declaration in declarations |name, depth, count|:
+            for declaration in declarations |name, depth, count, work|:
+                return 2 if not proof_replay_precondition_work_add(work, 1)
                 match declaration:
                     Ast::Decl.Alias(candidate, _, _):
+                        return 2 if not proof_replay_precondition_work_add(work, sview_len(candidate))
+                        return 2 if not proof_replay_precondition_work_add(work, sview_len(name))
                         count <- count + 1 if candidate == name
                     Ast::Decl.Module(_, nested, _):
-                        count <- count + proof_replay_precondition_type_alias_count(nested, name, depth + 1)
+                        count <- count + proof_replay_precondition_type_alias_count(nested, name, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        count <- count + proof_replay_precondition_type_alias_count(nested, name, depth + 1)
+                        count <- count + proof_replay_precondition_type_alias_count(nested, name, work, depth + 1)
                     _:
                         pass
                 return 2 if count > 1
             return count
 
-        def proof_replay_precondition_type_alias_target(declarations: darray[Ast::Decl]&, name: sview, target: mutable Ast::Expr&, depth: usize) -> bool:
+        def proof_replay_precondition_type_alias_target(declarations: darray[Ast::Decl]&, name: sview, target: mutable Ast::Expr&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
-            for declaration in declarations |name, target, depth|:
+            for declaration in declarations |name, target, work, depth|:
+                return false if not proof_replay_precondition_work_add(work, 1)
                 match declaration:
                     Ast::Decl.Alias(candidate, candidate_target, _):
+                        return false if not proof_replay_precondition_work_add(work, sview_len(candidate))
+                        return false if not proof_replay_precondition_work_add(work, sview_len(name))
                         if candidate == name:
                             target <- candidate_target
                             return true
                     Ast::Decl.Module(_, nested, _):
-                        return true if proof_replay_precondition_type_alias_target(nested, name, target, depth + 1)
+                        return true if proof_replay_precondition_type_alias_target(nested, name, target, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return true if proof_replay_precondition_type_alias_target(nested, name, target, depth + 1)
+                        return true if proof_replay_precondition_type_alias_target(nested, name, target, work, depth + 1)
                     _:
                         pass
             return false
 
-        def proof_replay_precondition_refinement_capture(predicate: Ast::Expr, parameters: darray[Ast::ParamDecl]&) -> bool:
+        def proof_replay_precondition_refinement_capture(predicate: Ast::Expr, parameters: darray[Ast::ParamDecl]&, work: mutable usize&) -> bool:
+            return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + parameters.count
+            return false if not proof_replay_precondition_expr_repetition_charge(predicate, parameters.count + 1, work)
             return true if proof_expr_mentions_name(predicate, "result")
-            for parameter in parameters |predicate|:
+            for parameter in parameters |predicate, work|:
+                return false if not proof_replay_precondition_work_add(work, sview_len(parameter.name))
                 return true if parameter.name != "self" and proof_expr_mentions_name(predicate, parameter.name)
             return false
 
-        def proof_replay_precondition_refinement_matches(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, parameters: darray[Ast::ParamDecl]&, parameter_name: sview, required: Ast::Expr, depth: usize) -> bool:
+        def proof_replay_precondition_refinement_matches(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, parameters: darray[Ast::ParamDecl]&, parameter_name: sview, required: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
+            return false if not proof_replay_summary_expr_charge_with_work(type_expression, work)
+            return false if not proof_replay_summary_expr_charge_with_work(required, work)
             match type_expression:
                 Ast::Expr.Refinement(base, predicate, _):
-                    if not proof_replay_precondition_refinement_capture(predicate, parameters):
+                    if not proof_replay_precondition_refinement_capture(predicate, parameters, work):
                         subject: Ast::Expr = Ast::Expr.Ident(parameter_name, Ast::expr_pos(predicate))
                         substituted: Ast::Expr = proof_replay_substitute(predicate, "self", subject)
                         return true if not proof_replay_expr_is_invalid(substituted) and proof_replay_expr_equal(substituted, required)
-                    return proof_replay_precondition_refinement_matches(base, declarations, parameters, parameter_name, required, depth + 1)
+                    return proof_replay_precondition_refinement_matches(base, declarations, parameters, parameter_name, required, work, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_precondition_refinement_matches(inner, declarations, parameters, parameter_name, required, depth + 1)
+                    return proof_replay_precondition_refinement_matches(inner, declarations, parameters, parameter_name, required, work, depth + 1)
                 Ast::Expr.Ident(alias_name, _):
-                    return false if proof_replay_precondition_type_alias_count(declarations, alias_name, 0) != 1
+                    return false if proof_replay_precondition_type_alias_count(declarations, alias_name, work, 0) != 1
                     target: mutable Ast::Expr = Ast::Expr.Absent
-                    return false if not proof_replay_precondition_type_alias_target(declarations, alias_name, &target, 0)
-                    return proof_replay_precondition_refinement_matches(target, declarations, parameters, parameter_name, required, depth + 1)
+                    return false if not proof_replay_precondition_type_alias_target(declarations, alias_name, &target, work, 0)
+                    return proof_replay_precondition_refinement_matches(target, declarations, parameters, parameter_name, required, work, depth + 1)
                 _:
                     return false
             return false
@@ -180,6 +232,13 @@ extend ElisaProof:
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + report.source_annotations.count
+            for annotation in report.source_annotations |source_work|:
+                return false if sview_len(annotation.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(annotation.name)
+                return false if sview_len(annotation.owner) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(annotation.owner)
+                return false if sview_len(annotation.module) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(annotation.module)
             return false if report.traces.records.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + report.traces.records.count
             constant_candidates: mutable usize = 0
@@ -202,9 +261,9 @@ extend ElisaProof:
                 candidate_source_cost: usize = owner_scan_cost + report.source_annotations.count
                 return false if candidate_source_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / constant_candidates
                 source_work <- source_work + candidate_source_cost * constant_candidates
-            return proof_replay_precondition_source_valid_unmetered(report, trace)
+            return proof_replay_precondition_source_valid_unmetered(report, trace, source_work)
 
-        def proof_replay_precondition_source_valid_unmetered(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_precondition_source_valid_unmetered(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
             return false if report.replay_owner_line != 0 and report.replay_owner_line != trace.line
             matches: mutable usize = 0
@@ -214,5 +273,5 @@ extend ElisaProof:
             return false if matches != 1
             return true if proof_replay_precondition_body_contract_matches(report, trace, body)
             for parameter in parameters |report, trace, parameters|:
-                return true if parameter.name != "" and proof_replay_precondition_refinement_matches(parameter.type_expression, report.source_declarations, parameters, parameter.name, trace.expression, 0)
+                return true if parameter.name != "" and proof_replay_precondition_refinement_matches(parameter.type_expression, report.source_declarations, parameters, parameter.name, trace.expression, source_work, 0)
             return false

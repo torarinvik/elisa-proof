@@ -1,8 +1,7 @@
 extend ElisaProofFrameSource:
     private:
         def call_expression_at(expression: Ast::Expr, position: Ast::Pos, depth: usize, work: mutable usize&, matches: mutable usize&, found: mutable Ast::Expr&) -> bool:
-            return false if depth >= 64 or work >= 4096
-            work <- work + 1
+            return false if depth >= 64 or not replay_work_charge(1, work)
             match expression:
                 Ast::Expr.Call(callee, arguments, _, actual):
                     if same_position(actual, position):
@@ -24,9 +23,8 @@ extend ElisaProofFrameSource:
 
         def call_statements_at(body: darray[Ast::Stmt]&, position: Ast::Pos, depth: usize, work: mutable usize&, matches: mutable usize&, found: mutable Ast::Expr&) -> bool:
             return false if depth >= 64
+            return false if not replay_work_charge(body.count, work)
             for statement in body |position, depth, work, matches, found|:
-                return false if work >= 4096
-                work <- work + 1
                 match statement:
                     Ast::Stmt.Contract(_, expression, _):
                         return false if not call_expression_at(expression, position, depth + 1, work, matches, found)
@@ -49,16 +47,17 @@ extend ElisaProofFrameSource:
 
         def call_owner_line(declarations: darray[Ast::Decl]&, name: sview, depth: usize, work: mutable usize&, matches: mutable usize&, line: mutable u32&) -> bool:
             return false if depth >= 64
+            return false if not replay_work_charge(declarations.count, work)
             for declaration in declarations |name, depth, work, matches, line|:
-                return false if work >= 4096
-                work <- work + 1
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, _, _, _, position):
+                        return false if not replay_work_charge(sview_len(candidate), work)
                         if candidate == name:
                             return false if matches != 0
                             matches <- matches + 1
                             line <- position.line
                     Ast::Decl.Const(candidate, _, _, _, _) | Ast::Decl.Alias(candidate, _, _):
+                        return false if not replay_work_charge(sview_len(candidate), work)
                         return false if candidate == name
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not call_owner_line(&nested, name, depth + 1, work, matches, line)
@@ -70,26 +69,32 @@ extend ElisaProofFrameSource:
         # Resolve one exact original occurrence; no producer call/summary row is
         # consulted. Leaf targets must be globally unique and unshadowed.
         def source_call(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
-            context = owner(declarations, name, line)
-            return (false, Ast::Expr.Invalid, "", 0) if not context.known
             work: mutable usize = 0
+            return source_call_with_work(declarations, name, line, position, &work)
+
+        def source_call_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
+            context = owner_with_work(declarations, name, line, work)
+            return (false, Ast::Expr.Invalid, "", 0) if not context.known
             matches: mutable usize = 0
             found: mutable Ast::Expr = Ast::Expr.Invalid
-            return (false, Ast::Expr.Invalid, "", 0) if not call_statements_at(&context.body, position, 0, &work, &matches, &found) or matches != 1
+            return (false, Ast::Expr.Invalid, "", 0) if not call_statements_at(&context.body, position, 0, work, &matches, &found) or matches != 1
             match found:
                 Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
-                    for formal in context.formals |callee|:
+                    return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(context.formals.count, work)
+                    for formal in context.formals |callee, work|:
+                        return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(sview_len(formal), work)
                         return (false, Ast::Expr.Invalid, "", 0) if formal == callee
-                    for statement in context.body |callee|:
+                    return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(context.body.count, work)
+                    for statement in context.body |callee, work|:
                         match statement:
                             Ast::Stmt.VarDecl(binding, _, _, _):
+                                return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(sview_len(binding), work)
                                 return (false, Ast::Expr.Invalid, "", 0) if binding == callee
                             _:
                                 pass
-                    work <- 0
                     matches <- 0
                     callee_line: mutable u32 = 0
-                    return (false, Ast::Expr.Invalid, "", 0) if not call_owner_line(declarations, callee, 0, &work, &matches, &callee_line) or matches != 1
+                    return (false, Ast::Expr.Invalid, "", 0) if not call_owner_line(declarations, callee, 0, work, &matches, &callee_line) or matches != 1
                     return (true, found, callee, callee_line)
                 _:
                     return (false, Ast::Expr.Invalid, "", 0)

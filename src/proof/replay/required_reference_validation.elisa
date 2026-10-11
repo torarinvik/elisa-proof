@@ -18,46 +18,66 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_replay_required_reference_struct_count(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> usize:
+        def proof_replay_required_reference_struct_count(declarations: darray[Ast::Decl]&, wanted: sview, work: mutable usize&, depth: usize) -> usize:
             return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return 2 if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
             count: mutable usize = 0
-            for declaration in declarations |wanted, depth, count|:
+            for declaration in declarations |wanted, work, depth, count|:
                 match declaration:
                     Ast::Decl.Struct(name, _, _, _, _, _, _):
+                        return 2 if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
                         count <- count + 1 if name == wanted
-                    Ast::Decl.Alias(name, _, _):
+                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return 2 if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
                         count <- count + 2 if name == wanted
-                    Ast::Decl.Enum(name, _, _, _, _):
-                        count <- count + 2 if name == wanted
-                    Ast::Decl.Module(_, body, _):
-                        count <- count + proof_replay_required_reference_struct_count(body, wanted, depth + 1)
+                    Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _) | Ast::Decl.Import(name, _) | Ast::Decl.Law(name, _, _):
+                        return 2 if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                    Ast::Decl.Module(module_name, body, _):
+                        return 2 if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        count <- count + proof_replay_required_reference_struct_count(body, wanted, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        count <- count + proof_replay_required_reference_struct_count(body, wanted, depth + 1)
+                        count <- count + proof_replay_required_reference_struct_count(body, wanted, work, depth + 1)
                     _:
                         pass
             return count
 
-        def proof_replay_required_reference_source_count(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, owner: sview, parameter_name: sview, line: u32, depth: usize) -> (owners: usize, parameters: usize):
+        def proof_replay_required_reference_source_count(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, owner: sview, parameter_name: sview, line: u32, work: mutable usize&, depth: usize) -> (owners: usize, parameters: usize):
             return (2, 2) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return (2, 2) if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
             owners: mutable usize = 0
             parameters: mutable usize = 0
-            for declaration in declarations |all_declarations, owner, parameter_name, line, depth, owners, parameters|:
+            for declaration in declarations |all_declarations, owner, parameter_name, line, work, depth, owners, parameters|:
                 match declaration:
                     Ast::Decl.Func(name, source_parameters, _, _, _, _, position):
+                        return (2, 2) if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
                         if name == owner:
                             owners <- owners + 1
                             if position.line == line:
-                                for parameter in source_parameters |all_declarations, parameter_name, parameters|:
+                                return (2, 2) if source_parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                                work <- work + source_parameters.count
+                                for parameter in source_parameters |all_declarations, parameter_name, work, parameters|:
+                                    return (2, 2) if sview_len(parameter.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                                    work <- work + sview_len(parameter.name)
                                     continue if parameter.name != parameter_name
+                                    return (2, 2) if not proof_replay_summary_expr_charge_with_work(parameter.type_expression, work)
                                     record: sview = proof_replay_required_reference_name(parameter.type_expression, false, 0)
-                                    valid: bool = record != "" and proof_replay_required_reference_struct_count(all_declarations, record, 0) == 1
+                                    valid: bool = record != "" and proof_replay_required_reference_struct_count(all_declarations, record, work, 0) == 1
                                     parameters <- parameters + (1 if valid else 2)
-                    Ast::Decl.Module(_, body, _):
-                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, depth + 1)
+                    Ast::Decl.Module(module_name, body, _):
+                        return (2, 2) if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, work, depth + 1)
                         owners <- owners + nested.owners
                         parameters <- parameters + nested.parameters
                     Ast::Decl.Scoped(body, _):
-                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, depth + 1)
+                        nested = proof_replay_required_reference_source_count(body, all_declarations, owner, parameter_name, line, work, depth + 1)
                         owners <- owners + nested.owners
                         parameters <- parameters + nested.parameters
                     _:
@@ -65,11 +85,19 @@ extend ElisaProof:
             return (owners, parameters)
 
         def proof_replay_required_reference_trace_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool can[Global.Read, Global.Write]:
-            return false if not (proof_replay_boundary_trace_shape_valid(report, trace) can Global{Read,Write})
+            work: mutable usize = 0
+            return (proof_replay_required_reference_trace_valid_with_work(report, trace, &work) can Global{Read,Write})
+
+        def proof_replay_required_reference_trace_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if trace.kind != "required-reference-parameter"
+            return false if not proof_replay_boundary_trace_payload_shape_valid(report, trace)
+            return false if sview_len(trace.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + sview_len(trace.name)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(parameter_name, _), TokenKind.BangEq, Ast::Expr.Ident(sentinel, _), _):
                     return false if parameter_name == "" or sentinel != "null"
-                    source = proof_replay_required_reference_source_count(report.source_declarations, report.source_declarations, trace.name, parameter_name, trace.line, 0)
+                    return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
+                    source = proof_replay_required_reference_source_count(report.source_declarations, report.source_declarations, trace.name, parameter_name, trace.line, source_work, 0)
                     return source.owners == 1 and source.parameters == 1
                 _:
                     return false

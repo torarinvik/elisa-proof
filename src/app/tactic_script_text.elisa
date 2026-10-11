@@ -90,6 +90,46 @@ def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usiz
     return (true, found_id) if found
     return (false, 0)
 
+# Canonical proof output carries the source fingerprint. Preserve it when translating the text
+# back to a checked tactic document so an edited source cannot silently retarget the same goal id.
+# Short hand scripts may omit the comment and remain explicitly unpinned.
+def proof_rendered_source_fingerprint(contents: darray[u8]&) -> (known: bool, valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    label: sview = "# source: fingerprint fnv1a32="
+    found: mutable bool = false
+    found_value: mutable u32 = 0
+    line_start: mutable usize = 0
+    while line_start < contents.count |contents, label, found, found_value, line_start|:
+        line_end: mutable usize = line_start
+        while line_end < contents.count |contents, line_end|:
+            break if contents[line_end] == '\n'.u8()
+            line_end <- line_end + 1
+        label_matches: mutable bool = line_end - line_start >= sview_len(label)
+        if label_matches:
+            for offset in 0..<sview_len(label) |offset, contents, line_start, label_matches, label|:
+                label_matches <- false if contents[line_start + offset] != sview_at(label, offset)
+        if label_matches:
+            return (true, false, 0) if found
+            found <- true
+            cursor: mutable usize = line_start + sview_len(label)
+            parsed: mutable usize = 0
+            digits: mutable usize = 0
+            overflow: mutable bool = false
+            while cursor < line_end |cursor, contents, parsed, digits, overflow|:
+                byte: u8 = contents[cursor]
+                break if byte < '0'.u8() or byte > '9'.u8()
+                digit: usize = (byte - '0'.u8()).usize()
+                overflow <- true if parsed > 429496729 or (parsed == 429496729 and digit > 5)
+                parsed <- parsed * 10 + digit if not overflow
+                digits <- digits + 1
+                cursor <- cursor + 1
+            return (true, false, 0) if digits == 0 or overflow
+            # The canonical header appends source-status fields after the decimal fingerprint.
+            # Require a comma boundary so a numeric prefix cannot hide malformed digits or text.
+            return (true, false, 0) if cursor < line_end and contents[cursor] != ','.u8()
+            found_value <- parsed.u32()
+        line_start <- line_end + 1 if line_end < contents.count else line_end
+    return (found, true, found_value)
+
 # Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
 # 2 it names no goal of this source and so cannot be checked at all.
 # Translate a human-written proof script into the tactic interchange the checked engine already
@@ -114,7 +154,7 @@ def proof_script_block_declaration_valid(contents: darray[u8]&, start: usize, en
     return false if not proof_script_starts_with(contents, start, end, keyword)
     label_start: usize = start + sview_len(keyword)
     return false if label_start >= end or contents[end - 1] != ':'.u8()
-    return false if label_start + 1 >= end - 1
+    return false if label_start >= end - 1
     for index in label_start..<end - 1 |index, contents|:
         byte: u8 = contents[index]
         return false if byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()

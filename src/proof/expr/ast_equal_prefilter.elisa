@@ -40,6 +40,61 @@ extend ElisaProof:
                 _:
                     return 0
 
+        # Extra tags keep trace-index hashes selective for expression forms that the
+        # general quick-diff walk deliberately leaves untouched. These tags only partition
+        # hashes; exact equality remains the proof-replay authority.
+        def proof_expr_shape_kind(expression: Ast::Expr) -> usize:
+            match expression:
+                Ast::Expr.FloatLit(_, _):
+                    return 10
+                Ast::Expr.CharLit(_, _):
+                    return 11
+                Ast::Expr.Move(_, _):
+                    return 12
+                Ast::Expr.If(_, _, _, _):
+                    return 13
+                Ast::Expr.Construct(_, _, _):
+                    return 14
+                Ast::Expr.Scope(_, _, _):
+                    return 15
+                Ast::Expr.Tuple(_, _):
+                    return 16
+                Ast::Expr.Array(_, _):
+                    return 17
+                Ast::Expr.Block(_, _, _, _):
+                    return 18
+                _:
+                    return proof_expr_quick_kind(expression)
+
+        # Unknown operators share the fallback code. That can add collisions but cannot
+        # make unequal terms match because the hash is only a prefilter.
+        def proof_expr_shape_operator_code(operator: TokenKind) -> usize:
+            return 1 if operator == TokenKind.Plus
+            return 2 if operator == TokenKind.Minus
+            return 3 if operator == TokenKind.Star
+            return 4 if operator == TokenKind.Slash
+            return 5 if operator == TokenKind.Percent
+            return 6 if operator == TokenKind.EqEq
+            return 7 if operator == TokenKind.BangEq
+            return 8 if operator == TokenKind.Lt
+            return 9 if operator == TokenKind.LtEq
+            return 10 if operator == TokenKind.Gt
+            return 11 if operator == TokenKind.GtEq
+            return 12 if operator == TokenKind.And
+            return 13 if operator == TokenKind.Or
+            return 14 if operator == TokenKind.Not
+            return 15 if operator == TokenKind.Is
+            return 16 if operator == TokenKind.LShift
+            return 17 if operator == TokenKind.RShift
+            return 18 if operator == TokenKind.Ampersand
+            return 19 if operator == TokenKind.Pipe
+            return 20 if operator == TokenKind.Caret
+            return 21 if operator == TokenKind.RangeLt
+            return 22 if operator == TokenKind.RangeLe
+            return 23 if operator == TokenKind.RangeGt
+            return 24 if operator == TokenKind.LArrow
+            return 0
+
     public:
         # True only when `proof_expr_equal_supported(left, right)` is certainly false. A
         # parenthesis counts as a level, so a long chain of them ends the walk undecided.
@@ -122,9 +177,9 @@ extend ElisaProof:
                     return proof_expr_quick_kind(right) != 0
             return false
 
-        # A hash that `proof_expr_equal` respects: equal terms hash alike. It reads only what the
-        # comparator compares on the variants above, with parentheses stripped and positions and
-        # operators ignored, and stops at the same depth; any other variant hashes to a constant.
+        # A hash that `proof_expr_equal` respects: equal terms hash alike. It strips parentheses,
+        # ignores source positions, and stops at the same shallow depth; unhandled fields may
+        # collide, but equality checks remain authoritative.
         # It selects candidates for an equality scan and never stands in for the comparison.
         def proof_expr_shape_hash(expression: Ast::Expr, depth: usize) -> u32:
             return proof_expr_shape_hash_stripped(expression, depth, 0)
@@ -140,30 +195,67 @@ extend ElisaProof:
                     return proof_expr_shape_hash_stripped(inner, depth, parentheses + 1)
                 _:
                     pass
-            hash: u32 = proof_expr_shape_mix(basis.u32(), proof_expr_quick_kind(expression).i64())
+            hash: u32 = proof_expr_shape_mix(basis.u32(), proof_expr_shape_kind(expression).i64())
             return hash if depth >= PROOF_EXPR_QUICK_DIFFERS_DEPTH
             match expression:
                 Ast::Expr.IntLit(value, _):
                     return proof_expr_shape_mix(proof_expr_shape_mix(hash, value), value >> 32)
                 Ast::Expr.BoolLit(value, _):
                     return proof_expr_shape_mix(hash, 1 if value else 0)
+                Ast::Expr.FloatLit(value, _) | Ast::Expr.StringLit(value, _) | Ast::Expr.CharLit(value, _):
+                    return proof_expr_shape_mix(hash, proof_name_hash(value).i64())
                 Ast::Expr.Ident(name, _):
                     return proof_expr_shape_mix(hash, proof_name_hash(name).i64())
-                Ast::Expr.Unary(_, operand, _):
+                Ast::Expr.Unary(operator, operand, _):
+                    mixed: u32 = proof_expr_shape_mix(hash, proof_expr_shape_operator_code(operator).i64())
+                    return proof_expr_shape_mix(mixed, proof_expr_shape_hash(operand, depth + 1).i64())
+                Ast::Expr.Move(operand, _):
                     return proof_expr_shape_mix(hash, proof_expr_shape_hash(operand, depth + 1).i64())
-                Ast::Expr.Binary(left, _, right, _):
-                    mixed: u32 = proof_expr_shape_mix(hash, proof_expr_shape_hash(left, depth + 1).i64())
+                Ast::Expr.Binary(left, operator, right, _):
+                    mixed: mutable u32 = proof_expr_shape_mix(hash, proof_expr_shape_operator_code(operator).i64())
+                    mixed <- proof_expr_shape_mix(mixed, proof_expr_shape_hash(left, depth + 1).i64())
                     return proof_expr_shape_mix(mixed, proof_expr_shape_hash(right, depth + 1).i64())
-                Ast::Expr.Call(callee, arguments, _, _):
+                Ast::Expr.Call(callee, arguments, argument_names, _):
                     result: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(hash, arguments.count.i64()), proof_expr_shape_hash(callee, depth + 1).i64())
                     for argument in arguments |argument, result, depth|:
                         result <- proof_expr_shape_mix(result, proof_expr_shape_hash(argument, depth + 1).i64())
+                    result <- proof_expr_shape_mix(result, argument_names.count.i64())
+                    for argument_name in argument_names |argument_name, result|:
+                        result <- proof_expr_shape_mix(result, proof_name_hash(argument_name).i64())
                     return result
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    mixed: mutable u32 = proof_expr_shape_mix(hash, proof_expr_shape_hash(condition, depth + 1).i64())
+                    mixed <- proof_expr_shape_mix(mixed, proof_expr_shape_hash(then_expression, depth + 1).i64())
+                    return proof_expr_shape_mix(mixed, proof_expr_shape_hash(else_expression, depth + 1).i64())
                 Ast::Expr.Field(object, field, _):
+                    return proof_expr_shape_mix(proof_expr_shape_mix(hash, proof_name_hash(field).i64()), proof_expr_shape_hash(object, depth + 1).i64())
+                Ast::Expr.Scope(object, field, _):
                     return proof_expr_shape_mix(proof_expr_shape_mix(hash, proof_name_hash(field).i64()), proof_expr_shape_hash(object, depth + 1).i64())
                 Ast::Expr.Index(object, index, _):
                     mixed: u32 = proof_expr_shape_mix(hash, proof_expr_shape_hash(object, depth + 1).i64())
                     return proof_expr_shape_mix(mixed, proof_expr_shape_hash(index, depth + 1).i64())
+                Ast::Expr.Construct(type_expression, fields, _):
+                    result: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(hash, fields.count.i64()), proof_expr_shape_hash(type_expression, depth + 1).i64())
+                    for field in fields |field, result, depth|:
+                        result <- proof_expr_shape_mix(result, proof_name_hash(field.name).i64())
+                        result <- proof_expr_shape_mix(result, proof_expr_shape_hash(field.value, depth + 1).i64())
+                    return result
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    result: mutable u32 = proof_expr_shape_mix(hash, elements.count.i64())
+                    for element in elements |element, result, depth|:
+                        result <- proof_expr_shape_mix(result, proof_expr_shape_hash(element, depth + 1).i64())
+                    return result
+                Ast::Expr.Block(statements, body, _, _):
+                    result: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(hash, statements.count.i64()), proof_expr_shape_hash(body, depth + 1).i64())
+                    for statement in statements |statement, result, depth|:
+                        match statement:
+                            Ast::Stmt.VarDecl(name, type_expression, range_expression, _):
+                                result <- proof_expr_shape_mix(result, proof_name_hash(name).i64())
+                                result <- proof_expr_shape_mix(result, proof_expr_shape_hash(type_expression, depth + 1).i64())
+                                result <- proof_expr_shape_mix(result, proof_expr_shape_hash(range_expression, depth + 1).i64())
+                            _:
+                                result <- proof_expr_shape_mix(result, 0)
+                    return result
                 _:
                     return hash
             hash

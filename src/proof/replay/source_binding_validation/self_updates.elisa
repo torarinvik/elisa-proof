@@ -14,13 +14,20 @@ extend ElisaProof:
         # Whether `statement` is a self-referential plain assignment of `local_name` whose value the
         # producer bound to a fresh symbol (a rebind definition traced at its line in `owner`).
         def proof_replay_self_update_resymbolized(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_self_update_resymbolized_with_work(report, owner, statement, local_name, &source_work)
+
+        def proof_replay_self_update_resymbolized_with_work(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview, source_work: mutable usize&) -> bool:
             match statement:
                 Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, value, position):
                     return false if name != local_name or (operator != TokenKind.Assign and operator != TokenKind.LArrow)
+                    return false if not proof_replay_mutable_local_statement_work_charge(statement, source_work, 0)
+                    return false if not proof_replay_summary_owner_source_preflight(report, owner, report.replay_owner_line, source_work)
+                    return false if not proof_replay_mutable_local_trace_work_charge(report, source_work, 1)
                     return false if not proof_expr_mentions_name(value, local_name) or proof_replay_source_expr_touches(report.source_declarations, value, local_name, true, 0)
-                    for candidate in report.traces.records |candidate, report, owner, position, local_name|:
+                    for candidate in report.traces.records |candidate, report, owner, position, local_name, source_work|:
                         continue if candidate.kind != "local-binding" or candidate.name != owner or candidate.line != position.line
-                        continue if proof_replay_trace_owner_function_line(report, candidate.name, candidate.line) != report.replay_owner_line
+                        continue if proof_replay_trace_owner_function_line_with_work(report, candidate.name, candidate.line, source_work) != report.replay_owner_line
                         match candidate.expression:
                             Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, bound, _):
                                 return true if proof_internal_name_is_rebind(symbol) and proof_expr_mentions_name(bound, local_name) and proof_replay_local_binding_pos_matches(candidate.expression, position)
@@ -64,10 +71,11 @@ extend ElisaProof:
                     return false
 
         # VALID / INVALID / ABSENT as for mutable-local sites; loop bodies are not entered.
-        def proof_replay_self_update_site(report: ProofReport&, owner: sview, body: darray[Ast::Stmt]&, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, consumer_line: u32, nested: bool, depth: usize) -> usize:
+        def proof_replay_self_update_site(report: ProofReport&, owner: sview, body: darray[Ast::Stmt]&, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, consumer_line: u32, nested: bool, depth: usize, source_work: mutable usize&) -> usize:
             return ProofReplayLocalAlias::INVALID if depth >= ProofReplayLocalAlias::DEPTH_LIMIT
             found: mutable usize = ProofReplayLocalAlias::ABSENT
-            for index in 0..<body.count |index, body, report, owner, binding, value, local_name, consumer_line, nested, depth, found|:
+            for index in 0..<body.count |index, body, report, owner, binding, value, local_name, consumer_line, nested, depth, found, source_work|:
+                return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge(body[index], source_work, depth)
                 here: mutable usize = ProofReplayLocalAlias::ABSENT
                 match body[index]:
                     Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, assigned, statement_position):
@@ -76,33 +84,39 @@ extend ElisaProof:
                             if proof_expr_mentions_name(assigned, name) and proof_replay_expr_equal(assigned, value) and proof_replay_self_update_value(report, assigned, name, owner, 0):
                                 local_name <- name
                                 unanchored_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
-                                here <- ProofReplayLocalAlias::VALID if proof_replay_mutable_local_live(report, owner, body, index, name, consumer_line, nested, false, unanchored_position, false)
+                                here <- ProofReplayLocalAlias::VALID if proof_replay_mutable_local_live_with_work(report, owner, body, index, name, consumer_line, nested, false, unanchored_position, false, source_work)
                     Ast::Stmt.If(_, yes, no, _):
-                        here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, yes, binding, value, local_name, consumer_line, true, depth + 1))
-                        here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, no, binding, value, local_name, consumer_line, true, depth + 1))
+                        here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, yes, binding, value, local_name, consumer_line, true, depth + 1, source_work))
+                        here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, no, binding, value, local_name, consumer_line, true, depth + 1, source_work))
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |here, report, owner, binding, value, local_name, consumer_line, depth|:
-                            here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, arm.body, binding, value, local_name, consumer_line, true, depth + 1))
+                        for arm in arms |here, report, owner, binding, value, local_name, consumer_line, depth, source_work|:
+                            here <- proof_replay_mutable_local_merge(here, proof_replay_self_update_site(report, owner, arm.body, binding, value, local_name, consumer_line, true, depth + 1, source_work))
                     Ast::Stmt.Block(_, _, _, inner, _):
-                        here <- proof_replay_self_update_site(report, owner, inner, binding, value, local_name, consumer_line, true, depth + 1)
+                        here <- proof_replay_self_update_site(report, owner, inner, binding, value, local_name, consumer_line, true, depth + 1, source_work)
                     _:
                         pass
                 found <- proof_replay_mutable_local_merge(found, here)
             return found
 
         def proof_replay_local_binding_self_update_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            work: mutable usize = 0
+            return proof_replay_local_binding_self_update_source_with_work(report, trace, &work)
+
+        def proof_replay_local_binding_self_update_source_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if trace.name == "" or trace.line == 0 or report.trace_owner_line == 0
+            return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, value, _):
                     return false if not proof_internal_name_is_rebind(symbol) or symbol_position.line != trace.line
                     return false if proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
                     body: mutable darray[Ast::Stmt] = []
                     return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
                     local_name: mutable sview = ""
-                    return false if proof_replay_self_update_site(report, trace.name, body, trace.expression, value, &local_name, report.trace_owner_line, false, 0) != ProofReplayLocalAlias::VALID
+                    return false if proof_replay_self_update_site(report, trace.name, body, trace.expression, value, &local_name, report.trace_owner_line, false, 0, source_work) != ProofReplayLocalAlias::VALID
                     return false if local_name == "" or proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, local_name, 0)
                     return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
                     return false if not proof_replay_mutable_local_declared(body, local_name)
-                    return proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, value)
+                    return proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, value, false, source_work)
                 _:
                     return false

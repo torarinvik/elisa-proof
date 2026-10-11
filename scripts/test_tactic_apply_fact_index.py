@@ -70,7 +70,7 @@ apply_step = report["state"]["trace"][0]
 assert apply_step["action"] == "apply" and apply_step["accepted"]
 assert apply_step["has_argument_index"] and apply_step["argument_index"] == 1
 assert apply_step["has_argument"] is False and apply_step["has_secondary"] is False
-assert apply_step["goal"] == ident("B")
+assert apply_step["goal"] == {**ident("B"), "line": 0}
 
 # A well-formed but out-of-range index remains a recorded rejected no-op. Both trace replayers
 # must accept that refusal, while the final result stays open and cannot receive a certificate.

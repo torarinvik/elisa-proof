@@ -2,28 +2,34 @@
 # invalidates the whole lookup, including a match found before exhaustion.
 extend ElisaProofFrameSource:
     private:
-        def owner_at(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize, remaining: mutable usize&, matches: mutable usize&, formals: mutable darray[sview]&, body: mutable darray[Ast::Stmt]&, owner_position: mutable Ast::Pos&, formal_types: mutable darray[Ast::Expr]&, return_type: mutable Ast::Expr&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def owner_at(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize, remaining: mutable usize&, matches: mutable usize&, formals: mutable darray[sview]&, body: mutable darray[Ast::Stmt]&, owner_position: mutable Ast::Pos&, formal_types: mutable darray[Ast::Expr]&, return_type: mutable Ast::Expr&, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64
-            for declaration in declarations |owner, owner_line, depth, remaining, matches, formals, body, owner_position, formal_types, return_type|:
+            for declaration in declarations |owner, owner_line, depth, remaining, matches, formals, body, owner_position, formal_types, return_type, work|:
                 return false if remaining == 0
+                return false if not replay_work_charge(1, work)
                 remaining <- remaining - 1
                 match declaration:
                     Ast::Decl.Func(name, parameters, declared_return, statements, _, _, position):
+                        return false if not replay_work_charge(sview_len(name), work)
                         if name == owner and position.line == owner_line:
                             return false if matches != 0 or parameters.count > 64 or statements.count > 4096
                             matches <- matches + 1
                             owner_position <- position
                             if declared_return is expression:
                                 return_type <- expression
-                            for parameter in parameters |formals, formal_types|:
+                            return false if not replay_work_charge(parameters.count, work)
+                            return false if not replay_work_charge(statements.count, work)
+                            for parameter in parameters |formals, formal_types, work|:
+                                return false if not replay_work_charge(sview_len(parameter.name), work)
                                 return false if parameter.name == ""
-                                for prior in formals |parameter|:
+                                for prior in formals |parameter, work|:
+                                    return false if not replay_work_charge(sview_len(prior), work)
                                     return false if prior == parameter.name
                                 formals.push(parameter.name)
                                 formal_types.push(parameter.type_expression)
                             body.extend(statements)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not owner_at(nested, owner, owner_line, depth + 1, remaining, matches, formals, body, owner_position, formal_types, return_type)
+                        return false if not owner_at(nested, owner, owner_line, depth + 1, remaining, matches, formals, body, owner_position, formal_types, return_type, work)
                     _:
                         pass
             return true
@@ -32,6 +38,10 @@ extend ElisaProofFrameSource:
         # The source AST must belong to the certificate's independently checked
         # source identity. This lookup does not authenticate a source file itself.
         def owner(declarations: darray[Ast::Decl]&, name: sview, line: u32) -> (known: bool, formals: darray[sview], body: darray[Ast::Stmt], position: Ast::Pos, formal_types: darray[Ast::Expr], return_type: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            work: mutable usize = 0
+            return owner_with_work(declarations, name, line, &work)
+
+        def owner_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, work: mutable usize&) -> (known: bool, formals: darray[sview], body: darray[Ast::Stmt], position: Ast::Pos, formal_types: darray[Ast::Expr], return_type: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
             formals: mutable darray[sview] = []
             body: mutable darray[Ast::Stmt] = []
             formal_types: mutable darray[Ast::Expr] = []
@@ -39,7 +49,8 @@ extend ElisaProofFrameSource:
             owner_position: mutable Ast::Pos = Ast::pos_at_line(0)
             remaining: mutable usize = 4096
             matches: mutable usize = 0
-            complete = name != "" and line != 0 and owner_at(declarations, name, line, 0, &remaining, &matches, &formals, &body, &owner_position, &formal_types, &return_type)
+            return (false, [], [], Ast::pos_at_line(0), [], Ast::Expr.Invalid) if not replay_work_charge(sview_len(name), work)
+            complete = name != "" and line != 0 and owner_at(declarations, name, line, 0, &remaining, &matches, &formals, &body, &owner_position, &formal_types, &return_type, work)
             if not complete or matches != 1:
                 return (false, [], [], Ast::pos_at_line(0), [], Ast::Expr.Invalid)
             return (true, formals, body, owner_position, formal_types, return_type)

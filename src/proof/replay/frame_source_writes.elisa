@@ -12,17 +12,22 @@ extend ElisaProofFrameSource:
         # Direct function-body mutations only. Nested control flow, aliases,
         # indexed targets and mapped callee writes require separate source checks.
         def direct_write(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos) -> (known: bool, place: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
+            work: mutable usize = 0
+            return direct_write_with_work(declarations, name, line, position, &work)
+
+        def direct_write_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, place: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
             empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
-            context = owner(declarations, name, line)
+            context = owner_with_work(declarations, name, line, work)
             return (false, empty) if not context.known or context.body.count > 4096 or position.line == 0
             matches: mutable usize = 0
             actual: mutable ElisaProofKernelFramePolicy::Place = empty
-            for statement in context.body |context, position, matches, actual|:
+            return (false, empty) if not replay_work_charge(context.body.count, work)
+            for statement in context.body |context, position, matches, actual, work|:
                 match statement:
                     Ast::Stmt.Assign(target, operator, _, source_position):
                         if same_position(position, source_position):
                             return (false, empty) if not mutation_operator(operator) or matches != 0
-                            decoded = place(target, &context.formals)
+                            decoded = place_with_work(target, &context.formals, work)
                             return (false, empty) if not decoded.known
                             actual <- decoded.place
                             matches <- matches + 1
@@ -32,14 +37,19 @@ extend ElisaProofFrameSource:
             root: sview = context.formals[actual.parameter]
             # Refuse a local binder with the formal's spelling anywhere in this
             # scope. No producer alias/shadow table is used as authority.
-            for statement in context.body |root|:
+            return (false, empty) if not replay_work_charge(context.body.count, work)
+            for statement in context.body |root, work|:
                 match statement:
                     Ast::Stmt.VarDecl(binding, _, _, _):
+                        return (false, empty) if not replay_work_charge(sview_len(binding), work)
+                        return (false, empty) if not replay_work_charge(sview_len(root), work)
                         return (false, empty) if binding == root
                     Ast::Stmt.Assign(target, operator, _, _):
                         if operator == TokenKind.Assign:
                             match target:
                                 Ast::Expr.Ident(binding, _):
+                                    return (false, empty) if not replay_work_charge(sview_len(binding), work)
+                                    return (false, empty) if not replay_work_charge(sview_len(root), work)
                                     return (false, empty) if binding == root
                                 _:
                                     pass

@@ -87,7 +87,9 @@ extend ElisaProof:
             return sview_at(caller_owner, owner_prefix_length) == 58 and sview_at(caller_owner, owner_prefix_length + 1) == 58
 
         def proof_replay_function_owner_module(declarations: darray[Ast::Decl]&, name: sview, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT:
+                count <- 2
+                return
             for declaration in declarations |name, line, current, owner, count, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate_name, _, _, _, _, _, candidate_position):
@@ -103,7 +105,9 @@ extend ElisaProof:
 
         # Module enclosing the function declared at `line`, whatever its name.
         def proof_replay_module_at_function_line(declarations: darray[Ast::Decl]&, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT:
+                count <- 2
+                return
             for declaration in declarations |line, current, owner, count, depth|:
                 match declaration:
                     Ast::Decl.Func(_, _, _, _, _, _, candidate_position):
@@ -154,6 +158,18 @@ extend ElisaProof:
                 _:
                     return false
 
+        # The summary identity checks below walk both report summaries and source declarations.
+        # Charge those walks against the same report-wide source budget used by call recovery.
+        def proof_replay_summary_owner_matches_call_with_work(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, callee: Ast::Expr, source_work: mutable usize&) -> bool:
+            return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.executables.summaries.count
+            for candidate in report.executables.summaries |candidate, source_work|:
+                return false if sview_len(candidate.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(candidate.name)
+            return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
+            return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
+            return proof_replay_summary_owner_matches_call(report, trace, summary, callee)
+
         # Reconstruct an executable postcondition from the verified source contract and the exact
         # call bindings. This keeps ordinary calls at the source-semantics boundary while removing
         # the producer's ability to attach an arbitrary fact to a merely verified function name.
@@ -164,9 +180,13 @@ extend ElisaProof:
             return false if trace.summary_requires_start > report.traces.summary_require_goal_ids.count or trace.summary_requires_count > report.traces.summary_require_goal_ids.count - trace.summary_requires_start
             summary_found: mutable bool = false
             summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
+            return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
+            validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + report.executables.summaries.count
             # A summary trace records its callee's declaration line, which selects one summary
             # among same-named functions in different modules.
             for candidate in report.executables.summaries |candidate, trace, summary_found, summary|:
+                return false if sview_len(candidate.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
+                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(candidate.name)
                 if candidate.name == trace.dependency and (trace.owner_line == 0 or candidate.line == trace.owner_line):
                     return false if summary_found
                     summary_found <- true
@@ -178,7 +198,13 @@ extend ElisaProof:
             return false if summary.parameters_start + summary.parameters_count > report.executables.parameter_references.count
             return false if trace.summary_requires_count != summary.requires_count or trace.summary_ensure_index >= summary.ensures_count
             for index in 0..<summary.parameters_count |index, summary, report, trace|:
+                return false if sview_len(report.traces.summary_names[trace.summary_bindings_start + index]) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
+                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(report.traces.summary_names[trace.summary_bindings_start + index])
+                return false if sview_len(report.executables.parameters[summary.parameters_start + index]) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
+                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(report.executables.parameters[summary.parameters_start + index])
                 return false if report.traces.summary_names[trace.summary_bindings_start + index] != report.executables.parameters[summary.parameters_start + index]
+            return false if sview_len("result") > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
+            validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len("result")
             return false if report.traces.summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
             source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_with_work(report, trace, summary, validation_workspace.source_scan_work_used)
             return false if not source_call.known
@@ -186,12 +212,12 @@ extend ElisaProof:
             # producer's resolved local value is not itself evidence that this call occurred.
             return false if not proof_replay_summary_direct_call_source_site_with_work(report, trace, source_call.call, validation_workspace.source_scan_work_used)
             # A threaded call's exclusive `&` arguments are matched as the locals they lend.
-            threading: ProofReplayThreading = proof_replay_summary_threading(report, trace, summary, source_call.call)
+            threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, trace, summary, source_call.call, validation_workspace.source_scan_work_used)
             return false if not threading.valid
             return false if not proof_replay_summary_call_arguments_match(report, trace, summary, proof_replay_thread_call_arguments(source_call.call, threading), validation_workspace.source_scan_work_used)
             match source_call.call:
                 Ast::Expr.Call(callee, _, _, _):
-                    return false if not proof_replay_summary_owner_matches_call(report, trace, summary, callee)
+                    return false if not proof_replay_summary_owner_matches_call_with_work(report, trace, summary, callee, validation_workspace.source_scan_work_used)
                 _:
                     return false
             instance: mutable Ast::Expr = proof_replay_thread_contract(report.executables.ensures[summary.ensures_start + trace.summary_ensure_index], threading, false)

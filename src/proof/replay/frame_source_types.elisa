@@ -1,51 +1,60 @@
 extend ElisaProofFrameSource:
     private:
-        def type_entry(declarations: darray[Ast::Decl]&, name: sview, depth: usize, budget: mutable usize&, matches: mutable usize&, members: mutable darray[Ast::StructMember]&, alias: mutable Ast::Expr&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def type_entry(declarations: darray[Ast::Decl]&, name: sview, depth: usize, budget: mutable usize&, matches: mutable usize&, members: mutable darray[Ast::StructMember]&, alias: mutable Ast::Expr&, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64
-            for declaration in declarations |name, depth, budget, matches, members, alias|:
+            for declaration in declarations |name, depth, budget, matches, members, alias, work|:
                 return false if budget == 0
+                return false if not replay_work_charge(1, work)
                 budget <- budget - 1
                 match declaration:
                     Ast::Decl.Struct(candidate, fields, _, _, _, _, _):
+                        return false if not replay_work_charge(sview_len(candidate), work)
                         if candidate == name:
                             return false if matches != 0 or fields.count > budget
                             matches <- matches + 1
-                            for field in fields |members, budget|:
+                            return false if not replay_work_charge(fields.count, work)
+                            for field in fields |members, budget, work|:
                                 budget <- budget - 1
+                                return false if not replay_work_charge(sview_len(field.name), work)
                                 members.push(field)
                     Ast::Decl.Alias(candidate, target, _):
+                        return false if not replay_work_charge(sview_len(candidate), work)
                         if candidate == name:
                             return false if matches != 0
                             matches <- matches + 1
                             alias <- target
                     Ast::Decl.Enum(candidate, _, _, _, _):
+                        return false if not replay_work_charge(sview_len(candidate), work)
                         return false if candidate == name
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not type_entry(nested, name, depth + 1, budget, matches, members, alias)
+                        return false if not type_entry(nested, name, depth + 1, budget, matches, members, alias, work)
                     _:
                         pass
             return true
 
-        def field_type(declarations: darray[Ast::Decl]&, expression: Ast::Expr, field: sview, depth: usize, budget: mutable usize&) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+        def field_type(declarations: darray[Ast::Decl]&, expression: Ast::Expr, field: sview, depth: usize, budget: mutable usize&, work: mutable usize&) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
             return (false, Ast::Expr.Invalid) if depth >= 64 or budget == 0
+            return (false, Ast::Expr.Invalid) if not replay_work_charge(1, work)
             budget <- budget - 1
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
-                    return field_type(declarations, inner, field, depth + 1, budget)
+                    return field_type(declarations, inner, field, depth + 1, budget, work)
                 Ast::Expr.Unary(operator, inner, _):
                     if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
-                        return field_type(declarations, inner, field, depth + 1, budget)
+                        return field_type(declarations, inner, field, depth + 1, budget, work)
                     return (false, Ast::Expr.Invalid)
                 Ast::Expr.Ident(name, _):
                     members: mutable darray[Ast::StructMember] = []
                     alias: mutable Ast::Expr = Ast::Expr.Invalid
                     matches: mutable usize = 0
-                    return (false, Ast::Expr.Invalid) if not type_entry(declarations, name, 0, budget, &matches, &members, &alias) or matches != 1
+                    return (false, Ast::Expr.Invalid) if not type_entry(declarations, name, 0, budget, &matches, &members, &alias, work) or matches != 1
                     match alias:
                         Ast::Expr.Invalid:
                             found: mutable usize = 0
                             result: mutable Ast::Expr = Ast::Expr.Invalid
-                            for member in members |field, found, result|:
+                            return (false, Ast::Expr.Invalid) if not replay_work_charge(members.count, work)
+                            for member in members |field, found, result, work|:
+                                return (false, Ast::Expr.Invalid) if not replay_work_charge(sview_len(member.name), work)
                                 if member.name == field:
                                     found <- found + 1
                                     result <- member.type_expression
@@ -55,7 +64,7 @@ extend ElisaProofFrameSource:
                                 _:
                                     return (found == 1, result)
                         _:
-                            return field_type(declarations, alias, field, depth + 1, budget)
+                            return field_type(declarations, alias, field, depth + 1, budget, work)
                 _:
                     return (false, Ast::Expr.Invalid)
 
@@ -63,7 +72,11 @@ extend ElisaProofFrameSource:
         # Independently check declared fields along a formal-rooted nominal path.
         # Qualified/generic/tuple types need their own exact type identity lookup.
         def place_type(declarations: darray[Ast::Decl]&, name: sview, line: u32, actual: ElisaProofKernelFramePolicy::Place) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
-            context = owner(declarations, name, line)
+            work: mutable usize = 0
+            return place_type_with_work(declarations, name, line, actual, &work)
+
+        def place_type_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, actual: ElisaProofKernelFramePolicy::Place, work: mutable usize&) -> (known: bool, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            context = owner_with_work(declarations, name, line, work)
             return (false, Ast::Expr.Invalid) if not context.known or actual.parameter >= context.formal_types.count or actual.depth > 3
             return (false, Ast::Expr.Invalid) if (actual.depth == 0 and actual.field != "") or (actual.depth < 2 and actual.field2 != "") or (actual.depth < 3 and actual.field3 != "")
             current: mutable Ast::Expr = context.formal_types[actual.parameter]
@@ -73,13 +86,17 @@ extend ElisaProofFrameSource:
                 _:
                     pass
             budget: mutable usize = 4096
-            for index in 0..<actual.depth |index, actual, current, budget, declarations|:
+            for index in 0..<actual.depth |index, actual, current, budget, declarations, work|:
                 field: sview = actual.field if index == 0 else actual.field2 if index == 1 else actual.field3
+                return (false, Ast::Expr.Invalid) if not replay_work_charge(sview_len(field), work)
                 return (false, Ast::Expr.Invalid) if field == ""
-                resolved = field_type(declarations, current, field, 0, &budget)
+                resolved = field_type(declarations, current, field, 0, &budget, work)
                 return (false, Ast::Expr.Invalid) if not resolved.known
                 current <- resolved.type_expression
             return (true, current)
 
         def place_typed(declarations: darray[Ast::Decl]&, name: sview, line: u32, actual: ElisaProofKernelFramePolicy::Place) -> bool can[Memory.Allocate, Abort.Panic]:
             return place_type(declarations, name, line, actual).known
+
+        def place_typed_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, actual: ElisaProofKernelFramePolicy::Place, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return place_type_with_work(declarations, name, line, actual, work).known

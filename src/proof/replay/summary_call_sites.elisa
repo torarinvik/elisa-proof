@@ -105,7 +105,7 @@ extend ElisaProof:
                         pass
             return false
 
-        def proof_replay_summary_call_rebind_argument_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_summary_call_rebind_argument_matches(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
             match expected:
                 Ast::Expr.Ident(symbol, _):
                     # A literal rebind is re-derived from the summary of its own call, whose
@@ -150,7 +150,11 @@ extend ElisaProof:
                     Ast::Stmt.While(condition, nested, _):
                         return false if not proof_replay_summary_expr_cost(condition, cost, work, depth + 1)
                         return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                    Ast::Stmt.For(_, _, iterable, nested, _):
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        return false if variables.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + variables.count
+                        for variable in variables |variable, cost, work|:
+                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(variable))
                         return false if not proof_replay_summary_expr_cost(iterable, cost, work, depth + 1)
                         return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
                     Ast::Stmt.Match(value, arms, _):
@@ -158,6 +162,14 @@ extend ElisaProof:
                         return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
                         cost <- cost + arms.count
                         for arm in arms |cost, work, depth|:
+                            pattern_names: mutable darray[sview] = []
+                            pattern_work: mutable usize = work + cost
+                            return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
+                            cost <- pattern_work - work
+                            return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                            cost <- cost + pattern_names.count
+                            for pattern_name in pattern_names |pattern_name, cost, work|:
+                                return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(pattern_name))
                             return false if not proof_replay_summary_expr_cost(arm.guard, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(arm.body, cost, work, depth + 1)
                     Ast::Stmt.Block(_, _, _, nested, _):
                         return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
@@ -233,19 +245,32 @@ extend ElisaProof:
                         return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(field.name))
                         return false if not proof_replay_summary_expr_cost(field.value, cost, work, depth + 1)
                     return true
-                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                Ast::Expr.Comprehension(variable, iterable, condition, value, _):
+                    return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(variable))
                     return proof_replay_summary_expr_cost(iterable, cost, work, depth + 1) and proof_replay_summary_expr_cost(condition, cost, work, depth + 1) and proof_replay_summary_expr_cost(value, cost, work, depth + 1)
                 Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
                     return false if not proof_replay_summary_expr_cost(subject, cost, work, depth + 1)
                     return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
                     cost <- cost + arms.count
                     for arm in arms |cost, work, depth|:
+                        pattern_names: mutable darray[sview] = []
+                        pattern_work: mutable usize = work + cost
+                        return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
+                        cost <- pattern_work - work
+                        return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + pattern_names.count
+                        for pattern_name in pattern_names |pattern_name, cost, work|:
+                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(pattern_name))
                         return false if not proof_replay_summary_expr_cost(arm.guard, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(arm.body, cost, work, depth + 1)
                     return true
                 Ast::Expr.GetElse(value, recovery, _):
                     return false if not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
                     return proof_replay_summary_expr_cost_body(recovery, cost, work, depth + 1)
-                Ast::Expr.Lambda(_, nested, _):
+                Ast::Expr.Lambda(parameters, nested, _):
+                    return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + parameters.count
+                    for parameter in parameters |parameter, cost, work|:
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(parameter))
                     return proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
                 Ast::Expr.Block(statements, value, _, _):
                     return proof_replay_summary_expr_cost_body(statements, cost, work, depth + 1) and proof_replay_summary_expr_cost(value, cost, work, depth + 1)
@@ -273,12 +298,12 @@ extend ElisaProof:
             work <- work + cost
             return true
 
-        def proof_replay_summary_call_argument_equal(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize) -> bool:
+        def proof_replay_summary_call_argument_equal(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize) -> bool:
             work: mutable usize = 0
             complete: mutable bool = true
             return proof_replay_summary_call_argument_equal_with_work(report, trace, source, expected, rebind_depth, &work, &complete, 0) and complete
 
-        def proof_replay_summary_call_argument_equal_with_work(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
+        def proof_replay_summary_call_argument_equal_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
             if depth >= 96 or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 complete <- false
                 return false
@@ -324,7 +349,7 @@ extend ElisaProof:
         # the source spells that value through a qualified const. Match its exact source span,
         # callee, and argument mapping here; the argument comparator independently requires a
         # source-backed global-constant fact for each normalized constant.
-        def proof_replay_summary_call_same_source_span(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
+        def proof_replay_summary_call_same_source_span(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
             if depth >= 96 or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 complete <- false
                 return false
@@ -350,7 +375,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_summary_call_same_source_statement(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, expected: Ast::Expr, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, rebind_depth: usize) -> bool:
+        def proof_replay_summary_call_same_source_statement(report: mutable ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, expected: Ast::Expr, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, rebind_depth: usize) -> bool:
             if body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 complete <- false
                 return false
@@ -376,7 +401,7 @@ extend ElisaProof:
                 return false if not proof_replay_summary_bool_ref_value(complete)
             return true
 
-        def proof_replay_summary_call_same_source_declarations(report: ProofReport&, trace: ProofFactTrace, expected: Ast::Expr, declarations: darray[Ast::Decl]&, owner_line: u32, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize, rebind_depth: usize) -> bool:
+        def proof_replay_summary_call_same_source_declarations(report: mutable ProofReport&, trace: ProofFactTrace, expected: Ast::Expr, declarations: darray[Ast::Decl]&, owner_line: u32, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize, rebind_depth: usize) -> bool:
             if depth >= 96 or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 complete <- false
                 return false
@@ -394,7 +419,7 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_replay_summary_call_same_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_summary_call_same_source_site(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
             matches: mutable usize = 0
             complete: mutable bool = true
             owner_line: mutable u32 = report.replay_owner_line
@@ -407,7 +432,7 @@ extend ElisaProof:
         # omitted trailing positional slots take literal callee defaults
         # (summary_default_arguments.elisa); other defaults and ambiguous mappings stay
         # unsupported until their source semantics are independently reconstructed here.
-        def proof_replay_summary_call_arguments_match(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, call: Ast::Expr, work: mutable usize&) -> bool:
+        def proof_replay_summary_call_arguments_match(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, call: Ast::Expr, work: mutable usize&) -> bool:
             match call:
                 Ast::Expr.Call(_, arguments, argument_names, _):
                     return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
@@ -475,7 +500,7 @@ extend ElisaProof:
             complete <- true
             return proof_replay_deterministic_call_source_contains_statements_bounded(body, bare.call, work, &complete, 0) and complete
 
-        def proof_replay_summary_direct_call_source_site_at(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_summary_direct_call_source_site_at(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, rebind_depth: usize, work: mutable usize&) -> bool:
             return true if proof_replay_summary_raw_call_source_site_with_work(report, trace, call, work)
             return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             owner_line: mutable u32 = report.replay_owner_line
@@ -492,18 +517,18 @@ extend ElisaProof:
         # Call summaries are emitted both for the call term and, when it initializes a local,
         # for that local's name. Accept the latter only when the source declaration binds that
         # exact local to the exact call already used by a same-site direct summary.
-        def proof_replay_summary_source_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
+        def proof_replay_summary_source_call(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
             work: mutable usize = 0
             return proof_replay_summary_source_call_at_with_work(report, trace, summary, 0, &work)
 
-        def proof_replay_summary_source_call_at(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize) -> (known: bool, call: Ast::Expr):
+        def proof_replay_summary_source_call_at(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize) -> (known: bool, call: Ast::Expr):
             work: mutable usize = 0
             return proof_replay_summary_source_call_at_with_work(report, trace, summary, rebind_depth, &work)
 
-        def proof_replay_summary_source_call_with_work(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, work: mutable usize&) -> (known: bool, call: Ast::Expr):
+        def proof_replay_summary_source_call_with_work(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, work: mutable usize&) -> (known: bool, call: Ast::Expr):
             return proof_replay_summary_source_call_at_with_work(report, trace, summary, 0, work)
 
-        def proof_replay_summary_source_call_at_with_work(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize, work: mutable usize&) -> (known: bool, call: Ast::Expr):
+        def proof_replay_summary_source_call_at_with_work(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize, work: mutable usize&) -> (known: bool, call: Ast::Expr):
             result_index: usize = trace.summary_bindings_start + summary.parameters_count
             return (false, Ast::Expr.Invalid) if result_index >= report.traces.summary_values.count
             result_value: Ast::Expr = report.traces.summary_values[result_index]
