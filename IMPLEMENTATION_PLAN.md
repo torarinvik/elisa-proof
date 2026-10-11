@@ -9857,10 +9857,10 @@ Stage1/runtime before updating the proof compiler pin. The explicit-pool control
 checking selected-pool identity and exactly-once task-group capture.
 
 Static review of the uncommitted source-literal work-limit change found a likely undercharge in
-`proof_source_literal_ensure_expected_coverage_with_work`: it charges the expected returned
-parameter bytes twice, while matching also reads the identifier bytes in the attempt's goal AST.
-Verify and correct the charge, then include a long-identifier budget-exhaustion control before
-qualifying the source-bound replay work.
+`proof_source_literal_ensure_expected_coverage_with_work`: it charges the expected returned-name
+view before each comparison, but does not charge the identifier view read from `attempt.goal` or
+`certificate.goal`. Charge the actual AST identifier bytes before equality and include a
+long-identifier budget-exhaustion control before qualifying the source-bound replay work.
 
 The next work order is: (1) finish and commit the explicit-pool declaration fix plus positive,
 negative, same-line selector, and task-store-capture controls; (2) seed the exact committed latest
