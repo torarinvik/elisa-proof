@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-11. **Section 23.27.99 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is now pinned to compiler `98d3a5c6` with a matching exported frontend snapshot. Compiler `main` and `origin/main` contain the incremental grant-authority cache optimization; its correctness and cache-control gates pass. The exact PGS correctness gate passes, while its Mac timing remains exploratory, effectively flat, and non-qualifying. The first body-edit comparison mismatched warm-cache candidate and cache-disabled baseline, so it does not isolate the commit. The corrected seven-pair cache-on comparison was effectively flat (106.24 ms baseline vs 107.80 ms candidate median) and non-qualifying; no speedup claim is supported. The strict O2 proof build and direct-API harness pass on compiler `98d3a5c6` with LLVM 23.1.2. Homebrew now reports LLVM 23.1.3 as current, so the Stage1/proof build and Global-grant matrix still need requalification after that toolchain refresh. Nested temporary-array indexing remains explicitly refused with one `expression-unsupported` finding and zero replay gaps. The focused loop source-binding harness compiles with operation-local Global grants but still reports replay gaps, consistent with the known loop replay issue. These focused checks do not close the full proof suite or frozen compiler matrix recorded in §23.27.93. Next, rebuild and rerun proof controls with the refreshed toolchain, diagnose the loop replay gap, then target larger measured semantic costs. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.99 for the ordered backlog and current status.
+Status: refreshed 2026-10-11. **Section 23.27.102 records the active loop-replay follow-up; §23.27.71 remains the authoritative high-ROI execution order.** The last fully qualified proof product remains §23.27.100 (compiler `2efa1ca5`, LLVM 23.1.3). The current working proof pin is `d3909e55`; compiler `main` is at `d1260b00`. Loop result-symbol replay changes are statically checked but remain uncompiled and unverified because the shared Stage1 lane is reserved. Do not count the loop replay gap as closed. The PGS timing remains exploratory and non-qualifying, and the build/test matrix recorded below remains incomplete. Earlier sections retain historical evidence and design detail; consult §§23.27.71, 23.27.100, and 23.27.102 for execution order and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9738,3 +9738,86 @@ The separate authority slot/head reuse experiment compared parent source fingerp
 Keep unrelated active compiler work out of this proof integration: the authority candidate in `src/semantic/check_global_authority.elisa` and cross-language benchmark edits are owned by other tasks, including an expression-loop edit in `sieve.elisa`. Do not stage, reset, or commit those files from this task. The next proof priority is to isolate the line-28 replay gap; the compiler candidate timing requires a controlled, qualifying comparison before promotion.
 
 The linked-worktree audit found 96 compiler worktrees (48 dirty, 48 clean) and 62 local branches before preserving the dangling region-owner fix as `codex/region-owner-smc-fix`. `git worktree prune --dry-run` found no stale metadata. The merged local branch tips all have dirty linked worktrees; the clean detached checkouts are toolchain or benchmark baselines named by retained evidence, including the new clean `2efa1ca5` checkout whose Stage1/runtime paths are recorded in the proof build manifest. Unmerged branch tips contain unique commits. No worktree or branch was removed because each remaining candidate is active, dirty, unique, or referenced by validation evidence; revisit after those tasks release their checkouts and artifacts can be reproduced from stable installed products.
+
+### 23.27.101 Loop result-symbol bounds and compiler consolidation checkpoint (2026-10-11)
+
+The first loop replay gap remains certificate 10 (`looped`, source line 28). Its fact set includes
+the lower bound for a call-result symbol created by `kept: u8 = keep(y + 1)`. The draft source
+replay path recovers the unique declaration and direct call and checks the local and callee
+unsigned widths, but an independent review found a provenance hole: the result-symbol helper can
+return `known` when no trace links that synthetic symbol to the declared local. Require and validate
+the exact local-binding/summary provenance before using the declared type to justify the symbol;
+add a mutation that removes that link while retaining the type-bound fact. Do not accept the current
+draft as sound. The loop harness now has twelve source mutations. Its corrected d390 compile reached
+backend emission, which declined the new nested `match` statements in the range helper and test
+mutation helper. The test-only reference mistake is fixed; the focused replay remains unverified.
+
+The Str type-identity candidate's fresh O3 seed succeeded, but its O0 output control printed
+incorrect values for `u32` and `u8`; its owner identified cast-routing as the likely path and is
+making a static fix. A later source edit made that candidate's installed product fail its
+provenance check, so do not reuse that binary. The proof task released its compiler slot after the
+d390 backend-decline diagnostic. The proof pin is still `d3909e55`; current compiler `main` has
+advanced to `d1260b00` (target-width ABI plumbing), and the final proof tuple must be rebuilt and
+requalified against the newest validated consolidated compiler.
+
+For consolidation, `codex/region-owner-smc-fix` contains 25 commits not in current compiler
+`main`, while `main` contains 42 commits absent from that branch. The branch includes runtime-origin
+trust, Global-grant, and region-ownership fixes, so deleting it before qualification would lose
+unique work. An isolated merge candidate at `/private/tmp/elisa-mainline-consolidation-20261011`
+has resolved the two driver conflicts by retaining `main`'s incremental semantic snapshot path,
+adding the branch's fail-closed source-origin reset, and publishing the trusted runtime root only
+for file-backed CLI requests. After compiler `main` advanced to `d1260b00`, this candidate was
+rebased and the same two conflicts were resolved again. Shell syntax, Python syntax, conflict-marker,
+and staged whitespace checks pass; no compiler or runtime gate has run on this candidate. The primary
+compiler checkout is clean at `d1260b00`; active Str-type-identity work remains on its own unvalidated
+branch. Preserve it until its O0 output controls pass.
+
+**Next high-return order:** wait for the Str owner to release its validation slot; rerun the loop
+replay harness on the exact pinned compiler and repair any remaining source-admission or test
+errors; then qualify the isolated compiler merge with fresh provenance and focused runtime-origin,
+Global-grant, region-owner, native ABI, and self-host controls. Integrate only after those gates
+pass, rebuild the proof against the resulting newest compiler/LLVM tuple, and remove only branches
+whose commits are fully integrated and worktrees whose ignored artifacts are no longer needed.
+### 23.27.102 Result-symbol provenance and loop-preservation replay follow-up (2026-10-11; supersedes §23.27.101 replay draft)
+
+This entry supersedes §23.27.101's replay-draft assessment and next step; its separate compiler
+consolidation notes remain current. The active source draft extends the result-symbol type-bound
+path for locals initialized by a direct call. It now requires a unique source declaration,
+matching declared-local and callee return widths, and at least one source-validated
+`local == result_symbol` alias at its declaration. Identical trace records for that one source
+fact are allowed; conflicting local-binding or
+summary uses fail closed. Source alias validation checks the exact call site and local reaching
+definition at the binding line. The call-result symbol must also be available in the consumer
+state: either its local alias is live at the consumer, or its marker is a fact in a loop-header
+preservation certificate whose sourced guard/invariant and self-update reconstruct the post-body
+invariant goal. Function-summary results that use the same internal symbol go through this
+availability check when a certificate consumes them. The consumer must identify the unique source
+loop header; break/continue certificates are tied to their transfer lines. Because the report
+identifies consumers by line without a column, result-symbol availability is refused when its
+declaration shares the consumer line; this prevents an inline transfer from bypassing the
+loop-header phase check through ordinary alias liveness. Consumers whose line falls inside the
+call initializer's source span are also refused, covering multiline recovery transfers nested in
+call arguments.
+
+The focused harness includes controls for removing the alias trace, shifting its source line,
+removing consumer-certificate context, replacing the preservation goal with the entry invariant
+while keeping context rows, and preserving a later call bound on normal fallthrough after a
+`GetElse` continue while refusing that context when relabeled to the transfer line. The GetElse
+check swaps source text into an already-built report; it exercises replay source-gating with the
+normal header certificate, not a fresh parse, proof check, or producer-generated continue
+certificate for that variant. Direct regression coverage for the rule-family restriction and the
+function-summary consumer path remains to be added when test changes are requested. Context-free
+call-site inspection stays available for source validation, while certificate consumption must
+pass the result-symbol availability check. Ordinary local type-bound witness scope remains a
+separate static audit item: source declaration uniqueness currently does not prove that a local
+binding is available at the consuming certificate.
+`git diff --check` and Python AST parsing pass, and
+`type_bound_validation.elisa` remains 591 lines. No Stage1 compile or replay harness run has been
+performed: the shared compiler lane has not been released. Keep this candidate explicitly
+unverified and do not count the certificate-10 replay gap as closed until the same pinned-product
+compile, adversarial controls, and focused replay pass.
+
+The proof compiler pin now follows compiler `main` at `d1260b00f1e99d826c280c9de017659c19dc3cbe`.
+The installed compiler-root Stage1 fails source-provenance validation for that revision, so it
+must be rebuilt before proof validation. The active Homebrew LLVM is 23.1.3; record its resolved
+path and version with the fresh product rather than relying on the older 23.1.2 benchmark record.

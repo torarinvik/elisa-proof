@@ -21,6 +21,10 @@ extend ElisaProof:
             return false if index >= body.count or consumer_line == 0
             binding_line: u32 = proof_replay_statement_position(body[index]).line
             return false if consumer_line < binding_line
+            # Certificate goal offsets are not authoritative until replay matches the goal to
+            # one exact source assertion/check site. Reject equal-line bindings in this route;
+            # inline bodies can place a later assignment before an earlier certificate goal.
+            return false if binding_line == consumer_line
             return false if nested and consumer_line > proof_replay_body_last_line(body, 0)
             first_later: usize = index + 1
             for later in first_later..<body.count |later, body, report, owner, local_name, consumer_line, loop_entry|:
@@ -29,15 +33,15 @@ extend ElisaProof:
                     break
                 if position.line == consumer_line:
                     match body[later]:
-                        Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, value, _):
-                            if name == local_name and (operator == TokenKind.Assign or operator == TokenKind.LArrow) and position.end_line <= consumer_line and not proof_replay_source_expr_touches(report.source_declarations, value, local_name, true, 0):
-                                break
                         Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _) | Ast::Stmt.Expr(Ast::Expr.Block(_, _, _, _), _):
                             # A loop-entry check reads the state before the first iteration.
                             if loop_entry:
                                 break
                         _:
                             pass
+                    # Without an authenticated goal offset, any write on the consumer's line
+                    # might have happened before the check and invalidated this earlier value.
+                    return false if proof_replay_source_statement_touches(report.source_declarations, body[later], local_name, true, 0)
                 # A self-referential update that took a fresh symbol leaves the local's own
                 # symbol denoting the value it had (proof_bind_unsigned_symbol).
                 continue if proof_replay_self_update_resymbolized(report, owner, body[later], local_name)
@@ -66,10 +70,20 @@ extend ElisaProof:
                         if name == local_name and proof_replay_local_binding_pos_matches(binding, statement_position):
                             site <- true
                             written <- initializer
-                    Ast::Stmt.If(_, yes, no, _):
-                        here <- proof_replay_mutable_local_merge(here, proof_replay_mutable_local_site(report, trace, owner, yes, local_name, binding, value, consumer_line, true, loop_entry, depth + 1))
-                        here <- proof_replay_mutable_local_merge(here, proof_replay_mutable_local_site(report, trace, owner, no, local_name, binding, value, consumer_line, true, loop_entry, depth + 1))
-                    Ast::Stmt.Block(block_kind, _, _, inner, _):
+                    Ast::Stmt.If(_, yes, no, if_position):
+                        then_site: usize = proof_replay_mutable_local_site(report, trace, owner, yes, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        else_site: usize = proof_replay_mutable_local_site(report, trace, owner, no, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        # Inline `if`/`else` arms can share one physical line. A certificate
+                        # carries only that line, so it cannot distinguish a binding from the
+                        # opposite arm (or a same-line consumer before either arm runs). Never
+                        # merge such a branch-local fact into that consumer. Later-line consumers
+                        # are already excluded by the nested-body extent check above.
+                        if if_position.line == consumer_line and (then_site != ProofReplayLocalAlias::ABSENT or else_site != ProofReplayLocalAlias::ABSENT):
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            here <- proof_replay_mutable_local_merge(here, then_site)
+                            here <- proof_replay_mutable_local_merge(here, else_site)
+                    Ast::Stmt.Block(block_kind, _, _, inner, block_position):
                         # A can body executes once on every path that reaches its successor.
                         # Its outer-local writes can dominate a later consumer, but still need
                         # both the inner reaching check and the enclosing suffix's havoc check.
@@ -78,13 +92,36 @@ extend ElisaProof:
                         here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, inside_nested, loop_entry, depth + 1)
                         if outside_can and here == ProofReplayLocalAlias::VALID:
                             here <- ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_live(report, owner, body, index, local_name, consumer_line, nested, loop_entry)
-                    Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _):
-                        here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |here, report, trace, owner, local_name, binding, value, consumer_line, loop_entry, depth|:
-                            here <- proof_replay_mutable_local_merge(here, proof_replay_mutable_local_site(report, trace, owner, arm.body, local_name, binding, value, consumer_line, true, loop_entry, depth + 1))
-                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
-                        here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        if block_position.line == consumer_line and here != ProofReplayLocalAlias::ABSENT:
+                            here <- ProofReplayLocalAlias::INVALID
+                    Ast::Stmt.While(_, inner, loop_position):
+                        loop_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        if loop_position.line == consumer_line and loop_site != ProofReplayLocalAlias::ABSENT:
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            here <- loop_site
+                    Ast::Stmt.For(_, _, _, inner, loop_position):
+                        loop_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        if loop_position.line == consumer_line and loop_site != ProofReplayLocalAlias::ABSENT:
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            here <- loop_site
+                    Ast::Stmt.Match(_, arms, match_position):
+                        arm_site: mutable usize = ProofReplayLocalAlias::ABSENT
+                        for arm in arms |arm_site, report, trace, owner, local_name, binding, value, consumer_line, loop_entry, depth|:
+                            arm_site <- proof_replay_mutable_local_merge(arm_site, proof_replay_mutable_local_site(report, trace, owner, arm.body, local_name, binding, value, consumer_line, true, loop_entry, depth + 1))
+                        # As with inline if arms, a match arm's branch is not represented by a
+                        # certificate line. Do not merge a same-line arm binding into a consumer.
+                        if match_position.line == consumer_line and arm_site != ProofReplayLocalAlias::ABSENT:
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            here <- proof_replay_mutable_local_merge(here, arm_site)
+                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, block_position), _):
+                        block_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, true, loop_entry, depth + 1)
+                        if block_position.line == consumer_line and block_site != ProofReplayLocalAlias::ABSENT:
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            here <- block_site
                     _:
                         pass
                 if site:

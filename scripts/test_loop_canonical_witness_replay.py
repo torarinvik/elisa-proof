@@ -23,17 +23,190 @@ mutants = (
     baseline.replace("while y < Limits::TOP", "while y < Other::TOP")
     + "\nconst module Other:\n    const TOP: u8 = 10\n",
     baseline.replace("def looped(x: u8)", "def looped(y: u8, x: u8)"),
+    baseline.replace("kept: u8 = keep(y + 1)", "kept: u8 = assigned(y + 1)"),
+    baseline.replace("def keep(x: u8) -> u8", "def keep(x: u8) -> u16"),
+    baseline.replace("kept: u8 = keep(y + 1)", "kept: u16 = keep(y + 1)"),
 )
+flow_skip_source = baseline.replace(
+    "def looped(x: u8) -> u8:\n    requires x <= 5",
+    "def looped(xs: darray[u8], x: u8) -> u8:\n    requires x <= 5 and 0 < xs.count")
+flow_skip_source = flow_skip_source.replace(
+    "decreases Limits::TOP - y", "skipped: u8 = get xs[0] else continue")
 constants = "const LOOP_CANONICAL_SOURCE: sview = " + json.dumps(baseline) + "\n"
-constants += "const LOOP_CANONICAL_MUTANTS: sview[9] = [" + ", ".join(map(json.dumps, mutants)) + "]\n"
+constants += "const LOOP_CANONICAL_MUTANTS: sview[12] = [" + ", ".join(map(json.dumps, mutants)) + "]\n"
+constants += "const LOOP_CANONICAL_FLOW_SKIP_SOURCE: sview = " + json.dumps(flow_skip_source) + "\n"
 harness = prefix + constants + r'''
 extend ElisaProof:
     public:
+        def proof_test_loop_result_symbol_bounds(report: mutable ProofReport&, certificate: ProofGoalCertificate, checked: mutable bool&) -> i64:
+            result_symbol: mutable sview = ""
+            result_symbol_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            checked <- false
+            for fact in 0..<certificate.facts_count |fact, certificate, report, result_symbol, result_symbol_position, checked|:
+                origin: usize = report.traces.origin_indices[certificate.facts_start + fact]
+                continue if origin >= report.traces.records.count
+                trace: ProofFactTrace = report.traces.records[origin]
+                continue if trace.kind != "type-bound"
+                match trace.expression:
+                    Ast::Expr.Call(Ast::Expr.Ident(marker, _), arguments, argument_names, position):
+                        continue if marker != "__elisa_unsigned_type_bound" or arguments.count != 2 or argument_names.count != 0
+                        match arguments[0]:
+                            Ast::Expr.Ident(symbol, symbol_position):
+                                continue if not proof_internal_name_is_rebind(symbol)
+                                definition = proof_replay_result_symbol_definition(report, trace.name, symbol, symbol_position)
+                                continue if not definition.known
+                                return 216 if result_symbol != "" and result_symbol != symbol
+                                result_symbol <- symbol
+                                result_symbol_position <- symbol_position
+                            _:
+                                continue
+                        return 208 if not proof_replay_type_bound_source_valid(report, trace)
+                        saved_consumer_index: usize = report.trace_consumer_certificate_index
+                        report.trace_consumer_certificate_index <- 0
+                        no_context_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                        report.trace_consumer_certificate_index <- saved_consumer_index
+                        return 234 if no_context_accepted
+                        certificate_index: usize = saved_consumer_index - 1
+                        # Keep the loop header/call lines stable while adding a GetElse continue
+                        # before the call. The normal header preservation VC still has the call's
+                        # result, but the continuation VC is tied to the transfer's own line.
+                        flow_skip_bytes: mutable darray[u8] = []
+                        proof_test_loop_replace_source(LOOP_CANONICAL_FLOW_SKIP_SOURCE, &flow_skip_bytes, &report)
+                        flow_skip_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                        header_line: u32 = report.trace_owner_line
+                        header_certificate_line: u32 = report.certificates[certificate_index].line
+                        report.trace_owner_line <- 30
+                        report.certificates[certificate_index].line <- 30
+                        forged_continue_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                        report.trace_owner_line <- header_line
+                        report.certificates[certificate_index].line <- header_certificate_line
+                        proof_test_loop_replace_source(LOOP_CANONICAL_SOURCE, &flow_skip_bytes, &report)
+                        return 238 if not flow_skip_accepted
+                        return 239 if forged_continue_accepted
+                        entry_goal_checked: mutable bool = false
+                        for fact in 0..<certificate.facts_count |fact, certificate, report, trace, certificate_index, entry_goal_checked|:
+                            origin: usize = report.traces.origin_indices[certificate.facts_start + fact]
+                            continue if origin >= report.traces.records.count
+                            context: ProofFactTrace = report.traces.records[origin]
+                            continue if context.kind != "loop-invariant" or context.line != certificate.line
+                            saved_goal: Ast::Expr = report.certificates[certificate_index].goal
+                            report.certificates[certificate_index].goal <- context.expression
+                            forged_entry_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                            report.certificates[certificate_index].goal <- saved_goal
+                            entry_goal_checked <- true
+                            return 235 if forged_entry_accepted
+                            break
+                        return 236 if not entry_goal_checked
+                        alias_removed: mutable bool = false
+                        for record_index in 0..<report.traces.records.count |record_index, report, trace, symbol, symbol_position, definition, alias_removed|:
+                            candidate: ProofFactTrace = report.traces.records[record_index]
+                            continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                            match candidate.expression:
+                                Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
+                                    continue if local != definition.local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position)
+                                _:
+                                    continue
+                            detached: ProofFactTrace = ProofFactTrace{expression: candidate.expression, kernel_expression: candidate.kernel_expression, kind: "test-detached-local-binding", line: candidate.line, name: candidate.name, dependency: candidate.dependency, premises_start: candidate.premises_start, premises_count: candidate.premises_count, kernel_premises_start: candidate.kernel_premises_start, kernel_premises_count: candidate.kernel_premises_count, summary_bindings_start: candidate.summary_bindings_start, summary_bindings_count: candidate.summary_bindings_count, summary_requires_start: candidate.summary_requires_start, summary_requires_count: candidate.summary_requires_count, summary_ensure_index: candidate.summary_ensure_index, owner_line: candidate.owner_line}
+                            report.traces.records[record_index] <- detached
+                            alias_removed <- true
+                        return 231 if not alias_removed
+                        orphan_marker_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                        for record_index in 0..<report.traces.records.count |record_index, report, trace, symbol, symbol_position, definition|:
+                            candidate: ProofFactTrace = report.traces.records[record_index]
+                            continue if candidate.kind != "test-detached-local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                            match candidate.expression:
+                                Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
+                                    continue if local != definition.local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position)
+                                _:
+                                    continue
+                            restored: ProofFactTrace = ProofFactTrace{expression: candidate.expression, kernel_expression: candidate.kernel_expression, kind: "local-binding", line: candidate.line, name: candidate.name, dependency: candidate.dependency, premises_start: candidate.premises_start, premises_count: candidate.premises_count, kernel_premises_start: candidate.kernel_premises_start, kernel_premises_count: candidate.kernel_premises_count, summary_bindings_start: candidate.summary_bindings_start, summary_bindings_count: candidate.summary_bindings_count, summary_requires_start: candidate.summary_requires_start, summary_requires_count: candidate.summary_requires_count, summary_ensure_index: candidate.summary_ensure_index, owner_line: candidate.owner_line}
+                            report.traces.records[record_index] <- restored
+                        return 230 if orphan_marker_accepted
+                        alias_line_shifted: mutable bool = false
+                        for record_index in 0..<report.traces.records.count |record_index, report, trace, symbol, symbol_position, definition, alias_line_shifted|:
+                            candidate: ProofFactTrace = report.traces.records[record_index]
+                            continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                            match candidate.expression:
+                                Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
+                                    continue if local != definition.local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position)
+                                _:
+                                    continue
+                            shifted_alias: ProofFactTrace = ProofFactTrace{expression: candidate.expression, kernel_expression: candidate.kernel_expression, kind: candidate.kind, line: candidate.line + 1, name: candidate.name, dependency: candidate.dependency, premises_start: candidate.premises_start, premises_count: candidate.premises_count, kernel_premises_start: candidate.kernel_premises_start, kernel_premises_count: candidate.kernel_premises_count, summary_bindings_start: candidate.summary_bindings_start, summary_bindings_count: candidate.summary_bindings_count, summary_requires_start: candidate.summary_requires_start, summary_requires_count: candidate.summary_requires_count, summary_ensure_index: candidate.summary_ensure_index, owner_line: candidate.owner_line}
+                            report.traces.records[record_index] <- shifted_alias
+                            alias_line_shifted <- true
+                        return 233 if not alias_line_shifted
+                        shifted_alias_accepted: bool = proof_replay_type_bound_source_valid(report, trace)
+                        for record_index in 0..<report.traces.records.count |record_index, report, trace, symbol, symbol_position, definition|:
+                            candidate: ProofFactTrace = report.traces.records[record_index]
+                            continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line + 1
+                            match candidate.expression:
+                                Ast::Expr.Binary(Ast::Expr.Ident(local, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
+                                    continue if local != definition.local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position)
+                                _:
+                                    continue
+                            restored: ProofFactTrace = ProofFactTrace{expression: candidate.expression, kernel_expression: candidate.kernel_expression, kind: candidate.kind, line: trace.line, name: candidate.name, dependency: candidate.dependency, premises_start: candidate.premises_start, premises_count: candidate.premises_count, kernel_premises_start: candidate.kernel_premises_start, kernel_premises_count: candidate.kernel_premises_count, summary_bindings_start: candidate.summary_bindings_start, summary_bindings_count: candidate.summary_bindings_count, summary_requires_start: candidate.summary_requires_start, summary_requires_count: candidate.summary_requires_count, summary_ensure_index: candidate.summary_ensure_index, owner_line: candidate.owner_line}
+                            report.traces.records[record_index] <- restored
+                        return 232 if shifted_alias_accepted
+                        relabeled: ProofFactTrace = ProofFactTrace{expression: trace.expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line + 1, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 228 if proof_replay_type_bound_source_valid(report, relabeled)
+                        shifted_position: mutable Ast::Pos = symbol_position
+                        shifted_position.column <- shifted_position.column + 1
+                        shifted_position.offset <- shifted_position.offset + 1
+                        shifted_arguments: darray[Ast::Expr] = [Ast::Expr.Ident(symbol, shifted_position), arguments[1]]
+                        shifted_expression: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident(marker, position), shifted_arguments, argument_names, position)
+                        shifted: ProofFactTrace = ProofFactTrace{expression: shifted_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 229 if proof_replay_type_bound_source_valid(report, shifted)
+                        forged_arguments: darray[Ast::Expr] = [arguments[0], Ast::Expr.IntLit(16, position)]
+                        forged_expression: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident(marker, position), forged_arguments, argument_names, position)
+                        forged: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 209 if proof_replay_type_bound_source_valid(report, forged)
+                    _:
+                        pass
+            return 0 if result_symbol == ""
+            checked <- true
+            lower_found: mutable bool = false
+            upper_found: mutable bool = false
+            forged_symbol: mutable sview = ""
+            for symbol_index in 0..<PROOF_INTERNAL_REBIND_SYMBOL_COUNT |symbol_index, result_symbol, forged_symbol|:
+                candidate_symbol: sview = proof_internal_rebind_name(symbol_index)
+                if candidate_symbol != result_symbol:
+                    forged_symbol <- candidate_symbol
+                    break
+            return 217 if forged_symbol == ""
+            for fact in 0..<certificate.facts_count |fact, certificate, report, result_symbol, result_symbol_position, forged_symbol, lower_found, upper_found|:
+                origin: usize = report.traces.origin_indices[certificate.facts_start + fact]
+                continue if origin >= report.traces.records.count
+                trace: ProofFactTrace = report.traces.records[origin]
+                continue if trace.kind != "type-bound" or trace.line != result_symbol_position.line
+                match trace.expression:
+                    Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, Ast::Expr.Ident(symbol, _), expression_position):
+                        continue if symbol != result_symbol
+                        lower_found <- true
+                        return 206 if not proof_replay_type_bound_source_valid(report, trace)
+                        forged_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, Ast::Expr.Ident(forged_symbol, position), expression_position)
+                        forged: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 207 if proof_replay_type_bound_source_valid(report, forged)
+                        stronger_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(1, position), TokenKind.LtEq, Ast::Expr.Ident(symbol, position), expression_position)
+                        stronger: ProofFactTrace = ProofFactTrace{expression: stronger_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 213 if proof_replay_type_bound_source_valid(report, stronger)
+                    Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.LtEq, Ast::Expr.IntLit(_, _), expression_position):
+                        continue if symbol != result_symbol
+                        upper_found <- true
+                        return 210 if not proof_replay_type_bound_source_valid(report, trace)
+                        forged_expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(symbol, position), TokenKind.LtEq, Ast::Expr.IntLit(65535, position), expression_position)
+                        forged: ProofFactTrace = ProofFactTrace{expression: forged_expression, kernel_expression: trace.kernel_expression, kind: trace.kind, line: trace.line, name: trace.name, dependency: trace.dependency, premises_start: trace.premises_start, premises_count: trace.premises_count, kernel_premises_start: trace.kernel_premises_start, kernel_premises_count: trace.kernel_premises_count, summary_bindings_start: trace.summary_bindings_start, summary_bindings_count: trace.summary_bindings_count, summary_requires_start: trace.summary_requires_start, summary_requires_count: trace.summary_requires_count, summary_ensure_index: trace.summary_ensure_index, owner_line: trace.owner_line}
+                        return 211 if proof_replay_type_bound_source_valid(report, forged)
+                    _:
+                        pass
+            return 212 if not lower_found or not upper_found
+            return 0
+
         def proof_test_loop_source_gate(report: mutable ProofReport&) -> i64 can Memory.Allocate, Abort.Panic:
             owner: mutable u32 = 0
             count: usize = report.certificates.count
             frames: mutable usize = 0
-            for certificate_index in 0..<count |certificate_index, count, report, owner, frames|:
+            result_bound_checks: mutable usize = 0
+            for certificate_index in 0..<count |certificate_index, count, report, owner, frames, result_bound_checks|:
                 certificate: ProofGoalCertificate = report.certificates[certificate_index]
                 continue if certificate.name != "looped" or certificate.line != 28
                 needed: mutable bool = false
@@ -48,6 +221,10 @@ extend ElisaProof:
                 report.replay_owner_line <- owner
                 report.trace_owner_line <- certificate.line
                 report.trace_consumer_certificate_index <- certificate_index + 1
+                result_symbol_checked: mutable bool = false
+                result_symbol_gate: i64 = proof_test_loop_result_symbol_bounds(report, certificate, &result_symbol_checked)
+                return result_symbol_gate if result_symbol_gate != 0
+                result_bound_checks <- result_bound_checks + 1 if result_symbol_checked
                 contexts: mutable usize = 0
                 updates: mutable usize = 0
                 for fact in 0..<certificate.facts_count |fact, certificate, report, contexts, updates|:
@@ -63,6 +240,7 @@ extend ElisaProof:
                 if updates > 0:
                     return 204 if contexts < 2
                     frames <- frames + 1
+            return 218 if result_bound_checks == 0
             return 0 if frames == 3 else 205
 
         def proof_test_loop_identity_key(report: mutable ProofReport&) -> i64:
@@ -117,9 +295,12 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return initial_gate if initial_gate != 0
     identity: i64 = proof_test_loop_identity_key(&report)
     return identity if identity != 0
-    for index in 0..<9 |index, original, replaced, report|:
+    for index in 0..<12 |index, original, replaced, report|:
         proof_test_loop_replace_source(LOOP_CANONICAL_MUTANTS[index], &replaced, &report)
-        return 212 if proof_test_loop_source_gate(&report) == 0
+        source_gate: i64 = proof_test_loop_source_gate(&report)
+        # Swapping to another declared u8 callee preserves the result-width witness, but its
+        # precomputed function-summary must still fail during certificate replay below.
+        return 212 if source_gate == 0 and index != 9
         proof_replay_certificates(&report)
         return 213 if report.replay_gaps == 0
         proof_test_loop_replace_source(LOOP_CANONICAL_SOURCE, &replaced, &report)
@@ -132,4 +313,4 @@ run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Loop canonical witnesses: 17 certificates replay; owner/site/type/input stay distinct; nine stale sources refuse and restore")
+print("Loop canonical witnesses: 17 certificates replay; owner/site/type/input stay distinct; twelve stale sources refuse; normal-fallthrough and forged continue phases stay distinct")

@@ -1,5 +1,6 @@
-# A loop self-update may resymbolize a mutable unsigned local. Its fresh symbol's range is
-# justified only by the exact live source binding and the local's declared unsigned type.
+# Synthetic unsigned rebind symbols may name either a loop self-update or the result of a
+# source-local call initializer. Their bounds are justified by the exact source definition and
+# the corresponding source type; an internal name by itself proves nothing.
 extend ElisaProof:
     private:
         def proof_replay_type_bound_unsigned_rebind_target(expression: Ast::Expr, depth: usize) -> sview:
@@ -34,6 +35,7 @@ extend ElisaProof:
                 _:
                     return false
             return false if not proof_internal_name_is_rebind(symbol) or width <= 0
+            return false if symbol_position.line != trace.line
             binding_matches: mutable usize = 0
             target: mutable sview = ""
             for candidate in report.traces.records |trace, symbol, symbol_position, binding_matches, target, report|:
@@ -46,6 +48,19 @@ extend ElisaProof:
                         target <- proof_replay_type_bound_unsigned_rebind_target(value, 0)
                     _:
                         pass
+            if binding_matches == 0:
+                # Call results are stored under a fresh symbol, then linked to the declared
+                # local by `local == symbol`. There is no `symbol == call(...)` proof fact to
+                # trust. Recover that exact declaration/call from source, require its declared
+                # local width to match, and independently resolve the call's return width.
+                definition = proof_replay_result_symbol_definition(report, trace.name, symbol, symbol_position)
+                return false if not definition.known
+                return false if proof_unsigned_type_width(definition.local_type, report.source_declarations, 0) != width
+                return false if not proof_replay_result_symbol_source_available(report, trace, symbol_position, definition.local, definition.call)
+                marker_arguments: darray[Ast::Expr] = [definition.call, Ast::Expr.IntLit(width, symbol_position)]
+                marker_names: darray[sview] = []
+                marker: Ast::Expr = Ast::Expr.Call(Ast::Expr.Ident("__elisa_unsigned_type_bound", symbol_position), marker_arguments, marker_names, symbol_position)
+                return proof_replay_type_bound_call_result_fact(report, parameters, body, marker)
             return false if binding_matches != 1 or target == ""
             return false if any parameter in parameters where parameter.name == target
             typed_source_matches: mutable usize = 0
@@ -68,3 +83,52 @@ extend ElisaProof:
                     _:
                         pass
             return typed_source_matches == 1
+
+        # The producer emits all three canonical facts for a narrow unsigned binding: its lower
+        # bound, width marker, and upper bound. The marker is the source-backed witness; accept a
+        # lower/upper row only when it is the exact canonical inequality for that unique marker.
+        def proof_replay_type_bound_unsigned_rebind_range_fact(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&) -> bool:
+            symbol: mutable sview = ""
+            symbol_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            is_lower: mutable bool = false
+            upper_value: mutable i64 = -1
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.IntLit(0, zero_position), TokenKind.LtEq, Ast::Expr.Ident(name, position), expression_position):
+                    return false if not proof_replay_source_position_equal(zero_position, position) or not proof_replay_source_position_equal(expression_position, position)
+                    symbol <- name
+                    symbol_position <- position
+                    is_lower <- true
+                Ast::Expr.Binary(Ast::Expr.Ident(name, position), TokenKind.LtEq, Ast::Expr.IntLit(bound, bound_position), expression_position):
+                    return false if not proof_replay_source_position_equal(bound_position, position) or not proof_replay_source_position_equal(expression_position, position)
+                    symbol <- name
+                    symbol_position <- position
+                    upper_value <- bound
+                _:
+                    return false
+            return false if not proof_internal_name_is_rebind(symbol) or symbol_position.line != trace.line
+            marker_matches: mutable usize = 0
+            marker_width: mutable i64 = 0
+            for candidate in report.traces.records |candidate, report, trace, symbol, symbol_position, marker_matches, marker_width, parameters, body|:
+                continue if candidate.kind != "type-bound" or candidate.name != trace.name or candidate.line != trace.line
+                match candidate.expression:
+                    Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, argument_names, _):
+                        continue if marker_name != "__elisa_unsigned_type_bound" or arguments.count != 2 or argument_names.count != 0
+                        match arguments[0]:
+                            Ast::Expr.Ident(candidate_symbol, candidate_position):
+                                continue if candidate_symbol != symbol or not proof_replay_source_position_equal(candidate_position, symbol_position)
+                            _:
+                                continue
+                        width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        continue if not width_value.known or width_value.value <= 0 or width_value.value >= PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH
+                        return false if marker_matches > 0 and marker_width != width_value.value
+                        return false if not proof_replay_type_bound_unsigned_rebind_fact(report, candidate, parameters, body)
+                        marker_width <- width_value.value
+                        marker_matches <- marker_matches + 1
+                    _:
+                        pass
+            return false if marker_matches == 0
+            if is_lower:
+                expected: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, symbol_position), TokenKind.LtEq, Ast::Expr.Ident(symbol, symbol_position), symbol_position)
+                return proof_replay_expr_equal(trace.expression, expected)
+            expected_upper: i64 = proof_unsigned_width_max(marker_width)
+            return upper_value == expected_upper
