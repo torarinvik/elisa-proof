@@ -63,40 +63,52 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_replay_result_symbol_preservation_loop_site(body: darray[Ast::Stmt]&, loop_line: u32, symbol_position: Ast::Pos, loops: mutable usize&, declarations: mutable usize&, local: mutable sview&, local_type: mutable Ast::Expr&, call: mutable Ast::Expr&, depth: usize) -> void:
-            return if depth >= 96
-            for statement in body |body, loop_line, symbol_position, loops, declarations, local, local_type, call, depth|:
+        def proof_replay_result_symbol_preservation_loop_site_with_work(body: darray[Ast::Stmt]&, loop_line: u32, symbol_position: Ast::Pos, loops: mutable usize&, declarations: mutable usize&, local: mutable sview&, local_type: mutable Ast::Expr&, call: mutable Ast::Expr&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= 96
+            for statement in body |body, loop_line, symbol_position, loops, declarations, local, local_type, call, depth, source_work|:
+                return false if not proof_replay_mutable_local_statement_work_charge(statement, source_work, depth)
                 match statement:
                     Ast::Stmt.While(_, nested, position) | Ast::Stmt.For(_, _, _, nested, position):
                         if position.line == loop_line:
                             loops <- loops + 1
+                            return false if not proof_replay_mutable_local_body_work_charge(nested, source_work, 0)
                             proof_replay_result_symbol_direct_loop_declaration(nested, symbol_position, declarations, local, local_type, call)
                         else:
-                            proof_replay_result_symbol_preservation_loop_site(nested, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1)
+                            return false if not proof_replay_result_symbol_preservation_loop_site_with_work(nested, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1, source_work)
                     Ast::Stmt.If(_, yes, no, _):
-                        proof_replay_result_symbol_preservation_loop_site(yes, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1)
-                        proof_replay_result_symbol_preservation_loop_site(no, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1)
+                        return false if not proof_replay_result_symbol_preservation_loop_site_with_work(yes, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1, source_work)
+                        return false if not proof_replay_result_symbol_preservation_loop_site_with_work(no, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1, source_work)
                     Ast::Stmt.Block(_, _, _, nested, _) | Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
-                        proof_replay_result_symbol_preservation_loop_site(nested, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1)
+                        return false if not proof_replay_result_symbol_preservation_loop_site_with_work(nested, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1, source_work)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |loop_line, symbol_position, loops, declarations, local, local_type, call, depth|:
-                            proof_replay_result_symbol_preservation_loop_site(arm.body, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1)
+                        for arm in arms |loop_line, symbol_position, loops, declarations, local, local_type, call, depth, source_work|:
+                            return false if not proof_replay_result_symbol_preservation_loop_site_with_work(arm.body, loop_line, symbol_position, loops, declarations, local, local_type, call, depth + 1, source_work)
                     _:
                         pass
+            return true
 
-        def proof_replay_result_symbol_trace_in_consumer_certificate(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_result_symbol_trace_in_consumer_certificate_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if not proof_replay_mutable_local_text_compare_work_charge(certificate.name, trace.name, source_work)
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+            return false if not proof_replay_mutable_local_text_compare_work_charge(certificate.rule, "goal", source_work)
+            return false if not proof_replay_mutable_local_text_compare_work_charge(certificate.rule, "quantifier-forall", source_work)
+            return false if not proof_replay_mutable_local_text_compare_work_charge(certificate.rule, "quantifier-exists", source_work)
             # Loop preservation is certified through the ordinary goal path, which may select a
             # quantifier rule for quantified invariants. Specialized safety/index/frame rules do
             # not establish the normal-iteration preservation phase, even if they share premises.
             return false if certificate.rule != "goal" and certificate.rule != "quantifier-forall" and certificate.rule != "quantifier-exists"
             return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
-            for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, trace|:
+            if certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + certificate.facts_count
+            for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, trace, source_work|:
                 fact: Ast::Expr = report.certificate_facts[certificate.facts_start + fact_index]
-                return true if proof_replay_expr_equal(fact, trace.expression) and proof_replay_local_binding_expr_positions_match(fact, trace.expression)
+                exact: mutable bool = false
+                return false if not proof_replay_mutable_local_expr_equal_with_work(fact, trace.expression, &exact, source_work)
+                return true if exact and proof_replay_local_binding_expr_positions_match(fact, trace.expression)
             return false
 
         # A body-local result may enter the context only for normal loop preservation. The
@@ -104,8 +116,14 @@ extend ElisaProof:
         # guard/invariant; transfer certificates use their break/continue statement line. Inline
         # bodies can share a line with the header, so reject a result declaration on that line.
         def proof_replay_result_symbol_loop_preservation_available(report: ProofReport&, trace: ProofFactTrace, symbol_position: Ast::Pos, local: sview, call: Ast::Expr) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_result_symbol_loop_preservation_available_with_work(report, trace, symbol_position, local, call, &source_work)
+
+        def proof_replay_result_symbol_loop_preservation_available_with_work(report: ProofReport&, trace: ProofFactTrace, symbol_position: Ast::Pos, local: sview, call: Ast::Expr, source_work: mutable usize&) -> bool:
             return false if symbol_position.line == 0 or symbol_position.line == report.trace_owner_line
-            return false if not proof_replay_result_symbol_trace_in_consumer_certificate(report, trace)
+            return false if not proof_replay_mutable_local_trace_work_charge_fail_closed(report, source_work, 1)
+            return false if not proof_replay_result_symbol_trace_in_consumer_certificate_with_work(report, trace, source_work)
+            return false if not proof_replay_mutable_local_owner_preflight_work_charge(report, trace.name, report.replay_owner_line, source_work)
             body: mutable darray[Ast::Stmt] = []
             return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
             loops: mutable usize = 0
@@ -113,7 +131,7 @@ extend ElisaProof:
             found_local: mutable sview = ""
             found_type: mutable Ast::Expr = Ast::Expr.Invalid
             found_call: mutable Ast::Expr = Ast::Expr.Invalid
-            proof_replay_result_symbol_preservation_loop_site(body, report.trace_owner_line, symbol_position, &loops, &declarations, &found_local, &found_type, &found_call, 0)
+            return false if not proof_replay_result_symbol_preservation_loop_site_with_work(body, report.trace_owner_line, symbol_position, &loops, &declarations, &found_local, &found_type, &found_call, 0, source_work)
             return false if loops != 1 or declarations != 1 or found_local != local or not proof_replay_call_source_position_equal(found_call, call)
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             guard_found: mutable bool = false
@@ -121,34 +139,56 @@ extend ElisaProof:
             update_names: mutable darray[sview] = []
             update_values: mutable darray[Ast::Expr] = []
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
-            for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, trace, guard_found, invariant_expressions, update_names, update_values|:
+            if certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + certificate.facts_count
+            for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, trace, guard_found, invariant_expressions, update_names, update_values, source_work|:
                 origin: usize = report.traces.origin_indices[certificate.facts_start + fact_index]
                 continue if origin >= report.traces.records.count
                 candidate: ProofFactTrace = report.traces.records[origin]
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, source_work)
                 continue if candidate.name != trace.name
                 if candidate.line == report.trace_owner_line:
-                    guard_found <- true if candidate.kind == "loop-condition" and proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line)
-                    if candidate.kind == "loop-invariant" and proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line):
-                        invariant_expressions.push(candidate.expression)
-                if candidate.kind == "local-binding" and proof_replay_local_binding_loop_self_update_source(report, candidate, true):
-                    match candidate.expression:
-                        Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, value, _):
-                            target: sview = proof_replay_local_binding_update_target(value)
-                            continue if target == ""
-                            duplicate_update: mutable bool = false
-                            for update_index in 0..<update_names.count |update_index, update_names, update_values, target, symbol, symbol_position, duplicate_update|:
-                                if update_names[update_index] == target:
-                                    return false if not proof_replay_expr_equal(update_values[update_index], Ast::Expr.Ident(symbol, symbol_position)) or not proof_replay_source_position_equal(Ast::expr_pos(update_values[update_index]), symbol_position)
-                                    duplicate_update <- true
-                            continue if duplicate_update
-                            update_names.push(target)
-                            update_values.push(Ast::Expr.Ident(symbol, symbol_position))
-                        _:
-                            pass
+                    return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "loop-condition", source_work)
+                    if candidate.kind == "loop-condition":
+                        return false if not proof_replay_mutable_local_owner_preflight_work_charge(report, trace.name, report.replay_owner_line, source_work)
+                        guard_found <- true if proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line)
+                    return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "loop-invariant", source_work)
+                    if candidate.kind == "loop-invariant":
+                        return false if not proof_replay_mutable_local_owner_preflight_work_charge(report, trace.name, report.replay_owner_line, source_work)
+                        if proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line):
+                            invariant_expressions.push(candidate.expression)
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "local-binding", source_work)
+                if candidate.kind == "local-binding":
+                    candidate_update_valid: bool = proof_replay_local_binding_loop_self_update_source_with_work(report, candidate, true, source_work)
+                    return false if not candidate_update_valid and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if candidate_update_valid:
+                        match candidate.expression:
+                            Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, value, _):
+                                target: sview = proof_replay_local_binding_update_target(value)
+                                continue if target == ""
+                                duplicate_update: mutable bool = false
+                                for update_index in 0..<update_names.count |update_index, update_names, update_values, target, symbol, symbol_position, duplicate_update, source_work|:
+                                    return false if not proof_replay_mutable_local_identifier_scan_charge(Ast::Expr.Ident(update_names[update_index], symbol_position), 0, source_work)
+                                    if update_names[update_index] == target:
+                                        exact: mutable bool = false
+                                        return false if not proof_replay_mutable_local_expr_equal_with_work(update_values[update_index], Ast::Expr.Ident(symbol, symbol_position), &exact, source_work) or not exact or not proof_replay_source_position_equal(Ast::expr_pos(update_values[update_index]), symbol_position)
+                                        duplicate_update <- true
+                                continue if duplicate_update
+                                update_names.push(target)
+                                update_values.push(Ast::Expr.Ident(symbol, symbol_position))
+                            _:
+                                pass
             return false if not guard_found or invariant_expressions.count == 0 or update_names.count == 0
-            for invariant in invariant_expressions |invariant, update_names, update_values, certificate|:
+            for invariant in invariant_expressions |invariant, update_names, update_values, certificate, source_work|:
+                return false if not proof_replay_summary_expr_repeat_charge_with_work(invariant, update_names.count + 1, source_work)
                 expected_goal: Ast::Expr = proof_replay_substitute_many(invariant, update_names, update_values)
-                return true if not proof_replay_expr_equal(expected_goal, invariant) and proof_replay_expr_equal(expected_goal, certificate.goal)
+                return false if not proof_replay_summary_expr_charge_with_work(expected_goal, source_work) or not proof_replay_summary_expr_charge_with_work(invariant, source_work) or not proof_replay_summary_expr_charge_with_work(certificate.goal, source_work)
+                different_from_invariant: mutable bool = false
+                matches_goal: mutable bool = false
+                return false if not proof_replay_mutable_local_expr_equal_with_work(expected_goal, invariant, &different_from_invariant, source_work)
+                return false if not proof_replay_mutable_local_expr_equal_with_work(expected_goal, certificate.goal, &matches_goal, source_work)
+                return true if not different_from_invariant and matches_goal
             return false
 
         def proof_replay_result_symbol_source_available(report: ProofReport&, trace: ProofFactTrace, symbol_position: Ast::Pos, local: sview, call: Ast::Expr) -> bool:

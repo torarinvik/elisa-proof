@@ -1,13 +1,13 @@
 extend ElisaProofFrameSource:
     private:
-        def call_argument_place(expression: Ast::Expr, formals: darray[sview]&, depth: usize) -> (known: bool, value: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
+        def call_argument_place(expression: Ast::Expr, formals: darray[sview]&, depth: usize, work: mutable usize&) -> (known: bool, value: ElisaProofKernelFramePolicy::Place) can[Memory.Allocate, Abort.Panic]:
             empty: ElisaProofKernelFramePolicy::Place = ElisaProofKernelFramePolicy::Place{parameter: 0, depth: 0, field: "", field2: "", field3: ""}
-            return (false, empty) if depth >= 64
+            return (false, empty) if depth >= 64 or not replay_work_charge(1, work)
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _):
-                    return call_argument_place(inner, formals, depth + 1)
+                    return call_argument_place(inner, formals, depth + 1, work)
                 _:
-                    decoded = place(expression, formals)
+                    decoded = place_with_work(expression, formals, work)
                     return (decoded.known, decoded.place)
 
         def append_call_place(base: ElisaProofKernelFramePolicy::Place, suffix: ElisaProofKernelFramePolicy::Place) -> (known: bool, value: ElisaProofKernelFramePolicy::Place):
@@ -24,24 +24,31 @@ extend ElisaProofFrameSource:
         # The callee's complete supported body must independently obey its policy.
         # This is a call mapping, not whole caller event coverage or report admission.
         def source_call_changes(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, places: darray[ElisaProofKernelFramePolicy::Place]) can[Memory.Allocate, Abort.Panic]:
-            environment_work: mutable usize = 0
-            return (false, []) if not contract_environment(declarations, 0, &environment_work)
-            invocation = source_call(declarations, name, line, position)
-            caller = owner(declarations, name, line)
+            work: mutable usize = 0
+            return source_call_changes_with_work(declarations, name, line, position, tokens, source, source_length, &work)
+
+        def source_call_changes_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, places: darray[ElisaProofKernelFramePolicy::Place]) can[Memory.Allocate, Abort.Panic]:
+            return (false, []) if not contract_environment(declarations, 0, work)
+            invocation = source_call_with_work(declarations, name, line, position, work)
+            caller = owner_with_work(declarations, name, line, work)
             return (false, []) if not invocation.known or not caller.known
-            callee = owner(declarations, invocation.callee, invocation.callee_line)
-            policy = source_policy(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length)
+            callee = owner_with_work(declarations, invocation.callee, invocation.callee_line, work)
+            policy = source_policy_with_work(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, work)
             return (false, []) if not callee.known or not policy.known
-            return (false, []) if not (strict_direct_events(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length) can Global{Read,Write}).known
+            return (false, []) if not (strict_direct_events_with_work(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, work) can Global{Read,Write}).known
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
-            lowered = (lower_direct_events(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET) can Global{Read,Write})
-            return (false, []) if not lowered.known or not (direct_event_roots_replay(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, &lowered.roots) can Global{Read,Write})
+            lowered = (lower_direct_events_with_work(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, work) can Global{Read,Write})
+            return (false, []) if not lowered.known or not (direct_event_roots_replay_with_work(declarations, invocation.callee, invocation.callee_line, tokens, source, source_length, &nodes, &children, &lowered.roots, work) can Global{Read,Write})
             changes: mutable usize = 0
-            for clause in policy.clauses |changes|:
+            return (false, []) if not replay_work_charge(policy.clauses.count, work)
+            for clause in policy.clauses |changes, work|:
+                return (false, []) if not replay_work_charge(sview_len(clause.kind), work)
                 changes <- changes + 1 if clause.kind == "changes"
             if changes == 0:
-                for statement in callee.body:
+                return (false, []) if not replay_work_charge(callee.body.count, work)
+                for statement in callee.body |work|:
+                    return (false, []) if not replay_work_charge(1, work)
                     match statement:
                         Ast::Stmt.Assign(_, _, _, _):
                             return (false, [])
@@ -51,15 +58,19 @@ extend ElisaProofFrameSource:
             match invocation.expression:
                 Ast::Expr.Call(_, arguments, argument_names, _):
                     return (false, []) if arguments.count != callee.formals.count or argument_names.count != arguments.count
-                    for argument_name in argument_names:
+                    return (false, []) if not replay_work_charge(arguments.count, work)
+                    return (false, []) if not replay_work_charge(argument_names.count, work)
+                    for argument_name in argument_names |work|:
+                        return (false, []) if not replay_work_charge(sview_len(argument_name), work)
                         return (false, []) if argument_name != ""
-                    for clause in policy.clauses |clause, arguments, caller, declarations, name, line, places|:
+                    for clause in policy.clauses |clause, arguments, caller, declarations, name, line, places, work|:
+                        return (false, []) if not replay_work_charge(sview_len(clause.kind), work)
                         if clause.kind == "changes":
                             return (false, []) if clause.place.parameter >= arguments.count
-                            actual = call_argument_place(arguments[clause.place.parameter], &caller.formals, 0)
+                            actual = call_argument_place(arguments[clause.place.parameter], &caller.formals, 0, work)
                             return (false, []) if not actual.known
                             mapped = append_call_place(actual.value, clause.place)
-                            return (false, []) if not mapped.known or not place_typed(declarations, name, line, mapped.value)
+                            return (false, []) if not mapped.known or not place_typed_with_work(declarations, name, line, mapped.value, work)
                             places.push(mapped.value)
                 _:
                     return (false, [])

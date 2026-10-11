@@ -17,8 +17,12 @@ extend ElisaProofFrameSource:
         # Reserve a conservative bounded upper limit before changing either
         # arena. Refused source/budgets leave both existing prefixes untouched.
         def lower_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, node_limit: usize, child_limit: usize) -> (known: bool, roots: darray[usize]) can[Memory.Allocate, Abort.Panic]:
-            inventory = (direct_events(declarations, name, line, tokens, source, source_length) can Global{Read,Write})
-            policy = source_policy(declarations, name, line, tokens, source, source_length)
+            work: mutable usize = 0
+            return lower_direct_events_with_work(declarations, name, line, tokens, source, source_length, nodes, children, node_limit, child_limit, &work)
+
+        def lower_direct_events_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, node_limit: usize, child_limit: usize, work: mutable usize&) -> (known: bool, roots: darray[usize]) can[Memory.Allocate, Abort.Panic]:
+            inventory = (direct_events_with_work(declarations, name, line, tokens, source, source_length, work) can Global{Read,Write})
+            policy = source_policy_with_work(declarations, name, line, tokens, source, source_length, work)
             return (false, []) if not inventory.known or not policy.known
             return (false, []) if node_limit > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or child_limit > ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
             # Source limits bound clauses to 128 and events to 4096; these sums
@@ -28,6 +32,30 @@ extend ElisaProofFrameSource:
             child_addition: usize = places * 3 + inventory.events.count * policy.clauses.count
             return (false, []) if nodes.count > node_limit or node_addition > node_limit - nodes.count
             return (false, []) if children.count > child_limit or child_addition > child_limit - children.count
+            # Debit every later arena traversal before mutating either arena, so a
+            # budget refusal preserves the caller's existing arena prefixes.
+            return (false, []) if not replay_work_charge(policy.clauses.count, work)
+            for clause in policy.clauses |work|:
+                return (false, []) if not replay_work_charge(1, work)
+                return (false, []) if not replay_work_charge(sview_len(clause.kind), work)
+                return (false, []) if not replay_work_charge(clause.place.depth, work)
+                return (false, []) if not replay_work_charge(sview_len(clause.place.field), work)
+                return (false, []) if not replay_work_charge(sview_len(clause.place.field2), work)
+                return (false, []) if not replay_work_charge(sview_len(clause.place.field3), work)
+            return (false, []) if not replay_work_charge(inventory.events.count, work)
+            for event in inventory.events |event, policy, work|:
+                return (false, []) if not replay_work_charge(1, work)
+                return (false, []) if not replay_work_charge(sview_len(event.kind), work)
+                return (false, []) if not replay_work_charge(event.place.depth, work)
+                return (false, []) if not replay_work_charge(sview_len(event.place.field), work)
+                return (false, []) if not replay_work_charge(sview_len(event.place.field2), work)
+                return (false, []) if not replay_work_charge(sview_len(event.place.field3), work)
+                return (false, []) if not replay_work_charge(sview_len(name), work)
+                if event.kind == "allow":
+                    for clause in policy.clauses |work|:
+                        return (false, []) if not replay_work_charge(sview_len(clause.kind), work)
+                    for clause in policy.clauses |work|:
+                        return (false, []) if not replay_work_charge(sview_len(clause.kind), work)
             policy_roots: mutable darray[usize] = []
             for clause in policy.clauses |nodes, children, policy_roots|:
                 policy_roots.push(lower_place(clause.place, nodes, children))
@@ -47,6 +75,7 @@ extend ElisaProofFrameSource:
                         children.push(policy_roots[index]) if policy.clauses[index].kind == "preserves"
                 elif event.kind == "preserve":
                     operation <- "preserve"
+                    return (false, []) if event.clause_index >= policy_roots.count
                     children.push(policy_roots[event.clause_index])
                 count: usize = children.count - start
                 roots.push(nodes.count)

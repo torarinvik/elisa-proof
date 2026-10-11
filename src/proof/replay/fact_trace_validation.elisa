@@ -214,6 +214,14 @@ extend ElisaProof:
                 _:
                     return false
 
+        # Replay equality is a bounded structural walk over the admitted AST forms. This
+        # Charge both the structural preflight and the exact comparison pass.
+        def proof_replay_trace_expression_equality_work(report: mutable ProofReport&, expression: Ast::Expr) -> bool:
+            start_work: usize = report.traces.lookup_work_used
+            return false if not proof_replay_trace_expression_work(report, expression, 0)
+            comparison_work: usize = report.traces.lookup_work_used - start_work
+            return proof_replay_trace_lookup_charge_amount(report, comparison_work)
+
         # Fact provenance is keyed by the owner name before exact expression/kernel equality is
         # checked. Hashes only select a probe path; the stored sview comparison remains the
         # authority, so collisions cannot admit a fact for another owner.
@@ -238,13 +246,18 @@ extend ElisaProof:
         # Full, bounded fingerprint for exactly the expression forms admitted by the kernel and
         # compared by proof_replay_expr_equal. Unsupported forms are omitted from the expression
         # table, since replay equality rejects them even against themselves. Parentheses are
-        # transparent and source positions are ignored, including in quantified blocks; hashes
+        # transparent; quantifier block line identity is included because exact equality checks
         # still only select candidates; exact replay equality remains authoritative.
         def proof_replay_trace_expression_hash_name_work(report: mutable ProofReport&, name: sview) -> bool:
             proof_replay_trace_lookup_charge_amount(report, sview_len(name))
 
         def proof_replay_trace_expression_hash(report: mutable ProofReport&, expression: Ast::Expr, depth: usize) -> (supported: bool, hash: u32):
             return (false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_trace_lookup_charge(report)
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.FloatLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Slice(_, _, _, _) | Ast::Expr.IndexN(_, _, _) | Ast::Expr.SetLit(_, _) | Ast::Expr.DictLit(_, _) | Ast::Expr.RecordUpdate(_, _, _) | Ast::Expr.GetElse(_, _, _):
+                    return (false, 0)
+                _:
+                    pass
             match expression:
                 Ast::Expr.Paren(inner, _):
                     return proof_replay_trace_expression_hash(report, inner, depth + 1)
@@ -365,11 +378,11 @@ extend ElisaProof:
                         return (false, 0) if not element_hash.supported
                         hash <- proof_expr_shape_mix(hash, element_hash.hash.i64())
                     return (true, hash)
-                Ast::Expr.Block(statements, body, captures, _):
+                Ast::Expr.Block(statements, body, captures, position):
                     return (false, 0) if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
                     return (false, 0) if not proof_replay_trace_lookup_charge_amount(report, statements.count)
-                    # `proof_expr_equal_supported` ignores source positions on expressions.
                     hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 15), statements.count.i64())
+                    hash <- proof_expr_shape_mix(hash, position.line.i64())
                     for statement in statements |statement, hash, depth|:
                         match statement:
                             Ast::Stmt.VarDecl(binder, type_expression, range_expression, _):
@@ -550,7 +563,6 @@ extend ElisaProof:
                             break
                     probe_slot <- (probe_slot + 1) % capacity
                     probes <- probes + 1
-                return if not proof_replay_trace_expression_work(report, report.traces.records[index].expression, 0)
                 expression_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, report.traces.records[index].expression, 0)
                 report.traces.expression_hashes[index] <- expression_hash.hash
                 return if expression_hash.supported and not proof_replay_fact_expression_index_insert(report, owner, owner_hash, index, expression_hash.hash, capacity, &work, sentinel)
@@ -637,7 +649,6 @@ extend ElisaProof:
             return (proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, depth, dependency_stack, active_certificates, validation_workspace) can Global{Read,Write})
 
         def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool can[Global.Read, Global.Write]:
-            return false if not proof_replay_trace_expression_work(report, fact, 0)
             expression_shape: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, fact, 0)
             return false if not expression_shape.supported
             expression_hash: u32 = expression_shape.hash
@@ -646,14 +657,8 @@ extend ElisaProof:
                 trace: ProofFactTrace = report.traces.records[trace_index]
                 return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
                 return false if trace.name != owner or trace_index >= report.traces.expression_hashes.count or report.traces.expression_hashes[trace_index] != expression_hash
-                return false if not proof_replay_trace_expression_work(report, trace.expression, 0)
-                # Exact equality validates both operands, including the query once per hash
-                # collision candidate. The trace side was charged immediately above.
-                return false if not proof_replay_trace_expression_work(report, fact, 0)
-                return false if not proof_replay_trace_expression_work(report, fact, 0)
-                return false if not proof_replay_trace_expression_work(report, fact, 0)
-                return false if not proof_replay_trace_expression_work(report, trace.expression, 0)
-                return false if not proof_replay_trace_expression_work(report, trace.expression, 0)
+                return false if not proof_replay_trace_expression_equality_work(report, fact)
+                return false if not proof_replay_trace_expression_equality_work(report, trace.expression)
                 return true if proof_replay_expr_equal(trace.expression, fact) and (proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, active_certificates, validation_workspace) can Global{Read,Write})
                 trace_index <- proof_replay_trace_expression_chain_next(report, trace_index, owner, expression_hash)
             return false

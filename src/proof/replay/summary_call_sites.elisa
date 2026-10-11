@@ -7,6 +7,19 @@ extend ElisaProof:
             can Abort.Panic:
                 return value
 
+        def proof_replay_summary_scope_work_charge(scope: darray[sview]&, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or scope.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + scope.count
+            for segment in scope |work|:
+                return false if sview_len(segment) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                work <- work + sview_len(segment)
+            return true
+
+        def proof_replay_summary_scope_equal_with_work(left: darray[sview]&, right: darray[sview]&, work: mutable usize&) -> bool:
+            return false if not proof_replay_summary_scope_work_charge(left, work)
+            return false if not proof_replay_summary_scope_work_charge(right, work)
+            return proof_replay_global_constant_scope_equal(left, right)
+
         def proof_replay_summary_call_owner_scope(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, current_scope: darray[sview]&, found_scope: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> void:
             if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 matches <- 2
@@ -19,11 +32,28 @@ extend ElisaProof:
                 work <- work + 1
                 match declaration:
                     Ast::Decl.Func(name, _, _, _, _, _, position):
+                        if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                            matches <- 2
+                            return
+                        work <- work + sview_len(name)
+                        if sview_len(owner) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                            matches <- 2
+                            return
+                        work <- work + sview_len(owner)
                         if name == owner and (owner_line == 0 or position.line == owner_line):
                             matches <- matches + 1
                             found_scope.clear()
                             found_scope.extend(current_scope)
                     Ast::Decl.Module(module_name, body, _):
+                        module_bytes: usize = sview_len(module_name)
+                        if module_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
+                            matches <- 2
+                            return
+                        work <- work + module_bytes * 3
+                        if current_scope.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                            matches <- 2
+                            return
+                        work <- work + current_scope.count
                         next_scope: mutable darray[sview] = proof_replay_global_constant_scope_with_module(current_scope, module_name)
                         proof_replay_summary_call_owner_scope(body, owner, owner_line, &next_scope, found_scope, matches, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
@@ -37,6 +67,7 @@ extend ElisaProof:
             source_path: mutable darray[sview] = []
             declaration_path: mutable darray[sview] = []
             return false if not proof_replay_qualified_path(source, &source_path, 0) or not proof_replay_qualified_path(declaration, &declaration_path, 0)
+            return false if not proof_replay_summary_scope_work_charge(source_path, work) or not proof_replay_summary_scope_work_charge(declaration_path, work)
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
             owner_scope: mutable darray[sview] = []
@@ -44,11 +75,12 @@ extend ElisaProof:
             root_scope: mutable darray[sview] = []
             proof_replay_summary_call_owner_scope(report.source_declarations, trace.name, owner_line, &root_scope, &owner_scope, &matches, work, 0)
             return false if matches != 1
-            return true if proof_replay_global_constant_scope_equal(&declaration_path, &source_path)
+            return true if proof_replay_summary_scope_equal_with_work(&declaration_path, &source_path, work)
             relative_path: mutable darray[sview] = []
             relative_path.extend(owner_scope)
             relative_path.extend(source_path)
-            return proof_replay_global_constant_scope_equal(&declaration_path, &relative_path)
+            return false if not proof_replay_summary_scope_work_charge(relative_path, work)
+            return proof_replay_summary_scope_equal_with_work(&declaration_path, &relative_path, work)
 
         # A constant spelling is normalized to its value only when no parameter or local of the
         # owner function spells the name (for a path, its first segment) anywhere in the body:
@@ -60,9 +92,13 @@ extend ElisaProof:
             found_owner_line: mutable u32 = 0
             matches: mutable usize = 0
             owners: mutable usize = 0
-            return false if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, work, 0)
+            if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, work, 0):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
             scan_cost: usize = work - scan_start
-            return false if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3
+            if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
             # Reserve the same bounded tree size for the legacy owner, parameter and shadow
             # predicates that follow this complete preflight walk.
             work <- work + scan_cost * 3
@@ -171,10 +207,15 @@ extend ElisaProof:
                             for pattern_name in pattern_names |pattern_name, cost, work|:
                                 return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(pattern_name))
                             return false if not proof_replay_summary_expr_cost(arm.guard, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(arm.body, cost, work, depth + 1)
-                    Ast::Stmt.Block(_, _, _, nested, _):
+                    Ast::Stmt.Block(_, clause, binding, nested, _):
+                        return false if clause.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + clause.count
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(binding))
+                        for word in clause |cost, work|:
+                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(word))
                         return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
-                        pass
+                    Ast::Stmt.Break(label, _) | Ast::Stmt.Continue(label, _):
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(label))
                     _:
                         return false
             return true
@@ -283,6 +324,7 @@ extend ElisaProof:
             if not proof_replay_summary_expr_cost(left, &cost, work, 0) or not proof_replay_summary_expr_cost(right, &cost, work, 0):
                 work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false
+            # The cost walk above and the exact structural comparison each visit the operands.
             if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2:
                 work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false
@@ -296,6 +338,25 @@ extend ElisaProof:
                 work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false
             work <- work + cost
+            return true
+
+        # Repeated substitutions scan the whole contract once per binding; some forms also
+        # compare each identifier against the binding list. Reserve an AST-size multiple before
+        # entering those repeated transformations.
+        def proof_replay_summary_expr_repeat_charge_with_work(expression: Ast::Expr, repetitions: usize, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(expression, &cost, work, 0):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            if repetitions >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            total_passes: usize = repetitions + 1
+            if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / total_passes:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            work <- work + cost * total_passes
             return true
 
         def proof_replay_summary_call_argument_equal(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize) -> bool:

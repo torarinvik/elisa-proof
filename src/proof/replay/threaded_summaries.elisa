@@ -23,28 +23,54 @@ extend ElisaProof:
         def proof_replay_threading_none(valid: bool) -> ProofReplayThreading:
             return ProofReplayThreading{valid: valid, parameters: [], slots: [], symbols: []}
 
+        def proof_replay_thread_name_compare_work_charge(left: sview, right: sview, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            return false if sview_len(left) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + sview_len(left)
+            return false if sview_len(right) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + sview_len(right)
+            return true
+
         # The unique source declaration of the callee and whether it may thread.
-        def proof_replay_thread_callee_find(declarations: darray[Ast::Decl]&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, depth: usize) -> void:
-            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
+        def proof_replay_thread_callee_find_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 found <- 2
-                return
-            for declaration in declarations |name, line, found, safe, mutable_slots, depth|:
+                return false
+            work <- work + declarations.count
+            for declaration in declarations |name, line, found, safe, mutable_slots, work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate, parameters, return_type, _, effects, _, position):
+                        return false if sview_len(candidate) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate)
                         if candidate == name and position.line == line:
                             found <- found + 1
                             mutable_slots.clear()
-                            safe <- not (any effect in effects where sview_starts_with(effect, "Unsafe"))
+                            safe <- true
+                            return false if effects.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + effects.count
+                            for effect in effects |work, safe|:
+                                return false if sview_len(effect) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                                work <- work + sview_len(effect)
+                                safe <- false if sview_starts_with(effect, "Unsafe")
                             if return_type is declared:
+                                return false if not proof_replay_summary_expr_charge_with_work(declared, work)
                                 safe <- false if proof_resource_is_reference_type(declared)
-                            for index in 0..<parameters.count |index, parameters, safe, mutable_slots|:
+                            return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + parameters.count
+                            for index in 0..<parameters.count |index, parameters, safe, mutable_slots, work|:
+                                return false if sview_len(parameters[index].name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                                work <- work + sview_len(parameters[index].name)
+                                return false if not proof_replay_summary_expr_charge_with_work(parameters[index].type_expression, work)
                                 continue if not proof_resource_is_reference_type(parameters[index].type_expression)
+                                return false if not proof_replay_summary_expr_charge_with_work(parameters[index].type_expression, work)
                                 safe <- false if not proof_resource_is_mutable_reference_type(parameters[index].type_expression)
                                 mutable_slots.push(index)
-                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_replay_thread_callee_find(body, name, line, found, safe, mutable_slots, depth + 1)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_thread_callee_find_with_work(nested, name, line, found, safe, mutable_slots, work, depth + 1)
                     _:
                         pass
+            return true
 
         # Declarations of `local_name` in an owner body: (count, any of them a reference).
         def proof_replay_thread_local_declarations(body: darray[Ast::Stmt]&, local_name: sview, count: mutable usize&, reference: mutable bool&, depth: usize) -> void:
@@ -119,15 +145,18 @@ extend ElisaProof:
                 count <- count + 1
             return proof_replay_threading_none(true) if count == 0
             return proof_replay_threading_none(false) if not proof_replay_mutable_local_trace_work_charge(report, source_work, count)
+            repeated_call_cost: mutable usize = 0
+            return proof_replay_threading_none(false) if not proof_replay_summary_expr_cost(call, &repeated_call_cost, source_work, 0)
+            return proof_replay_threading_none(false) if repeated_call_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / count
+            source_work <- source_work + repeated_call_cost * count
             return proof_replay_threading_none(false) if report.source_region_param_lines.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + report.source_region_param_lines.count
-            for slot_index in 0..<count |slot_index, source_work, report, trace|:
-                return proof_replay_threading_none(false) if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, source_work)
+            return proof_replay_threading_none(false) if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, source_work)
             invalid: ProofReplayThreading = proof_replay_threading_none(false)
             found: mutable usize = 0
             safe: mutable bool = false
             mutable_slots: mutable darray[usize] = []
-            proof_replay_thread_callee_find(report.source_declarations, summary.name, summary.line, &found, &safe, &mutable_slots, 0)
+            return invalid if not proof_replay_thread_callee_find_with_work(report.source_declarations, summary.name, summary.line, &found, &safe, &mutable_slots, source_work, 0)
             return invalid if found != 1 or not safe or mutable_slots.count != count
             return invalid if any region_line in report.source_region_param_lines where region_line == summary.line
             arguments: mutable darray[Ast::Expr] = []
@@ -147,7 +176,12 @@ extend ElisaProof:
             for index in 0..<count |index, mutable_slots, arguments, summary, report, trace, first, body, plan, invalid|:
                 slot: usize = mutable_slots[index]
                 local_name: sview = proof_replay_thread_argument_local(arguments[slot])
-                return invalid if local_name == "" or proof_internal_name_is_rebind(local_name) or (any taken in plan.parameters where taken == local_name)
+                return invalid if local_name == "" or proof_internal_name_is_rebind(local_name)
+                duplicate_local: mutable bool = false
+                for taken in plan.parameters |taken, local_name, duplicate_local, invalid, source_work|:
+                    return invalid if not proof_replay_thread_name_compare_work_charge(taken, local_name, source_work)
+                    duplicate_local <- true if taken == local_name
+                return invalid if duplicate_local
                 declarations: mutable usize = 0
                 reference_local: mutable bool = false
                 proof_replay_thread_local_declarations(body, local_name, &declarations, &reference_local, 0)
@@ -156,7 +190,12 @@ extend ElisaProof:
                     return invalid if other != slot and proof_expr_mentions_name(arguments[other], local_name)
                 match report.traces.summary_values[first + index]:
                     Ast::Expr.Ident(symbol, _):
-                        return invalid if not proof_internal_name_is_rebind(symbol) or (any taken in plan.symbols where taken == symbol)
+                        return invalid if not proof_internal_name_is_rebind(symbol)
+                        duplicate_symbol: mutable bool = false
+                        for taken in plan.symbols |taken, symbol, duplicate_symbol, invalid, source_work|:
+                            return invalid if not proof_replay_thread_name_compare_work_charge(taken, symbol, source_work)
+                            duplicate_symbol <- true if taken == symbol
+                        return invalid if duplicate_symbol
                         plan.symbols.push(symbol)
                     _:
                         return invalid
