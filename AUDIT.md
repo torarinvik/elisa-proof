@@ -10815,6 +10815,19 @@ unknown-edge sentinel. The name is now reserved at source admission. The regress
 `scripts/test_internal_marker_names.py` now requires a `proof-internal-name` refusal for it. The
 source-admission matrix still refuses all six malformed classes across all twelve routes.
 
+## Source-admission route coverage follow-up (2026-10-12)
+
+The earlier twelve-route count omitted five public CLI projections: `--summary-json`,
+`--function-json`, `--explain`, `--linear-hints`, and `--correspondence`. The matrix now lists all
+17 routes. Its positive controls generate a correspondence package from the exact tested source
+and provide a valid empty linear-hint stream; malformed-source cases use a valid control package
+and require the correspondence result to mark the source inadmissible. The shared required-
+permission matrix also supplies source-matched packages and hints to those routes.
+
+This is a coverage correction, not yet compiler qualification evidence. The added matrix must be
+run against a fresh Stage0/Stage1 product pair built from the current source before claiming all
+17 routes pass; a stale product can only provide exploratory results.
+
 **Follow-up suite evidence.** With the field-place producer/kernel collision checks in place, the
 full `scripts/test.sh` passed against isolated Stage1
 `61ea11eb29a8ed2fa9a59c07acd1c2c09f9d255f` and Stage0

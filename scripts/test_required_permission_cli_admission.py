@@ -16,7 +16,13 @@ with tempfile.TemporaryDirectory() as temporary:
         proof.write_bytes(admission.run("--proof", admission.GOAL, source).stdout)
         repair = json.loads(admission.run("--repair", admission.GOAL, source).stdout)
         (directory / "control.script").write_text(repair["script"])
-        for name, arguments in admission.routes(directory, source, proof):
+        package = directory / "granted.package.json"
+        packaged = admission.run("--package", source)
+        assert packaged.returncode == 0, (index, "package", packaged.stdout[:300])
+        package.write_bytes(packaged.stdout)
+        hints = directory / "granted.hints"
+        hints.write_text("# valid empty hint stream\n", encoding="utf-8")
+        for name, arguments in admission.routes(directory, source, proof, package, hints):
             result = admission.run(*arguments)
             assert result.returncode == 0, (index, name, result.stdout[:300])
 print("Required permission CLI admission: five violation forms refuse all routes; four granted controls remain admitted")
