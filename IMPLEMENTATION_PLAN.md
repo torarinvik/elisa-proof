@@ -9620,9 +9620,13 @@ The separate `8d7cfca` backend/region-owner commit was re-audited: its rename is
 `resolved_error_family(...)` on current compiler `main`, its native owner-lookup smoke passes there,
 and cherry-picking it produced no unique changes. The `query_head_for` / `const_scope_owner` region
 annotations still need an exact commit and validation report before integration. The PGS compile-time
-comparison is an exploratory Mac run with non-qualifying metadata; wait for that run to exit before
-any further compiler-backed checks. Cross-language timing remains subject to the Linux benchmark
-gate and seed-matched Stage1 products.
+comparison completed as an exploratory Mac run: 12 cases, 24 warmups, and 108 measured pairs; all
+outputs matched and input/product postflight checks passed. The median of the 12 per-case paired
+baseline/candidate ratios is 1.0824, with substantial case-to-case spread. Its metadata sets
+`timing_eligible=false` because this 10-core Mac run is exploratory and non-qualifying; it supports
+no broad performance claim. The saved report is
+`/private/tmp/elisa-pgs-index-mac-exploratory-01ddacf7-20261011/summary.json`. Cross-language timing
+remains subject to the Linux benchmark gate and seed-matched Stage1 products.
 
 The compiler cleanup removed two duplicate temporary seed worktrees, a second clean checkout at
 the retained `37a322e7` scoped-type baseline, and an obsolete generated Stage1 checkout. The current
