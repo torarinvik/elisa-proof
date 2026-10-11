@@ -9805,10 +9805,12 @@ while keeping context rows, and preserving a later call bound on normal fallthro
 `GetElse` continue while refusing that context when relabeled to the transfer line. The GetElse
 check swaps source text into an already-built report; it exercises replay source-gating with the
 normal header certificate, not a fresh parse, proof check, or producer-generated continue
-certificate for that variant. Direct regression coverage for the rule-family restriction and the
-function-summary consumer path remains to be added when test changes are requested. Context-free
-call-site inspection stays available for source validation, while certificate consumption must
-pass the result-symbol availability check. Ordinary local type-bound witness scope remains a
+certificate for that variant. The existing source-binding harness now also mutates a valid
+preservation attempt and its certificate to an unrecognized phase and requires the general
+attempt matcher to reject the pair; this mutation control has not been run on Stage1. The
+function-summary consumer path still needs direct regression coverage. Context-free call-site
+inspection stays available for source validation, while certificate consumption must pass the
+result-symbol availability check. Ordinary local type-bound witness scope remains a
 separate static audit item: source declaration uniqueness currently does not prove that a local
 binding is available at the consuming certificate.
 `git diff --check` and Python AST parsing pass, and

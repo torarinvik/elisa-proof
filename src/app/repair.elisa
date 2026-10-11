@@ -1,4 +1,6 @@
-const PROOF_REPAIR_SCRATCH_SLOT_COUNT: usize = PROOF_JSON_BRANCH_DEPTH_LIMIT
+const PROOF_REPAIR_REWRITE_FACT_LIMIT: usize = 4
+const PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT: usize = 16
+const PROOF_REPAIR_REWRITE_CLOSERS: usize = 4
 
 def proof_push_json_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKernelCore::ProofKernelNode) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"kind\":")
@@ -255,6 +257,8 @@ def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&
         argument_value <- argument_value * 10 + (byte - '0'.u8()).usize()
         argument_digits <- argument_digits + 1
         cursor <- cursor + 1
+    indexed_rewrite: bool = (name_end - name_start == 7 and proof_script_starts_with(contents, name_start, name_end, "rewrite")) or (name_end - name_start == 11 and proof_script_starts_with(contents, name_start, name_end, "rewriteback"))
+    return (false, emitted) if argument_digits > 0 and not indexed_rewrite
     # Anything after the action name and one optional index is not part of this grammar.
     return (false, emitted) if cursor != stop
     proof_push(buffer, ",") if emitted > 0
@@ -266,9 +270,8 @@ def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&
     proof_push(buffer, "}")
     return (true, emitted + 1)
 
-# The bounded, deterministic repair vocabulary. Every candidate is a fixed sequence of the
-# argument-free actions the checked engine already implements, tried in this exact order, so a
-# repair is reproducible and its search space is a stated constant rather than a heuristic budget.
+# The bounded, deterministic base vocabulary. Source-derived rewrites are appended separately
+# from at most four explicit equality facts in the selected goal's context.
 # Nothing here decides anything: a candidate is only ever a *proposal*, admitted solely if the
 # tactic engine accepts it and the kernel replays the certificate it produces.
 def proof_repair_candidates() -> darray[sview] can[Memory.Allocate, Abort.Panic]:
@@ -305,9 +308,19 @@ def proof_repair_push_script_json(buffer: mutable darray[u8]&, goal_id: usize, a
     proof_repair_push_actions(buffer, actions, true)
     proof_push(buffer, "]}")
 
+def proof_repair_push_indexed_script_json(buffer: mutable darray[u8]&, goal_id: usize, fact_index: usize, reverse: bool, closer: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"format\":\"elisa-proof-tactics-v1\",\"target\":{\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, "},\"actions\":[{\"action\":\"rewriteback\"" if reverse else "},\"actions\":[{\"action\":\"rewrite\"")
+    proof_push(buffer, ",\"argument_index\":")
+    proof_push_number(buffer, fact_index.u32())
+    proof_push(buffer, "},")
+    proof_repair_push_actions(buffer, closer, true)
+    proof_push(buffer, "]}")
+
 # The proposal in the same shape `--proof` renders and `--script` runs, so a repair can be read,
 # edited and re-run without translation.
-def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, actions: sview) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, actions: sview, has_rewrite: bool, fact_index: usize, reverse: bool) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "# goal ")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, "\nproof ")
@@ -315,17 +328,27 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
     proof_push(buffer, "_")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ":\n")
+    if has_rewrite:
+        proof_push(buffer, "    by rewriteback " if reverse else "    by rewrite ")
+        proof_push_number(buffer, fact_index.u32())
+        proof_push(buffer, "\n")
     proof_repair_push_actions(buffer, actions, false)
     proof_push(buffer, "qed\n")
 
 # One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
 # what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
-# its own.
-def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, actions: sview) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
+# its own. Rewrites are generated only from explicit equalities in this goal's own fact list.
+def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
     repair_state: mutable darray[u8] = []
+    repair_goal: mutable Ast::Expr = Ast::Expr.Invalid
+    repair_fact_start: mutable usize = 0
+    repair_fact_count: mutable usize = 0
     if goal_id < report.goal_attempts.count:
         repair_attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
         if repair_attempt.facts_start <= report.certificate_facts.count and repair_attempt.facts_count <= report.certificate_facts.count - repair_attempt.facts_start:
+            repair_goal <- repair_attempt.goal
+            repair_fact_start <- repair_attempt.facts_start
+            repair_fact_count <- repair_attempt.facts_count
             proof_push(&repair_state, "{\"facts\":[")
             for fact_index in 0..<repair_attempt.facts_count |fact_index, repair_attempt, report, repair_state|:
                 proof_push(&repair_state, ",") if fact_index > 0
@@ -333,29 +356,35 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
             proof_push(&repair_state, "],\"goal\":")
             proof_push_json_expr(&repair_state, repair_attempt.goal)
             proof_push(&repair_state, "}")
-    candidates: darray[sview] = proof_repair_candidates()
+    base_candidates: darray[sview] = proof_repair_candidates()
     repaired: mutable bool = false
     searched: mutable usize = 0
     winning: mutable sview = ""
-    candidate_arena: mutable Arena = zeroed
+    winning_fact_index: mutable usize = 0
+    winning_reverse: mutable bool = false
+    has_rewrite: mutable bool = false
+    candidate_count: mutable usize = base_candidates.count if repair_state.count > 0 else 0
+    exhaustive: mutable bool = repair_state.count > 0
     region repair_region(PROOF_TACTIC_WORKSPACE_ARENA_BYTES):
         repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
         in repair_store:
             if repair_state.count > 0:
-                for candidate_index in 0..<candidates.count |candidate_index, candidates, repair_state, report, repaired, searched, winning, goal_id|:
+                for candidate_index in 0..<base_candidates.count |candidate_index, base_candidates, repair_state, report, repaired, searched, winning, goal_id|:
                     break if repaired
-                    candidate: sview = candidates[candidate_index]
+                    candidate: sview = base_candidates[candidate_index]
                     script_text: mutable darray[u8] = []
                     proof_repair_push_script_json(&script_text, goal_id, candidate)
+                    candidate_arena: mutable Arena = zeroed
                     parsed_candidate: JsonParseResult[candidate_arena] = (json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&script_text, 0, script_text.count)) can Global{Read,Write})
-                    continue if parsed_candidate.code != JsonErrorCode.OK
+                    if parsed_candidate.code != JsonErrorCode.OK:
+                        (arena_free(&candidate_arena) can Global{Read,Write})
+                        continue
                     parsed_state: JsonParseResult[candidate_arena] = (json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&repair_state, 0, repair_state.count)) can Global{Read,Write})
-                    continue if parsed_state.code != JsonErrorCode.OK
+                    if parsed_state.code != JsonErrorCode.OK:
+                        (arena_free(&candidate_arena) can Global{Read,Write})
+                        continue
                     candidate_state: mutable ProofTacticState& @candidate_arena = proof_tactic_state_in_arena(&candidate_arena)
-                    candidate_scratch_empty: mutable darray[Ast::Expr] @candidate_arena = []
                     candidate_scratch: mutable darray[ProofTacticJsonBranchScratch] @candidate_arena = []
-                    for scratch_index in 0..<PROOF_REPAIR_SCRATCH_SLOT_COUNT |scratch_index, candidate_scratch_empty, candidate_scratch|:
-                        candidate_scratch.push(ProofTacticJsonBranchScratch{left: proof_tactic_state(&candidate_scratch_empty, Ast::Expr.Invalid), right: proof_tactic_state(&candidate_scratch_empty, Ast::Expr.Invalid)})
                     candidate_tree: mutable ProofTacticJsonTree& @candidate_arena = proof_tactic_tree_in_arena(&candidate_arena)
                     candidate_annotations: mutable darray[Ast::EnumAnnotation] @candidate_arena = []
                     candidate_result: ProofTacticJsonResult = (proof_tactic_json_run_source(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, report, goal_id) can Global{Read,Write})
@@ -365,12 +394,69 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
                     if candidate_result.valid and candidate_result.solved and candidate_result.kernel_replayed and candidate_result.certificate_replayed:
                         repaired <- true
                         winning <- candidate
-    (arena_free(&candidate_arena) can Global{Read,Write})
-    return (repaired, searched, winning)
+                        exhaustive <- false
+                    (arena_free(&candidate_arena) can Global{Read,Write})
+                if not repaired:
+                    rewrite_closers: darray[sview] = ["decide", "assumption", "simp,decide", "simp,assumption"]
+                    relevant_rewrite_facts: mutable usize = 0
+                    fact_scan_count: mutable usize = repair_fact_count
+                    if fact_scan_count > PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT:
+                        fact_scan_count <- PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT
+                        exhaustive <- false
+                    for fact_index in 0..<fact_scan_count |fact_index, repair_fact_start, report, rewrite_closers, repair_state, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, candidate_count, exhaustive, relevant_rewrite_facts, repair_goal|:
+                        break if repaired
+                        fact: Ast::Expr = report.certificate_facts[repair_fact_start + fact_index]
+                        match fact:
+                            Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                                continue if proof_expr_has_call(fact) or proof_expr_has_move(fact)
+                                left_to_right: (changed: bool, value: Ast::Expr) = proof_tactic_replace(repair_goal, left, right)
+                                right_to_left: (changed: bool, value: Ast::Expr) = proof_tactic_replace(repair_goal, right, left)
+                                continue if not left_to_right.changed and not right_to_left.changed
+                                if relevant_rewrite_facts >= PROOF_REPAIR_REWRITE_FACT_LIMIT:
+                                    exhaustive <- false
+                                    break
+                                relevant_rewrite_facts <- relevant_rewrite_facts + 1
+                                candidate_count <- candidate_count + rewrite_closers.count if left_to_right.changed
+                                candidate_count <- candidate_count + rewrite_closers.count if right_to_left.changed
+                                for direction in 0..<2 |direction, fact_index, rewrite_closers, repair_state, report, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, candidate_count, exhaustive, left_to_right, right_to_left|:
+                                    reverse: bool = direction == 1
+                                    continue if reverse and not right_to_left.changed
+                                    continue if not reverse and not left_to_right.changed
+                                    for closer_index in 0..<rewrite_closers.count |closer_index, direction, reverse, fact_index, rewrite_closers, repair_state, report, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, exhaustive, closer_index|:
+                                        break if repaired
+                                        closer: sview = rewrite_closers[closer_index]
+                                        script_text: mutable darray[u8] = []
+                                        proof_repair_push_indexed_script_json(&script_text, goal_id, fact_index, reverse, closer)
+                                        candidate_arena: mutable Arena = zeroed
+                                        parsed_candidate: JsonParseResult[candidate_arena] = (json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&script_text, 0, script_text.count)) can Global{Read,Write})
+                                        if parsed_candidate.code != JsonErrorCode.OK:
+                                            (arena_free(&candidate_arena) can Global{Read,Write})
+                                            continue
+                                        parsed_state: JsonParseResult[candidate_arena] = (json_parse_checked(&candidate_arena, ElisaProofJson::bytes_range_ref(&repair_state, 0, repair_state.count)) can Global{Read,Write})
+                                        if parsed_state.code != JsonErrorCode.OK:
+                                            (arena_free(&candidate_arena) can Global{Read,Write})
+                                            continue
+                                        candidate_state: mutable ProofTacticState& @candidate_arena = proof_tactic_state_in_arena(&candidate_arena)
+                                        candidate_scratch: mutable darray[ProofTacticJsonBranchScratch] @candidate_arena = []
+                                        candidate_tree: mutable ProofTacticJsonTree& @candidate_arena = proof_tactic_tree_in_arena(&candidate_arena)
+                                        candidate_annotations: mutable darray[Ast::EnumAnnotation] @candidate_arena = []
+                                        candidate_result: ProofTacticJsonResult = (proof_tactic_json_run_source(ElisaProofJson::from_result(parsed_candidate), ElisaProofJson::from_result(parsed_state), &candidate_annotations, candidate_state, candidate_tree, &candidate_scratch, report, goal_id) can Global{Read,Write})
+                                        searched <- searched + 1
+                                        if candidate_result.valid and candidate_result.solved and candidate_result.kernel_replayed and candidate_result.certificate_replayed:
+                                            repaired <- true
+                                            winning <- closer
+                                            winning_fact_index <- fact_index
+                                            winning_reverse <- reverse
+                                            has_rewrite <- true
+                                            exhaustive <- false
+                                        (arena_free(&candidate_arena) can Global{Read,Write})
+                            _:
+                                pass
+    return (repaired, searched, candidate_count, exhaustive, winning, winning_fact_index, winning_reverse, has_rewrite)
 
 # One goal's entry in a whole-file repair report: what it is, whether a proposal survived the
 # kernel, and the runnable script when one did.
-def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, actions: sview)) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool)) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"goal_id\":")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ",\"name\":")
@@ -383,10 +469,14 @@ def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, go
     proof_push(buffer, "\"repaired\"" if found.repaired else "\"unrepaired\"")
     proof_push(buffer, ",\"tried\":")
     proof_push_number(buffer, found.searched.u32())
+    proof_push(buffer, ",\"candidates\":")
+    proof_push_number(buffer, found.candidates.u32())
+    proof_push(buffer, ",\"exhaustive\":")
+    proof_push(buffer, "true" if found.exhaustive else "false")
     proof_push(buffer, ",\"script\":")
     if found.repaired:
         script_body: mutable darray[u8] = []
-        proof_repair_push_script_text(&script_body, report, goal_id, found.actions)
+        proof_repair_push_script_text(&script_body, report, goal_id, found.actions, found.has_rewrite, found.rewrite_fact_index, found.rewrite_reverse)
         proof_push_json_bytes(buffer, script_body)
     else:
         proof_push(buffer, "null")
