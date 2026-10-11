@@ -1,0 +1,111 @@
+# Renderers must not give every report field or goal a fresh replay budget. Cache one exact
+# attempt/certificate result per goal and share its source-work counter across the render.
+def proof_output_cached_replay_status(replayed: darray[bool]&, goal_id: usize) -> bool:
+    return false if goal_id >= replayed.count
+    return replayed[goal_id]
+
+def proof_output_confirmation_counts(report: ProofReport&, replayed: darray[bool]&) -> (known: bool, replay_confirmed: u32, frame_checks: u32):
+    return (false, 0, 0) if replayed.count != report.goal_attempts.count
+    return (false, 0, 0) if report.obligation_inventory.count != report.obligations.usize()
+    return (false, 0, 0) if report.proven > report.obligations
+    return (false, 0, 0) if report.obligation_inventory.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+    remaining_work: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - report.obligation_inventory.count
+    return (false, 0, 0) if report.goal_attempts.count > remaining_work
+
+    cursor: mutable usize = 0
+    proven_obligations: mutable u32 = 0
+    replay_confirmed: mutable u32 = 0
+    frame_checks: mutable u32 = 0
+    work: mutable usize = 0
+    for index in 0..<report.obligation_inventory.count |index, report, replayed, cursor, proven_obligations, replay_confirmed, frame_checks, work|:
+        return (false, 0, 0) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+        work <- work + 1
+        entry: ProofObligationEntry = report.obligation_inventory[index]
+        return (false, 0, 0) if entry.identity != index or entry.attempts_start != cursor
+        return (false, 0, 0) if cursor > report.goal_attempts.count or entry.attempts_count > report.goal_attempts.count - cursor
+        source_kind_bytes: usize = sview_len(entry.source_kind)
+        return (false, 0, 0) if source_kind_bytes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+        work <- work + source_kind_bytes
+        proven_obligations <- proven_obligations + 1 if entry.proven
+        if entry.source_kind == "frame":
+            return (false, 0, 0) if entry.attempts_count != 0
+            frame_checks <- frame_checks + 1 if entry.proven
+        elif entry.proven and entry.attempts_count == 0:
+            return (false, 0, 0)
+        elif entry.proven:
+            all_attempts_replayed: mutable bool = true
+            end: usize = cursor + entry.attempts_count
+            for attempt_index in cursor..<end |attempt_index, report, replayed, all_attempts_replayed, work|:
+                return (false, 0, 0) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                work <- work + 1
+                attempt: ProofGoalAttempt = report.goal_attempts[attempt_index]
+                all_attempts_replayed <- false if not attempt.proven or not replayed[attempt_index]
+            replay_confirmed <- replay_confirmed + 1 if all_attempts_replayed
+        cursor <- cursor + entry.attempts_count
+
+    return (false, 0, 0) if cursor != report.goal_attempts.count or proven_obligations != report.proven
+    (true, replay_confirmed, frame_checks)
+
+def proof_push_json_confirmation_counts(buffer: mutable darray[u8]&, report: ProofReport&, replayed: darray[bool]&) -> void can[Memory.Allocate, Abort.Panic]:
+    confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = proof_output_confirmation_counts(report, replayed)
+    proof_push(buffer, ",\"proven\":")
+    if confirmation.known:
+        proof_push_number(buffer, confirmation.replay_confirmed)
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"frame_checks\":")
+    if confirmation.known:
+        proof_push_number(buffer, confirmation.frame_checks)
+    else:
+        proof_push(buffer, "null")
+    proof_push(buffer, ",\"unproven\":")
+    if confirmation.known and confirmation.replay_confirmed <= report.obligations and confirmation.frame_checks <= report.obligations - confirmation.replay_confirmed:
+        proof_push_number(buffer, report.obligations - confirmation.replay_confirmed - confirmation.frame_checks)
+    else:
+        proof_push(buffer, "null")
+
+def proof_output_text_equal_with_work(left: sview, right: sview, replay_work: mutable usize&) -> (complete: bool, equal: bool):
+    return (false, false) if not proof_replay_source_work_charge(1, replay_work)
+    left_length: usize = sview_len(left)
+    right_length: usize = sview_len(right)
+    return (true, false) if left_length != right_length
+    return (false, false) if not proof_replay_source_work_charge(left_length, replay_work)
+    (true, left == right)
+
+def proof_report_verification_state_with_replay(report: ProofReport&, import_failed: bool, semantic_errors: u32, replay_complete: bool) -> sview:
+    has_disproved: mutable bool = false
+    has_unsupported: mutable bool = false
+    has_unknown: mutable bool = false
+    for finding in report.findings |has_disproved, has_unsupported, has_unknown|:
+        has_disproved <- true if finding.status == "disproved"
+        has_unsupported <- true if finding.status == "unsupported"
+        has_unknown <- true if finding.status == "unknown"
+    return "disproved" if has_disproved
+    return "unsupported" if has_unsupported
+    return "unknown" if has_unknown or proof_report_source_has_unresolved_checks(report, import_failed, semantic_errors) or not replay_complete
+    return "proved"
+
+def proof_report_engine_state_with_replay(report: ProofReport&, replay_complete: bool) -> sview:
+    return "proved" if report.failed == 0 and replay_complete
+    return "open"
+
+def proof_output_goal_state_with_source_admissibility(report: ProofReport&, goal_id: usize, goal_source_admissible: bool, replayed: bool) -> sview:
+    return "not_found" if goal_id >= report.goal_attempts.count
+    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+    if attempt.proven and replayed:
+        # Goal status is local: an unrelated open obligation makes the report incomplete,
+        # but it does not invalidate this goal when source checks and replay passed locally.
+        return "proved" if goal_source_admissible else "unknown"
+    return "unknown" if attempt.proven or attempt.has_certificate
+    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+    return "disproved" if selected.known and report.findings[selected.index].status == "disproved"
+    return "unsupported" if selected.known and report.findings[selected.index].status == "unsupported"
+    return "timeout" if selected.known and report.findings[selected.index].status == "timeout"
+    return "unknown"
+
+# Compatibility wrapper for callers that only have report-wide admissibility.
+def proof_output_goal_state_with_replay(report: ProofReport&, goal_id: usize, source_complete: bool, source_admissible: bool, replayed: bool) -> sview:
+    return proof_output_goal_state_with_source_admissibility(report, goal_id, source_admissible, replayed)
+
+def proof_goal_verification_state_with_replayed(report: ProofReport&, goal_id: usize, source_complete: bool, source_admissible: bool, replayed: bool) -> sview:
+    return proof_output_goal_state_with_replay(report, goal_id, source_complete, source_admissible, replayed)

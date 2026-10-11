@@ -1,0 +1,205 @@
+# Bound the deterministic-call source-state transformations before the legacy copier runs.
+extend ElisaProof:
+    private:
+        def proof_replay_deterministic_call_budget_charge(amount: usize, work: mutable usize&) -> bool:
+            if work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            work <- work + amount
+            return true
+
+        def proof_replay_deterministic_call_budget_product(left: usize, right: usize, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+            return false if right != 0 and left > (PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work) / right
+            return proof_replay_deterministic_call_budget_charge(left * right, work)
+
+        def proof_replay_deterministic_call_environment_cost(names: darray[sview]&, values: darray[Ast::Expr]&, work: usize, cost: mutable usize&) -> bool:
+            if names.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                return false
+            cost <- cost + names.count
+            for index in 0..<names.count |index, names, values, work, cost|:
+                name_size: usize = sview_len(names[index])
+                return false if name_size > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work - cost
+                cost <- cost + name_size
+                if index < values.count:
+                    return false if not proof_replay_summary_expr_cost(values[index], cost, work, 0)
+            return true
+
+        # Substitution can duplicate a large replacement at every identifier occurrence. The
+        # product bounds environment lookup, capture checks, and the full materialized result
+        # before the old tree copier allocates it.
+        def proof_replay_deterministic_call_substitution_reserve(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            expression_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(expression, &expression_cost, work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if expression_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work: usize = work + expression_cost
+            environment_cost: mutable usize = 0
+            if not proof_replay_deterministic_call_environment_cost(names, values, sizing_work, &environment_cost):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            return false if not proof_replay_deterministic_call_budget_charge(expression_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(environment_cost, work)
+            return false if environment_cost >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+            return proof_replay_deterministic_call_budget_product(expression_cost, environment_cost + 1, work)
+
+        # Marker normalization also performs a fixed 64-name internal-symbol search and a
+        # same-environment uniqueness scan for every eligible binding.
+        def proof_replay_deterministic_call_marker_reserve(expression: Ast::Expr, names: darray[sview]&, values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            name_bytes: mutable usize = 0
+            for name in names |name, values, work, name_bytes|:
+                return false if not proof_replay_deterministic_call_budget_charge(1 + sview_len(name), work)
+                name_bytes <- name_bytes + sview_len(name)
+                for index in 0..<64 |name, index, work|:
+                    rebind_name: sview = proof_internal_rebind_name(index)
+                    return false if not proof_replay_deterministic_call_budget_charge(1 + sview_len(name) + sview_len(rebind_name), work)
+            # Up to N² equality dispatches and at most 2N times the total name bytes.
+            return false if not proof_replay_deterministic_call_budget_product(names.count, names.count, work)
+            return false if not proof_replay_deterministic_call_budget_product(names.count * 2, name_bytes, work)
+            return proof_replay_deterministic_call_substitution_reserve(expression, names, values, work)
+
+        def proof_replay_deterministic_call_havoc_reserve(names: darray[sview]&, count: usize, work: mutable usize&, complete: mutable bool&) -> bool:
+            if count > names.count:
+                complete <- false
+                return false
+            for index in 0..<count |index, names, work, complete|:
+                return false if not proof_replay_deterministic_call_match_text_charge(names[index], work, complete)
+                return false if not proof_replay_deterministic_call_match_charge(2, work, complete)
+            return true
+
+        def proof_replay_deterministic_call_state_declaration_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, work: usize, depth: usize) -> bool:
+            if depth >= 96 or work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work or declarations.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work - cost:
+                return false
+            cost <- cost + declarations.count
+            for declaration in declarations |cost, work, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+                        return false if parameters.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + parameters.count
+                        for parameter in parameters |parameter, cost, work, depth|:
+                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(parameter.name))
+                            return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, work, depth + 1)
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+                    Ast::Decl.Module(name, nested, _):
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+                        return false if not proof_replay_deterministic_call_state_declaration_cost(nested, cost, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_deterministic_call_state_declaration_cost(nested, cost, work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_deterministic_call_state_name_cost(names: darray[sview]&, work: usize, cost: mutable usize&) -> bool:
+            return false if names.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+            cost <- cost + names.count
+            for name in names |name, cost, work|:
+                return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+            return true
+
+        def proof_replay_deterministic_call_name_lookup_reserve(names: darray[sview]&, name: sview, work: mutable usize&) -> bool:
+            name_cost: mutable usize = 0
+            if not proof_replay_deterministic_call_state_name_cost(names, work, &name_cost):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            return false if not proof_replay_deterministic_call_budget_charge(name_cost, work)
+            name_size: usize = sview_len(name)
+            return false if not proof_replay_deterministic_call_budget_charge(name_size, work)
+            return proof_replay_deterministic_call_budget_product(names.count, name_size + 1, work)
+
+        def proof_replay_deterministic_call_unshadow_reserve(call: Ast::Expr, names: darray[sview]&, work: mutable usize&) -> bool:
+            call_cost: mutable usize = 0
+            name_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(call, &call_cost, work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if call_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work: usize = work + call_cost
+            if not proof_replay_deterministic_call_state_name_cost(names, sizing_work, &name_cost):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            return false if not proof_replay_deterministic_call_budget_charge(call_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(name_cost, work)
+            return false if names.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - name_cost
+            return proof_replay_deterministic_call_budget_product(call_cost, name_cost + names.count, work)
+
+        # Reserve the recursive write/effect visitor, its nested span/place-root checks, and
+        # the two whole-declaration callee safety searches for each possible call node.
+        def proof_replay_deterministic_call_state_analysis_reserve(expression: Ast::Expr, declarations: darray[Ast::Decl]&, names: darray[sview]&, work: mutable usize&) -> bool:
+            expression_cost: mutable usize = 0
+            declaration_cost: mutable usize = 0
+            name_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(expression, &expression_cost, work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if expression_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work: usize = work + expression_cost
+            if not proof_replay_deterministic_call_state_declaration_cost(declarations, &declaration_cost, sizing_work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if declaration_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - sizing_work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work <- sizing_work + declaration_cost
+            if not proof_replay_deterministic_call_state_name_cost(names, sizing_work, &name_cost):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            return false if not proof_replay_deterministic_call_budget_charge(expression_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(declaration_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(name_cost, work)
+            # span_within_any may revisit a nested argument subtree once per call node.
+            # Reserve the quadratic worst case before invoking that legacy effect walker.
+            return false if not proof_replay_deterministic_call_budget_product(expression_cost, expression_cost, work)
+            return false if not proof_replay_deterministic_call_budget_product(expression_cost, declaration_cost, work)
+            return false if not proof_replay_deterministic_call_budget_product(expression_cost, declaration_cost, work)
+            return false if names.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT / 2
+            comparison_factor: usize = names.count * 2
+            return false if name_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - comparison_factor
+            comparison_factor <- comparison_factor + name_cost
+            return proof_replay_deterministic_call_budget_product(expression_cost, comparison_factor, work)
+
+        def proof_replay_deterministic_call_state_body_reserve(body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, names: darray[sview]&, work: mutable usize&) -> bool:
+            body_cost: mutable usize = 0
+            declaration_cost: mutable usize = 0
+            name_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(body, &body_cost, work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if body_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work: usize = work + body_cost
+            if not proof_replay_deterministic_call_state_declaration_cost(declarations, &declaration_cost, sizing_work, 0):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            if declaration_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - sizing_work:
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            sizing_work <- sizing_work + declaration_cost
+            if not proof_replay_deterministic_call_state_name_cost(names, sizing_work, &name_cost):
+                work <- PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                return false
+            return false if not proof_replay_deterministic_call_budget_charge(body_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(declaration_cost, work)
+            return false if not proof_replay_deterministic_call_budget_charge(name_cost, work)
+            # Effect checks can repeat span searches over nested expressions.
+            return false if not proof_replay_deterministic_call_budget_product(body_cost, body_cost, work)
+            return false if not proof_replay_deterministic_call_budget_product(body_cost, declaration_cost, work)
+            return false if not proof_replay_deterministic_call_budget_product(body_cost, declaration_cost, work)
+            return false if body_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - names.count
+            name_slots: usize = names.count + body_cost
+            return false if name_slots > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT / 2
+            comparison_factor: usize = name_slots * 2
+            return false if name_cost > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - comparison_factor
+            comparison_factor <- comparison_factor + name_cost
+            return false if body_cost > (PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - comparison_factor) / 2
+            comparison_factor <- comparison_factor + body_cost * 2
+            return proof_replay_deterministic_call_budget_product(body_cost, comparison_factor, work)

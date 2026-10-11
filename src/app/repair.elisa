@@ -28,8 +28,8 @@ def proof_push_json_kernel_node(buffer: mutable darray[u8]&, node: ElisaProofKer
     proof_push_json_string(buffer, node.secondary_name)
     proof_push(buffer, "}")
 
-def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, fact_index: usize, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
-    origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, fact_index, owner)
+def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport&, fact_index: usize, owner: sview, work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+    origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, fact_index, owner, work)
     if not origin.known:
         proof_push(buffer, "null")
         return
@@ -45,15 +45,34 @@ def proof_push_json_fact_origin(buffer: mutable darray[u8]&, report: ProofReport
     proof_push_number(buffer, origin.premises_count.u32())
     proof_push(buffer, "}")
 
-def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: ProofReport&, facts_start: usize, facts_count: usize, owner: sview) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: ProofReport&, facts_start: usize, facts_count: usize, owner: sview, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    dependency_start: usize = buffer.count
+    proof_push(buffer, "[")
     emitted: mutable usize = 0
-    for fact_index in 0..<facts_count |fact_index, facts_start, report, owner, emitted, buffer|:
-        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, facts_start + fact_index, owner)
+    for fact_index in 0..<facts_count |fact_index, facts_start, report, owner, emitted, buffer, work|:
+        if proof_replay_fact_origin_work_exhausted(work):
+            buffer.count <- dependency_start
+            proof_push(buffer, "[]")
+            return false
+        origin: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, facts_start + fact_index, owner, work)
+        if proof_replay_fact_origin_work_exhausted(work):
+            buffer.count <- dependency_start
+            proof_push(buffer, "[]")
+            return false
         continue if not origin.known or origin.dependency == ""
         duplicate: mutable bool = false
-        for prior_index in 0..<fact_index |prior_index, facts_start, report, owner, origin, duplicate|:
-            prior: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at(report, facts_start + prior_index, owner)
-            duplicate <- true if prior.known and prior.kind == origin.kind and prior.dependency == origin.dependency
+        for prior_index in 0..<fact_index |prior_index, facts_start, report, owner, origin, duplicate, work|:
+            prior: (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) = proof_replay_fact_origin_at_with_work(report, facts_start + prior_index, owner, work)
+            if proof_replay_fact_origin_work_exhausted(work):
+                buffer.count <- dependency_start
+                proof_push(buffer, "[]")
+                return false
+            if prior.known:
+                if not proof_replay_fact_origin_text_compare_charge(prior.kind, origin.kind, work) or not proof_replay_fact_origin_text_compare_charge(prior.dependency, origin.dependency, work):
+                    buffer.count <- dependency_start
+                    proof_push(buffer, "[]")
+                    return false
+                duplicate <- true if prior.kind == origin.kind and prior.dependency == origin.dependency
         continue if duplicate
         proof_push(buffer, ",") if emitted > 0
         proof_push(buffer, "{\"kind\":")
@@ -64,6 +83,8 @@ def proof_push_json_goal_dependencies(buffer: mutable darray[u8]&, report: Proof
         proof_push_number(buffer, origin.line)
         proof_push(buffer, "}")
         emitted <- emitted + 1
+    proof_push(buffer, "]")
+    return true
 
 def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"kind\":")
@@ -470,6 +491,7 @@ def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, go
 
 def proof_tactic_text_to_json(contents: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
     empty: mutable darray[u8] = []
+    return empty if contents.count > PROOF_INPUT_FILE_MAX_BYTES
     claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
     return empty if not claimed.known
     source_fingerprint: (known: bool, valid: bool, value: u32) = proof_rendered_source_fingerprint(contents)

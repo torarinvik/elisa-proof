@@ -3,7 +3,6 @@ include "./signed_call_snapshots.elisa"
 include "./typed_call_initializers.elisa"
 extend ElisaProof:
     private:
-        const PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT: usize = 1048576
 
         # Unknown or deep forms refuse, so a later AST constructor cannot bypass this boundary.
         def proof_replay_expression_contains_call_node(expression: Ast::Expr, depth: usize) -> bool:
@@ -47,52 +46,8 @@ extend ElisaProof:
                     return true
             return false
 
-        # Rebuild deterministic call sites from caller source, not the trace payload.
-        def proof_replay_deterministic_call_arguments_equal(source: darray[Ast::Expr]&, source_names: darray[sview]&, expected: darray[Ast::Expr]&, expected_names: darray[sview]&) -> bool:
-            return false if source.count != expected.count
-            return false if source_names.count != 0 and source_names.count != source.count
-            return false if expected_names.count != 0 and expected_names.count != expected.count
-            for index in 0..<source.count |index, source, source_names, expected, expected_names|:
-                source_name: sview = source_names[index] if source_names.count > 0 else ""
-                expected_name: sview = expected_names[index] if expected_names.count > 0 else ""
-                return false if source_name != expected_name or not proof_replay_deterministic_call_expression_equal(source[index], expected[index])
-            return true
-
-        def proof_replay_deterministic_call_expression_equal(source: Ast::Expr, expected: Ast::Expr) -> bool:
-            match source:
-                Ast::Expr.Call(source_callee, source_arguments, source_names, source_position):
-                    match expected:
-                        Ast::Expr.Call(expected_callee, expected_arguments, expected_names, expected_position):
-                            return source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and proof_replay_expr_equal(source_callee, expected_callee) and proof_replay_deterministic_call_arguments_equal(source_arguments, source_names, expected_arguments, expected_names)
-                        _:
-                            return false
-                Ast::Expr.Binary(source_left, source_operator, source_right, _):
-                    match expected:
-                        Ast::Expr.Binary(expected_left, expected_operator, expected_right, _):
-                            return source_operator == expected_operator and proof_replay_deterministic_call_expression_equal(source_left, expected_left) and proof_replay_deterministic_call_expression_equal(source_right, expected_right)
-                        _:
-                            return false
-                Ast::Expr.Unary(source_operator, source_inner, _):
-                    match expected:
-                        Ast::Expr.Unary(expected_operator, expected_inner, _):
-                            return source_operator == expected_operator and proof_replay_deterministic_call_expression_equal(source_inner, expected_inner)
-                        _:
-                            return false
-                Ast::Expr.Paren(source_inner, _):
-                    match expected:
-                        Ast::Expr.Paren(expected_inner, _):
-                            return proof_replay_deterministic_call_expression_equal(source_inner, expected_inner)
-                        _:
-                            return false
-                _:
-                    return proof_replay_expr_equal(source, expected)
-
-        def proof_replay_deterministic_call_source_contains(expression: Ast::Expr, expected: Ast::Expr, depth: usize) -> bool:
-            work: mutable usize = 0
-            complete: mutable bool = true
-            found: bool = proof_replay_deterministic_call_source_contains_bounded(expression, expected, &work, &complete, depth)
-            return complete and found
-
+        # Rebuild deterministic call sites from caller source, not the trace payload. The
+        # matcher charges each candidate comparison through the source walk's shared counter.
         def proof_replay_deterministic_call_source_contains_bounded(expression: Ast::Expr, expected: Ast::Expr, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
             if depth >= 96 or work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT:
                 complete <- false
@@ -100,7 +55,12 @@ extend ElisaProof:
             work <- work + 1
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_replay_deterministic_call_expression_equal(expression, expected)
+                    candidate_matches: bool = proof_replay_deterministic_call_expression_equal_with_work(expression, expected, work, complete, depth)
+                    return true if candidate_matches
+                    return false if not complete
+                    if work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT:
+                        complete <- false
+                        return false
                     return true if proof_replay_deterministic_call_source_contains_any_bounded(arguments, expected, work, complete, depth + 1)
                     return proof_replay_deterministic_call_source_contains_bounded(callee, expected, work, complete, depth + 1)
                 Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
@@ -213,12 +173,6 @@ extend ElisaProof:
                         return false
             return false
 
-        def proof_replay_deterministic_call_source_contains_any(expressions: darray[Ast::Expr]&, expected: Ast::Expr, depth: usize) -> bool:
-            work: mutable usize = 0
-            complete: mutable bool = true
-            found: bool = proof_replay_deterministic_call_source_contains_any_bounded(expressions, expected, &work, &complete, depth)
-            return complete and found
-
         def proof_replay_deterministic_call_source_contains_any_bounded(expressions: darray[Ast::Expr]&, expected: Ast::Expr, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
             if depth >= 96 or work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT:
                 complete <- false
@@ -234,120 +188,155 @@ extend ElisaProof:
         # Compare the marker only with the substituted source call (see deterministic_call_state).
         # A captured block may run with its captures rewritten by enclosing code the walk cannot
         # order, so it starts from a reset.
-        def proof_replay_deterministic_call_source_expression(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_replay_deterministic_call_source_expression(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
+            complete: mutable bool = true
             match expression:
                 Ast::Expr.Block(statements, block_result, captures, _):
                     names_mark: usize = names.count
                     values_mark: usize = values.count
-                    proof_replay_deterministic_call_havoc_bindings(names, values, names_mark) if captures.count > 0
+                    if captures.count > 0:
+                        return false if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names_mark, work, &complete)
                     source_line: u32 = Ast::expr_pos(expected).line
-                    statement_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, statements, expected, source_line, names, values, depth + 1)
+                    statement_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, statements, expected, source_line, names, values, work, depth + 1)
                     tail_matches: mutable bool = false
-                    tail_matches <- proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, block_result, expected, source_line, names, values, depth + 1)
+                    tail_matches <- proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, block_result, expected, source_line, names, values, work, depth + 1)
                     tail_match_count: mutable usize = 0
                     tail_match_count <- 1 if statement_matches.known and tail_matches
                     names.resize(names_mark)
                     values.resize(values_mark)
-                    return statement_matches.known and statement_matches.matches + tail_match_count == 1
+                    return complete and statement_matches.known and statement_matches.matches + tail_match_count == 1
                 _:
                     pass
             # Another call evaluated in the same expression could write a local the matched call
             # reads, in an order this walk does not model.
+            return false if proof_replay_deterministic_expr_writes_with_work(declarations, names, expression, Ast::expr_pos(expected), depth + 1, work, &complete)
+            return false if not complete or not proof_replay_deterministic_call_unshadow_reserve(expected, names, work)
             return false if not proof_replay_deterministic_call_site_unshadowed(expected, names, depth + 1)
-            return false if proof_replay_deterministic_expr_writes(declarations, names, expression, Ast::expr_pos(expected), depth + 1)
+            return false if not proof_replay_deterministic_call_substitution_reserve(expression, names, values, work)
             resolved: Ast::Expr = proof_replay_substitute_many(expression, names, values)
-            marker: Ast::Expr = proof_replay_deterministic_call_marker_resolved(expected, names, values)
-            return proof_replay_deterministic_call_source_contains(resolved, expected, depth + 1) or proof_replay_deterministic_call_source_contains(resolved, marker, depth + 1)
+            marker: Ast::Expr = proof_replay_deterministic_call_marker_resolved(expected, names, values, work, &complete)
+            return false if not complete
+            found: bool = proof_replay_deterministic_call_source_contains_bounded(resolved, expected, work, &complete, depth + 1)
+            return false if not complete or found
+            return proof_replay_deterministic_call_source_contains_bounded(resolved, marker, work, &complete, depth + 1) and complete
 
-        def proof_replay_deterministic_call_source_expression_at_line(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_replay_deterministic_call_source_expression_at_line(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, expression: Ast::Expr, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
-            return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(cast_sites, declarations, expression, expected, names, values, depth + 1)
+            return Ast::expr_pos(expected).line == line and proof_replay_deterministic_call_source_expression(cast_sites, declarations, expression, expected, names, values, work, depth + 1)
 
         # Bind caller locals in statement order, reconstructing the resolved actuals that the
         # producer placed in the marker at the call's pre-state. Loops and joins that may rewrite
         # state reset every binding; a redeclared (shadowing) name or an unmodelled write target
         # fails closed.
-        def proof_replay_deterministic_call_source_statements(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize) -> (known: bool, matches: usize):
+        def proof_replay_deterministic_call_source_statements(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, expected: Ast::Expr, line: u32, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, work: mutable usize&, depth: usize) -> (known: bool, matches: usize):
             return (false, 0) if depth >= 96
             no_skip: Ast::Pos = Ast::pos_at_line(0)
-            for statement in body |cast_sites, declarations, expected, line, names, values, depth, no_skip|:
+            complete: mutable bool = true
+            for statement in body |cast_sites, declarations, expected, line, names, values, work, complete, depth, no_skip|:
+                return (false, 0) if not proof_replay_deterministic_call_match_charge(1, work, &complete)
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, initializer, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, initializer, expected, line, names, values, work, depth + 1)
                         return (true, 0) if position.line > line
-                        return (false, 0) if proof_replay_deterministic_call_name_bound(names, local_name)
+                        local_bound: bool = proof_replay_deterministic_call_name_bound_with_work(names, local_name, work, &complete)
+                        return (false, 0) if not complete or local_bound
+                        return (false, 0) if not proof_replay_deterministic_call_substitution_reserve(initializer, names, values, work)
                         resolved_initializer: Ast::Expr = proof_replay_substitute_many(initializer, names, values)
                         names.push(local_name)
-                        if proof_replay_deterministic_call_immutable_type(type_expression) and proof_replay_expression_contains_call_node(resolved_initializer, 0):
-                            values.push(Ast::Expr.Absent)
+                        if proof_replay_deterministic_call_immutable_type(type_expression):
+                            # Count both the cost sizing pass and the legacy call-node visitor.
+                            return (false, 0) if not proof_replay_summary_expr_repeat_charge_with_work(resolved_initializer, 1, work)
+                            if proof_replay_expression_contains_call_node(resolved_initializer, 0):
+                                values.push(Ast::Expr.Absent)
+                            else:
+                                values.push(resolved_initializer)
                         else:
                             values.push(resolved_initializer)
                         # A source-validated built-in widening cast does not mutate caller
                         # bindings. Other methods still reset all reconstructed values.
                         initializer_skip: mutable Ast::Pos = no_skip
-                        for cast_site in cast_sites |cast_site, initializer, initializer_skip|:
-                            initializer_skip <- Ast::expr_pos(cast_site) if proof_replay_deterministic_call_expression_equal(initializer, cast_site)
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, names, initializer, initializer_skip, depth + 1)
+                        for cast_site in cast_sites |cast_site, initializer, initializer_skip, work, complete, depth|:
+                            same_cast: bool = proof_replay_deterministic_call_expression_equal_with_work(initializer, cast_site, work, &complete, depth + 1)
+                            return (false, 0) if not complete or work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                            initializer_skip <- Ast::expr_pos(cast_site) if same_cast
+                        if proof_replay_deterministic_expr_writes_with_work(declarations, names, initializer, initializer_skip, depth + 1, work, &complete):
+                            return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names.count, work, &complete)
+                        return (false, 0) if not complete
                     Ast::Stmt.Assign(target, operator, value, position):
                         return (true, 0) if position.line > line
                         return (false, 0) if operator != TokenKind.Assign and operator != TokenKind.LArrow
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, work, depth + 1)
+                        return (false, 0) if not proof_replay_deterministic_call_substitution_reserve(value, names, values, work)
                         resolved_value: Ast::Expr = proof_replay_substitute_many(value, names, values)
                         match target:
                             Ast::Expr.Ident(local_name, _):
                                 # A first entry must be a declaration's (marker-side resolution
                                 # relies on it): an assigned parameter or global starts opaque.
-                                if not proof_replay_deterministic_call_name_bound(names, local_name):
+                                local_bound: bool = proof_replay_deterministic_call_name_bound_with_work(names, local_name, work, &complete)
+                                return (false, 0) if not complete
+                                if not local_bound:
                                     names.push(local_name)
                                     values.push(Ast::Expr.Absent)
                                 names.push(local_name)
                                 values.push(resolved_value)
                             _:
                                 return (false, 0)
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, names, value, no_skip, depth + 1)
+                        if proof_replay_deterministic_expr_writes_with_work(declarations, names, value, no_skip, depth + 1, work, &complete):
+                            return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names.count, work, &complete)
+                        return (false, 0) if not complete
                     Ast::Stmt.Expr(value, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, depth + 1)
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names.count) if proof_replay_deterministic_expr_writes(declarations, names, value, no_skip, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, work, depth + 1)
+                        if proof_replay_deterministic_expr_writes_with_work(declarations, names, value, no_skip, depth + 1, work, &complete):
+                            return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names.count, work, &complete)
+                        return (false, 0) if not complete
                     Ast::Stmt.Return(value, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, work, depth + 1)
                     Ast::Stmt.Contract(_, expression, position):
                         return (true, 0) if position.line > line
-                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, expression, expected, line, names, values, depth + 1)
+                        return (true, 1) if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, expression, expected, line, names, values, work, depth + 1)
                     Ast::Stmt.If(condition, yes, no, position):
                         return (true, 0) if position.line > line
-                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, condition, expected, line, names, values, depth + 1) else 0
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, condition, expected, line, names, values, work, depth + 1) else 0
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, yes, expected, line, names, values, depth + 1)
+                        yes_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, yes, expected, line, names, values, work, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return (false, 0) if not yes_matches.known
-                        no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, no, expected, line, names, values, depth + 1)
+                        no_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, no, expected, line, names, values, work, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return (false, 0) if not no_matches.known
                         branch_matches: usize = condition_match + yes_matches.matches + no_matches.matches
                         return (true, branch_matches) if branch_matches > 0
                         # The call follows the join: either branch may have run.
-                        if proof_replay_deterministic_expr_writes(declarations, names, condition, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, names, yes, depth + 1) or proof_replay_deterministic_statements_write(declarations, names, no, depth + 1):
-                            proof_replay_deterministic_call_havoc_bindings(names, values, names.count)
+                        condition_writes: bool = proof_replay_deterministic_expr_writes_with_work(declarations, names, condition, no_skip, depth + 1, work, &complete)
+                        return (false, 0) if not complete
+                        yes_writes: bool = proof_replay_deterministic_statements_write_with_work(declarations, names, yes, depth + 1, work, &complete)
+                        return (false, 0) if not complete
+                        no_writes: bool = proof_replay_deterministic_statements_write_with_work(declarations, names, no, depth + 1, work, &complete)
+                        return (false, 0) if not complete
+                        if condition_writes or yes_writes or no_writes:
+                            return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names.count, work, &complete)
                             return (false, 0)
                     Ast::Stmt.Match(value, arms, position):
                         return (true, 0) if position.line > line
-                        value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, depth + 1) else 0
+                        value_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, value, expected, line, names, values, work, depth + 1) else 0
                         arm_match_count: mutable usize = value_match
-                        arms_write: mutable bool = proof_replay_deterministic_expr_writes(declarations, names, value, no_skip, depth + 1)
+                        arms_write: mutable bool = proof_replay_deterministic_expr_writes_with_work(declarations, names, value, no_skip, depth + 1, work, &complete)
+                        return (false, 0) if not complete
                         rebind_index: mutable usize = 0
-                        for arm in arms |cast_sites, arm, declarations, expected, line, names, values, depth, arm_match_count, rebind_index, arms_write, no_skip|:
+                        for arm in arms |cast_sites, arm, declarations, expected, line, names, values, work, complete, depth, arm_match_count, rebind_index, arms_write, no_skip|:
                             names_mark: usize = names.count
                             values_mark: usize = values.count
                             pattern_names: mutable darray[sview] = []
-                            return (false, 0) if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
-                            for pattern_name in pattern_names |cast_sites, pattern_name, names, values|:
-                                return (false, 0) if proof_replay_deterministic_call_name_bound(names, pattern_name)
+                            return (false, 0) if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &work, depth + 1)
+                            for pattern_name in pattern_names |cast_sites, pattern_name, names, values, work, complete|:
+                                pattern_bound: bool = proof_replay_deterministic_call_name_bound_with_work(names, pattern_name, work, &complete)
+                                return (false, 0) if not complete or pattern_bound
                                 names.push(pattern_name)
                                 values.push(Ast::Expr.Absent)
                                 rebind_name: sview = proof_internal_rebind_name(rebind_index)
@@ -355,23 +344,27 @@ extend ElisaProof:
                                 names.push(rebind_name)
                                 values.push(Ast::Expr.Ident(pattern_name, Ast::expr_pos(expected)))
                                 rebind_index <- rebind_index + 1
-                            guard_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, arm.guard, expected, line, names, values, depth + 1) else 0
-                            arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, arm.body, expected, line, names, values, depth + 1)
+                            guard_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, arm.guard, expected, line, names, values, work, depth + 1) else 0
+                            arm_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, arm.body, expected, line, names, values, work, depth + 1)
                             names.resize(names_mark)
                             values.resize(values_mark)
                             return (false, 0) if not arm_matches.known
                             arm_match_count <- arm_match_count + guard_match + arm_matches.matches
-                            arms_write <- true if proof_replay_deterministic_expr_writes(declarations, names, arm.guard, no_skip, depth + 1) or proof_replay_deterministic_statements_write(declarations, names, arm.body, depth + 1)
+                            guard_writes: bool = proof_replay_deterministic_expr_writes_with_work(declarations, names, arm.guard, no_skip, depth + 1, work, &complete)
+                            return (false, 0) if not complete
+                            body_writes: bool = proof_replay_deterministic_statements_write_with_work(declarations, names, arm.body, depth + 1, work, &complete)
+                            return (false, 0) if not complete
+                            arms_write <- true if guard_writes or body_writes
                         return (true, arm_match_count) if arm_match_count > 0
                         # The call follows the match: any arm may have run.
                         if arms_write:
-                            proof_replay_deterministic_call_havoc_bindings(names, values, names.count)
+                            return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names.count, work, &complete)
                             return (false, 0)
                     Ast::Stmt.Block(_, _, _, nested, position):
                         return (true, 0) if position.line > line
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        scoped_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, nested, expected, line, names, values, depth + 1)
+                        scoped_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, nested, expected, line, names, values, work, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return scoped_matches
@@ -386,13 +379,14 @@ extend ElisaProof:
                         # any binding, so the body starts from a reset. A call after the loop
                         # is not matched.
                         return (false, 0) if bind != "" or variables.count != 1 or variables[0] == ""
-                        return (false, 0) if proof_replay_deterministic_call_name_bound(names, variables[0])
+                        binder_bound: bool = proof_replay_deterministic_call_name_bound_with_work(names, variables[0], work, &complete)
+                        return (false, 0) if not complete or binder_bound
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
+                        return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names_mark, work, &complete)
                         names.push(variables[0])
                         values.push(proof_loop_binder_value(variables[0], position))
-                        nested_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, nested, expected, line, names, values, depth + 1)
+                        nested_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, nested, expected, line, names, values, work, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return nested_matches
@@ -403,84 +397,114 @@ extend ElisaProof:
                         # body's own declarations and assignments are bound in statement order.
                         names_mark: usize = names.count
                         values_mark: usize = values.count
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
-                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, condition, expected, line, names, values, depth + 1) else 0
-                        body_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, while_body, expected, line, names, values, depth + 1)
+                        return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names_mark, work, &complete)
+                        condition_match: usize = 1 if proof_replay_deterministic_call_source_expression_at_line(cast_sites, declarations, condition, expected, line, names, values, work, depth + 1) else 0
+                        body_matches: (known: bool, matches: usize) = proof_replay_deterministic_call_source_statements(cast_sites, declarations, while_body, expected, line, names, values, work, depth + 1)
                         names.resize(names_mark)
                         values.resize(values_mark)
                         return (false, 0) if not body_matches.known
                         loop_matches: usize = condition_match + body_matches.matches
                         return (true, loop_matches) if loop_matches > 0
                         # The call follows the loop: the loop may have rewritten any binding.
-                        proof_replay_deterministic_call_havoc_bindings(names, values, names_mark)
+                        return (false, 0) if not proof_replay_deterministic_call_havoc_bindings_with_work(names, values, names_mark, work, &complete)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return (false, 0)
             return (true, 0)
 
-        def proof_replay_deterministic_call_source_declarations(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, line: u32, matches: mutable usize&, depth: usize) -> bool:
-            return proof_replay_deterministic_call_source_declarations_in(cast_sites, declarations, declarations, owner, owner_line, expected, line, matches, depth)
+        def proof_replay_deterministic_call_source_declarations(cast_sites: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, line: u32, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return proof_replay_deterministic_call_source_declarations_in(cast_sites, declarations, declarations, owner, owner_line, expected, line, matches, work, depth)
 
         # `all` is the whole source tree, used to resolve callees; `declarations` is the level
         # being searched for the owner.
-        def proof_replay_deterministic_call_source_declarations_in(cast_sites: darray[Ast::Expr]&, all: darray[Ast::Decl]&, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, line: u32, matches: mutable usize&, depth: usize) -> bool:
+        def proof_replay_deterministic_call_source_declarations_in(cast_sites: darray[Ast::Expr]&, all: darray[Ast::Decl]&, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, expected: Ast::Expr, line: u32, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96
-            for declaration in declarations |cast_sites, all, owner, owner_line, expected, line, matches, depth|:
+            complete: mutable bool = true
+            for declaration in declarations |cast_sites, all, owner, owner_line, expected, line, matches, depth, work, complete|:
+                return false if not proof_replay_deterministic_call_match_charge(1, work, &complete)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, _, _, position):
-                        if name == owner and (owner_line == 0 or position.line == owner_line):
+                        same_owner: bool = proof_replay_deterministic_call_match_text_equal(name, owner, work, &complete)
+                        return false if not complete
+                        if same_owner and (owner_line == 0 or position.line == owner_line):
                             names: mutable darray[sview] = []
                             values: mutable darray[Ast::Expr] = []
-                            for parameter in parameters |cast_sites, names, values|:
+                            for parameter in parameters |cast_sites, names, values, work, complete|:
+                                return false if not proof_replay_deterministic_call_match_text_charge(parameter.name, work, &complete)
                                 names.push(parameter.name)
                                 values.push(Ast::Expr.Absent)
-                            source_matches = proof_replay_deterministic_call_source_statements(cast_sites, all, body, expected, line, &names, &values, 0)
+                            source_matches = proof_replay_deterministic_call_source_statements(cast_sites, all, body, expected, line, &names, &values, work, 0)
                             return false if not source_matches.known
                             matches <- matches + source_matches.matches
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_deterministic_call_source_declarations_in(cast_sites, all, nested, owner, owner_line, expected, line, matches, depth + 1)
+                        return false if not proof_replay_deterministic_call_source_declarations_in(cast_sites, all, nested, owner, owner_line, expected, line, matches, work, depth + 1)
                     _:
                         pass
             return true
 
         # Read exact cast expressions from source after the independent widening
         # validator admits their binding. Neither a name nor a colliding span is a purity claim.
-        def proof_replay_deterministic_source_cast_sites(body: darray[Ast::Stmt]&, target: sview, line: u32, sites: mutable darray[Ast::Expr]&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for statement in body |statement, target, line, sites, depth|:
+        def proof_replay_deterministic_source_cast_sites(body: darray[Ast::Stmt]&, target: sview, line: u32, sites: mutable darray[Ast::Expr]&, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
+            if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT:
+                complete <- false
+                return false
+            for statement in body |statement, target, line, sites, work, complete, depth|:
+                return false if not proof_replay_deterministic_call_match_charge(1, work, complete)
                 match statement:
                     Ast::Stmt.VarDecl(name, _, initializer, declaration_position):
-                        if name == target and declaration_position.line == line:
+                        same_name: bool = proof_replay_deterministic_call_match_text_equal(name, target, work, complete)
+                        return false if not complete
+                        if same_name and declaration_position.line == line:
                             match initializer:
                                 Ast::Expr.Call(_, arguments, _, _):
-                                    sites.push(initializer) if arguments.count == 0 and not any site in sites where proof_replay_deterministic_call_expression_equal(site, initializer)
+                                    if arguments.count == 0:
+                                        duplicate: mutable bool = false
+                                        for site in sites |site, initializer, duplicate, work, complete, depth|:
+                                            if proof_replay_deterministic_call_expression_equal_with_work(site, initializer, work, complete, depth + 1):
+                                                duplicate <- true
+                                                if work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT:
+                                                    complete <- false
+                                                    return false
+                                                break
+                                            return false if not complete or work >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                                        sites.push(initializer) if not duplicate
                                 _:
                                     pass
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |arm, target, line, sites, depth|:
-                            proof_replay_deterministic_source_cast_sites(arm.body, target, line, sites, depth + 1)
+                        for arm in arms |arm, target, line, sites, work, complete, depth|:
+                            return false if not proof_replay_deterministic_call_match_charge(1, work, complete)
+                            return false if not proof_replay_deterministic_source_cast_sites(arm.body, target, line, sites, work, complete, depth + 1)
                     _:
                         pass
+            return true
 
-        def proof_replay_deterministic_validated_cast_sites(report: mutable ProofReport&, owner: sview, sites: mutable darray[Ast::Expr]&) -> void:
+        def proof_replay_deterministic_validated_cast_sites(report: mutable ProofReport&, owner: sview, sites: mutable darray[Ast::Expr]&, work: mutable usize&, complete: mutable bool&) -> bool:
             body: mutable darray[Ast::Stmt] = []
             owners: mutable usize = 0
             proof_replay_local_binding_find_owner(report.source_declarations, owner, report.replay_owner_line, &body, &owners, 0)
-            return if owners != 1
+            return false if owners != 1
             # The owner index narrows this lookup; source validation still decides admission.
-            return if not proof_replay_trace_lookup_charge(report)
+            return false if not proof_replay_trace_lookup_charge(report)
             candidate_index: mutable usize = proof_replay_fact_trace_head(report, owner)
-            while candidate_index < report.traces.records.count |candidate_index, report, owner, sites, body|:
+            while candidate_index < report.traces.records.count |candidate_index, report, owner, sites, body, work, complete|:
+                return false if not proof_replay_deterministic_call_match_charge(1, work, complete)
                 candidate: ProofFactTrace = report.traces.records[candidate_index]
                 candidate_index <- proof_replay_trace_chain_next(report, candidate_index)
-                continue if candidate.kind != "local-binding" or candidate.name != owner
+                same_kind: bool = proof_replay_deterministic_call_match_text_equal(candidate.kind, "local-binding", work, complete)
+                return false if not complete
+                continue if not same_kind
+                same_name: bool = proof_replay_deterministic_call_match_text_equal(candidate.name, owner, work, complete)
+                return false if not complete
+                continue if not same_name
+                return false if not proof_replay_summary_owner_source_preflight(report, owner, report.replay_owner_line, work)
                 continue if not proof_replay_local_binding_widening_cast_declaration_source(report, candidate)
                 match candidate.expression:
                     Ast::Expr.Binary(Ast::Expr.Ident(target, _), TokenKind.EqEq, _, _):
-                        proof_replay_deterministic_source_cast_sites(body, target, candidate.line, sites, 0)
+                        return false if not proof_replay_deterministic_source_cast_sites(body, target, candidate.line, sites, work, complete, 0)
                     _:
                         pass
+            return true
 
         def proof_replay_deterministic_call_source_site(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
             work: mutable usize = 0
@@ -495,11 +519,12 @@ extend ElisaProof:
             return false if report.source_annotations.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
             work <- work + report.source_annotations.count
             return false if not proof_replay_summary_expr_charge_with_work(call, work)
-            return proof_replay_deterministic_call_source_site_unmetered(report, trace, call)
+            return proof_replay_deterministic_call_source_site_scan_with_work(report, trace, call, work)
 
-        def proof_replay_deterministic_call_source_site_unmetered(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> bool:
+        def proof_replay_deterministic_call_source_site_scan_with_work(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> bool:
             cast_sites: mutable darray[Ast::Expr] = []
-            proof_replay_deterministic_validated_cast_sites(report, trace.name, &cast_sites)
+            complete: mutable bool = true
+            return false if not proof_replay_deterministic_validated_cast_sites(report, trace.name, &cast_sites, work, &complete)
             matches: mutable usize = 0
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
@@ -508,5 +533,5 @@ extend ElisaProof:
             # precondition call on the following line is matched exactly instead of omitted by
             # the declaration line stored on its trace.
             call_line: u32 = Ast::expr_pos(call).line
-            return false if call_line == 0 or not proof_replay_deterministic_call_source_declarations(cast_sites, report.source_declarations, trace.name, owner_line, call, call_line, &matches, 0)
+            return false if call_line == 0 or not proof_replay_deterministic_call_source_declarations(cast_sites, report.source_declarations, trace.name, owner_line, call, call_line, &matches, work, 0)
             return matches == 1

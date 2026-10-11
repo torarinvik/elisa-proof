@@ -2,32 +2,44 @@
 # Callers still establish entry/preservation and binding liveness independently.
 extend ElisaProof:
     private:
-        def proof_replay_loop_scope_walk(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_loop_scope_walk(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, work_limit: usize, depth: usize) -> bool:
             return false if depth >= 64
-            for statement in statements |statements, line, condition, loop_body, lexical_body, matches, work, depth|:
-                return false if work >= 4096
+            for statement in statements |statements, line, condition, loop_body, lexical_body, matches, work, work_limit, depth|:
+                return false if work >= work_limit
                 work <- work + 1
                 match statement:
                     Ast::Stmt.While(test, inner, position) | Ast::Stmt.For(_, _, test, inner, position):
                         if position.line == line:
                             matches <- matches + 1
                             condition <- test
+                            if inner.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + inner.count
                             loop_body.clear()
                             loop_body.extend(inner)
+                            if statements.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + statements.count
                             lexical_body.clear()
                             lexical_body.extend(statements)
-                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
                     Ast::Stmt.If(_, yes, no, _):
-                        return false if not proof_replay_loop_scope_walk(yes, line, condition, loop_body, lexical_body, matches, work, depth + 1)
-                        return false if not proof_replay_loop_scope_walk(no, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        return false if not proof_replay_loop_scope_walk(yes, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
+                        return false if not proof_replay_loop_scope_walk(no, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |line, condition, loop_body, lexical_body, matches, work, depth|:
-                            return false if not proof_replay_loop_scope_walk(arm.body, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        for arm in arms |line, condition, loop_body, lexical_body, matches, work, work_limit, depth|:
+                            if work >= work_limit:
+                                work <- work_limit
+                                return false
+                            work <- work + 1
+                            return false if not proof_replay_loop_scope_walk(arm.body, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
                     Ast::Stmt.Block(kind, _, _, inner, _):
                         # Proof-only blocks do not introduce executable loops.
-                        return false if kind != "assert_by" and not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        return false if kind != "assert_by" and not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
                     Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _) | Ast::Stmt.Return(Ast::Expr.Block(inner, _, _, _), _) | Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(inner, _, _, _), _):
-                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, depth + 1)
+                        return false if not proof_replay_loop_scope_walk(inner, line, condition, loop_body, lexical_body, matches, work, work_limit, depth + 1)
                     _:
                         pass
             true
@@ -35,7 +47,22 @@ extend ElisaProof:
         def proof_replay_loop_scope(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&) -> bool:
             matches: mutable usize = 0
             work: mutable usize = 0
-            return false if line == 0 or not proof_replay_loop_scope_walk(statements, line, condition, loop_body, lexical_body, &matches, &work, 0)
+            return false if line == 0 or not proof_replay_loop_scope_walk(statements, line, condition, loop_body, lexical_body, &matches, &work, 4096, 0)
+            matches == 1
+
+        def proof_replay_loop_scope_with_work(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            proof_replay_loop_scope_with_limit(statements, line, condition, loop_body, lexical_body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_replay_loop_scope_with_limit(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, source_work: mutable usize&, source_work_limit: usize) -> bool:
+            return false if line == 0 or source_work > source_work_limit
+            matches: mutable usize = 0
+            walk_work: mutable usize = 0
+            remaining_work: usize = source_work_limit - source_work
+            walk_limit: usize = 4096 if remaining_work > 4096 else remaining_work
+            walk_complete: bool = proof_replay_loop_scope_walk(statements, line, condition, loop_body, lexical_body, &matches, &walk_work, walk_limit, 0)
+            return false if walk_work > remaining_work
+            source_work <- source_work + walk_work
+            return false if not walk_complete
             matches == 1
 
         def proof_replay_nested_local_declarations(declarations: darray[Ast::Decl]&, statements: darray[Ast::Stmt]&, name: sview, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:

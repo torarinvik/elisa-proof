@@ -13,12 +13,169 @@ extend ElisaProof:
         # Signed locals may be expanded to their initializer in an entry goal.
         # Reconstruct that expansion from an effect-free source prefix only;
         # unsigned locals keep their names and their separately replayed bindings.
-        def proof_replay_loop_entry_expanded_goal(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, invariant: Ast::Expr) -> bool:
+        def proof_replay_loop_entry_expansion_work_charge_product(work: mutable usize&, count: usize, cost: usize, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > work_limit
+            if count != 0 and cost > (work_limit - work) / count:
+                work <- work_limit
+                return false
+            work <- work + count * cost
+            true
+
+        # Reuse the detailed legacy-query reservation while preserving this caller's
+        # possibly smaller CONTROL budget. Offset the helper's global meter so its
+        # remaining allowance equals `work_limit - source_work`, then merge the
+        # charged delta back into the shared counter.
+        def proof_replay_loop_entry_single_declaration_with_limit(report: ProofReport&, body: darray[Ast::Stmt]&, name: sview, source_work: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or source_work > work_limit
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
+            virtual_seed: usize = source_work + (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work_limit)
+            virtual_work: mutable usize = virtual_seed
+            single_declaration: bool = proof_replay_source_single_declaration_with_work(report.source_declarations, body, name, &virtual_work)
+            if virtual_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or virtual_work < virtual_seed:
+                source_work <- work_limit
+                return false
+            query_work: usize = virtual_work - virtual_seed
+            if query_work > work_limit - source_work:
+                source_work <- work_limit
+                return false
+            source_work <- source_work + query_work
+            single_declaration
+
+        # Reserve a stable-name body query without running its legacy semantic visitor.
+        # The virtual offset narrows the shared query helper to this caller's budget.
+        def proof_replay_loop_entry_touch_query_with_limit(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview, writes: bool, source_work: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or source_work > work_limit
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
+            virtual_seed: usize = source_work + (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work_limit)
+            virtual_work: mutable usize = virtual_seed
+            query_complete: bool = proof_replay_source_touch_query_reserve(declarations, body, name, writes, &virtual_work)
+            if virtual_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or virtual_work < virtual_seed:
+                source_work <- work_limit
+                return false
+            query_work: usize = virtual_work - virtual_seed
+            if query_work > work_limit - source_work:
+                source_work <- work_limit
+                return false
+            source_work <- source_work + query_work
+            query_complete
+
+        def proof_replay_loop_entry_reserve_stable_identifier(name: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, source_work: mutable usize&, work_limit: usize) -> bool:
+            return true if name == ""
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
+            parameter: bool = proof_replay_local_binding_parameter_name_present(declarations, owner, owner_line, name, 0)
+            if parameter:
+                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
+                immutable_integer: bool = proof_replay_local_binding_immutable_integer_parameter(declarations, owner, owner_line, name, 0)
+                return false if not proof_replay_loop_entry_touch_query_with_limit(declarations, owner_body, name, false, source_work, work_limit)
+                return true if immutable_integer
+                parameter_matches: mutable usize = 0
+                parameter_type: mutable sview = ""
+                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
+                proof_replay_local_binding_parameter_integer_layers(declarations, owner, owner_line, name, &parameter_matches, &parameter_type, 0)
+                if parameter_matches == 1 and parameter_type != "":
+                    return proof_replay_loop_entry_touch_query_with_limit(declarations, owner_body, name, true, source_work, work_limit)
+                return true
+            name_bytes: usize = sview_len(name)
+            target_bytes: usize = sview_len(target)
+            return false if name_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if target_bytes >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - name_bytes
+            compare_cost: usize = name_bytes + target_bytes + 1
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, owner_body.count, compare_cost, work_limit)
+            true
+
+        # The stable initializer can ask whether each identifier is shadowed and
+        # whether a mutable parameter is written. Reserve only the paths its source
+        # binding can take, including call-slot/declaration work for mutable parameters.
+        def proof_replay_loop_entry_reserve_stable_name_queries(expression: Ast::Expr, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, owner_body: darray[Ast::Stmt]&, target: sview, declaration_work: usize, source_work: mutable usize&, work_limit: usize, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return true if name == target
+                    return proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_replay_loop_entry_reserve_stable_name_queries(inner, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(left, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return proof_replay_loop_entry_reserve_stable_name_queries(right, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(condition, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return false if not proof_replay_loop_entry_reserve_stable_name_queries(then_value, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                    return proof_replay_loop_entry_reserve_stable_name_queries(else_value, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident(name, _), Ast::Expr.IntLit(index, _), _):
+                    return true if index < 0
+                    proof_replay_loop_entry_touch_query_with_limit(declarations, owner_body, name, false, source_work, work_limit)
+                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(name, _), method, _), arguments, _, _):
+                    return true if arguments.count != 0 or (method != "i8" and method != "i16" and method != "i32" and method != "i64" and method != "isize" and method != "u8" and method != "u16" and method != "u32" and method != "u64" and method != "usize")
+                    return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, declaration_work, work_limit)
+                    return true if proof_replay_local_binding_cast_hook_present(declarations, 0)
+                    proof_replay_loop_entry_reserve_stable_identifier(name, declarations, owner, owner_line, owner_body, target, declaration_work, source_work, work_limit)
+                _:
+                    pass
+            return true
+
+        def proof_replay_loop_entry_expansion_reserve(report: ProofReport&, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, goal: Ast::Expr, source_work: mutable usize&, work_limit: usize) -> bool:
+            return false if body.count > 4096 or source_work > work_limit or work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            invariant_start: usize = source_work
+            return false if not proof_replay_summary_expr_charge_with_limit(invariant, source_work, work_limit)
+            invariant_work: usize = source_work - invariant_start
+            return false if not proof_replay_summary_expr_charge_with_limit(goal, source_work, work_limit)
+            declaration_seed: usize = PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - (work_limit - source_work)
+            declaration_work: mutable usize = declaration_seed
+            declaration_scan_complete: bool = proof_replay_deterministic_declaration_scan_charge(report.source_declarations, &declaration_work, 0)
+            declaration_scan_work: usize = declaration_work - declaration_seed
+            return false if declaration_scan_work > work_limit - source_work
+            source_work <- source_work + declaration_scan_work
+            return false if not declaration_scan_complete
+            declaration_work <- declaration_scan_work
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 2, declaration_work, work_limit)
+            local_count: mutable usize = 0
+            local_name_work: mutable usize = 0
+            local_ast_work: mutable usize = 0
+            for statement in body |statement, source_work, local_count, local_name_work, local_ast_work|:
+                return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, 1, work_limit)
+                match statement:
+                    Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        local_count <- local_count + 1
+                        return false if not proof_replay_loop_entry_expansion_work_charge_product(&local_name_work, 1, sview_len(name), work_limit)
+                        before_type: usize = source_work
+                        return false if not proof_replay_summary_expr_charge_with_limit(type_expression, source_work, work_limit)
+                        local_ast_work <- local_ast_work + source_work - before_type
+                        before_initializer: usize = source_work
+                        return false if not proof_replay_summary_expr_charge_with_limit(initializer, source_work, work_limit)
+                        local_ast_work <- local_ast_work + source_work - before_initializer
+                        return false if not proof_replay_loop_entry_reserve_stable_name_queries(initializer, report.source_declarations, trace.name, report.replay_owner_line, owner_body, name, declaration_work, source_work, work_limit, 0)
+                    _:
+                        pass
+            # The later stable-initializer walk visits the same local AST once.
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, local_ast_work, work_limit)
+            # The later prefix scan in `expanded_goal` runs once even when there
+            # are no local candidates for the per-local reservation to cover.
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, body.count, work_limit)
+            per_local_scan_work: mutable usize = 0
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(&per_local_scan_work, declaration_work, 12, work_limit)
+            return false if local_ast_work > work_limit / 8
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(&per_local_scan_work, declaration_work, local_ast_work * 8, work_limit)
+            substitution_work: mutable usize = 0
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(&substitution_work, invariant_work, local_count, work_limit)
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(&substitution_work, invariant_work, local_name_work, work_limit)
+            return false if not proof_replay_loop_entry_expansion_work_charge_product(source_work, local_count, per_local_scan_work, work_limit)
+            proof_replay_loop_entry_expansion_work_charge_product(source_work, 1, substitution_work, work_limit)
+
+        def proof_replay_loop_entry_expanded_goal(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr) -> bool:
+            work: mutable usize = 0
+            proof_replay_loop_entry_expanded_goal_with_work(report, trace, certificate, body, owner_body, invariant, &work)
+
+        def proof_replay_loop_entry_expanded_goal_with_work(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, source_work: mutable usize&) -> bool:
+            proof_replay_loop_entry_expanded_goal_with_limit(report, trace, certificate, body, owner_body, invariant, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_replay_loop_entry_expanded_goal_with_limit(report: mutable ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, owner_body: darray[Ast::Stmt]&, invariant: Ast::Expr, source_work: mutable usize&, work_limit: usize) -> bool:
+            return false if not proof_replay_loop_entry_expansion_reserve(report, body, owner_body, invariant, certificate.goal, source_work, work_limit)
             names: mutable darray[sview] = []
             values: mutable darray[Ast::Expr] = []
             found: mutable bool = false
-            return false if body.count > 4096 or not ElisaProofFrameSource::index_copy_environment(report.source_declarations)
-            for statement in body |report, trace, certificate, body, names, values, found|:
+            return false if not ElisaProofFrameSource::index_copy_environment(report.source_declarations)
+            for statement in body |report, trace, certificate, body, names, values, found, source_work|:
                 position: Ast::Pos = proof_replay_statement_position(statement)
                 if position.line == certificate.line:
                     match statement:
@@ -34,10 +191,10 @@ extend ElisaProof:
                     Ast::Stmt.VarDecl(name, type_expression, initializer, _):
                         return false if not proof_replay_local_binding_integer_type(type_expression, 0)
                         type_name: sview = proof_replay_local_binding_reference_integer_name(type_expression, 0)
-                        return false if type_name == "" or not proof_replay_source_single_declaration(report.source_declarations, body, name)
+                        return false if type_name == "" or not proof_replay_loop_entry_single_declaration_with_limit(report, body, name, source_work, work_limit)
                         return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
-                        work: mutable usize = 0
-                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, type_name, 0, &work)
+                        scalar_work: mutable usize = 0
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, type_name, 0, &scalar_work)
                         pure: mutable bool = proof_replay_local_binding_stable_initializer(initializer, name, report.source_declarations, trace.name, report.replay_owner_line, 0)
                         match initializer:
                             Ast::Expr.Index(Ast::Expr.Ident(receiver, _), Ast::Expr.IntLit(at, _), _):
@@ -57,7 +214,8 @@ extend ElisaProof:
                         return false
             return false if not found or names.count == 0
             expanded: Ast::Expr = proof_replay_substitute_many(invariant, names, values)
-            proof_replay_summary_call_argument_equal(report, trace, expanded, certificate.goal, 0)
+            complete: mutable bool = true
+            proof_replay_summary_call_argument_equal_with_work(report, trace, expanded, certificate.goal, 0, source_work, &complete, 0) and complete
 
         def proof_replay_loop_entry_invariants(statements: darray[Ast::Stmt]&, line: u32, invariants: mutable darray[Ast::Expr]&, loops: mutable usize&, nested: bool) -> void:
             for statement in statements |line, invariants, loops, nested|:
@@ -82,11 +240,17 @@ extend ElisaProof:
                         pass
 
         def proof_replay_loop_entry_certificate(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
+            work: mutable usize = 0
+            proof_replay_loop_entry_certificate_with_work(report, trace, &work)
+
+        def proof_replay_loop_entry_certificate_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
-            for index in 0..<certificate.facts_count |index, certificate, report|:
+            for index in 0..<certificate.facts_count |index, certificate, report, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 trace_index: usize = report.traces.origin_indices[certificate.facts_start + index]
                 continue if trace_index >= report.traces.records.count
                 candidate: ProofFactTrace = report.traces.records[trace_index]
@@ -97,12 +261,16 @@ extend ElisaProof:
             condition: mutable Ast::Expr = Ast::Expr.Invalid
             loop_body: mutable darray[Ast::Stmt] = []
             lexical_body: mutable darray[Ast::Stmt] = []
-            return false if not proof_replay_loop_scope(body, certificate.line, &condition, &loop_body, &lexical_body)
-            for statement in loop_body |report, trace, certificate, lexical_body|:
+            return false if not proof_replay_loop_scope_with_work(body, certificate.line, &condition, &loop_body, &lexical_body, source_work)
+            complete: mutable bool = true
+            for statement in loop_body |report, trace, certificate, lexical_body, source_work, complete|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match statement:
                     Ast::Stmt.Contract("invariant", invariant, _):
-                        return true if proof_replay_summary_call_argument_equal(report, trace, invariant, certificate.goal, 0)
-                        return true if proof_replay_loop_entry_expanded_goal(report, trace, certificate, lexical_body, invariant)
+                        return true if proof_replay_summary_call_argument_equal_with_work(report, trace, invariant, certificate.goal, 0, source_work, &complete, 0) and complete
+                        return false if not complete
+                        return true if proof_replay_loop_entry_expanded_goal_with_work(report, trace, certificate, lexical_body, body, invariant, source_work)
                     _:
                         pass
             false

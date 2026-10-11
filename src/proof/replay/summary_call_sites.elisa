@@ -86,22 +86,28 @@ extend ElisaProof:
         # owner function spells the name (for a path, its first segment) anywhere in the body:
         # such a binding would make the source spelling denote that local instead.
         def proof_replay_summary_owner_source_preflight(report: ProofReport&, owner: sview, owner_line: u32, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            scan_start: usize = work
+            proof_replay_summary_owner_source_preflight_with_limit(report, owner, owner_line, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        def proof_replay_summary_owner_source_preflight_with_limit(report: ProofReport&, owner: sview, owner_line: u32, work: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > work_limit
+            seed: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - (work_limit - work)
+            metered_work: mutable usize = seed
+            scan_start: usize = metered_work
             found: mutable Ast::Expr = Ast::Expr.Invalid
             found_owner_line: mutable u32 = 0
             matches: mutable usize = 0
             owners: mutable usize = 0
-            if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, work, 0):
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, &metered_work, 0):
+                work <- work_limit
                 return false
-            scan_cost: usize = work - scan_start
-            if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            scan_cost: usize = metered_work - scan_start
+            if scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - metered_work) / 3:
+                work <- work_limit
                 return false
             # Reserve the same bounded tree size for the legacy owner, parameter and shadow
             # predicates that follow this complete preflight walk.
-            work <- work + scan_cost * 3
+            metered_work <- metered_work + scan_cost * 3
+            work <- work + (metered_work - seed)
             true
 
         def proof_replay_summary_call_constant_source_unshadowed(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, work: mutable usize&) -> bool:
@@ -126,10 +132,12 @@ extend ElisaProof:
             work <- work + report.source_declarations.count
             return false if not proof_replay_summary_call_constant_source_unshadowed(report, trace, source, work)
             for candidate in report.traces.records |candidate, trace, source, expected_value, work|:
-                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                work <- work + 1
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, work)
                 continue if candidate.name != trace.name
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "global-constant", work)
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "global-constant-qualified", work)
                 continue if candidate.kind != "global-constant" and candidate.kind != "global-constant-qualified"
+                return false if not proof_replay_summary_expr_charge_with_work(candidate.expression, work)
                 match candidate.expression:
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                         decoded = proof_replay_global_constant_fact_value(right)
@@ -150,9 +158,10 @@ extend ElisaProof:
                     return false if not proof_internal_name_is_rebind(symbol) or rebind_depth >= PROOF_REPLAY_REBIND_ARGUMENT_DEPTH_LIMIT
                     for candidate_index in 0..<report.traces.records.count |candidate_index, report, trace, source, symbol, rebind_depth, work|:
                         candidate: ProofFactTrace = report.traces.records[candidate_index]
-                        return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                        work <- work + 1
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "local-binding", work)
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, work)
                         continue if candidate.kind != "local-binding" or candidate.name != trace.name or candidate.line != trace.line
+                        return false if not proof_replay_summary_expr_charge_with_work(candidate.expression, work)
                         match candidate.expression:
                             Ast::Expr.Binary(Ast::Expr.Ident(bound_name, _), TokenKind.EqEq, literal, _):
                                 continue if bound_name != symbol or (not proof_replay_summary_expr_equal_with_work(literal, source, work) and not proof_replay_summary_call_global_constant_matches_with_work(report, trace, source, literal, work))
@@ -162,202 +171,6 @@ extend ElisaProof:
                     return false
                 _:
                     return false
-
-        # Charge structural equality by the full AST width, not just recursion depth. The
-        # generic replay comparator is depth-bounded but its vector walks are intentionally
-        # shared by other callers; summary source checks need a batch-local work ceiling.
-        def proof_replay_summary_expr_cost_body(body: darray[Ast::Stmt]&, cost: mutable usize&, work: usize, depth: usize) -> bool:
-            if depth >= 96 or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost:
-                return false
-            cost <- cost + body.count
-            for statement in body |cost, work, depth|:
-                match statement:
-                    Ast::Stmt.VarDecl(name, type_expression, value, _):
-                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + sview_len(name)
-                        return false if not proof_replay_summary_expr_cost(type_expression, cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                    Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
-                        return false if not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                    Ast::Stmt.Assign(target, _, value, _):
-                        return false if not proof_replay_summary_expr_cost(target, cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                    Ast::Stmt.If(condition, yes, no, _):
-                        return false if not proof_replay_summary_expr_cost(condition, cost, work, depth + 1)
-                        return false if not proof_replay_summary_expr_cost_body(yes, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(no, cost, work, depth + 1)
-                    Ast::Stmt.While(condition, nested, _):
-                        return false if not proof_replay_summary_expr_cost(condition, cost, work, depth + 1)
-                        return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                    Ast::Stmt.For(_, variables, iterable, nested, _):
-                        return false if variables.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + variables.count
-                        for variable in variables |variable, cost, work|:
-                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(variable))
-                        return false if not proof_replay_summary_expr_cost(iterable, cost, work, depth + 1)
-                        return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                    Ast::Stmt.Match(value, arms, _):
-                        return false if not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                        return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + arms.count
-                        for arm in arms |cost, work, depth|:
-                            pattern_names: mutable darray[sview] = []
-                            pattern_work: mutable usize = work + cost
-                            return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
-                            cost <- pattern_work - work
-                            return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                            cost <- cost + pattern_names.count
-                            for pattern_name in pattern_names |pattern_name, cost, work|:
-                                return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(pattern_name))
-                            return false if not proof_replay_summary_expr_cost(arm.guard, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(arm.body, cost, work, depth + 1)
-                    Ast::Stmt.Block(_, clause, binding, nested, _):
-                        return false if clause.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + clause.count
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(binding))
-                        for word in clause |cost, work|:
-                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(word))
-                        return false if not proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                    Ast::Stmt.Break(label, _) | Ast::Stmt.Continue(label, _):
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(label))
-                    _:
-                        return false
-            return true
-
-        def proof_replay_summary_expr_cost_add(cost: mutable usize&, work: usize, amount: usize) -> bool:
-            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            return false if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-            cost <- cost + amount
-            return true
-
-        def proof_replay_summary_expr_cost(expression: Ast::Expr, cost: mutable usize&, work: usize, depth: usize) -> bool:
-            if depth >= 96 or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
-                return false
-            cost <- cost + 1
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
-                    return true
-                Ast::Expr.StringLit(value, _) | Ast::Expr.CharLit(value, _):
-                    return proof_replay_summary_expr_cost_add(cost, work, sview_len(value))
-                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _):
-                    return true
-                Ast::Expr.Invalid:
-                    return false
-                Ast::Expr.Field(inner, field, _) | Ast::Expr.Scope(inner, field, _):
-                    return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(field))
-                    return proof_replay_summary_expr_cost(inner, cost, work, depth + 1)
-                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                    return proof_replay_summary_expr_cost(inner, cost, work, depth + 1)
-                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
-                    return proof_replay_summary_expr_cost(left, cost, work, depth + 1) and proof_replay_summary_expr_cost(right, cost, work, depth + 1)
-                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
-                    return proof_replay_summary_expr_cost(object, cost, work, depth + 1) and proof_replay_summary_expr_cost(low, cost, work, depth + 1) and proof_replay_summary_expr_cost(high, cost, work, depth + 1)
-                Ast::Expr.Call(callee, arguments, argument_names, _):
-                    return false if not proof_replay_summary_expr_cost(callee, cost, work, depth + 1)
-                    return false if argument_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + argument_names.count
-                    for argument_name in argument_names |cost, work|:
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(argument_name))
-                    for argument in arguments |cost, work, depth|:
-                        return false if not proof_replay_summary_expr_cost(argument, cost, work, depth + 1)
-                    return true
-                Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
-                    return false if not proof_replay_summary_expr_cost(callee, cost, work, depth + 1)
-                    for argument in arguments |cost, work, depth|:
-                        return false if not proof_replay_summary_expr_cost(argument, cost, work, depth + 1)
-                    return true
-                Ast::Expr.IndexN(object, elements, _):
-                    return false if not proof_replay_summary_expr_cost(object, cost, work, depth + 1)
-                    for element in elements |cost, work, depth|:
-                        return false if not proof_replay_summary_expr_cost(element, cost, work, depth + 1)
-                    return true
-                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |cost, work, depth|:
-                        return false if not proof_replay_summary_expr_cost(element, cost, work, depth + 1)
-                    return true
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |cost, work, depth|:
-                        return false if cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - 2
-                        cost <- cost + 2
-                        return false if not proof_replay_summary_expr_cost(entry.key, cost, work, depth + 1) or not proof_replay_summary_expr_cost(entry.value, cost, work, depth + 1)
-                    return true
-                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
-                    return false if not proof_replay_summary_expr_cost(base, cost, work, depth + 1)
-                    for field in fields |cost, work, depth|:
-                        return false if cost >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-                        cost <- cost + 1
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(field.name))
-                        return false if not proof_replay_summary_expr_cost(field.value, cost, work, depth + 1)
-                    return true
-                Ast::Expr.Comprehension(variable, iterable, condition, value, _):
-                    return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(variable))
-                    return proof_replay_summary_expr_cost(iterable, cost, work, depth + 1) and proof_replay_summary_expr_cost(condition, cost, work, depth + 1) and proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
-                    return false if not proof_replay_summary_expr_cost(subject, cost, work, depth + 1)
-                    return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + arms.count
-                    for arm in arms |cost, work, depth|:
-                        pattern_names: mutable darray[sview] = []
-                        pattern_work: mutable usize = work + cost
-                        return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
-                        cost <- pattern_work - work
-                        return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + pattern_names.count
-                        for pattern_name in pattern_names |pattern_name, cost, work|:
-                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(pattern_name))
-                        return false if not proof_replay_summary_expr_cost(arm.guard, cost, work, depth + 1) or not proof_replay_summary_expr_cost_body(arm.body, cost, work, depth + 1)
-                    return true
-                Ast::Expr.GetElse(value, recovery, _):
-                    return false if not proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                    return proof_replay_summary_expr_cost_body(recovery, cost, work, depth + 1)
-                Ast::Expr.Lambda(parameters, nested, _):
-                    return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + parameters.count
-                    for parameter in parameters |parameter, cost, work|:
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(parameter))
-                    return proof_replay_summary_expr_cost_body(nested, cost, work, depth + 1)
-                Ast::Expr.Block(statements, value, _, _):
-                    return proof_replay_summary_expr_cost_body(statements, cost, work, depth + 1) and proof_replay_summary_expr_cost(value, cost, work, depth + 1)
-                _:
-                    return false
-
-        def proof_replay_summary_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost(left, &cost, work, 0) or not proof_replay_summary_expr_cost(right, &cost, work, 0):
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            # The cost walk above and the exact structural comparison each visit the operands.
-            if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2:
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            work <- work + cost * 2
-            return proof_replay_expr_equal(left, right)
-
-        def proof_replay_summary_expr_charge_with_work(expression: Ast::Expr, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost(expression, &cost, work, 0) or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            work <- work + cost
-            return true
-
-        # Repeated substitutions scan the whole contract once per binding; some forms also
-        # compare each identifier against the binding list. Reserve an AST-size multiple before
-        # entering those repeated transformations.
-        def proof_replay_summary_expr_repeat_charge_with_work(expression: Ast::Expr, repetitions: usize, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            cost: mutable usize = 0
-            if not proof_replay_summary_expr_cost(expression, &cost, work, 0):
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            if repetitions >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            total_passes: usize = repetitions + 1
-            if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / total_passes:
-                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                return false
-            work <- work + cost * total_passes
-            return true
 
         def proof_replay_summary_call_argument_equal(report: mutable ProofReport&, trace: ProofFactTrace, source: Ast::Expr, expected: Ast::Expr, rebind_depth: usize) -> bool:
             work: mutable usize = 0
@@ -381,6 +194,7 @@ extend ElisaProof:
                             return false if source_arguments.count != expected_arguments.count or source_names.count != expected_names.count
                             return false if not proof_replay_summary_expr_equal_with_work(source_callee, expected_callee, work)
                             for index in 0..<source_arguments.count |index, source_arguments, expected_arguments, source_names, expected_names, report, trace, work, complete, depth|:
+                                return false if not proof_replay_mutable_local_text_compare_work_charge(source_names[index], expected_names[index], work)
                                 return false if source_names[index] != expected_names[index] or not proof_replay_summary_call_argument_equal_with_work(report, trace, source_arguments[index], expected_arguments[index], rebind_depth, work, complete, depth + 1)
                             return true
                         _:
@@ -429,6 +243,7 @@ extend ElisaProof:
                             return false if source_arguments.count != expected_arguments.count or source_names.count != expected_names.count
                             return false if not proof_replay_summary_expr_equal_with_work(source_callee, expected_callee, work)
                             for index in 0..<source_arguments.count |index, source_arguments, source_names, expected_arguments, expected_names, report, trace, work, complete, depth|:
+                                return false if not proof_replay_mutable_local_text_compare_work_charge(source_names[index], expected_names[index], work)
                                 return false if source_names[index] != expected_names[index] or not proof_replay_summary_call_argument_equal_with_work(report, trace, source_arguments[index], expected_arguments[index], rebind_depth, work, complete, depth + 1)
                             return true
                         _:
@@ -470,6 +285,9 @@ extend ElisaProof:
             for declaration in declarations |report, trace, expected, owner_line, matches, work, complete, depth|:
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, position):
+                        if not proof_replay_mutable_local_text_compare_work_charge(name, trace.name, work):
+                            complete <- false
+                            return false
                         if name == trace.name and (owner_line == 0 or position.line == owner_line):
                             return false if not proof_replay_summary_call_same_source_statement(report, trace, body, expected, matches, work, complete, rebind_depth)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
@@ -486,6 +304,7 @@ extend ElisaProof:
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
             return false if not proof_replay_summary_call_same_source_declarations(report, trace, call, report.source_declarations, owner_line, &matches, work, &complete, 0, rebind_depth)
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return complete and matches == 1
 
         # A call summary's parameter values are part of the trusted substitution into its
@@ -509,9 +328,8 @@ extend ElisaProof:
                     next_positional: mutable usize = 0
                     saw_named: mutable bool = false
                     for index in 0..<arguments.count |index, arguments, argument_names, slots, next_positional, saw_named, report, trace, summary, work|:
-                        return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                        work <- work + 1
                         argument_name: sview = argument_names[index] if argument_names.count > 0 else ""
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(argument_name, "", work)
                         parameter_slot: mutable usize = summary.parameters_count
                         if argument_name == "":
                             return false if saw_named
@@ -522,10 +340,9 @@ extend ElisaProof:
                         else:
                             saw_named <- true
                             for candidate in 0..<summary.parameters_count |candidate, argument_name, report, summary, parameter_slot, work|:
-                                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                                work <- work + 1
                                 formal_index: usize = summary.parameters_start + candidate
                                 return false if formal_index >= report.executables.parameters.count
+                                return false if not proof_replay_mutable_local_text_compare_work_charge(report.executables.parameters[formal_index], argument_name, work)
                                 parameter_slot <- candidate if report.executables.parameters[formal_index] == argument_name
                         return false if parameter_slot >= summary.parameters_count or slots[parameter_slot]
                         slots[parameter_slot] <- true
@@ -607,7 +424,7 @@ extend ElisaProof:
                 Ast::Expr.Ident(local_name, binding_position):
                     if proof_internal_name_is_rebind(local_name):
                         # A result symbol stands for its declaration's call (result_symbols.elisa).
-                        definition = proof_replay_result_symbol_definition(report, trace.name, local_name, binding_position)
+                        definition = proof_replay_result_symbol_definition_with_work(report, trace.name, local_name, binding_position, work)
                         return (false, Ast::Expr.Invalid) if not definition.known or not proof_replay_summary_raw_call_source_site_with_work(report, trace, definition.call, work)
                         # Standalone source-call inspection has no consumer path to check. When
                         # replay is validating a certificate fact, require the result symbol to
@@ -615,14 +432,14 @@ extend ElisaProof:
                         # preservation route; a syntactic call site alone does not prove that the
                         # call ran on a transfer path.
                         return (true, definition.call) if report.trace_consumer_certificate_index == 0 and report.trace_owner_line == 0
-                        return (true, definition.call) if proof_replay_result_symbol_source_available(report, trace, binding_position, definition.local, definition.call)
+                        return (true, definition.call) if proof_replay_result_symbol_source_available_with_work(report, trace, binding_position, definition.local, definition.call, work)
                         return (false, Ast::Expr.Invalid)
                     candidate_matches: mutable usize = 0
                     candidate_call: mutable Ast::Expr = Ast::Expr.Invalid
                     for candidate in report.traces.records |candidate, report, trace, summary, local_name, work|:
-                        if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
-                            return (false, Ast::Expr.Invalid)
-                        work <- work + 1
+                        return (false, Ast::Expr.Invalid) if not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "function-summary", work)
+                        return (false, Ast::Expr.Invalid) if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, work)
+                        return (false, Ast::Expr.Invalid) if not proof_replay_mutable_local_text_compare_work_charge(candidate.dependency, trace.dependency, work)
                         continue if candidate.kind != "function-summary" or candidate.name != trace.name or candidate.line != trace.line or candidate.dependency != trace.dependency or candidate.owner_line != trace.owner_line or candidate.summary_ensure_index != trace.summary_ensure_index
                         continue if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
                         continue if candidate.summary_bindings_start > report.traces.summary_names.count or candidate.summary_bindings_count > report.traces.summary_names.count - candidate.summary_bindings_start
@@ -642,22 +459,22 @@ extend ElisaProof:
                         if summary.parameters_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                             return (false, Ast::Expr.Invalid)
                         work <- work + summary.parameters_count
-                        for offset in 0..<summary.parameters_count |offset, same_parameters, candidate, report, trace, summary|:
+                        for offset in 0..<summary.parameters_count |offset, same_parameters, candidate, report, trace, summary, work|:
                             candidate_index: usize = candidate.summary_bindings_start + offset
                             trace_index: usize = trace.summary_bindings_start + offset
-                            same_parameters <- false if report.traces.summary_names[candidate_index] != report.traces.summary_names[trace_index] or not proof_replay_expr_equal(report.traces.summary_values[candidate_index], report.traces.summary_values[trace_index])
+                            same_parameters <- false if not proof_replay_mutable_local_text_compare_work_charge(report.traces.summary_names[candidate_index], report.traces.summary_names[trace_index], work) or not proof_replay_summary_expr_equal_with_work(report.traces.summary_values[candidate_index], report.traces.summary_values[trace_index], work)
                         continue if not same_parameters
                         source_only: bool = report.trace_consumer_certificate_index == 0 and report.trace_owner_line == 0
                         if source_only:
                             candidate_matches <- candidate_matches + 1
                             candidate_call <- direct_call
                         else:
-                            if report.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
-                                return (false, Ast::Expr.Invalid)
-                            work <- work + report.source_declarations.count
-                            if proof_replay_result_symbol_source_available(report, trace, binding_position, local_name, direct_call):
+                            if proof_replay_result_symbol_source_available_with_work(report, trace, binding_position, local_name, direct_call, work):
                                 candidate_matches <- candidate_matches + 1
                                 candidate_call <- direct_call
+                    # A budget refusal on the last candidate cannot be treated as a proof that
+                    # an earlier matching candidate was unique.
+                    return (false, Ast::Expr.Invalid) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return (true, candidate_call) if candidate_matches == 1
                     return (false, Ast::Expr.Invalid)
                 _:
@@ -669,3 +486,5 @@ extend ElisaProof:
                     return true
                 _:
                     return false
+
+include "./summary_source_cost.elisa"

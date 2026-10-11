@@ -5,38 +5,50 @@ extend ElisaProof:
         def proof_replay_note_trace_lookup_budget(report: mutable ProofReport&) -> void:
             proof_kernel_budget_note(report, "replay-trace-lookup") if report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
 
+        # This audit validates one trace entry. Do not leave the all-facts origin cache
+        # behind: only the selected trace is validated below, so other rows must not become
+        # newly presentable through snapshots the audit just rebuilt.
+        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
+            valid: bool = proof_replay_fact_trace_entry_with_cache(report, trace_index)
+            report.traces.origin_indices.clear()
+            report.traces.origin_snapshots.clear()
+            return valid
+
+    private:
         # Standalone provenance entry point for auditors and adversarial harnesses. Require both
         # independently implemented views so this audit API detects drift between source-level
         # reconstruction and the authoritative source-neutral kernel trace.
-        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
+        def proof_replay_fact_trace_entry_with_cache[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
+            # This entry has no active certificate context. Ignore caller-retained report
+            # context and rebuild every cache it uses from the current mutable report.
+            report.replay_owner_line <- 0
+            report.trace_owner_line <- 0
+            report.trace_consumer_certificate_index <- 0
             return false if trace_index >= report.traces.records.count
             proof_replay_build_fact_trace_index(report)
+            proof_replay_cache_fact_origins(report)
             proof_replay_note_trace_lookup_budget(report)
             return false if report.kernel.budget_exhausted
+            report.kernel.arena_validated <- (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel.nodes, &report.kernel.children) can Global{Read,Write})
+            return false if not report.kernel.arena_validated
             trace: ProofFactTrace = report.traces.records[trace_index]
             dependency_stack: mutable darray[sview] = [trace.name]
             active_certificates: mutable darray[usize] = []
             validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
-            saved_trace_owner_line: u32 = report.trace_owner_line
-            # Standalone trace admission has no active certificate line, so it cannot
-            # authenticate a local call-result binding against a particular consumer.
-            report.trace_owner_line <- 0
             node_count: usize = report.kernel.nodes.count
             child_count: usize = report.kernel.children.count
             source_valid: bool = (proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, active_certificates, validation_workspace) can Global{Read,Write})
             proof_replay_note_trace_lookup_budget(report)
-            if report.kernel.budget_exhausted:
-                report.trace_owner_line <- saved_trace_owner_line
-                return false
+            return false if report.kernel.budget_exhausted
             kernel_valid: mutable bool = (proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true, active_certificates, validation_workspace) can Global{Read,Write})
             if node_count != report.kernel.nodes.count or child_count != report.kernel.children.count:
                 report.kernel.arena_validated <- (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel.nodes, &report.kernel.children) can Global{Read,Write})
                 kernel_valid <- false if not report.kernel.arena_validated
-            report.trace_owner_line <- saved_trace_owner_line
             proof_replay_note_trace_lookup_budget(report)
             return false if report.kernel.budget_exhausted
             return source_valid and kernel_valid
 
+    public:
         def proof_replay_fact_trace_index(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
             # Once replay reports a resource-budget failure, do not turn an unavailable index
             # into a repeated full scan for every certificate fact. Such a report cannot prove
@@ -67,17 +79,23 @@ extend ElisaProof:
                 probes <- probes + 1
             return report.traces.records.count
 
-        def proof_replay_fact_origin(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+        def proof_replay_fact_origin[@r](report: mutable ProofReport& @r, fact: Ast::Expr, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize) can[Global.Read, Global.Write]:
             index: usize = proof_replay_fact_trace_index(report, fact, owner)
+            return (false, "", 0, "", "", 0) if index >= report.traces.records.count
+            return (false, "", 0, "", "", 0) if not (proof_replay_fact_trace_entry(report, index) can Global{Read,Write})
             return (true, report.traces.records[index].kind, report.traces.records[index].line, report.traces.records[index].name, report.traces.records[index].dependency, report.traces.records[index].premises_count) if index < report.traces.records.count
             return (false, "", 0, "", "", 0)
 
+    private:
         def proof_replay_cache_fact_origins(report: mutable ProofReport&) -> void:
             sentinel: usize = report.traces.records.count
             report.traces.origin_indices.clear()
+            report.traces.origin_snapshots.clear()
             return if not proof_kernel_report_append_allowed(report, 0, report.certificate_facts.count, "replay-fact-origins")
+            return if not proof_kernel_report_append_allowed(report, 0, report.certificate_facts.count, "replay-fact-origin-snapshots")
             return if not proof_kernel_report_append_allowed(report, 0, report.certificates.count, "replay-fact-origins")
             report.traces.origin_indices.resize(report.certificate_facts.count)
+            report.traces.origin_snapshots.resize(report.certificate_facts.count)
             for index in 0..<report.traces.origin_indices.count |index, report, sentinel|:
                 return if not proof_replay_trace_lookup_charge(report)
                 report.traces.origin_indices[index] <- sentinel
@@ -91,29 +109,128 @@ extend ElisaProof:
                     fact: Ast::Expr = report.certificate_facts[fact_index]
                     origin_index: usize = proof_replay_fact_trace_index(report, fact, certificate.name)
                     report.traces.origin_indices[fact_index] <- origin_index
+                    if origin_index < report.traces.records.count:
+                        origin: ProofFactTrace = report.traces.records[origin_index]
+                        report.traces.origin_snapshots[fact_index] <- ProofFactOriginSnapshot{expression: fact, trace_index: origin_index, kind: origin.kind, line: origin.line, name: origin.name, dependency: origin.dependency, premises_count: origin.premises_count}
                     return if report.kernel.budget_exhausted
 
-        def proof_replay_fact_origin_at(report: ProofReport&, fact_index: usize, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
-            return (false, "", 0, "", "", 0) if report.kernel.budget_exhausted or report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
-            if fact_index < report.traces.origin_indices.count:
+    public:
+        def proof_replay_fact_origin_work_exhausted(work: usize) -> bool:
+            return work > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+
+        def proof_replay_fact_origin_work_charge(amount: usize, work: mutable usize&) -> bool:
+            if work > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET or amount > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET - work:
+                work <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            work <- work + amount
+            return true
+
+        def proof_replay_fact_origin_text_compare_charge(left: sview, right: sview, work: mutable usize&) -> bool:
+            return false if not proof_replay_fact_origin_work_charge(1, work)
+            return false if not proof_replay_fact_origin_work_charge(sview_len(left), work)
+            return false if not proof_replay_fact_origin_work_charge(sview_len(right), work)
+            return true
+
+        # A report's fact and trace arrays are public mutable data. Charge both cost passes and
+        # the exact comparison before trusting that an output cache still describes this report.
+        def proof_replay_fact_origin_expression_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> bool:
+            if work >= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                work <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(left, &cost, work, 0) or not proof_replay_summary_expr_cost(right, &cost, work, 0):
+                work <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            if cost > (PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET - work) / 2:
+                work <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            work <- work + cost * 2
+            return proof_replay_expr_equal(left, right)
+
+        # Structural expression equality intentionally ignores source spans; origin output
+        # exposes the root line, so bind every root-position component to the replay snapshot.
+        def proof_replay_fact_origin_position_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> bool:
+            return false if not proof_replay_fact_origin_work_charge(6, work)
+            left_position: Ast::Pos = Ast::expr_pos(left)
+            right_position: Ast::Pos = Ast::expr_pos(right)
+            return left_position.line == right_position.line and left_position.column == right_position.column and left_position.offset == right_position.offset and left_position.end_line == right_position.end_line and left_position.end_column == right_position.end_column and left_position.end_offset == right_position.end_offset
+
+        def proof_replay_fact_origin_at_with_work(report: ProofReport&, fact_index: usize, owner: sview, work: mutable usize&) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            if report.kernel.budget_exhausted or report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET or work > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                work <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return (false, "", 0, "", "", 0)
+            # Charge the cached lookup, its owner comparison, and each snapshot comparison.
+            # The shared render counter makes repeated and all-pairs callers bounded.
+            return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_work_charge(1, work)
+            return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_work_charge(sview_len(owner), work)
+            if fact_index < report.certificate_facts.count and fact_index < report.traces.origin_indices.count and fact_index < report.traces.origin_snapshots.count:
                 trace_index: usize = report.traces.origin_indices[fact_index]
-                if trace_index < report.traces.records.count and report.traces.records[trace_index].name == owner:
+                snapshot: ProofFactOriginSnapshot = report.traces.origin_snapshots[fact_index]
+                if trace_index < report.traces.records.count and trace_index == snapshot.trace_index:
                     cached: ProofFactTrace = report.traces.records[trace_index]
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_text_compare_charge(snapshot.name, owner, work)
+                    return (false, "", 0, "", "", 0) if snapshot.name != owner
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_text_compare_charge(cached.name, snapshot.name, work)
+                    return (false, "", 0, "", "", 0) if cached.name != snapshot.name
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_text_compare_charge(cached.kind, snapshot.kind, work)
+                    return (false, "", 0, "", "", 0) if cached.kind != snapshot.kind
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_text_compare_charge(cached.dependency, snapshot.dependency, work)
+                    return (false, "", 0, "", "", 0) if cached.dependency != snapshot.dependency
+                    return (false, "", 0, "", "", 0) if cached.line != snapshot.line or cached.premises_count != snapshot.premises_count
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_expression_equal_with_work(report.certificate_facts[fact_index], snapshot.expression, work)
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_position_equal_with_work(report.certificate_facts[fact_index], snapshot.expression, work)
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_expression_equal_with_work(cached.expression, snapshot.expression, work)
+                    return (false, "", 0, "", "", 0) if not proof_replay_fact_origin_position_equal_with_work(cached.expression, snapshot.expression, work)
                     return (true, cached.kind, cached.line, cached.name, cached.dependency, cached.premises_count)
             return (false, "", 0, "", "", 0)
 
-        # Output and theorem-catalog boundaries must not trust a mutable certificate index alone.
-        # Reuse replay's exact attempt/root binding before exposing a per-goal replay result.
+    private:
+        # This report-bound cache is only valid inside a fresh replay batch, after every flag
+        # was reset and before the mutable report escapes. Public consumers use the opaque
+        # ProofReplayReceipt projection below instead.
         def proof_replay_attempt_certificate_replayed(report: ProofReport&, attempt: ProofGoalAttempt) -> bool:
+            work: mutable usize = 0
+            return proof_replay_attempt_certificate_replayed_with_work(report, attempt, &work)
+
+        def proof_replay_attempt_certificate_replayed_with_work(report: ProofReport&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> bool:
             return false if not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
-            return false if not proof_replay_attempt_matches_certificate(report, attempt, certificate, attempt.certificate_index)
+            return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, attempt.certificate_index, source_work)
             return certificate.replayed
 
         # The producer's result is only an internal candidate until its exact bound
-        # certificate has passed independent replay. Public proof claims use this predicate.
+        # certificate has passed independent replay.
         def proof_replay_attempt_is_proven(report: ProofReport&, attempt: ProofGoalAttempt) -> bool:
             return attempt.proven and proof_replay_attempt_certificate_replayed(report, attempt)
+
+        def proof_replay_attempt_statuses_with_work(report: ProofReport&, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            replayed.clear()
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.goal_attempts.count
+            for attempt in report.goal_attempts |report, replayed, source_work|:
+                replayed.push(proof_replay_attempt_certificate_replayed_with_work(report, attempt, source_work))
+            return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+    public:
+        # Shared output-cost meter. This charges formatting work only; it carries no proof
+        # status and is safe for renderer callers to use directly.
+        def proof_replay_source_work_charge(amount: usize, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + amount
+            true
+
+    private:
+        def proof_replay_attempt_statuses_and_complete_with_work(report: ProofReport&, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            return false if not proof_replay_attempt_statuses_with_work(report, replayed, source_work)
+            return false if report.replay_gaps != 0 or report.replayed != report.certificates.count
+            return false if replayed.count != report.goal_attempts.count
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.certificates.count
+            for certificate in report.certificates:
+                return false if not certificate.replayed
+            for index in 0..<report.goal_attempts.count |index, report, replayed|:
+                return false if report.goal_attempts[index].proven and not replayed[index]
+            true
 
         # A zero gap counter alone is not proof that replay completed: bounded setup can reject
         # the replay batch before visiting any certificate, and reports may be revalidated after
@@ -123,9 +240,44 @@ extend ElisaProof:
             return false if report.replay_gaps != 0 or report.replayed != report.certificates.count
             for certificate in report.certificates:
                 return false if not certificate.replayed
-            for attempt in report.goal_attempts:
-                return false if attempt.proven and not proof_replay_attempt_certificate_replayed(report, attempt)
+            attempt_work: mutable usize = 0
+            return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            attempt_work <- report.goal_attempts.count
+            for attempt in report.goal_attempts |report, attempt_work|:
+                if attempt.proven:
+                    return false if not proof_replay_attempt_certificate_replayed_with_work(report, attempt, attempt_work)
             return true
+
+        def proof_replay_receipt_from_report(report: ProofReport&, source_validated: bool) -> ProofReplayReceipt can[Memory.Allocate]:
+            attempt_statuses: mutable darray[bool] = []
+            source_work: mutable usize = 0
+            complete: mutable bool = proof_replay_attempt_statuses_and_complete_with_work(report, &attempt_statuses, &source_work)
+            return ProofReplayReceipt{} if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            proven_statuses: mutable darray[bool] = []
+            certificate_statuses: mutable darray[bool] = []
+            if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                complete <- false
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            else:
+                source_work <- source_work + report.goal_attempts.count
+                for index in 0..<report.goal_attempts.count |index, report, attempt_statuses, proven_statuses, complete, source_work|:
+                    return ProofReplayReceipt{} if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    source_work <- source_work + 1
+                    replayed: bool = index < attempt_statuses.count and attempt_statuses[index]
+                    proven_statuses.push(report.goal_attempts[index].proven and replayed)
+            if report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                complete <- false
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            else:
+                source_work <- source_work + report.certificates.count
+                for certificate in report.certificates |certificate, certificate_statuses, source_work|:
+                    return ProofReplayReceipt{} if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    source_work <- source_work + 1
+                    certificate_statuses.push(certificate.replayed)
+            return ProofReplayReceipt{} if attempt_statuses.count != report.goal_attempts.count
+            return ProofReplayReceipt{} if proven_statuses.count != report.goal_attempts.count
+            return ProofReplayReceipt{} if certificate_statuses.count != report.certificates.count
+            return ProofReplayReceipt{attempt_statuses: attempt_statuses, attempt_proven_statuses: proven_statuses, certificate_statuses: certificate_statuses, complete: complete, source_validated: source_validated, issued: true}
 
         def proof_replay_revoke_certificate_batch(report: mutable ProofReport&) -> void:
             report.replayed <- 0
@@ -134,7 +286,7 @@ extend ElisaProof:
                 certificate.replayed <- false
                 report.replay_gaps <- report.replay_gaps + 1
 
-        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> void can[Global.Read, Global.Write]:
+        def proof_replay_certificates_mutating[@r](report: mutable ProofReport& @r) -> void can[Global.Read, Global.Write]:
             # Replay is a query over the current immutable certificate set. Reset presentation
             # counters and per-certificate flags so repeated API calls cannot accumulate stale
             # results from an earlier replay pass.
@@ -160,6 +312,7 @@ extend ElisaProof:
                 report.replay_gaps <- max_gap_count if report.certificates.count > max_gap_count.usize() else report.certificates.count.u32()
                 return
             arena_grew: mutable bool = false
+            validation_workspace.allow_replayed_dependency_memo <- true
             for index in 0..<report.certificates.count |index, report, validation_workspace|:
                 node_count: usize = report.kernel.nodes.count
                 child_count: usize = report.kernel.children.count
@@ -191,5 +344,60 @@ extend ElisaProof:
                     for certificate in report.certificates |certificate, report|:
                         certificate.replayed <- false
                         report.replay_gaps <- report.replay_gaps + 1
+            validation_workspace.allow_replayed_dependency_memo <- false
             if not proof_replay_certificates_complete(report) and report.replay_gaps == 0:
                 report.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS
+
+    public:
+        # A receipt is an immutable result for this exact replay batch. It owns the status
+        # vectors privately, so later edits to the public diagnostic report cannot turn a
+        # failed replay into a successful proof query.
+        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt can[Memory.Allocate, Global.Read, Global.Write]:
+            (proof_replay_certificates_mutating(report) can Global{Read,Write})
+            return proof_replay_receipt_from_report(report, false)
+
+
+        def proof_replay_receipt_is_issued(receipt: ProofReplayReceipt) -> bool:
+            receipt.issued
+
+        def proof_replay_receipt_is_complete(receipt: ProofReplayReceipt) -> bool:
+            receipt.issued and receipt.complete
+
+        def proof_replay_receipt_source_validated(receipt: ProofReplayReceipt) -> bool:
+            receipt.issued and receipt.source_validated
+
+        def proof_replay_receipt_attempt_count(receipt: ProofReplayReceipt) -> usize:
+            return 0 if not receipt.issued
+            receipt.attempt_statuses.count
+
+        def proof_replay_receipt_certificate_count(receipt: ProofReplayReceipt) -> usize:
+            return 0 if not receipt.issued
+            receipt.certificate_statuses.count
+
+        def proof_replay_receipt_attempt_status(receipt: ProofReplayReceipt, attempt_index: usize) -> bool:
+            return false if not receipt.issued or attempt_index >= receipt.attempt_statuses.count
+            receipt.attempt_statuses[attempt_index]
+
+        def proof_replay_receipt_attempt_is_proven(receipt: ProofReplayReceipt, attempt_index: usize) -> bool:
+            return false if not receipt.issued or not receipt.source_validated or attempt_index >= receipt.attempt_proven_statuses.count
+            receipt.attempt_proven_statuses[attempt_index]
+
+        def proof_replay_receipt_certificate_status(receipt: ProofReplayReceipt, certificate_index: usize) -> bool:
+            return false if not receipt.issued or certificate_index >= receipt.certificate_statuses.count
+            receipt.certificate_statuses[certificate_index]
+
+        def proof_replay_receipt_attempt_statuses_with_work(receipt: ProofReplayReceipt, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            replayed.clear()
+            return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.attempt_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + receipt.attempt_statuses.count
+            for status in receipt.attempt_statuses |replayed|:
+                replayed.push(status)
+            return true
+
+        def proof_replay_receipt_certificate_statuses_with_work(receipt: ProofReplayReceipt, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            replayed.clear()
+            return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + receipt.certificate_statuses.count
+            for status in receipt.certificate_statuses |replayed|:
+                replayed.push(status)
+            return true

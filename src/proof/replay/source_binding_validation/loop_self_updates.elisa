@@ -13,26 +13,57 @@
 #   - no other binding or summary of the owner defines S differently (the shared rule).
 extend ElisaProof:
     private:
-        # The source touch walk can resolve every call argument against the declaration tree.
-        # Reserve one whole owner scan per possible argument, bounded by the statement's AST
-        # cost, before running that walk.
-        def proof_replay_loop_prefix_source_touch_work_charge(statement: Ast::Stmt, owner_scan_work: usize, source_work: mutable usize&) -> bool:
+        def proof_replay_loop_source_call_parameter_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+            cost <- cost + declarations.count
+            for declaration in declarations |cost, depth|:
+                match declaration:
+                    Ast::Decl.Func(_, parameters, _, _, _, _, _):
+                        return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+                        cost <- cost + parameters.count
+                        for parameter in parameters |parameter, cost|:
+                            return false if sview_len(parameter.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+                            cost <- cost + sview_len(parameter.name)
+                            return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, 0, 0)
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+                        cost <- cost + sview_len(name)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_loop_source_call_parameter_cost(nested, cost, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_loop_source_call_parameter_cost_charge(report: ProofReport&, parameter_cost: mutable usize&, source_work: mutable usize&) -> bool:
+            measured_cost: mutable usize = 0
+            if not proof_replay_loop_source_call_parameter_cost(report.source_declarations, &measured_cost, 0):
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            if measured_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + measured_cost
+            parameter_cost <- measured_cost
+            return true
+
+        # The source touch walk can resolve every call argument against declarations and scan a
+        # matching function's parameter list/type. Reserve that full lookup per possible
+        # argument, bounded by the statement's AST cost, before running the walk.
+        def proof_replay_loop_prefix_source_touch_work_charge(statement: Ast::Stmt, source_call_lookup_work: usize, source_work: mutable usize&) -> bool:
             statement_cost: mutable usize = 0
             if not proof_replay_mutable_local_statement_work_charge(statement, statement_cost, 0):
                 return proof_replay_mutable_local_work_exhaust(source_work)
             if statement_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
                 return proof_replay_mutable_local_work_exhaust(source_work)
             source_work <- source_work + statement_cost
-            if statement_cost != 0 and owner_scan_work > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / statement_cost:
+            if statement_cost != 0 and source_call_lookup_work > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / statement_cost:
                 return proof_replay_mutable_local_work_exhaust(source_work)
-            source_work <- source_work + statement_cost * owner_scan_work
+            source_work <- source_work + statement_cost * source_call_lookup_work
             return true
 
         # VALID when exactly one matching assignment is found in this loop's body, INVALID when
         # one is found but a write of x precedes it, ABSENT otherwise.
-        def proof_replay_loop_self_update_in_loop_with_work(report: ProofReport&, owner: sview, condition: Ast::Expr, body: darray[Ast::Stmt]&, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, owner_scan_work: usize, source_work: mutable usize&) -> usize:
+        def proof_replay_loop_self_update_in_loop_with_work(report: ProofReport&, owner: sview, condition: Ast::Expr, body: darray[Ast::Stmt]&, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, owner_scan_work: usize, source_call_lookup_work: usize, source_work: mutable usize&) -> usize:
             found: mutable usize = ProofReplayLocalAlias::ABSENT
-            for index in 0..<body.count |index, body, report, owner, condition, binding, value, local_name, found, owner_scan_work, source_work|:
+            for index in 0..<body.count |index, body, report, owner, condition, binding, value, local_name, found, owner_scan_work, source_call_lookup_work, source_work|:
                 return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge_fail_closed(body[index], source_work, 0)
                 match body[index]:
                     Ast::Stmt.Assign(Ast::Expr.Ident(name, _), operator, assigned, statement_position):
@@ -47,21 +78,21 @@ extend ElisaProof:
                                     return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_expr_work_charge(condition, source_work)
                                     condition_statement: Ast::Stmt = Ast::Stmt.Expr(condition, Ast::expr_pos(condition))
                                     if proof_replay_self_update_value(report, assigned, name, owner, 0):
-                                        return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(condition_statement, owner_scan_work, source_work)
+                                        return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(condition_statement, source_call_lookup_work, source_work)
                                         if not proof_replay_source_expr_touches(report.source_declarations, condition, name, true, 0):
                                             clean: mutable bool = true
-                                            for earlier in 0..<index |earlier, body, report, owner, name, clean, source_work|:
+                                            for earlier in 0..<index |earlier, body, report, owner, name, clean, source_call_lookup_work, source_work|:
                                                 return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge_fail_closed(body[earlier], source_work, 0)
                                                 match body[earlier]:
                                                     Ast::Stmt.Contract(_, _, _):
                                                         pass
                                                     _:
-                                                        return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(body[earlier], owner_scan_work, source_work)
+                                                        return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(body[earlier], source_call_lookup_work, source_work)
                                                         if not proof_replay_self_update_resymbolized_with_work(report, owner, body[earlier], name, source_work):
                                                             return ProofReplayLocalAlias::INVALID if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                                             return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_owner_preflight_work_charge(report, owner, report.replay_owner_line, source_work)
                                                             return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge_fail_closed(body[earlier], source_work, 0)
-                                                            return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(body[earlier], owner_scan_work, source_work)
+                                                            return ProofReplayLocalAlias::INVALID if not proof_replay_loop_prefix_source_touch_work_charge(body[earlier], source_call_lookup_work, source_work)
                                                             clean <- false if proof_replay_source_statement_touches(report.source_declarations, body[earlier], name, true, 0)
                                             if clean:
                                                 local_name <- name
@@ -72,15 +103,15 @@ extend ElisaProof:
             return found
 
         # The unique loop on `line`; `loop_scope` receives its lexical statement list.
-        def proof_replay_loop_self_update_site_with_work(report: ProofReport&, owner: sview, statements: darray[Ast::Stmt]&, line: u32, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, loops: mutable usize&, loop_scope: mutable darray[Ast::Stmt]&, nested: bool, owner_scan_work: usize, source_work: mutable usize&) -> usize:
+        def proof_replay_loop_self_update_site_with_work(report: ProofReport&, owner: sview, statements: darray[Ast::Stmt]&, line: u32, binding: Ast::Expr, value: Ast::Expr, local_name: mutable sview&, loops: mutable usize&, loop_scope: mutable darray[Ast::Stmt]&, nested: bool, owner_scan_work: usize, source_call_lookup_work: usize, source_work: mutable usize&) -> usize:
             found: mutable usize = ProofReplayLocalAlias::ABSENT
-            for statement in statements |report, owner, statements, line, binding, value, local_name, loops, loop_scope, nested, found, owner_scan_work, source_work|:
+            for statement in statements |report, owner, statements, line, binding, value, local_name, loops, loop_scope, nested, found, owner_scan_work, source_call_lookup_work, source_work|:
                 return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge_fail_closed(statement, source_work, 0)
                 match statement:
                     Ast::Stmt.While(condition, body, position):
                         if position.line == line:
                             loops <- loops + 1
-                            here: usize = proof_replay_loop_self_update_in_loop_with_work(report, owner, condition, body, binding, value, local_name, owner_scan_work, source_work)
+                            here: usize = proof_replay_loop_self_update_in_loop_with_work(report, owner, condition, body, binding, value, local_name, owner_scan_work, source_call_lookup_work, source_work)
                             if here != ProofReplayLocalAlias::ABSENT:
                                 loop_scope.clear()
                                 loop_scope.extend(statements)
@@ -88,7 +119,7 @@ extend ElisaProof:
                     Ast::Stmt.For(_, _, condition, body, position):
                         if position.line == line:
                             loops <- loops + 1
-                            here: usize = proof_replay_loop_self_update_in_loop_with_work(report, owner, condition, body, binding, value, local_name, owner_scan_work, source_work)
+                            here: usize = proof_replay_loop_self_update_in_loop_with_work(report, owner, condition, body, binding, value, local_name, owner_scan_work, source_call_lookup_work, source_work)
                             if here != ProofReplayLocalAlias::ABSENT:
                                 loop_scope.clear()
                                 loop_scope.extend(statements)
@@ -97,7 +128,7 @@ extend ElisaProof:
                         if not nested:
                             match proof_replay_source_unwrap_empty_value_block(block, 0):
                                 Ast::Expr.Block(inner, _, _, _):
-                                    found <- proof_replay_mutable_local_merge(found, proof_replay_loop_self_update_site_with_work(report, owner, inner, line, binding, value, local_name, loops, loop_scope, true, owner_scan_work, source_work))
+                                    found <- proof_replay_mutable_local_merge(found, proof_replay_loop_self_update_site_with_work(report, owner, inner, line, binding, value, local_name, loops, loop_scope, true, owner_scan_work, source_call_lookup_work, source_work))
                                 _:
                                     pass
                     _:
@@ -142,12 +173,15 @@ extend ElisaProof:
                     owner_scan_work: usize = source_work - owner_scan_start
                     return false if not proof_replay_mutable_local_identifier_scan_charge(value, owner_scan_work, source_work)
                     return false if proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
+                    parameter_cost: mutable usize = 0
+                    return false if not proof_replay_loop_source_call_parameter_cost_charge(report, &parameter_cost, source_work)
+                    source_call_lookup_work: usize = owner_scan_work + parameter_cost
                     body: mutable darray[Ast::Stmt] = []
                     return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
                     local_name: mutable sview = ""
                     loops: mutable usize = 0
                     loop_scope: mutable darray[Ast::Stmt] = []
-                    site: usize = proof_replay_loop_self_update_site_with_work(report, trace.name, body, report.trace_owner_line, trace.expression, value, &local_name, &loops, &loop_scope, false, owner_scan_work, source_work)
+                    site: usize = proof_replay_loop_self_update_site_with_work(report, trace.name, body, report.trace_owner_line, trace.expression, value, &local_name, &loops, &loop_scope, false, owner_scan_work, source_call_lookup_work, source_work)
                     return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or site != ProofReplayLocalAlias::VALID
                     return false if loops != 1 or local_name == ""
                     return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, local_name, 0)

@@ -4,6 +4,9 @@
 extend ElisaProof:
     private:
         const PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT: usize = 16384
+        const PROOF_REPLAY_CONTROL_DEPTH_LIMIT: usize = 64
+        const PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT: usize = 4096
+        const PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE: u32 = 4294967295
 
         def proof_replay_control_source_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
             return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
@@ -26,8 +29,22 @@ extend ElisaProof:
                 _:
                     return false
 
+        def proof_replay_control_expr_source_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&, work_limit: usize) -> bool:
+            return false if not proof_replay_summary_expr_equal_with_limit(left, right, work, work_limit)
+            return true if proof_replay_control_expr_position_equal(left, right)
+            match left:
+                Ast::Expr.Ident(name, _):
+                    match right:
+                        Ast::Expr.Ident(other, _):
+                            return false if not proof_replay_attempt_text_compare_with_limit(name, other, work, work_limit)
+                            return name == other
+                        _:
+                            return false
+                _:
+                    return false
+
         def proof_replay_control_global_constant_count(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, depth: usize) -> bool:
-            return false if depth >= 64
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
             for declaration in declarations |target, matches, mutable_matches, depth|:
                 match declaration:
                     Ast::Decl.Const(name, _, _, is_mutable, _):
@@ -77,13 +94,24 @@ extend ElisaProof:
             return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, name)
             return proof_replay_local_binding_immutable_integer_parameter(report.source_declarations, trace.name, report.replay_owner_line, name, 0) or proof_replay_control_immutable_boolean_parameter(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
 
+        def proof_replay_control_deterministic_declaration_scan_with_work(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            remaining_work: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
+            scan_seed: usize = PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - remaining_work
+            scan_work: mutable usize = scan_seed
+            complete: bool = proof_replay_deterministic_declaration_scan_charge(declarations, &scan_work, 0)
+            scan_cost: usize = scan_work - scan_seed
+            return false if scan_cost > remaining_work
+            source_work <- source_work + scan_cost
+            complete
+
         def proof_replay_control_stable_identifier_with_work(report: ProofReport&, trace: ProofFactTrace, name: sview, source_work: mutable usize&) -> bool:
             return false if name == ""
-            return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
-            return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
+            return false if not proof_replay_control_deterministic_declaration_scan_with_work(report.source_declarations, source_work)
+            return false if not proof_replay_control_deterministic_declaration_scan_with_work(report.source_declarations, source_work)
             owner_line: mutable u32 = report.replay_owner_line
-            owner_line <- 0 if owner_line == 4294967295
-            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, owner_line, source_work)
+            owner_line <- 0 if owner_line == PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE
+            return false if not proof_replay_summary_owner_source_preflight_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             return proof_replay_control_stable_identifier(report, trace, name)
 
         # Only source expressions whose value cannot change during the control-flow region
@@ -91,18 +119,21 @@ extend ElisaProof:
         # and substituted locals need a source environment/effect certificate this trace lacks.
         def proof_replay_control_stable_expression(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, source_work: mutable usize&) -> bool:
             owner_line: mutable u32 = report.replay_owner_line
-            owner_line <- 0 if owner_line == 4294967295
+            owner_line <- 0 if owner_line == PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE
             owner_start: usize = source_work
-            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, owner_line, source_work)
+            return false if not proof_replay_summary_owner_source_preflight_with_limit(report, trace.name, owner_line, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             owner_source_work: usize = source_work - owner_start
-            expression_work: mutable usize = 0
+            return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            expression_seed: usize = source_work
+            expression_work: mutable usize = expression_seed
             valid: bool = proof_replay_control_stable_expression_budgeted(report, trace, expression, &expression_work, owner_source_work, 0)
-            return false if expression_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            expression_work <- expression_work - expression_seed
+            return false if expression_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + expression_work
             return valid
 
         def proof_replay_control_stable_expression_core(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= 64
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
                     return true
@@ -117,7 +148,7 @@ extend ElisaProof:
                     return false
 
         def proof_replay_control_stable_expression_budgeted(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, depth: usize) -> bool:
-            return false if depth >= 64 or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
@@ -159,19 +190,27 @@ extend ElisaProof:
                     return Ast::Expr.Unary(TokenKind.Not, expression, position)
 
         def proof_replay_control_assertion_matches(statement: Ast::Stmt, certificate: ProofGoalCertificate) -> bool:
+            work: mutable usize = 0
+            proof_replay_control_assertion_matches_with_work(statement, certificate, &work)
+
+        def proof_replay_control_assertion_matches_with_work(statement: Ast::Stmt, certificate: ProofGoalCertificate, work: mutable usize&) -> bool:
             # The source goal has to survive the checker substitution with the same tree and
             # span. A substituted local is rejected until replay can authenticate its value map.
             match statement:
                 Ast::Stmt.Contract("assert", expression, position):
                     return false if position.line != certificate.line
-                    return proof_replay_control_expr_source_equal(expression, certificate.goal)
+                    return proof_replay_control_expr_source_equal_with_work(expression, certificate.goal, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
                 Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident("assert", _), arguments, _, _), position):
                     return false if position.line != certificate.line or arguments.count != 1
-                    return proof_replay_control_expr_source_equal(arguments[0], certificate.goal)
+                    return proof_replay_control_expr_source_equal_with_work(arguments[0], certificate.goal, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
                 _:
                     return false
 
         def proof_replay_control_assert_by_goal_matches(statement: Ast::Stmt, certificate: ProofGoalCertificate) -> bool:
+            work: mutable usize = 0
+            proof_replay_control_assert_by_goal_matches_with_work(statement, certificate, &work)
+
+        def proof_replay_control_assert_by_goal_matches_with_work(statement: Ast::Stmt, certificate: ProofGoalCertificate, work: mutable usize&) -> bool:
             match statement:
                 Ast::Stmt.Block("assert_by", _, _, body, _):
                     return false if body.count == 0
@@ -180,14 +219,14 @@ extend ElisaProof:
                             # An assert-by block's first contract is its declared goal. Other
                             # contracts count only in this exact first-statement role.
                             return false if kind == "assert" or position.line != certificate.line
-                            return proof_replay_control_expr_source_equal(expression, certificate.goal)
+                            return proof_replay_control_expr_source_equal_with_work(expression, certificate.goal, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
                         _:
                             return false
                 _:
                     return false
 
         def proof_replay_control_assertion_expr_scan(expression: Ast::Expr, certificate: ProofGoalCertificate, depth: usize, work: mutable usize&, matches: mutable usize&) -> bool:
-            return false if depth >= 64 or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match expression:
                 Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
@@ -245,11 +284,11 @@ extend ElisaProof:
             return false
 
         def proof_replay_control_assertion_scan(body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, depth: usize, work: mutable usize&, matches: mutable usize&) -> bool:
-            return false if depth >= 64
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
             for statement in body |certificate, depth, work, matches|:
                 return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 work <- work + 1
-                matches <- matches + 1 if proof_replay_control_assertion_matches(statement, certificate) or proof_replay_control_assert_by_goal_matches(statement, certificate)
+                matches <- matches + 1 if proof_replay_control_assertion_matches_with_work(statement, certificate, work) or proof_replay_control_assert_by_goal_matches_with_work(statement, certificate, work)
                 match statement:
                     Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _):
                         return false if not proof_replay_control_assertion_expr_scan(expression, certificate, depth + 1, work, matches)
@@ -292,13 +331,24 @@ extend ElisaProof:
             return true
 
         def proof_replay_control_certificate_attempt_index_unique(report: ProofReport&, certificate: ProofGoalCertificate, certificate_index: usize) -> bool:
+            work: mutable usize = 0
+            return proof_replay_control_certificate_attempt_index_unique_with_work(report, certificate, certificate_index, &work)
+
+        def proof_replay_control_certificate_attempt_index_unique_with_work(report: ProofReport&, certificate: ProofGoalCertificate, certificate_index: usize, work: mutable usize&) -> bool:
             return false if certificate_index >= report.certificates.count
             return false if report.certificates[certificate_index].name != certificate.name or report.certificates[certificate_index].line != certificate.line
             return false if certificate.source_phase != "" and certificate.source_phase != "loop-invariant-entry" and certificate.source_phase != "loop-invariant-preservation"
-            return false if report.goal_attempts.count > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT or report.goal_attempts.count > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+            work <- work + report.goal_attempts.count
             matches: mutable usize = 0
-            for attempt in report.goal_attempts |report, certificate, certificate_index, matches|:
-                matches <- matches + 1 if proof_replay_attempt_matches_certificate(report, attempt, certificate, certificate_index)
+            for index in 0..<report.goal_attempts.count |index, report, certificate, certificate_index, matches, work|:
+                attempt: ProofGoalAttempt = report.goal_attempts[index]
+                matched: bool = proof_replay_attempt_matches_certificate_with_limit(report, attempt, certificate, certificate_index, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
+                matches <- matches + 1 if matched
+                return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                return false if work == PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and (index + 1 < report.goal_attempts.count or not matched)
+                return false if work == PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT and (index + 1 < report.goal_attempts.count or not matched)
             matches == 1
 
         def proof_replay_control_certificate_attempt_unique(report: ProofReport&, certificate: ProofGoalCertificate) -> bool:
@@ -306,30 +356,43 @@ extend ElisaProof:
             certificate_index: usize = report.trace_consumer_certificate_index - 1
             return proof_replay_control_certificate_attempt_index_unique(report, certificate, certificate_index)
 
+        def proof_replay_control_certificate_attempt_unique_with_work(report: ProofReport&, certificate: ProofGoalCertificate, work: mutable usize&) -> bool:
+            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
+            certificate_index: usize = report.trace_consumer_certificate_index - 1
+            return proof_replay_control_certificate_attempt_index_unique_with_work(report, certificate, certificate_index, work)
+
         def proof_replay_control_assertion_in_scope(report: ProofReport&, whole_body: darray[Ast::Stmt]&, scope_body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate) -> bool:
+            work: mutable usize = 0
+            return proof_replay_control_assertion_in_scope_with_work(report, whole_body, scope_body, certificate, &work)
+
+        def proof_replay_control_assertion_in_scope_with_work(report: ProofReport&, whole_body: darray[Ast::Stmt]&, scope_body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, work: mutable usize&) -> bool:
             return false if certificate.rule != "goal" and certificate.rule != "quantifier-forall" and certificate.rule != "quantifier-exists"
-            return false if not proof_replay_control_certificate_attempt_unique(report, certificate)
+            return false if not proof_replay_control_certificate_attempt_unique_with_work(report, certificate, work)
             whole_matches: mutable usize = 0
-            whole_work: mutable usize = 0
-            return false if not proof_replay_control_assertion_scan(whole_body, certificate, 0, &whole_work, &whole_matches) or whole_matches != 1
+            return false if not proof_replay_control_assertion_scan(whole_body, certificate, 0, work, &whole_matches) or whole_matches != 1
             scope_matches: mutable usize = 0
-            scope_work: mutable usize = 0
-            return false if not proof_replay_control_assertion_scan(scope_body, certificate, 0, &scope_work, &scope_matches)
+            return false if not proof_replay_control_assertion_scan(scope_body, certificate, 0, work, &scope_matches)
             return scope_matches == 1
 
         def proof_replay_control_assertion_unique_in_owner(report: ProofReport&, body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, work: mutable usize&) -> bool:
             return false if certificate.rule != "goal" and certificate.rule != "quantifier-forall" and certificate.rule != "quantifier-exists"
-            return false if not proof_replay_control_certificate_attempt_unique(report, certificate)
+            return false if not proof_replay_control_certificate_attempt_unique_with_work(report, certificate, work)
             matches: mutable usize = 0
             return false if not proof_replay_control_assertion_scan(body, certificate, 0, work, &matches)
             matches == 1
         # Compare AST statement order in the loop's lexical parent. A larger line or byte offset
         # alone cannot distinguish a same-line assertion in the loop body from one after it.
         def proof_replay_control_assertion_after_loop(report: ProofReport&, whole_body: darray[Ast::Stmt]&, lexical_body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, loop_line: u32) -> bool:
-            return false if not proof_replay_control_assertion_in_scope(report, whole_body, whole_body, certificate)
+            work: mutable usize = 0
+            proof_replay_control_assertion_after_loop_with_work(report, whole_body, lexical_body, certificate, loop_line, &work)
+
+        def proof_replay_control_assertion_after_loop_with_work(report: ProofReport&, whole_body: darray[Ast::Stmt]&, lexical_body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, loop_line: u32, work: mutable usize&) -> bool:
+            return false if not proof_replay_control_assertion_in_scope_with_work(report, whole_body, whole_body, certificate, work)
             loop_matches: mutable usize = 0
             loop_index: mutable usize = lexical_body.count
-            for index in 0..<lexical_body.count |index, lexical_body, loop_line, loop_matches, loop_index|:
+            for index in 0..<lexical_body.count |index, lexical_body, loop_line, loop_matches, loop_index, work|:
+                return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                work <- work + 1
                 match lexical_body[index]:
                     Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position):
                         if position.line == loop_line:
@@ -340,20 +403,21 @@ extend ElisaProof:
             return false if loop_matches != 1
             assertion_matches: mutable usize = 0
             assertion_index: mutable usize = lexical_body.count
-            work: mutable usize = 0
             for index in 0..<lexical_body.count |index, lexical_body, certificate, assertion_matches, assertion_index, work|:
+                return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                work <- work + 1
                 single_statement: mutable darray[Ast::Stmt] = [lexical_body[index]]
                 local_matches: mutable usize = 0
-                return false if not proof_replay_control_assertion_scan(single_statement, certificate, 0, &work, &local_matches)
+                return false if not proof_replay_control_assertion_scan(single_statement, certificate, 0, work, &local_matches)
                 if local_matches > 0:
                     assertion_matches <- assertion_matches + local_matches
                     assertion_index <- index
             assertion_matches == 1 and assertion_index > loop_index
 
         def proof_replay_control_body_has_break(body: darray[Ast::Stmt]&, depth: usize, work: mutable usize&) -> bool:
-            return true if depth >= 64
+            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
             for statement in body |depth, work|:
-                return true if work >= 4096
+                return true if work >= PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT
                 work <- work + 1
                 match statement:
                     Ast::Stmt.Break(_, _):
@@ -377,7 +441,7 @@ extend ElisaProof:
             return false
 
         def proof_replay_control_expr_has_break(expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
-            return true if depth >= 64 or work >= 4096
+            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT
             work <- work + 1
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):

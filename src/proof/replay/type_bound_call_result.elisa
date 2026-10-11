@@ -1,0 +1,97 @@
+# Recover source-backed scalar type-bound facts for calls with a unique pure callee.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_find_callee_with_work(declarations: darray[Ast::Decl]&, wanted: sview, matches: mutable usize&, return_type: mutable Ast::Expr&, parameter_count: mutable usize&, effect_count: mutable usize&, complete: mutable bool&, work: mutable usize&, depth: usize) -> void:
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or not complete:
+                complete <- false
+                return
+            for declaration in declarations |wanted, matches, return_type, parameter_count, effect_count, complete, work, depth|:
+                return if not complete or matches > 1
+                if not proof_replay_type_bound_local_work_charge(1, work):
+                    complete <- false
+                    return
+                match declaration:
+                    Ast::Decl.Func(name, candidate_parameters, candidate_return_type, _, candidate_effects, _, _):
+                        if not proof_replay_type_bound_local_text_compare_charge(name, wanted, work):
+                            complete <- false
+                            return
+                        if name == wanted:
+                            matches <- matches + 1
+                            return_type <- candidate_return_type
+                            parameter_count <- candidate_parameters.count
+                            effect_count <- candidate_effects.count
+                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        if not proof_replay_type_bound_local_text_compare_charge(name, wanted, work):
+                            complete <- false
+                            return
+                        matches <- matches + 1 if name == wanted
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        proof_replay_type_bound_find_callee_with_work(nested, wanted, matches, return_type, parameter_count, effect_count, complete, work, depth + 1)
+                    _:
+                        pass
+
+        def proof_replay_type_bound_call_result_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_call_result_fact_with_work(report, parameters, body, expression, &work)
+
+        def proof_replay_type_bound_call_result_fact_with_work(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, work: mutable usize&) -> bool:
+            marker: mutable sview = ""
+            call: mutable Ast::Expr = Ast::Expr.Invalid
+            width: mutable i64 = 0
+            match expression:
+                Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, argument_names, _):
+                    marker <- marker_name
+                    return false if not proof_replay_type_bound_local_type_name_charge(marker, work)
+                    if marker == "__elisa_primitive_scalar_type":
+                        return false if arguments.count != 1 or argument_names.count != 0
+                        call <- arguments[0]
+                    elif marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound" or marker == "__elisa_unsigned_type_bound":
+                        return false if arguments.count != 2 or argument_names.count != 0
+                        call <- arguments[0]
+                        return false if not proof_replay_summary_expr_charge_with_work(arguments[1], work)
+                        width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
+                        return false if not width_value.known
+                        width <- width_value.value
+                    else:
+                        return false
+                _:
+                    return false
+            call_name: mutable sview = ""
+            call_arguments: mutable darray[Ast::Expr] = []
+            call_argument_names: mutable darray[sview] = []
+            match call:
+                Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, argument_names, _):
+                    call_name <- name
+                    call_arguments <- arguments
+                    call_argument_names <- argument_names
+                _:
+                    return false
+            return false if call_name == "" or call_argument_names.count != 0 and call_argument_names.count != call_arguments.count
+            shadowed: mutable bool = false
+            for parameter in parameters |parameter, call_name, shadowed, work|:
+                return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, call_name, work)
+                shadowed <- true if parameter.name == call_name
+            return false if shadowed
+            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, call_name, work)
+            return false if proof_replay_source_body_declares(report.source_declarations, body, call_name)
+            complete: mutable bool = true
+            return false if not proof_replay_deterministic_call_source_contains_statements_bounded(body, call, work, &complete, 0) or not complete
+            callee_matches: mutable usize = 0
+            return_type: mutable Ast::Expr = Ast::Expr.Invalid
+            callee_parameter_count: mutable usize = 0
+            callee_effect_count: mutable usize = 0
+            proof_replay_type_bound_find_callee_with_work(report.source_declarations, call_name, &callee_matches, &return_type, &callee_parameter_count, &callee_effect_count, &complete, work, 0)
+            return false if not complete or callee_matches != 1 or callee_parameter_count != call_arguments.count or callee_effect_count != 0
+            if marker == "__elisa_primitive_scalar_type":
+                if return_type is Ast::Expr.Ident(type_name, _):
+                    return false if not proof_replay_type_bound_local_type_name_charge(type_name, work)
+                    return true if proof_replay_type_bound_scalar_constant_type(return_type)
+                signed_width: i64 = proof_replay_type_bound_local_signed_width(report, return_type, work, 0)
+                return true if signed_width > 0
+                unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, return_type, work, 0)
+                return unsigned_width > 0
+            if marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound":
+                signed_width: i64 = proof_replay_type_bound_local_signed_width(report, return_type, work, 0)
+                return signed_width > 0 and width == signed_width
+            unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, return_type, work, 0)
+            return marker == "__elisa_unsigned_type_bound" and unsigned_width > 0 and width == unsigned_width

@@ -20,6 +20,7 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
         (root / "src/proof/replay/type_bound_local_rebind.elisa").resolve(): "type_bound_local_rebind_test.elisa",
         (root / "src/proof/replay/type_bound_validation.elisa").resolve(): "type_bound_validation_test.elisa",
         (root / "src/proof/replay/fact_trace_validation.elisa").resolve(): "fact_trace_validation_test.elisa",
+        (root / "src/proof/replay/fact_trace_index.elisa").resolve(): "fact_trace_index_test.elisa",
     }
     includes = re.findall(r'^include "([^"]+)"$', replay_file.read_text(encoding="utf-8"), re.MULTILINE)
     if not includes:

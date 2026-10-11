@@ -192,6 +192,10 @@ extend ElisaProof:
             return false
 
         def proof_replay_result_symbol_source_available(report: ProofReport&, trace: ProofFactTrace, symbol_position: Ast::Pos, local: sview, call: Ast::Expr) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_result_symbol_source_available_with_work(report, trace, symbol_position, local, call, &source_work)
+
+        def proof_replay_result_symbol_source_available_with_work(report: ProofReport&, trace: ProofFactTrace, symbol_position: Ast::Pos, local: sview, call: Ast::Expr, source_work: mutable usize&) -> bool:
             # The report stores a consumer line, not a source column. If the result declaration
             # shares that line, replay cannot tell whether a transfer on that line ran before or
             # after the call, so neither the ordinary alias nor loop-preservation route is safe.
@@ -202,20 +206,25 @@ extend ElisaProof:
             call_position: Ast::Pos = Ast::expr_pos(call)
             return false if call_position.line == 0 or call_position.end_line < call_position.line
             return false if report.trace_owner_line >= call_position.line and report.trace_owner_line <= call_position.end_line
-            return true if proof_replay_summary_local_alias_valid(report, trace.name, local, symbol_position, call)
-            return proof_replay_result_symbol_loop_preservation_available(report, trace, symbol_position, local, call)
+            return true if proof_replay_summary_local_alias_valid_with_work(report, trace.name, local, symbol_position, call, source_work)
+            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return proof_replay_result_symbol_loop_preservation_available_with_work(report, trace, symbol_position, local, call, source_work)
 
         # Authenticate the equality that links the source local to the result symbol at the
         # declaration itself. Consumer-line liveness is checked separately when that equality
         # is used as a local fact; the synthetic call result remains meaningful afterward.
         def proof_replay_result_symbol_alias_source_valid(report: ProofReport&, trace: ProofFactTrace, local: sview, symbol: sview, symbol_position: Ast::Pos, call: Ast::Expr) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_result_symbol_alias_source_valid_with_work(report, trace, local, symbol, symbol_position, call, &source_work)
+
+        def proof_replay_result_symbol_alias_source_valid_with_work(report: ProofReport&, trace: ProofFactTrace, local: sview, symbol: sview, symbol_position: Ast::Pos, call: Ast::Expr, source_work: mutable usize&) -> bool:
             return false if trace.kind != "local-binding" or trace.name == "" or trace.line != symbol_position.line
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(bound, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
                     return false if bound != local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position)
-                    work: mutable usize = 0
-                    return false if not proof_replay_summary_raw_call_source_site_with_work(report, trace, call, &work)
-                    return proof_replay_summary_local_alias_valid_at(report, trace.name, local, symbol_position, call, symbol_position.line)
+                    return false if not proof_replay_summary_raw_call_source_site_with_work(report, trace, call, source_work)
+                    return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return proof_replay_summary_local_alias_valid_at_with_work(report, trace.name, local, symbol_position, call, symbol_position.line, source_work)
                 _:
                     return false
 
@@ -223,9 +232,24 @@ extend ElisaProof:
         # is not exactly one declaration of the owner whose initializer is a direct call, or when
         # any binding or summary of the owner uses the symbol other than as that definition.
         def proof_replay_result_symbol_definition(report: ProofReport&, owner: sview, symbol: sview, symbol_position: Ast::Pos) -> (known: bool, local: sview, local_type: Ast::Expr, call: Ast::Expr):
+            source_work: mutable usize = 0
+            return proof_replay_result_symbol_definition_with_work(report, owner, symbol, symbol_position, &source_work)
+
+        def proof_replay_result_symbol_definition_with_work(report: ProofReport&, owner: sview, symbol: sview, symbol_position: Ast::Pos, source_work: mutable usize&) -> (known: bool, local: sview, local_type: Ast::Expr, call: Ast::Expr):
             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if owner == "" or not proof_internal_name_is_rebind(symbol) or symbol_position.line == 0
+            owner_scan_start: usize = source_work
+            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_mutable_local_owner_preflight_work_charge(report, owner, report.replay_owner_line, source_work)
+            owner_scan_work: usize = source_work - owner_scan_start
             body: mutable darray[Ast::Stmt] = []
             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_source_owner_body(report, owner, report.replay_owner_line, &body)
+            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
+            # Definition discovery scans every trace/value for this symbol, then validates the
+            # matching alias and summary values. Reserve three complete trace payload passes.
+            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_mutable_local_trace_work_charge_fail_closed(report, source_work, 3)
+            # Each candidate may ask for its owning function line by rescanning declarations.
+            if owner_scan_work != 0 and report.traces.records.count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / owner_scan_work:
+                return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + owner_scan_work * report.traces.records.count
             found: mutable usize = 0
             local: mutable sview = ""
             local_type: mutable Ast::Expr = Ast::Expr.Invalid
@@ -233,7 +257,7 @@ extend ElisaProof:
             proof_replay_result_symbol_find(body, symbol_position, &found, &local, &local_type, &call, 0)
             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if found != 1 or local == "" or not proof_replay_is_call(call)
             alias_found: mutable bool = false
-            for candidate in report.traces.records |candidate, report, owner, symbol, symbol_position, local|:
+            for candidate in report.traces.records |candidate, report, owner, symbol, symbol_position, local, source_work|:
                 continue if candidate.name != owner
                 continue if candidate.kind != "local-binding" and candidate.kind != "function-summary"
                 continue if proof_replay_trace_owner_function_line(report, candidate.name, candidate.line) != report.replay_owner_line
@@ -242,7 +266,7 @@ extend ElisaProof:
                     match candidate.expression:
                         Ast::Expr.Binary(Ast::Expr.Ident(bound, _), TokenKind.EqEq, Ast::Expr.Ident(value, value_position), _):
                             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if bound != local or value != symbol or not proof_replay_source_position_equal(value_position, symbol_position) or candidate.line != symbol_position.line
-                            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_result_symbol_alias_source_valid(report, candidate, local, symbol, symbol_position, call)
+                            return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid) if not proof_replay_result_symbol_alias_source_valid_with_work(report, candidate, local, symbol, symbol_position, call, source_work)
                             alias_found <- true
                         _:
                             return (false, "", Ast::Expr.Invalid, Ast::Expr.Invalid)
@@ -258,14 +282,17 @@ extend ElisaProof:
         # `local == symbol` for a result symbol: the definition is valid and the local still holds
         # its call's value at the consumer.
         def proof_replay_local_binding_result_symbol_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_local_binding_result_symbol_source_with_work(report, trace, &source_work)
+
+        def proof_replay_local_binding_result_symbol_source_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(local, local_position), TokenKind.EqEq, Ast::Expr.Ident(symbol, symbol_position), _):
                     return false if proof_internal_name_is_rebind(local) or not proof_internal_name_is_rebind(symbol)
                     return false if trace.line != symbol_position.line
-                    definition = proof_replay_result_symbol_definition(report, trace.name, symbol, symbol_position)
+                    definition = proof_replay_result_symbol_definition_with_work(report, trace.name, symbol, symbol_position, source_work)
                     return false if not definition.known or definition.local != local
-                    return false if not proof_replay_result_symbol_alias_source_valid(report, trace, local, symbol, symbol_position, definition.call)
-                    return proof_replay_summary_local_alias_valid(report, trace.name, local, symbol_position, definition.call)
+                    return proof_replay_summary_local_alias_valid_with_work(report, trace.name, local, symbol_position, definition.call, source_work)
                 _:
                     return false
 

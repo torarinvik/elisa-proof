@@ -158,6 +158,7 @@ extend ElisaProof:
                     elif name == "__elisa_signed_type_bound" or name == "__elisa_signed_place_type_bound" or name == "__elisa_unsigned_type_bound":
                         return false if arguments.count != 2 or argument_names.count != 0
                         term <- arguments[0]
+                        return false if not proof_replay_summary_expr_charge_with_work(arguments[1], work)
                         width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
                         return false if not width_value.known
                         marker_width <- width_value.value
@@ -203,9 +204,13 @@ extend ElisaProof:
                     return false
             return false if constant_name == ""
             shadow_name: sview = reference_path[0] if qualified else constant_name
-            return false if any parameter in owner_parameters where parameter.name == shadow_name
+            return false if owner_parameters.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + owner_parameters.count
+            for parameter in owner_parameters |parameter, shadow_name, work|:
+                return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, shadow_name, work)
+                return false if parameter.name == shadow_name
             return false if not proof_replay_type_bound_extent_preflight_with_work(owner_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return false if proof_replay_source_body_declares(report.source_declarations, owner_body, shadow_name)
+            return false if proof_replay_source_body_declares_with_work(report.source_declarations, owner_body, shadow_name, work)
             # A qualified spelling is a complete path from the source root. The owner scope is
             # only a base for bare names; carrying it into a qualified lookup duplicates the
             # module prefix for self-qualified constants inside `module` / `extend` bodies.
@@ -417,27 +422,36 @@ extend ElisaProof:
             return -1 if array_binding_name == ""
             extent: mutable i64 = -1
             parameter_matches: mutable usize = 0
-            for parameter in parameters |array_binding_name, extent, parameter_matches|:
+            return -1 if parameters.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + parameters.count
+            for parameter in parameters |array_binding_name, extent, parameter_matches, work|:
+                return -1 if not proof_replay_type_bound_local_text_compare_charge(parameter.name, array_binding_name, work)
                 if parameter.name == array_binding_name:
                     parameter_matches <- parameter_matches + 1
+                    return -1 if not proof_replay_summary_expr_charge_with_work(parameter.type_expression, work)
                     extent <- proof_replay_global_mutable_array_literal_extent(parameter.type_expression, 0)
             if parameter_matches == 1:
                 return -1 if extent < 0
-                return -1 if proof_replay_source_body_declares(report.source_declarations, body, array_binding_name)
-                return -1 if proof_replay_source_body_touches(report.source_declarations, body, array_binding_name, true, 0)
+                return -1 if proof_replay_source_body_declares_with_work(report.source_declarations, body, array_binding_name, work)
+                return -1 if proof_replay_source_body_touches_with_work(report.source_declarations, body, array_binding_name, true, work)
                 return extent
             return -1 if parameter_matches != 0
-            return -1 if any parameter in parameters where parameter.name == array_binding_name
-            return -1 if not proof_replay_source_single_declaration(report.source_declarations, body, array_binding_name)
+            return -1 if not proof_replay_source_single_declaration_with_work(report.source_declarations, body, array_binding_name, work)
             local_extent: mutable i64 = -1
             local_declaration_index: mutable usize = body.count
             local_declaration_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
             local_matches: mutable usize = 0
-            for body_index in 0..<body.count |body_index, body, array_binding_name, local_extent, local_declaration_index, local_declaration_position, local_matches|:
+            return -1 if body.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + body.count
+            for body_index in 0..<body.count |body_index, body, array_binding_name, local_extent, local_declaration_index, local_declaration_position, local_matches, work|:
+                return -1 if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                work <- work + 1
                 match body[body_index]:
                     Ast::Stmt.VarDecl(local_name, local_type, _, local_position):
+                        return -1 if not proof_replay_type_bound_local_text_compare_charge(local_name, array_binding_name, work)
                         if local_name == array_binding_name:
                             local_matches <- local_matches + 1
+                            return -1 if not proof_replay_summary_expr_charge_with_work(local_type, work)
                             local_extent <- proof_replay_global_mutable_array_literal_extent(local_type, 0)
                             local_declaration_index <- body_index
                             local_declaration_position <- local_position
@@ -446,9 +460,11 @@ extend ElisaProof:
             return -1 if local_matches != 1 or local_extent < 0 or local_declaration_index >= body.count
             return -1 if not proof_replay_type_bound_local_array_consumer_available_with_work(report, body, use_position, trace_name, array_binding_name, local_declaration_position, work)
             after_declaration: mutable darray[Ast::Stmt] = []
+            return -1 if body.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + body.count
             for body_index in local_declaration_index + 1..<body.count |body_index, body, after_declaration|:
                 after_declaration.push(body[body_index])
-            return -1 if proof_replay_source_body_touches(report.source_declarations, after_declaration, array_binding_name, true, 0)
+            return -1 if proof_replay_source_body_touches_with_work(report.source_declarations, after_declaration, array_binding_name, true, work)
             return local_extent
 
         def proof_replay_type_bound_fixed_array_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32, trace_name: sview, work: mutable usize&) -> bool:
@@ -464,6 +480,7 @@ extend ElisaProof:
                     return proof_replay_global_mutable_array_bound_precondition(report, parameters, body, expression, extent, line)
                 Ast::Expr.Binary(index_expression, TokenKind.Lt, Ast::Expr.Field(Ast::Expr.Ident(array_binding_name, _), "count", _), _):
                     return false if array_binding_name == ""
+                    return false if not proof_replay_summary_expr_charge_with_work(index_expression, work)
                     index_value: (known: bool, value: i64) = proof_constant_int(index_expression)
                     return false if not index_value.known or index_value.value < 0
                     index_use_work: mutable usize = work
@@ -474,71 +491,6 @@ extend ElisaProof:
                     return index_value.value < extent
                 _:
                     return false
-
-        def proof_replay_type_bound_find_callee(declarations: darray[Ast::Decl]&, wanted: sview, matches: mutable usize&, return_type: mutable Ast::Expr&, parameters: mutable darray[Ast::ParamDecl]&, effect_count: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |wanted, matches, return_type, parameters, effect_count, depth|:
-                match declaration:
-                    Ast::Decl.Func(name, candidate_parameters, candidate_return_type, _, candidate_effects, _, _):
-                        if name == wanted:
-                            matches <- matches + 1
-                            return_type <- candidate_return_type
-                            parameters <- candidate_parameters
-                            effect_count <- candidate_effects.count
-                    Ast::Decl.Extern(name, _, _, _, _, _, _, _):
-                        matches <- matches + 1 if name == wanted
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_replay_type_bound_find_callee(nested, wanted, matches, return_type, parameters, effect_count, depth + 1)
-                    _:
-                        pass
-
-        def proof_replay_type_bound_call_result_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr) -> bool:
-            marker: mutable sview = ""
-            call: mutable Ast::Expr = Ast::Expr.Invalid
-            width: mutable i64 = 0
-            match expression:
-                Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, argument_names, _):
-                    marker <- marker_name
-                    if marker == "__elisa_primitive_scalar_type":
-                        return false if arguments.count != 1 or argument_names.count != 0
-                        call <- arguments[0]
-                    elif marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound" or marker == "__elisa_unsigned_type_bound":
-                        return false if arguments.count != 2 or argument_names.count != 0
-                        call <- arguments[0]
-                        width_value: (known: bool, value: i64) = proof_constant_int(arguments[1])
-                        return false if not width_value.known
-                        width <- width_value.value
-                    else:
-                        return false
-                _:
-                    return false
-            call_name: mutable sview = ""
-            call_arguments: mutable darray[Ast::Expr] = []
-            call_argument_names: mutable darray[sview] = []
-            match call:
-                Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, argument_names, _):
-                    call_name <- name
-                    call_arguments <- arguments
-                    call_argument_names <- argument_names
-                _:
-                    return false
-            return false if call_name == "" or call_argument_names.count != 0 and call_argument_names.count != call_arguments.count
-            return false if any parameter in parameters where parameter.name == call_name
-            return false if proof_replay_source_body_declares(report.source_declarations, body, call_name)
-            return false if not proof_replay_deterministic_call_source_contains_statements(body, call, 0)
-            callee_matches: mutable usize = 0
-            return_type: mutable Ast::Expr = Ast::Expr.Invalid
-            callee_parameters: mutable darray[Ast::ParamDecl] = []
-            callee_effect_count: mutable usize = 0
-            proof_replay_type_bound_find_callee(report.source_declarations, call_name, &callee_matches, &return_type, &callee_parameters, &callee_effect_count, 0)
-            return false if callee_matches != 1 or callee_parameters.count != call_arguments.count or callee_effect_count != 0
-            signed_width: i64 = proof_signed_type_width(return_type, report.source_declarations, 0)
-            unsigned_width: i64 = proof_unsigned_type_width(return_type, report.source_declarations, 0)
-            if marker == "__elisa_primitive_scalar_type":
-                return proof_replay_type_bound_scalar_constant_type(return_type) or signed_width > 0 or unsigned_width > 0
-            if marker == "__elisa_signed_type_bound" or marker == "__elisa_signed_place_type_bound":
-                return signed_width > 0 and width == signed_width
-            return marker == "__elisa_unsigned_type_bound" and unsigned_width > 0 and width == unsigned_width
 
         def proof_replay_type_bound_source_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
@@ -565,27 +517,24 @@ extend ElisaProof:
             # binding. Reject oversized or incomplete trees before entering those scans.
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
             return true if proof_replay_type_bound_scalar_constant_fact_with_work(report, trace, work)
-            return false if report.source_declarations.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-            work <- work + report.source_declarations.count
+            return true if proof_replay_type_bound_call_result_fact_with_work(report, owner_parameters, function_body, trace.expression, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_call_result_fact(report, owner_parameters, function_body, trace.expression)
-            return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            if proof_replay_type_bound_local_scalar_fact(report, owner_parameters, function_body, trace.expression, trace.line):
+            if proof_replay_type_bound_local_scalar_fact_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work):
                 return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, function_body, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_unsigned_rebind_fact(report, trace, owner_parameters, function_body)
+            return true if proof_replay_type_bound_unsigned_rebind_fact_with_work(report, trace, owner_parameters, function_body, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_unsigned_rebind_range_fact(report, trace, owner_parameters, function_body)
+            return true if proof_replay_type_bound_unsigned_rebind_range_fact_with_work(report, trace, owner_parameters, function_body, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            if proof_replay_type_bound_local_array_witness(report, owner_parameters, function_body, trace.expression, trace.line):
+            if proof_replay_type_bound_local_array_witness_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work):
                 return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, function_body, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            if proof_replay_type_bound_local_array_fact(report, owner_parameters, function_body, trace.expression, trace.line):
+            if proof_replay_type_bound_local_array_fact_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work):
                 return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, function_body, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
             return true if proof_replay_type_bound_fixed_array_fact(report, owner_parameters, function_body, trace.expression, trace.line, trace.name, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_dynamic_array_guard_fact(report, owner_parameters, function_body, trace.expression, trace.line)
+            return true if proof_replay_type_bound_dynamic_array_guard_fact_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work)
             loop_matches: mutable usize = 0
             loop_valid: mutable bool = false
             loop_consumer_valid: mutable bool = false

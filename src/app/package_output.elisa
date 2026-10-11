@@ -39,7 +39,7 @@ def proof_push_package_kernel_node(buffer: mutable darray[u8]&, node: ElisaProof
     proof_push_json_string(buffer, node.secondary_name)
     proof_push(buffer, "}")
 
-def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, attempt: ProofGoalAttempt) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, attempt: ProofGoalAttempt, origin_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     return false if attempt.kernel_facts_start > report.kernel.certificate_facts.count or attempt.kernel_facts_count > report.kernel.certificate_facts.count - attempt.kernel_facts_start
     statement: mutable darray[u8] = []
     valid: bool = proof_portable_sequent_identity(&statement, report.kernel.nodes, report.kernel.children, report.kernel.certificate_facts, attempt.kernel_facts_start, attempt.kernel_facts_count, attempt.kernel_goal)
@@ -57,10 +57,11 @@ def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&
         proof_push(buffer, ",") if index > 0
         proof_push_number(buffer, report.kernel.certificate_facts[attempt.kernel_facts_start + index].u32())
     proof_push(buffer, "],\"hypothesis_origins\":[")
-    for index in 0..<attempt.facts_count |index, attempt, report, buffer|:
+    for index in 0..<attempt.facts_count |index, attempt, report, buffer, origin_work|:
         proof_push(buffer, ",") if index > 0
-        proof_push_json_fact_origin(buffer, report, attempt.facts_start + index, attempt.name)
-    proof_push(buffer, "],\"conclusion\":")
+        proof_push_json_fact_origin(buffer, report, attempt.facts_start + index, attempt.name, origin_work)
+    proof_push(buffer, "],\"hypothesis_origins_complete\":true" if not proof_replay_fact_origin_work_exhausted(origin_work) else "],\"hypothesis_origins_complete\":false")
+    proof_push(buffer, ",\"conclusion\":")
     proof_push_number(buffer, attempt.kernel_goal.u32())
     proof_push(buffer, ",\"statement\":")
     proof_push_json_bytes(buffer, statement)
@@ -72,15 +73,23 @@ def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&
 # Returns the number of theorems written. A replayed goal whose sequent has no identity (an
 # unknown node kind) is left out rather than exported under a partial statement.
 def proof_push_json_package(buffer: mutable darray[u8]&, report: ProofReport&, source_path: darray[u8]&, source_content: sview, source_map: ProofSourceMap&, source_bytes: usize, source_fingerprint: u32, source_admissible: bool) -> usize can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    replay_work: mutable usize = 0
+    replayed_goals: mutable darray[bool] = []
+    if source_admissible:
+        proof_replay_attempt_statuses_with_work(report, &replayed_goals, &replay_work)
+    origin_work: mutable usize = report.traces.lookup_work_used
+    return proof_push_json_package_with_replayed(buffer, report, source_path, source_content, source_map, source_bytes, source_fingerprint, source_admissible, replayed_goals, &origin_work)
+
+def proof_push_json_package_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, source_path: darray[u8]&, source_content: sview, source_map: ProofSourceMap&, source_bytes: usize, source_fingerprint: u32, source_admissible: bool, replayed_goals: darray[bool]&, origin_work: mutable usize&) -> usize can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
     theorems: mutable darray[u8] = []
     written: mutable usize = 0
     node_end: mutable usize = 0
     if source_admissible:
-        for goal_id in 0..<report.goal_attempts.count |goal_id, report, theorems, written, node_end|:
+        for goal_id in 0..<report.goal_attempts.count |goal_id, report, theorems, written, node_end, origin_work, replayed_goals|:
             attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-            continue if not attempt.proven or not proof_replay_attempt_certificate_replayed(report, attempt)
+            continue if not attempt.proven or not proof_output_cached_replay_status(replayed_goals, goal_id)
             theorem: mutable darray[u8] = []
-            continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt)
+            continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt, origin_work)
             proof_push(&theorems, ",") if written > 0
             theorems.extend(theorem)
             written <- written + 1
@@ -107,7 +116,9 @@ def proof_push_json_package(buffer: mutable darray[u8]&, report: ProofReport&, s
     proof_push_number(buffer, source_fingerprint)
     proof_push(buffer, "},\"admissible\":")
     proof_push(buffer, "true" if source_admissible else "false")
-    proof_push(buffer, ",\"authenticated\":false},\"trust\":{\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\"},\"kernel\":{\"nodes\":[")
+    proof_push(buffer, ",\"authenticated\":false},\"trust\":{\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\"},\"origin_metadata_complete\":")
+    proof_push(buffer, "true" if not proof_replay_fact_origin_work_exhausted(origin_work) else "false")
+    proof_push(buffer, ",\"kernel\":{\"nodes\":[")
     for index in 0..<node_end |index, report, buffer|:
         proof_push(buffer, ",") if index > 0
         proof_push_package_kernel_node(buffer, report.kernel.nodes[index])

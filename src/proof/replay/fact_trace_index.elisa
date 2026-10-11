@@ -1,0 +1,356 @@
+extend ElisaProof:
+    private:
+        # Fact provenance is keyed by the owner name before exact expression/kernel equality is
+        # checked. Hashes only select a probe path; the stored sview comparison remains the
+        # authority, so collisions cannot admit a fact for another owner.
+        def proof_replay_owner_hash(value: sview) -> u32:
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            for index in 0..<sview_len(value) |index, hash, value|:
+                hash <- ((hash ^ sview_at(value, index).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return hash.u32()
+
+        def proof_replay_trace_index_capacity(count: usize) -> usize:
+            return 0 if count == 0
+            return 0 if count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            target: usize = count * 2
+            capacity: mutable usize = 1
+            while capacity < target:
+                # `target` is already under the explicit slot budget. Use it directly when the
+                # next geometric step would cross that bound; open addressing only needs modulo.
+                return target if capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET / 2
+                capacity <- capacity * 2
+            return capacity
+
+        # Full, bounded fingerprint for exactly the expression forms admitted by the kernel and
+        # compared by proof_replay_expr_equal. Unsupported forms are omitted from the expression
+        # table, since replay equality rejects them even against themselves. Parentheses are
+        # transparent. Ordinary source positions are excluded, while quantifier-block lines are
+        # included because replay equality distinguishes them. Exact replay equality remains
+        # authoritative after hash-based candidate selection.
+        def proof_replay_trace_expression_hash_name_work(report: mutable ProofReport&, name: sview) -> bool:
+            proof_replay_trace_lookup_charge_amount(report, sview_len(name))
+
+        def proof_replay_trace_expression_hash(report: mutable ProofReport&, expression: Ast::Expr, depth: usize) -> (supported: bool, hash: u32):
+            return (false, 0) if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_trace_lookup_charge(report)
+            basis: i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_trace_expression_hash(report, inner, depth + 1)
+                Ast::Expr.Absent | Ast::Expr.FloatLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.GetElse(_, _, _):
+                    return (false, 0)
+                Ast::Expr.IntLit(value, _):
+                    hash: u32 = proof_expr_shape_mix(basis.u32(), 1)
+                    return (true, proof_expr_shape_mix(proof_expr_shape_mix(hash, value), value >> 32))
+                Ast::Expr.BoolLit(value, _):
+                    return (true, proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 2), 1 if value else 0))
+                Ast::Expr.Ident(name, _):
+                    return (false, 0) if not proof_replay_trace_expression_hash_name_work(report, name)
+                    return (true, proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 3), proof_name_hash(name).i64()))
+                Ast::Expr.Unary(operator, operand, _):
+                    operand_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, operand, depth + 1)
+                    return (false, 0) if not operand_hash.supported
+                    hash: u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 4), proof_expr_shape_operator_code(operator).i64())
+                    return (true, proof_expr_shape_mix(hash, operand_hash.hash.i64()))
+                Ast::Expr.Move(operand, _):
+                    operand_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, operand, depth + 1)
+                    return (false, 0) if not operand_hash.supported
+                    return (true, proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 5), operand_hash.hash.i64()))
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, left, depth + 1)
+                    return (false, 0) if not left_hash.supported
+                    right_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, right, depth + 1)
+                    return (false, 0) if not right_hash.supported
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 6), proof_expr_shape_operator_code(operator).i64())
+                    hash <- proof_expr_shape_mix(hash, left_hash.hash.i64())
+                    return (true, proof_expr_shape_mix(hash, right_hash.hash.i64()))
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, condition, depth + 1)
+                    return (false, 0) if not condition_hash.supported
+                    then_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, then_expression, depth + 1)
+                    return (false, 0) if not then_hash.supported
+                    else_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, else_expression, depth + 1)
+                    return (false, 0) if not else_hash.supported
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 7), condition_hash.hash.i64())
+                    hash <- proof_expr_shape_mix(hash, then_hash.hash.i64())
+                    return (true, proof_expr_shape_mix(hash, else_hash.hash.i64()))
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return (false, 0) if not proof_replay_trace_lookup_charge_amount(report, arguments.count) or not proof_replay_trace_lookup_charge_amount(report, argument_names.count)
+                    callee_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, callee, depth + 1)
+                    return (false, 0) if not callee_hash.supported
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 8), arguments.count.i64()), argument_names.count.i64())
+                    hash <- proof_expr_shape_mix(hash, callee_hash.hash.i64())
+                    for argument in arguments |argument, hash, depth|:
+                        argument_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, argument, depth + 1)
+                        return (false, 0) if not argument_hash.supported
+                        hash <- proof_expr_shape_mix(hash, argument_hash.hash.i64())
+                    for argument_name in argument_names |argument_name, hash|:
+                        return (false, 0) if not proof_replay_trace_expression_hash_name_work(report, argument_name)
+                        hash <- proof_expr_shape_mix(hash, proof_name_hash(argument_name).i64())
+                    return (true, hash)
+                Ast::Expr.Field(object, field, _) | Ast::Expr.Scope(object, field, _):
+                    return (false, 0) if field == "" or not proof_replay_trace_expression_hash_name_work(report, field)
+                    object_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, object, depth + 1)
+                    return (false, 0) if not object_hash.supported
+                    tag: i64 = 9 if expression is Ast::Expr.Field(_, _, _) else 10
+                    hash: u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), tag), proof_name_hash(field).i64())
+                    return (true, proof_expr_shape_mix(hash, object_hash.hash.i64()))
+                Ast::Expr.Index(object, index, _):
+                    object_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, object, depth + 1)
+                    return (false, 0) if not object_hash.supported
+                    index_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, index, depth + 1)
+                    return (false, 0) if not index_hash.supported
+                    hash: u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 11), object_hash.hash.i64())
+                    return (true, proof_expr_shape_mix(hash, index_hash.hash.i64()))
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return (false, 0) if not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                    type_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, type_expression, depth + 1)
+                    return (false, 0) if not type_hash.supported
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 12), fields.count.i64()), type_hash.hash.i64())
+                    for field in fields |field, hash, depth|:
+                        return (false, 0) if field.name == "" or not proof_replay_trace_expression_hash_name_work(report, field.name)
+                        value_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, field.value, depth + 1)
+                        return (false, 0) if not value_hash.supported
+                        hash <- proof_expr_shape_mix(hash, proof_name_hash(field.name).i64())
+                        hash <- proof_expr_shape_mix(hash, value_hash.hash.i64())
+                    return (true, hash)
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    return (false, 0) if not proof_replay_trace_lookup_charge_amount(report, elements.count)
+                    tag: i64 = 13 if expression is Ast::Expr.Tuple(_, _) else 14
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), tag), elements.count.i64())
+                    for element in elements |element, hash, depth|:
+                        element_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, element, depth + 1)
+                        return (false, 0) if not element_hash.supported
+                        hash <- proof_expr_shape_mix(hash, element_hash.hash.i64())
+                    return (true, hash)
+                Ast::Expr.Block(statements, body, captures, position):
+                    return (false, 0) if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
+                    return (false, 0) if not proof_replay_trace_lookup_charge_amount(report, statements.count)
+                    hash: mutable u32 = proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), 15), statements.count.i64())
+                    hash <- proof_expr_shape_mix(hash, position.line.i64())
+                    for statement in statements |statement, hash, depth|:
+                        match statement:
+                            Ast::Stmt.VarDecl(binder, type_expression, range_expression, _):
+                                return (false, 0) if binder == "" or not proof_replay_trace_expression_hash_name_work(report, binder)
+                                type_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, type_expression, depth + 1)
+                                return (false, 0) if not type_hash.supported
+                                range_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, range_expression, depth + 1)
+                                return (false, 0) if not range_hash.supported
+                                hash <- proof_expr_shape_mix(hash, proof_name_hash(binder).i64())
+                                hash <- proof_expr_shape_mix(hash, type_hash.hash.i64())
+                                hash <- proof_expr_shape_mix(hash, range_hash.hash.i64())
+                            _:
+                                return (false, 0)
+                    body_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, body, depth + 1)
+                    return (false, 0) if not body_hash.supported
+                    return (true, proof_expr_shape_mix(hash, body_hash.hash.i64()))
+                Ast::Expr.CharLit(value, _) | Ast::Expr.StringLit(value, _):
+                    tag: i64 = 16 if expression is Ast::Expr.CharLit(_, _) else 17
+                    return (false, 0) if not proof_replay_trace_expression_hash_name_work(report, value)
+                    return (true, proof_expr_shape_mix(proof_expr_shape_mix(basis.u32(), tag), proof_name_hash(value).i64()))
+                _:
+                    return (false, 0)
+
+        def proof_replay_fact_expression_index_hash(owner_hash: u32, expression_hash: u32) -> u32:
+            low: i64 = expression_hash.i64() & 4294967295
+            return (((owner_hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
+
+        # The indexes are optimizations, so any incomplete build must disable every related array.
+        # Keeping a dimension-valid prefix or stale origin map could let revalidation trust it.
+        def proof_replay_trace_index_abort(report: mutable ProofReport&) -> void:
+            report.traces.index_hashes.clear()
+            report.traces.index_values.clear()
+            report.traces.next_indices.clear()
+            report.traces.expression_index_hashes.clear()
+            report.traces.expression_index_values.clear()
+            report.traces.expression_hashes.clear()
+            report.traces.next_expression_indices.clear()
+            report.traces.origin_indices.clear()
+            proof_kernel_budget_note(report, "replay-fact-index")
+
+        def proof_replay_fact_expression_index_insert(report: mutable ProofReport&, owner: sview, owner_hash: u32, trace_index: usize, expression_hash: u32, capacity: usize, work: mutable usize&, sentinel: usize) -> bool:
+            composite_hash: u32 = proof_replay_fact_expression_index_hash(owner_hash, expression_hash)
+            slot: mutable usize = (composite_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |report, owner, composite_hash, expression_hash, trace_index, slot, probes, capacity, work, sentinel|:
+                if not proof_replay_trace_lookup_charge(report):
+                    proof_replay_trace_index_abort(report)
+                    return false
+                if work >= PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET:
+                    proof_replay_trace_index_abort(report)
+                    return false
+                work <- work + 1
+                current: usize = report.traces.expression_index_values[slot]
+                if current == sentinel:
+                    report.traces.expression_index_hashes[slot] <- composite_hash
+                    report.traces.expression_index_values[slot] <- trace_index
+                    return true
+                if report.traces.expression_index_hashes[slot] == composite_hash:
+                    if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name)):
+                        proof_replay_trace_index_abort(report)
+                        return false
+                    if report.traces.records[current].name == owner and report.traces.expression_hashes[current] == expression_hash:
+                        report.traces.next_expression_indices[trace_index] <- current
+                        report.traces.expression_index_values[slot] <- trace_index
+                        return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            proof_replay_trace_index_abort(report)
+            return false
+
+        def proof_replay_build_fact_trace_index(report: mutable ProofReport&) -> void:
+            count: usize = report.traces.records.count
+            sentinel: usize = count
+            report.traces.lookup_work_used <- 0
+            report.traces.index_hashes.clear()
+            report.traces.index_values.clear()
+            report.traces.next_indices.clear()
+            report.traces.expression_index_hashes.clear()
+            report.traces.expression_index_values.clear()
+            report.traces.expression_hashes.clear()
+            report.traces.next_expression_indices.clear()
+            report.traces.origin_indices.clear()
+            return if report.kernel.budget_exhausted
+            return if not proof_kernel_report_append_allowed(report, 0, count, "replay-fact-index")
+            return if count == 0
+            report.traces.next_indices.resize(count)
+            report.traces.next_expression_indices.resize(count)
+            report.traces.expression_hashes.resize(count)
+            index: mutable usize = 0
+            while index < count:
+                if not proof_replay_trace_lookup_charge_amount(report, 2):
+                    proof_replay_trace_index_abort(report)
+                    return
+                report.traces.next_indices[index] <- sentinel
+                report.traces.next_expression_indices[index] <- sentinel
+                index <- index + 1
+            capacity: usize = proof_replay_trace_index_capacity(count)
+            if capacity == 0:
+                proof_replay_trace_index_abort(report)
+                return
+            report.traces.index_hashes.resize(capacity)
+            report.traces.index_values.resize(capacity)
+            report.traces.expression_index_hashes.resize(capacity)
+            report.traces.expression_index_values.resize(capacity)
+            slot: mutable usize = 0
+            while slot < capacity:
+                if not proof_replay_trace_lookup_charge_amount(report, 2):
+                    proof_replay_trace_index_abort(report)
+                    return
+                report.traces.index_values[slot] <- sentinel
+                report.traces.expression_index_values[slot] <- sentinel
+                slot <- slot + 1
+            index <- 0
+            work: mutable usize = 0
+            while index < count |index, report, sentinel, capacity, work|:
+                owner: sview = report.traces.records[index].name
+                if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner)):
+                    proof_replay_trace_index_abort(report)
+                    return
+                owner_hash: u32 = proof_replay_owner_hash(owner)
+                probe_slot: mutable usize = (owner_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |report, owner_hash, owner, index, probe_slot, probes, capacity, work, sentinel|:
+                    if not proof_replay_trace_lookup_charge(report):
+                        proof_replay_trace_index_abort(report)
+                        return
+                    if work >= PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET:
+                        proof_replay_trace_index_abort(report)
+                        return
+                    work <- work + 1
+                    current: usize = report.traces.index_values[probe_slot]
+                    if current == sentinel:
+                        report.traces.index_hashes[probe_slot] <- owner_hash
+                        report.traces.index_values[probe_slot] <- index
+                        break
+                    if report.traces.index_hashes[probe_slot] == owner_hash:
+                        if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name)):
+                            proof_replay_trace_index_abort(report)
+                            return
+                        if report.traces.records[current].name == owner:
+                            report.traces.next_indices[index] <- current
+                            report.traces.index_values[probe_slot] <- index
+                            break
+                    probe_slot <- (probe_slot + 1) % capacity
+                    probes <- probes + 1
+                expression_hash: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, report.traces.records[index].expression, 0)
+                if report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                    proof_replay_trace_index_abort(report)
+                    return
+                report.traces.expression_hashes[index] <- expression_hash.hash
+                return if expression_hash.supported and not proof_replay_fact_expression_index_insert(report, owner, owner_hash, index, expression_hash.hash, capacity, &work, sentinel)
+                index <- index + 1
+
+        def proof_replay_fact_expression_head(report: mutable ProofReport&, owner: sview, expression_hash: u32) -> usize:
+            count: usize = report.traces.records.count
+            capacity: usize = report.traces.expression_index_values.count
+            return count if capacity == 0 or capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET
+            return count if report.kernel.budget_exhausted
+            return count if report.traces.expression_index_hashes.count != capacity or report.traces.expression_hashes.count != count or report.traces.next_expression_indices.count != count
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
+            owner_hash: u32 = proof_replay_owner_hash(owner)
+            composite_hash: u32 = proof_replay_fact_expression_index_hash(owner_hash, expression_hash)
+            slot: mutable usize = (composite_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, composite_hash, expression_hash, owner, report, capacity, count|:
+                return count if not proof_replay_trace_lookup_charge(report)
+                index: usize = report.traces.expression_index_values[slot]
+                return count if index >= count
+                if report.traces.expression_index_hashes[slot] == composite_hash:
+                    return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[index].name))
+                    return index if report.traces.records[index].name == owner and report.traces.expression_hashes[index] == expression_hash
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return count
+
+        def proof_replay_fact_trace_head(report: mutable ProofReport&, owner: sview) -> usize:
+            count: usize = report.traces.records.count
+            capacity: usize = report.traces.index_values.count
+            return count if capacity == 0
+            return count if report.kernel.budget_exhausted
+            # These arrays are an optimization, not authoritative report data. If a caller has
+            # mutated one of them independently, abandon the index rather than dereferencing a
+            # mismatched hash/next slot and turning malformed input into a replay crash.
+            return count if report.traces.index_hashes.count != capacity or report.traces.next_indices.count != count
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
+            hash: u32 = proof_replay_owner_hash(owner)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, owner, report, capacity, count|:
+                return count if not proof_replay_trace_lookup_charge(report)
+                index: usize = report.traces.index_values[slot]
+                return count if index >= count
+                if report.traces.index_hashes[slot] == hash:
+                    return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[index].name))
+                    return index if report.traces.records[index].name == owner
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return count
+
+        # The index is rebuilt internally as a descending linked chain: a newer trace points to
+        # an older trace with the same owner, and the sentinel is `count`. Reports are also
+        # exposed to revalidation callers, so a mutated link must not become an infinite loop or
+        # an out-of-range dereference. Invalid and non-decreasing links terminate the chain; the
+        # caller then fails to find the requested provenance rather than trusting malformed data.
+        def proof_replay_trace_chain_next(report: mutable ProofReport&, current: usize) -> usize:
+            count: usize = report.traces.records.count
+            return count if current >= count or current >= report.traces.next_indices.count
+            return count if not proof_replay_trace_lookup_charge(report)
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name))
+            next: usize = report.traces.next_indices[current]
+            return count if next >= count or next >= current
+            return next
+
+        # Expression chains are descending too, but each one contains only traces sharing the
+        # same owner and replay-compatible expression hash. Validate both ends of every link.
+        def proof_replay_trace_expression_chain_next(report: mutable ProofReport&, current: usize, owner: sview, expression_hash: u32) -> usize:
+            count: usize = report.traces.records.count
+            return count if current >= count or current >= report.traces.next_expression_indices.count or current >= report.traces.expression_hashes.count
+            return count if not proof_replay_trace_lookup_charge(report)
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name))
+            return count if report.traces.records[current].name != owner or report.traces.expression_hashes[current] != expression_hash
+            next: usize = report.traces.next_expression_indices[current]
+            return count if next >= count or next >= current or next >= report.traces.expression_hashes.count
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[next].name))
+            return count if report.traces.records[next].name != owner or report.traces.expression_hashes[next] != expression_hash
+            return next
+

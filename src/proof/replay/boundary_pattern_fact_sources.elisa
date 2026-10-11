@@ -1,0 +1,165 @@
+extend ElisaProof:
+    private:
+        # Bound recursive pattern walks before calling the producer's canonical lowering.
+        # Unsupported shapes still fail in `proof_match_closed_pattern`; this preflight only
+        # prevents a deeply nested or unusually large source pattern from exhausting replay.
+        def proof_replay_control_pattern_within_budget(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match pattern:
+                Ast::Pattern.Literal(text) | Ast::Pattern.Other(text):
+                    return proof_replay_control_pattern_text_work_charge(text, work)
+                Ast::Pattern.Range(low, high, _):
+                    return false if not proof_replay_control_pattern_text_work_charge(low, work)
+                    return proof_replay_control_pattern_text_work_charge(high, work)
+                Ast::Pattern.As(name, inner) | Ast::Pattern.Field(name, inner):
+                    return false if not proof_replay_control_pattern_text_work_charge(name, work)
+                    for child in inner |depth, work|:
+                        return false if not proof_replay_control_pattern_within_budget(child, depth + 1, work)
+                Ast::Pattern.Binding(name) | Ast::Pattern.Pin(name) | Ast::Pattern.Rest(name):
+                    return proof_replay_control_pattern_text_work_charge(name, work)
+                Ast::Pattern.TypeBind(type_name, binder):
+                    return false if not proof_replay_control_pattern_text_work_charge(type_name, work)
+                    return proof_replay_control_pattern_text_work_charge(binder, work)
+                Ast::Pattern.Variant(path, options) | Ast::Pattern.Struct(path, options):
+                    return false if not proof_replay_control_pattern_text_work_charge(path, work)
+                    for child in options |depth, work|:
+                        return false if not proof_replay_control_pattern_within_budget(child, depth + 1, work)
+                Ast::Pattern.Or(options) | Ast::Pattern.Tuple(options):
+                    for child in options |depth, work|:
+                        return false if not proof_replay_control_pattern_within_budget(child, depth + 1, work)
+                _:
+                    pass
+            return true
+        def proof_replay_control_pattern_text_work_charge(text: sview, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            work <- work + 1
+            if sview_len(text) > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                return false
+            work <- work + sview_len(text)
+            return true
+        def proof_replay_control_pattern_repeat_charge(pattern: Ast::Pattern, repetitions: usize, work: mutable usize&) -> bool:
+            start: usize = work
+            return false if not proof_replay_control_pattern_within_budget(pattern, 0, work)
+            pattern_work: usize = work - start
+            return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            remaining: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+            if repetitions != 0 and pattern_work > remaining / repetitions:
+                work <- PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                return false
+            work <- work + pattern_work * repetitions
+            return true
+        def proof_replay_control_pattern_irrefutable_work_charge(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match pattern:
+                Ast::Pattern.As(_, inner) | Ast::Pattern.Field(_, inner):
+                    return true if inner.count != 1
+                    return proof_replay_control_pattern_irrefutable_work_charge(inner[0], depth + 1, work)
+                _:
+                    return true
+        def proof_replay_control_pattern_exactness_work_charge(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match pattern:
+                Ast::Pattern.Literal(text):
+                    return proof_replay_control_pattern_text_work_charge(text, work)
+                Ast::Pattern.Range(low, high, _):
+                    return false if not proof_replay_control_pattern_text_work_charge(low, work)
+                    return proof_replay_control_pattern_text_work_charge(high, work)
+                Ast::Pattern.As(_, inner):
+                    return true if inner.count != 1
+                    return proof_replay_control_pattern_exactness_work_charge(inner[0], depth + 1, work)
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields |depth, work|:
+                        return false if not proof_replay_control_pattern_irrefutable_work_charge(field, depth + 1, work)
+                Ast::Pattern.Or(options):
+                    for option in options |depth, work|:
+                        return false if not proof_replay_control_pattern_exactness_work_charge(option, depth + 1, work)
+                _:
+                    pass
+            return true
+        # Pattern.Literal erases the source token kind. A direct formal type is enough to
+        # support only the non-overlapping string subset here; a quoted "42" and scalar 42,
+        # or quoted "true" and Boolean true, still have the same pattern payload. Numeric,
+        # Boolean, and range patterns stay closed until token-kind provenance is retained.
+        def proof_replay_control_pattern_type_is_direct_string(type_expression: Ast::Expr) -> bool:
+            match proof_strip_parens(type_expression):
+                Ast::Expr.Ident(name, _):
+                    return proof_pattern_is_string_type(type_expression) and (name == "sview" or name == "cstr")
+                _:
+                    return false
+
+        def proof_replay_control_pattern_typed_payload_unambiguous(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
+            match pattern:
+                Ast::Pattern.As(_, inner):
+                    return inner.count == 1 and proof_replay_control_pattern_typed_payload_unambiguous(inner[0], type_expression)
+                Ast::Pattern.Literal(text):
+                    return proof_replay_control_pattern_type_is_direct_string(type_expression) and proof_pattern_unambiguous_string_literal(text)
+                Ast::Pattern.Range(_, _, _):
+                    return false
+                Ast::Pattern.Or(options):
+                    return false if options.count == 0
+                    for option in options |options, type_expression|:
+                        return false if not proof_replay_control_pattern_typed_payload_unambiguous(option, type_expression)
+                _:
+                    pass
+            return true
+
+        def proof_replay_control_pattern_needs_source_type(pattern: Ast::Pattern) -> bool:
+            match pattern:
+                Ast::Pattern.Literal(_) | Ast::Pattern.Range(_, _, _):
+                    return true
+                Ast::Pattern.As(_, inner):
+                    return inner.count == 1 and proof_replay_control_pattern_needs_source_type(inner[0])
+                Ast::Pattern.Or(options):
+                    for option in options |options|:
+                        return true if proof_replay_control_pattern_needs_source_type(option)
+                _:
+                    pass
+            return false
+
+        def proof_replay_control_pattern_scrutinee_stable(report: ProofReport&, trace: ProofFactTrace, scrutinee: Ast::Expr, type_expression: Ast::Expr, owner_source_work: usize, work: mutable usize&) -> bool:
+            if proof_replay_control_pattern_type_is_direct_string(type_expression):
+                match proof_strip_parens(scrutinee):
+                    Ast::Expr.Ident(name, _):
+                        return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT or owner_source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+                        work <- work + owner_source_work
+                        body: mutable darray[Ast::Stmt] = []
+                        owner_matches: mutable usize = 0
+                        return false if not proof_replay_control_find_owner_body(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, &work, 0) or owner_matches != 1
+                        # Calls, assignments, moves, unknown syntax, and local rebinding all
+                        # make the borrowed string's value unstable for a later arm assertion.
+                        return not proof_replay_source_body_touches_with_work(report.source_declarations, body, name, true, &work)
+                    _:
+                        return false
+            return proof_replay_control_stable_expression_budgeted(report, trace, scrutinee, &work, owner_source_work, 0)
+
+        def proof_replay_control_pattern_exact(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
+            if not (type_expression is Ast::Expr.Absent):
+                return proof_replay_control_pattern_typed_payload_unambiguous(pattern, type_expression) and proof_pattern_condition_exact_typed(pattern, type_expression)
+            return false if proof_replay_control_pattern_needs_source_type(pattern)
+            return proof_pattern_condition_exact(pattern)
+
+        def proof_replay_control_pattern_condition(report: ProofReport&, pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, work: mutable usize&) -> Ast::Expr?:
+            return null if not proof_replay_control_pattern_repeat_charge(pattern, 3, work)
+            return null if not proof_match_closed_pattern(pattern)
+            names: mutable darray[sview] = []
+            values: mutable darray[Ast::Expr] = []
+            return null if not proof_bind_pattern(pattern, position, scrutinee, &names, &values)
+            condition: Ast::Expr? = null
+            if not (type_expression is Ast::Expr.Absent):
+                return null if not proof_replay_control_pattern_typed_payload_unambiguous(pattern, type_expression)
+                condition <- proof_pattern_condition_typed(pattern, scrutinee, position, type_expression)
+            else:
+                return null if proof_replay_control_pattern_needs_source_type(pattern)
+                condition <- proof_pattern_condition(pattern, scrutinee, position)
+            if condition is expression:
+                # Pattern equality must resolve to the primitive relation that the checker
+                # lowered; custom literal comparisons cannot enter through a user operator.
+                return null if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
+                return null if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+                return expression
+            return null
+

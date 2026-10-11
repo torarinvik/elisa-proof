@@ -54,6 +54,125 @@ extend ElisaProof:
                 _:
                     return 0
 
+        def proof_replay_variant_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_summary_expr_repeat_charge_with_limit(left, 3, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if not proof_replay_summary_expr_repeat_charge_with_limit(right, 3, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return proof_expr_equal(left, right)
+
+        def proof_replay_variant_text_compare_charge_with_work(left: sview, right: sview, source_work: mutable usize&) -> bool:
+            if not proof_replay_attempt_text_compare_with_limit(left, right, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            return true
+
+        def proof_replay_variant_operator_impl_pair_with_work(report: ProofReport&, concrete: sview, protocol: sview, source_work: mutable usize&) -> (complete: bool, exists: bool):
+            if concrete == "":
+                return (true, false)
+            if report.operator_impls.bucket_heads.count == 0:
+                return (true, false)
+            return (false, false) if report.operator_impls.hashes.count != report.operator_impls.rows.count or report.operator_impls.next_indices.count != report.operator_impls.rows.count
+            return (false, false) if not proof_replay_variant_text_compare_charge_with_work(concrete, "", source_work) or not proof_replay_variant_text_compare_charge_with_work(protocol, "", source_work)
+            hash: u32 = proof_operator_impl_hash(concrete, protocol)
+            slot: usize = (hash.i64() % report.operator_impls.bucket_heads.count.i64()).usize()
+            entry: mutable usize = report.operator_impls.bucket_heads[slot]
+            return (false, false) if entry > report.operator_impls.rows.count
+            steps: mutable usize = 0
+            while entry < report.operator_impls.rows.count and steps < report.operator_impls.rows.count |entry, steps, hash, concrete, protocol, report, source_work|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return (false, false)
+                source_work <- source_work + 1
+                return (false, false) if entry >= report.operator_impls.next_indices.count
+                implementation: ProofOperatorImpl = report.operator_impls.rows[entry]
+                if report.operator_impls.hashes[entry] == hash:
+                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(implementation.concrete, concrete, source_work)
+                    if implementation.concrete == concrete:
+                        return (false, false) if not proof_replay_variant_text_compare_charge_with_work(implementation.protocol, protocol, source_work)
+                        return (true, true) if implementation.protocol == protocol
+                next_entry: usize = report.operator_impls.next_indices[entry]
+                return (false, false) if next_entry > report.operator_impls.rows.count
+                entry <- next_entry
+                steps <- steps + 1
+            return (false, false) if entry < report.operator_impls.rows.count
+            return (true, false)
+
+        def proof_replay_variant_builtin_operator_impl_exists_with_work(report: ProofReport&, concrete: sview, protocol: sview, source_work: mutable usize&) -> (complete: bool, exists: bool):
+            return (true, false) if concrete == "" or protocol == ""
+            if report.operator_impls.valid:
+                exact: (complete: bool, exists: bool) = proof_replay_variant_operator_impl_pair_with_work(report, concrete, protocol, source_work)
+                return exact if not exact.complete or exact.exists
+                return proof_replay_variant_operator_impl_pair_with_work(report, concrete, "", source_work)
+            for annotation in report.source_annotations |concrete, protocol, source_work|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return (false, false)
+                source_work <- source_work + 1
+                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__ext_concrete", source_work)
+                if annotation.owner == "__ext_concrete":
+                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.name, concrete, source_work)
+                    return (true, true) if annotation.name == concrete
+                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.owner, "__impl_concrete", source_work)
+                if annotation.owner == "__impl_concrete":
+                    return (false, false) if not proof_replay_variant_text_compare_charge_with_work(annotation.name, concrete, source_work)
+                    if annotation.name == concrete:
+                        for scope in report.source_annotations |annotation, protocol, source_work|:
+                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                return (false, false)
+                            source_work <- source_work + 1
+                            return (false, false) if not proof_replay_variant_text_compare_charge_with_work(scope.owner, "__impl_scope", source_work)
+                            if scope.owner == "__impl_scope" and scope.line == annotation.line:
+                                return (false, false) if not proof_replay_variant_text_compare_charge_with_work(scope.name, protocol, source_work)
+                                return (true, true) if scope.name == protocol
+            return (true, false)
+
+        def proof_replay_variant_type_alias_with_work(declarations: darray[Ast::Decl]&, name: sview, target: mutable Ast::Expr&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                matches <- 2
+                return true
+            for declaration in declarations |name, target, matches, source_work, depth|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return false
+                source_work <- source_work + 1
+                match declaration:
+                    Ast::Decl.Alias(alias_name, alias_target, _):
+                        return false if not proof_replay_variant_text_compare_charge_with_work(alias_name, name, source_work)
+                        if alias_name == name:
+                            matches <- matches + 1
+                            return true if matches > 1
+                            target <- alias_target
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_variant_type_alias_with_work(nested, name, target, matches, source_work, depth + 1)
+                        return true if matches > 1
+                    _:
+                        pass
+            return true
+
+        def proof_replay_variant_type_head_name_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            source_work <- source_work + 1
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias_target: mutable Ast::Expr = Ast::Expr.Absent
+                    alias_count: mutable usize = 0
+                    return "" if not proof_replay_variant_type_alias_with_work(declarations, name, &alias_target, &alias_count, source_work, 0)
+                    return "" if alias_count > 1
+                    return proof_replay_variant_type_head_name_with_work(alias_target, declarations, source_work, depth + 1) if alias_count == 1
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias_target: mutable Ast::Expr = Ast::Expr.Absent
+                    alias_count: mutable usize = 0
+                    return "" if not proof_replay_variant_type_alias_with_work(declarations, name, &alias_target, &alias_count, source_work, 0)
+                    return "" if alias_count > 1
+                    return proof_replay_variant_type_head_name_with_work(alias_target, declarations, source_work, depth + 1) if alias_count == 1
+                    return name
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_replay_variant_type_head_name_with_work(inner, declarations, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_variant_type_head_name_with_work(inner, declarations, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+
         def proof_replay_variant_source_work_charge(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, extra_scans: usize, pairwise_cases: bool) -> bool:
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             source_start: usize = source_work
@@ -128,7 +247,7 @@ extend ElisaProof:
         # This boundary fact is accepted only for the complete constructor set of one unique
         # source enum. Proposition replay separately verifies that every tag test has the same
         # subject type as that enum; malformed, omitted, duplicated, or foreign tags fail here.
-        def proof_replay_match_exhaustiveness_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_match_exhaustiveness_valid(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             subjects: mutable darray[Ast::Expr] = []
             enum_names: mutable darray[sview] = []
             variants: mutable darray[sview] = []
@@ -136,25 +255,32 @@ extend ElisaProof:
             return false if variants.count == 0 or variants.count > PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
             first_subject: Ast::Expr = subjects[0]
             enum_name: sview = enum_names[0]
-            for index in 0..<variants.count |index, subjects, enum_names, variants|:
-                return false if not proof_expr_equal(subjects[index], first_subject) or enum_names[index] != enum_name
-                for prior in 0..<index |prior, variants, index|:
+            for index in 0..<variants.count |index, subjects, enum_names, variants, source_work|:
+                return false if not proof_replay_variant_expr_equal_with_work(subjects[index], first_subject, source_work)
+                return false if not proof_replay_variant_text_compare_charge_with_work(enum_names[index], enum_name, source_work)
+                return false if enum_names[index] != enum_name
+                for prior in 0..<index |prior, variants, index, source_work|:
+                    return false if not proof_replay_variant_text_compare_charge_with_work(variants[prior], variants[index], source_work)
                     return false if variants[prior] == variants[index]
             declared: mutable darray[sview] = []
             enums: mutable usize = 0
             return false if not proof_replay_collect_enum_variants(report.source_declarations, enum_name, &declared, &enums, 0)
             return false if enums != 1 or declared.count != variants.count
             declared_seen: mutable darray[sview] = []
-            for expected in declared |declared_seen, variants|:
-                return false if any earlier in declared_seen where earlier == expected
+            for expected in declared |declared_seen, variants, source_work|:
+                for earlier in declared_seen |expected, source_work|:
+                    return false if not proof_replay_variant_text_compare_charge_with_work(earlier, expected, source_work)
+                    return false if earlier == expected
                 declared_seen.push(expected)
                 occurrences: mutable usize = 0
-                for actual in variants |expected, occurrences|:
+                for actual in variants |expected, occurrences, source_work|:
+                    return false if not proof_replay_variant_text_compare_charge_with_work(actual, expected, source_work)
                     occurrences <- occurrences + 1 if actual == expected
                 return false if occurrences != 1
-            for actual in variants |variants, declared|:
+            for actual in variants |variants, declared, source_work|:
                 occurrences: mutable usize = 0
-                for expected in declared |actual, occurrences|:
+                for expected in declared |actual, occurrences, source_work|:
+                    return false if not proof_replay_variant_text_compare_charge_with_work(expected, actual, source_work)
                     occurrences <- occurrences + 1 if expected == actual
                 return false if occurrences != 1
             return true
@@ -180,14 +306,17 @@ extend ElisaProof:
                 _:
                     return (false, no_subject, "", "")
 
-        def proof_replay_variant_exclusion_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_variant_exclusion_valid(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
                     first: (known: bool, subject: Ast::Expr, enum_name: sview, variant: sview) = proof_replay_variant_negated_test(left)
                     second: (known: bool, subject: Ast::Expr, enum_name: sview, variant: sview) = proof_replay_variant_negated_test(right)
                     return false if not first.known or not second.known
-                    return false if first.enum_name != second.enum_name or first.variant == second.variant
-                    return false if not proof_expr_equal(first.subject, second.subject)
+                    return false if not proof_replay_variant_text_compare_charge_with_work(first.enum_name, second.enum_name, source_work)
+                    return false if first.enum_name != second.enum_name
+                    return false if not proof_replay_variant_text_compare_charge_with_work(first.variant, second.variant, source_work)
+                    return false if first.variant == second.variant
+                    return false if not proof_replay_variant_expr_equal_with_work(first.subject, second.subject, source_work)
                     enums: mutable usize = 0
                     firsts: mutable usize = 0
                     seconds: mutable usize = 0
@@ -262,26 +391,30 @@ extend ElisaProof:
                     return false
             return false
 
-        def proof_replay_enum_scope_matches(current: darray[sview]&, target: darray[sview]&) -> bool:
+        def proof_replay_enum_scope_matches(current: darray[sview]&, target: darray[sview]&, source_work: mutable usize&) -> bool:
             return false if current.count + 1 != target.count or target.count == 0
-            for index in 0..<current.count |index, current, target|:
+            for index in 0..<current.count |index, current, target, source_work|:
+                return false if not proof_replay_variant_text_compare_charge_with_work(current[index], target[index], source_work)
                 return false if current[index] != target[index]
             return true
 
-        def proof_replay_const_enum_member_value_at_path(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize) -> (enums: usize, const_enums: usize, members: usize, known: bool, value: i64):
+        def proof_replay_const_enum_member_value_at_path(declarations: darray[Ast::Decl]&, target: darray[sview]&, current: darray[sview]&, member_name: sview, depth: usize, source_work: mutable usize&) -> (enums: usize, const_enums: usize, members: usize, known: bool, value: i64):
             return (2, 2, 2, false, 0) if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            return (2, 2, 2, false, 0) if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             enums: mutable usize = 0
             const_enums: mutable usize = 0
             members: mutable usize = 0
             known: mutable bool = false
             value: mutable i64 = 0
-            for declaration in declarations |target, current, member_name, depth, enums, const_enums, members, known, value|:
+            for declaration in declarations |target, current, member_name, depth, enums, const_enums, members, known, value, source_work|:
                 match declaration:
                     Ast::Decl.Module(module_name, body, _):
+                        return (2, 2, 2, false, 0) if current.count >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or current.count + 1 > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                        source_work <- source_work + current.count + 1
                         nested_scope: mutable darray[sview] = []
                         nested_scope.extend(current)
                         nested_scope.push(module_name)
-                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, nested_scope, member_name, depth + 1)
+                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, nested_scope, member_name, depth + 1, source_work)
                         enums <- enums + nested.enums
                         const_enums <- const_enums + nested.const_enums
                         members <- members + nested.members
@@ -289,7 +422,7 @@ extend ElisaProof:
                             known <- true
                             value <- nested.value
                     Ast::Decl.Scoped(body, _):
-                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, current, member_name, depth + 1)
+                        nested: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(body, target, current, member_name, depth + 1, source_work)
                         enums <- enums + nested.enums
                         const_enums <- const_enums + nested.const_enums
                         members <- members + nested.members
@@ -297,10 +430,15 @@ extend ElisaProof:
                             known <- true
                             value <- nested.value
                     Ast::Decl.Enum(enum_name, variants, is_const, _, _):
-                        if proof_replay_enum_scope_matches(current, target) and target[target.count - 1] == enum_name:
+                        scope_matches: bool = proof_replay_enum_scope_matches(current, target, source_work)
+                        return (2, 2, 2, false, 0) if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        if scope_matches:
+                            return (2, 2, 2, false, 0) if not proof_replay_variant_text_compare_charge_with_work(target[target.count - 1], enum_name, source_work)
+                        if scope_matches and target[target.count - 1] == enum_name:
                             enums <- enums + 1
                             const_enums <- const_enums + 1 if is_const
-                            for variant in variants |member_name, is_const, members, known, value|:
+                            for variant in variants |member_name, is_const, members, known, value, source_work|:
+                                return (2, 2, 2, false, 0) if not proof_replay_variant_text_compare_charge_with_work(variant.name, member_name, source_work)
                                 if variant.name == member_name and variant.fields.count == 0:
                                     members <- members + 1
                                     if is_const:
@@ -314,32 +452,37 @@ extend ElisaProof:
                         pass
             return (enums, const_enums, members, known, value)
 
-        def proof_replay_const_enum_member_value_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_const_enum_member_value_valid(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Field(left_type, left_member, _), operator, Ast::Expr.Field(right_type, right_member, _), _):
-                    return false if (operator != TokenKind.EqEq and operator != TokenKind.BangEq) or left_member == "" or right_member == "" or not proof_expr_equal(left_type, right_type)
+                    return false if (operator != TokenKind.EqEq and operator != TokenKind.BangEq) or left_member == "" or right_member == "" or not proof_replay_variant_expr_equal_with_work(left_type, right_type, source_work)
                     path: mutable darray[sview] = []
                     return false if not proof_replay_enum_type_path(left_type, &path, 0) or path.count == 0
                     enum_name: sview = path[path.count - 1]
-                    return false if proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+                    builtin_operator: (complete: bool, exists: bool) = proof_replay_variant_builtin_operator_impl_exists_with_work(report, enum_name, "Eq", source_work)
+                    return false if not builtin_operator.complete or builtin_operator.exists
                     current_scope: darray[sview] = []
-                    left: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, left_member, 0)
-                    right: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, right_member, 0)
+                    left: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, left_member, 0, source_work)
+                    right: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value_at_path(report.source_declarations, path, current_scope, right_member, 0, source_work)
                     return false if left.enums != 1 or left.const_enums != 1 or left.members != 1 or not left.known
                     return false if right.enums != 1 or right.const_enums != 1 or right.members != 1 or not right.known
                     return (left.value == right.value) if operator == TokenKind.EqEq else (left.value != right.value)
                 _:
                     return false
 
-        def proof_replay_const_enum_exclusion_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_const_enum_exclusion_valid(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
                     first: (known: bool, subject: Ast::Expr, enum_type: Ast::Expr, variant: sview) = proof_replay_const_enum_negated_equality(left)
                     second: (known: bool, subject: Ast::Expr, enum_type: Ast::Expr, variant: sview) = proof_replay_const_enum_negated_equality(right)
                     return false if not first.known or not second.known
-                    return false if first.variant == second.variant or not proof_expr_equal(first.subject, second.subject) or not proof_expr_equal(first.enum_type, second.enum_type)
-                    enum_name: sview = proof_type_head_name(first.enum_type, report.source_declarations, 0)
-                    return false if enum_name == "" or proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
+                    return false if not proof_replay_variant_text_compare_charge_with_work(first.variant, second.variant, source_work)
+                    return false if first.variant == second.variant
+                    return false if not proof_replay_variant_expr_equal_with_work(first.subject, second.subject, source_work) or not proof_replay_variant_expr_equal_with_work(first.enum_type, second.enum_type, source_work)
+                    enum_name: sview = proof_replay_variant_type_head_name_with_work(first.enum_type, report.source_declarations, source_work, 0)
+                    return false if enum_name == ""
+                    builtin_operator: (complete: bool, exists: bool) = proof_replay_variant_builtin_operator_impl_exists_with_work(report, enum_name, "Eq", source_work)
+                    return false if not builtin_operator.complete or builtin_operator.exists
                     aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_name, 0)
                     return false if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
                     first_value: (enums: usize, const_enums: usize, members: usize, known: bool, value: i64) = proof_replay_const_enum_member_value(report.source_declarations, enum_name, first.variant, 0)

@@ -12,39 +12,82 @@ extend ElisaProof:
                 _:
                     return Ast::Expr.Invalid
 
+        def proof_replay_type_bound_local_array_extent_charge_with_work(type_expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
+            # Charge this metering walk and the legacy literal-extent walk that follows it.
+            return false if not proof_replay_type_bound_local_work_charge(2, work)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _) | Ast::Expr.Unary(TokenKind.Lmut, inner, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _):
+                    return proof_replay_type_bound_local_array_extent_charge_with_work(inner, work, depth + 1)
+                Ast::Expr.Index(Ast::Expr.Ident(element_name, _), _, _):
+                    return proof_replay_type_bound_local_type_name_charge(element_name, work)
+                Ast::Expr.IndexN(Ast::Expr.Ident(base_name, _), _, _):
+                    return false if not proof_replay_type_bound_local_text_compare_charge(base_name, "array", work)
+                    return proof_replay_type_bound_local_text_compare_charge(base_name, "array", work)
+                _:
+                    pass
+            return true
+
         def proof_replay_type_bound_local_array_witness(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_local_array_witness_with_work(report, parameters, body, expression, line, &work)
+
+        def proof_replay_type_bound_local_array_witness_with_work(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32, work: mutable usize&) -> bool:
+            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, "", work)
             candidate_matches: mutable usize = 0
-            for statement in body |report, parameters, expression, line, candidate_matches|:
+            for statement in body |report, parameters, expression, line, candidate_matches, work|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, local_type, _, position):
                         continue if local_name == "" or position.line != line
-                        continue if any parameter in parameters where parameter.name == local_name
+                        parameter_match: mutable bool = false
+                        for parameter in parameters |parameter, local_name, parameter_match, work|:
+                            return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, local_name, work)
+                            parameter_match <- true if parameter.name == local_name
+                        continue if parameter_match
+                        return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
                         extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
                         continue if extent < 0
                         root: Ast::Expr = Ast::Expr.Ident(local_name, position)
                         count: Ast::Expr = Ast::Expr.Field(root, "count", position)
                         matches: mutable bool = false
-                        matches <- true if proof_replay_expr_equal(expression, Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position))
-                        matches <- true if proof_replay_expr_equal(expression, proof_builtin_index_marker(root, position))
-                        matches <- true if proof_replay_expr_equal(expression, proof_scalar_term_marker(count, position))
-                        matches <- true if proof_replay_expr_equal(expression, proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position))
+                        equality: mutable (complete: bool, equal: bool) = proof_replay_type_bound_local_expr_equal_with_work(expression, Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position), work)
+                        return false if not equality.complete
+                        matches <- true if equality.equal
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_builtin_index_marker(root, position), work)
+                        return false if not equality.complete
+                        matches <- true if equality.equal
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_scalar_term_marker(count, position), work)
+                        return false if not equality.complete
+                        matches <- true if equality.equal
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position), work)
+                        return false if not equality.complete
+                        matches <- true if equality.equal
+                        return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
                         element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
                         element_name: sview = proof_ident_name(element)
+                        return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
                         element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
                         if element_scalar:
                             # The producer records the complete builtin indexed protocol set as
                             # `Index.All` for a primitive element. Bind that aggregate marker to
                             # this unique fixed-array declaration before accepting it.
                             expected_index_operators: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position)
-                            matches <- true if proof_replay_expr_equal(expression, expected_index_operators)
+                            equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_index_operators, work)
+                            return false if not equality.complete
+                            matches <- true if equality.equal
                             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-                            for protocol in protocols |expression, root, position, matches|:
+                            for protocol in protocols |expression, root, position, matches, work|:
                                 expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
-                                matches <- true if proof_replay_expr_equal(expression, expected_operator)
-                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                                equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_operator, work)
+                                return false if not equality.complete
+                                matches <- true if equality.equal
+                            element_width: i64 = proof_replay_type_bound_local_unsigned_width(report, element, work, 0)
                             expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
-                            matches <- true if proof_replay_expr_equal(expression, expected_element)
+                            equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_element, work)
+                            return false if not equality.complete
+                            matches <- true if equality.equal
                         if matches:
+                            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, local_name, work)
                             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
                             candidate_matches <- candidate_matches + 1
                     _:
@@ -54,39 +97,226 @@ extend ElisaProof:
         # Scalar locals retain source type witnesses at their declaration site. Resolve the
         # exact unique binding before accepting a width marker so a later shadow or forged local
         # type cannot borrow the trace.
+        def proof_replay_type_bound_local_work_exhaust(work: mutable usize&) -> bool:
+            work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return false
+
+        def proof_replay_type_bound_local_work_charge(amount: usize, work: mutable usize&) -> bool:
+            if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or amount > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
+                return proof_replay_type_bound_local_work_exhaust(work)
+            work <- work + amount
+            return true
+
+        def proof_replay_type_bound_local_text_compare_charge(left: sview, right: sview, work: mutable usize&) -> bool:
+            return false if not proof_replay_type_bound_local_work_charge(1, work)
+            return false if not proof_replay_type_bound_local_work_charge(sview_len(left), work)
+            return proof_replay_type_bound_local_work_charge(sview_len(right), work)
+
+        def proof_replay_type_bound_local_text_repeat_charge(name: sview, repetitions: usize, work: mutable usize&) -> bool:
+            name_bytes: usize = sview_len(name)
+            return proof_replay_type_bound_local_work_exhaust(work) if name_bytes >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            name_cost: usize = name_bytes + 1
+            if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or repetitions > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / name_cost:
+                return proof_replay_type_bound_local_work_exhaust(work)
+            work <- work + repetitions * name_cost
+            return true
+
+        def proof_replay_type_bound_local_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> (complete: bool, equal: bool):
+            return (false, false) if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(left, &cost, work, 0) or not proof_replay_summary_expr_cost(right, &cost, work, 0):
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return (false, false)
+            if cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 2:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return (false, false)
+            work <- work + cost * 2
+            return (true, proof_replay_expr_equal(left, right))
+
+        def proof_replay_type_bound_local_type_name_charge(name: sview, work: mutable usize&) -> bool:
+            name_bytes: usize = sview_len(name)
+            return proof_replay_type_bound_local_work_exhaust(work) if name_bytes >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT / 16
+            # Primitive-name resolvers perform a fixed chain of comparisons; charge both the
+            # comparison dispatches and the bytes examined, including for one-character names.
+            name_cost: usize = name_bytes + 1
+            return proof_replay_type_bound_local_work_charge(name_cost * 16, work)
+
+        # Include the cost walk itself and every later body visit. Source uniqueness also
+        # compares the requested name at visited nodes, so reserve that byte factor per pass.
+        def proof_replay_type_bound_local_body_repeat_charge(body: darray[Ast::Stmt]&, repetitions: usize, compare_name: sview, work: mutable usize&) -> bool:
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(body, &cost, work, 0):
+                return proof_replay_type_bound_local_work_exhaust(work)
+            if work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
+                return proof_replay_type_bound_local_work_exhaust(work)
+            compare_name_cost: usize = sview_len(compare_name)
+            if repetitions >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or compare_name_cost >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+                return proof_replay_type_bound_local_work_exhaust(work)
+            passes: usize = repetitions + 1
+            factor: usize = compare_name_cost + 1
+            remaining: usize = PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            if passes > remaining / factor or cost > remaining / passes / factor:
+                return proof_replay_type_bound_local_work_exhaust(work)
+            work <- work + cost * passes * factor
+            return true
+
+        # A one-pass alias lookup has the same unique/ambiguous result as proof_find_type_alias,
+        # while charging every declaration visit and every alias-name comparison to the caller.
+        def proof_replay_type_bound_local_alias_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, target: mutable Ast::Expr&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |name, matches, target, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Alias(alias_name, alias_target, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(alias_name, name, work)
+                        if alias_name == name:
+                            matches <- matches + 1
+                            target <- alias_target if matches == 1
+                            return true if matches > 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_local_alias_scan(nested, name, matches, target, work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_type_bound_local_const_enum_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |name, matches, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(enum_name, name, work)
+                        matches <- matches + 1 if is_const and enum_name == name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_local_const_enum_scan(nested, name, matches, work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_type_bound_local_unsigned_width(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            match expression:
+                Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_replay_type_bound_local_unsigned_width(report, base, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_type_bound_local_unsigned_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    primitive: i64 = proof_unsigned_primitive_width(expression)
+                    return primitive if primitive > 0
+                    matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
+                    return -1 if matches > 1
+                    return proof_replay_type_bound_local_unsigned_width(report, target, work, depth + 1) if matches == 1
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
+                    return -1 if matches > 0
+                _:
+                    pass
+            return 0
+
+        def proof_replay_type_bound_local_signed_width(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            match expression:
+                Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_replay_type_bound_local_signed_width(report, base, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_type_bound_local_signed_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    primitive: i64 = proof_signed_primitive_width(expression)
+                    return primitive if primitive > 0
+                    matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
+                    return -1 if matches > 1
+                    return proof_replay_type_bound_local_signed_width(report, target, work, depth + 1) if matches == 1
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
+                    return -1 if matches > 0
+                _:
+                    pass
+            return 0
+
+        def proof_replay_type_bound_local_scalar_kind(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            match expression:
+                Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_replay_type_bound_local_scalar_kind(report, base, work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_replay_type_bound_local_scalar_kind(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    return 1 if proof_scalar_primitive_type_name(name)
+                    alias_matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &alias_matches, &target, work, 0)
+                    return -1 if alias_matches > 1
+                    return proof_replay_type_bound_local_scalar_kind(report, target, work, depth + 1) if alias_matches == 1
+                    enum_matches: mutable usize = 0
+                    return -1 if not proof_replay_type_bound_local_const_enum_scan(report.source_declarations, name, &enum_matches, work, 0)
+                    return -1 if enum_matches > 1
+                    return 1 if enum_matches == 1
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
+                    alias_matches: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Absent
+                    return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &alias_matches, &target, work, 0)
+                    return -1 if alias_matches > 0
+                _:
+                    pass
+            return 0
+
         def proof_replay_type_bound_local_scalar_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_local_scalar_fact_with_work(report, parameters, body, expression, line, &work)
+
+        def proof_replay_type_bound_local_scalar_fact_with_work(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32, work: mutable usize&) -> bool:
+            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, "", work)
             candidate_matches: mutable usize = 0
-            for statement in body |report, parameters, expression, line, candidate_matches|:
+            for statement in body |report, parameters, expression, line, candidate_matches, work|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, local_type, _, position):
                         continue if local_name == "" or position.line != line
-                        continue if any parameter in parameters where parameter.name == local_name
+                        parameter_match: mutable bool = false
+                        for parameter in parameters |parameter, local_name, parameter_match, work|:
+                            return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, local_name, work)
+                            parameter_match <- true if parameter.name == local_name
+                        continue if parameter_match
                         term: Ast::Expr = Ast::Expr.Ident(local_name, position)
                         local_matches: mutable usize = 0
-                        unsigned_width: i64 = proof_unsigned_type_width(local_type, report.source_declarations, 0)
+                        unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, local_type, work, 0)
                         if unsigned_width > 0:
                             expected_unsigned: Ast::Expr = proof_unsigned_type_marker(local_name, unsigned_width, position)
-                            local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_unsigned)
+                            local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, expected_unsigned, work)
                             lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, term, position)
-                            local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, lower)
+                            local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, lower, work)
                             if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
                                 upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
-                                local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, upper)
-                        signed_width: i64 = proof_signed_type_width(local_type, report.source_declarations, 0)
+                                local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, upper, work)
+                        signed_width: i64 = proof_replay_type_bound_local_signed_width(report, local_type, work, 0)
                         if signed_width > 0:
                             expected_signed: Ast::Expr = proof_signed_type_marker(term, signed_width, position)
-                            local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_signed)
+                            local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, expected_signed, work)
                             if signed_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
                                 maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(signed_width)
                                 upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(maximum, position), position)
-                                local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, upper)
+                                local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, upper, work)
                                 magnitude: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(maximum, position), position)
                                 floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
                                 lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
-                                local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, lower)
-                        scalar_kind: i64 = proof_scalar_type_kind(local_type, report.source_declarations, 0)
-                        local_matches <- local_matches + 1 if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_expr_equal(expression, proof_scalar_type_marker(local_name, position))
+                                local_matches <- local_matches + 1 if proof_replay_summary_expr_equal_with_work(expression, lower, work)
+                        scalar_kind: i64 = proof_replay_type_bound_local_scalar_kind(report, local_type, work, 0)
+                        local_matches <- local_matches + 1 if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_summary_expr_equal_with_work(expression, proof_scalar_type_marker(local_name, position), work)
                         if local_matches != 0:
+                            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, local_name, work)
                             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
                             candidate_matches <- candidate_matches + local_matches
                     _:
@@ -94,41 +324,68 @@ extend ElisaProof:
             return candidate_matches == 1
 
         def proof_replay_type_bound_local_array_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_local_array_fact_with_work(report, parameters, body, expression, line, &work)
+
+        def proof_replay_type_bound_local_array_fact_with_work(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32, work: mutable usize&) -> bool:
+            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, "", work)
             valid_matches: mutable usize = 0
-            for statement in body |report, parameters, expression, line, valid_matches|:
+            for statement in body |report, parameters, expression, line, valid_matches, work|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, local_type, _, position):
                         continue if local_name == "" or position.line != line
-                        continue if any parameter in parameters where parameter.name == local_name
+                        parameter_match: mutable bool = false
+                        for parameter in parameters |parameter, local_name, parameter_match, work|:
+                            return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, local_name, work)
+                            parameter_match <- true if parameter.name == local_name
+                        continue if parameter_match
+                        return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
                         extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
                         continue if extent < 0
                         root: Ast::Expr = Ast::Expr.Ident(local_name, position)
                         count: Ast::Expr = Ast::Expr.Field(root, "count", position)
                         expected_extent: Ast::Expr = Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position)
                         local_matches: mutable usize = 0
-                        local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_extent)
+                        equality: mutable (complete: bool, equal: bool) = proof_replay_type_bound_local_expr_equal_with_work(expression, expected_extent, work)
+                        return false if not equality.complete
+                        local_matches <- local_matches + 1 if equality.equal
                         expected_index: Ast::Expr = proof_builtin_index_marker(root, position)
-                        local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_index)
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_index, work)
+                        return false if not equality.complete
+                        local_matches <- local_matches + 1 if equality.equal
                         expected_count_scalar: Ast::Expr = proof_scalar_term_marker(count, position)
-                        local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_count_scalar)
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_count_scalar, work)
+                        return false if not equality.complete
+                        local_matches <- local_matches + 1 if equality.equal
                         expected_count_unsigned: Ast::Expr = proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position)
-                        local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_count_unsigned)
+                        equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_count_unsigned, work)
+                        return false if not equality.complete
+                        local_matches <- local_matches + 1 if equality.equal
+                        return false if not proof_replay_type_bound_local_array_extent_charge_with_work(local_type, work, 0)
                         element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
                         element_name: sview = proof_ident_name(element)
+                        return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
                         element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
                         if element_scalar:
                             # Keep the certificate-facing source check aligned with the compact
                             # `Index.All` witness emitted for primitive array elements.
                             expected_index_operators: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position)
-                            local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_index_operators)
+                            equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_index_operators, work)
+                            return false if not equality.complete
+                            local_matches <- local_matches + 1 if equality.equal
                             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-                            for protocol in protocols |expression, root, position, local_matches|:
+                            for protocol in protocols |expression, root, position, local_matches, work|:
                                 expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
-                                local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_operator)
-                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                                equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_operator, work)
+                                return false if not equality.complete
+                                local_matches <- local_matches + 1 if equality.equal
+                            element_width: i64 = proof_replay_type_bound_local_unsigned_width(report, element, work, 0)
                             expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
-                            local_matches <- local_matches + 1 if proof_replay_expr_equal(expression, expected_element)
+                            equality <- proof_replay_type_bound_local_expr_equal_with_work(expression, expected_element, work)
+                            return false if not equality.complete
+                            local_matches <- local_matches + 1 if equality.equal
                         if local_matches != 0:
+                            return false if not proof_replay_type_bound_local_body_repeat_charge(body, 1, local_name, work)
                             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
                             valid_matches <- valid_matches + local_matches
                     _:
