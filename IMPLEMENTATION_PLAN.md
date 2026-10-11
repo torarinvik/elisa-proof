@@ -9594,12 +9594,13 @@ Compiler `main` is at `01ddacf789aff79e6a73fa99a52b05ab49a7bc71` and matches
 report-string fix, and the explicit Global grants required by the index. Fresh Stage1 provenance,
 the seven-case callee-field-growth smoke, and the incremental-cache cold/warm, revalidation,
 invalidation, generated-input, and corruption controls pass. The published-index candidate's
-24-check baseline/candidate correctness gate also passes. No timing run was collected, so the index
-is qualified for correctness only; it has no measured speedup claim.
+24-check baseline/candidate correctness gate also passes. The only timing run is the exploratory
+10-core Mac A/B described below; it is marked `timing_eligible=false` and supports no qualifying
+performance claim.
 
-Proof `main` retains source baseline `62a4cf55698fde30b2d01f49e92d47f37d148731`; documentation-only
-updates record this consolidation. Its working-tree pin is being updated to the exact compiler
-revision above.
+Proof `main` retains source baseline `62a4cf55698fde30b2d01f49e92d47f37d148731`; the compiler pin,
+current-Stage1 harness fixes, and bounded `Index.All` replay admission are committed. The pin names
+the exact compiler revision above.
 The strict proof build, mutable-global grant matrix, and direct API harness now pass against that
 Stage1 product. The harness resolves nested replay includes, omits the three runtime modules that
 Stage1 injects automatically, expects both Boolean source goals, and grants the test helper's
@@ -9613,13 +9614,15 @@ array variant (`[values[1]][0]`): the report has one `expression-unsupported` fi
 errors, and zero replay gaps. Direct and parenthesized indexing pass. Keep this expression rejected
 until the proof checker can authenticate both accesses and their bounds; compare it with the prior
 proof revision before treating it as a regression from this compiler pin. The strict build and focused
-Global.Read/Write controls are green, so commit the pin, harness compatibility fixes, and narrow
-`Index.All` source-replay correction together while tracking the nested-expression case separately.
+Global.Read/Write controls are green, and the pin, harness compatibility fixes, and narrow
+`Index.All` source-replay correction are committed while the nested-expression case stays separate.
 
 The separate `8d7cfca` backend/region-owner commit was re-audited: its rename is superseded by
 `resolved_error_family(...)` on current compiler `main`, its native owner-lookup smoke passes there,
 and cherry-picking it produced no unique changes. The `query_head_for` / `const_scope_owner` region
-annotations still need an exact commit and validation report before integration. The PGS compile-time
+annotations are already in `main` via `e40c84f4` and `88a9364b`, and their focused regression files
+are present; this pass did not rerun those two checks, so they have no fresh validation result here.
+The PGS compile-time
 comparison completed as an exploratory Mac run: 12 cases, 24 warmups, and 108 measured pairs; all
 outputs matched and input/product postflight checks passed. The median of the 12 per-case paired
 baseline/candidate ratios is 1.0824. The geometric mean speedups are 1.158 for wall time and 1.088
