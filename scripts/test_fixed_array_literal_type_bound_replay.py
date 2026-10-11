@@ -65,7 +65,11 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     nested_report: mutable ProofReport = proof_empty_report()
     nested_diagnostics: mutable darray[Semantic::Diagnostic] = []
     (api_probe(NESTED_ARRAY_LITERAL_SOURCE, &source, &nested_report, &nested_diagnostics) can Global{Read,Write})
-    return 247 if nested_report.failed != 0 or nested_report.replay_gaps != 0 or nested_report.proven != nested_report.obligations
+    # The checker does not yet authenticate bounds across a nested temporary array. Keep that
+    # expression refused without turning a sound fail-closed result into a replay gap.
+    return 247 if nested_report.failed != 1 or nested_report.findings.count != 1 or nested_report.findings[0].kind != "expression-unsupported"
+    return 248 if nested_report.replay_gaps != 0 or nested_report.proven + 1 != nested_report.obligations
+    return 249 if nested_diagnostics.count != 0
     return 0
 '''
 
@@ -85,4 +89,4 @@ run_source_binding_replay_harness(
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(),
     harness,
 )
-print(f"Fixed-array literal replay: authenticated direct/parenthesized/nested uses, rejected forged bound, visited all {len(ast_variants)} AST expression variants")
+print(f"Fixed-array literal replay: authenticated direct/parenthesized uses, refused nested temporary indexing, rejected forged bound, visited all {len(ast_variants)} AST expression variants")

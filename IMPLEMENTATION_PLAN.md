@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status: refreshed 2026-10-10. **Section 23.27.94 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is pinned to compiler `a84089fd`. The all-products O2 build, the separate `Global.Read`/`Global.Write` grant regression, and the deterministic-call loop replay harness passed on this tuple. These focused gates do not close the full proof suite or the frozen compiler matrix recorded in §23.27.93. The annotation-index candidate passed correctness but showed no repeatable compile-time gain, so it was not integrated. Keep the unsigned-diagnostic branch isolated until its large accepted-source memory regression is explained and repaired. Next, finish the current compiler storage qualification without overlap, qualify source-admission and independent replay on the same compiler/runtime, then measure common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.94 for the ordered backlog and current status.
+Status: refreshed 2026-10-11. **Section 23.27.98 records the latest local proof/compiler tuple; §23.27.71 remains the authoritative high-ROI execution order.** Proof `main` is pinned to compiler `ac2b23ef`. The strict O2 build, direct API admission, mutable-global grant matrix, and fixed-array literal replay regression pass on this tuple. Nested temporary-array indexing remains explicitly refused with one `expression-unsupported` finding and zero replay gaps. The compiler dependency scan now stops at the first changed callee; its fresh Stage1 build and seven-case callee-field smoke pass, but this micro-optimization has no paired timing result. The earlier 12-case PGS A/B remains exploratory and non-qualifying. These focused checks do not close the full proof suite or frozen compiler matrix recorded in §23.27.93. Next, complete source-admission and independent replay qualification on the same tuple, then measure common-path performance. Earlier sections retain historical evidence and design detail; consult §§23.27.71 and 23.27.98 for the ordered backlog and current status.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9644,3 +9644,26 @@ local branches and 90 worktrees: 46 dirty and 44 clean. Six clean non-main check
 distinct parser, annotation, scoped-type, or toolchain baselines. Dirty worktrees, unique commits,
 and baseline products referenced by benchmark artifacts remain preserved; no other safe duplicate
 was identified in this pass.
+
+### 23.27.98 Local follow-up: short-circuit dependency scans and requalify proof (2026-10-11)
+
+Compiler `main` now contains `ac2b23ef4d9590e77b40503c0d90df59837d542a`, which exits the
+parameter-growth dependency scan as soon as one changed callee schedules recomputation. This
+removes needless dictionary probes in the high-fanout changed-callee case identified by the
+exploratory PGS report. The Stage1 product was rebuilt from that source and its provenance freshness
+check passes; its SHA-256 is `e66e0e46bee56423da619ecf5c5632f18f1d8673069d8309db10fc936679a163`.
+The seven-case callee-field growth parity smoke passes. No timing was run for this specific
+short-circuit, so do not claim a measured speedup.
+
+Proof `main` now pins to that exact compiler revision. The strict O2 proof build passes, followed by
+the mutable-global grant matrix and direct API semantic-admission suite. The fixed-array literal
+replay test now encodes the conservative current behavior: direct and parenthesized indexing are
+authenticated; forged bounds are rejected; nested temporary-array indexing is refused as
+`expression-unsupported` with no replay gaps or semantic diagnostics. Its 35 AST-variant probe and
+the direct API source-goal/assert-by, loop-binder, grant, refinement, and reused-state controls pass.
+
+**Next high-return order:** finish the broader proof admission and replay mutation gates against this
+exact compiler/runtime pair; retain the nested-array refusal until its bounds are authenticated;
+then run the matched PGS performance matrix for the short-circuit change. Preserve the existing
+non-qualifying label on the earlier exploratory A/B and do not advance the professional-performance
+claim without a reproducible qualifying run.
