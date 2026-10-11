@@ -533,9 +533,9 @@ if [[ "$proof_script_shape_status" -ne 0 ]]; then
     exit 1
 fi
 
-# `--repair` searches a bounded, fixed vocabulary of tactic scripts and admits one only if the
-# checked engine solves the goal and the kernel replays the certificate it produced. The proposal
-# it emits must itself run: a repair that cannot be re-checked is a claim, not a proof.
+# `--repair` searches a bounded tactic vocabulary, including rewrites derived from goal facts, and
+# admits one only if the checked engine solves the goal and the kernel replays its certificate.
+# The proposal it emits must itself run: a repair that cannot be re-checked is a claim, not a proof.
 set +e
 "$ROOT_DIR/build/elisa-proof" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair.json"
 proof_repair_status=$?

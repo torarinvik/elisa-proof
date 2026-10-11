@@ -1,0 +1,130 @@
+# Validate local scalar and fixed-array type-bound facts against their exact source bindings.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_fixed_array_element(type_expression: Ast::Expr) -> Ast::Expr:
+            match type_expression:
+                Ast::Expr.Index(element, _, _):
+                    return element if proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
+                    return Ast::Expr.Invalid
+                Ast::Expr.IndexN(Ast::Expr.Ident("array", _), arguments, _):
+                    return arguments[0] if arguments.count == 2 and proof_replay_global_mutable_array_literal_extent(type_expression, 0) >= 0
+                    return Ast::Expr.Invalid
+                _:
+                    return Ast::Expr.Invalid
+
+        def proof_replay_type_bound_local_array_witness(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            candidate_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, candidate_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
+                        continue if extent < 0
+                        root: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        count: Ast::Expr = Ast::Expr.Field(root, "count", position)
+                        matches: mutable bool = false
+                        matches <- true if proof_replay_expr_equal(expression, Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_builtin_index_marker(root, position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_scalar_term_marker(count, position))
+                        matches <- true if proof_replay_expr_equal(expression, proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position))
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
+                        element_name: sview = proof_ident_name(element)
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        if element_scalar:
+                            # The producer records the complete builtin indexed protocol set as
+                            # `Index.All` for a primitive element. Bind that aggregate marker to
+                            # this unique fixed-array declaration before accepting it.
+                            expected_index_operators: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position)
+                            matches <- true if proof_replay_expr_equal(expression, expected_index_operators)
+                            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                            for protocol in protocols |expression, root, position, matches|:
+                                expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
+                                matches <- true if proof_replay_expr_equal(expression, expected_operator)
+                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                            expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
+                            matches <- true if proof_replay_expr_equal(expression, expected_element)
+                        candidate_matches <- candidate_matches + 1 if matches
+                    _:
+                        pass
+            return candidate_matches == 1
+
+        # Scalar locals retain source type witnesses at their declaration site. Resolve the
+        # exact unique binding before accepting a width marker so a later shadow or forged local
+        # type cannot borrow the trace.
+        def proof_replay_type_bound_local_scalar_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            candidate_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, candidate_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        term: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        unsigned_width: i64 = proof_unsigned_type_width(local_type, report.source_declarations, 0)
+                        if unsigned_width > 0:
+                            expected_unsigned: Ast::Expr = proof_unsigned_type_marker(local_name, unsigned_width, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, expected_unsigned)
+                            lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, term, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, lower)
+                            if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                                upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, upper)
+                        signed_width: i64 = proof_signed_type_width(local_type, report.source_declarations, 0)
+                        if signed_width > 0:
+                            expected_signed: Ast::Expr = proof_signed_type_marker(term, signed_width, position)
+                            candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, expected_signed)
+                            if signed_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                                maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(signed_width)
+                                upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(maximum, position), position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, upper)
+                                magnitude: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(maximum, position), position)
+                                floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+                                lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
+                                candidate_matches <- candidate_matches + 1 if proof_replay_expr_equal(expression, lower)
+                        scalar_kind: i64 = proof_scalar_type_kind(local_type, report.source_declarations, 0)
+                        candidate_matches <- candidate_matches + 1 if unsigned_width <= 0 and scalar_kind == 1 and proof_replay_expr_equal(expression, proof_scalar_type_marker(local_name, position))
+                    _:
+                        pass
+            return candidate_matches == 1
+
+        def proof_replay_type_bound_local_array_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
+            valid_matches: mutable usize = 0
+            for statement in body |report, parameters, expression, line, valid_matches|:
+                match statement:
+                    Ast::Stmt.VarDecl(local_name, local_type, _, position):
+                        continue if local_name == "" or position.line != line
+                        continue if any parameter in parameters where parameter.name == local_name
+                        continue if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                        extent: i64 = proof_replay_global_mutable_array_literal_extent(local_type, 0)
+                        continue if extent < 0
+                        root: Ast::Expr = Ast::Expr.Ident(local_name, position)
+                        count: Ast::Expr = Ast::Expr.Field(root, "count", position)
+                        expected_extent: Ast::Expr = Ast::Expr.Binary(count, TokenKind.EqEq, Ast::Expr.IntLit(extent, position), position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_extent)
+                        expected_index: Ast::Expr = proof_builtin_index_marker(root, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_index)
+                        expected_count_scalar: Ast::Expr = proof_scalar_term_marker(count, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_count_scalar)
+                        expected_count_unsigned: Ast::Expr = proof_unsigned_place_marker(count, ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS, position)
+                        valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_count_unsigned)
+                        element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
+                        element_name: sview = proof_ident_name(element)
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        if element_scalar:
+                            # Keep the certificate-facing source check aligned with the compact
+                            # `Index.All` witness emitted for primitive array elements.
+                            expected_index_operators: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position)
+                            valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_index_operators)
+                            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+                            for protocol in protocols |expression, root, position, valid_matches|:
+                                expected_operator: Ast::Expr = proof_index_operator_marker(root, protocol, position, true)
+                                valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_operator)
+                            element_width: i64 = proof_unsigned_type_width(element, report.source_declarations, 0)
+                            expected_element: Ast::Expr = proof_scalar_element_marker(root, 1, position, element_width)
+                            valid_matches <- valid_matches + 1 if proof_replay_expr_equal(expression, expected_element)
+                    _:
+                        pass
+            return valid_matches == 1
+

@@ -133,25 +133,30 @@ then carries `"admissible": false`), and `2` for one that names no goal of this 
 
 `build/elisa-proof --script block.txt file.elisa` runs a proof written by hand in that same shape,
 so a person can propose a different proof of the goal rather than only compare against the recorded
-one. `by <action>` and `by <action> <index>` lines are the steps; the block header, `given`, `show`
-and `qed` lines are documentation and carry no weight, since a source-bound script takes its
-hypotheses and conclusion from the goal itself. A line matching none of those refuses the whole
-script. The front end is untrusted elaboration: it translates the text into the same
+one. `by <action>` lines are the steps; `by rewrite <index>` and `by rewriteback <index>` select a
+zero-based equality fact for rewriting. The block header, `given`, `show` and `qed` lines are
+documentation and carry no weight, since a source-bound script takes its hypotheses and conclusion
+from the goal itself. A line matching none of those refuses the whole script. The front end is
+untrusted elaboration: it translates the text into the same
 `elisa-proof-tactics-v1` interchange `--tactics` consumes and runs exactly that checked path, so a
 text script and its JSON equivalent produce identical output. `split` and `cases` need nested
 branch scripts and must still be written as JSON.
 
-`build/elisa-proof --repair N file.elisa` searches a bounded, fixed vocabulary of tactic scripts for
-one that closes goal `N` and emits the winner in that same runnable shape, so the cycle closes: the
-report names a broken goal, repair proposes a proof, `--script` runs it, the kernel replays it. The
-search only ever proposes — a candidate is admitted solely when the checked engine solves the goal
-*and* the kernel replays the certificate it produced. The response states `candidates`, `tried` and
-`exhaustive`, so a success is explicitly a bounded one; `unrepaired` means the fixed vocabulary
-contained no proof and never that the goal is false. A source that is not admissible (it failed to
-parse, import, type-check or form its propositions) is not searched: the status is `inadmissible`
-and the script is null, since `--script` would refuse any script found there. It exits `0` when a
-repair was found, `1` when none was or the source is inadmissible, and `2` when the goal id does not
-exist.
+`build/elisa-proof --repair N file.elisa` searches a bounded tactic vocabulary for one that closes
+goal `N` and emits the winner in that same runnable shape, so the cycle closes: the report names a
+broken goal, repair proposes a proof, `--script` runs it, the kernel replays it. Alongside fixed
+argument-free sequences, it can derive rewrite candidates from up to four relevant explicit
+equality facts among the goal's first sixteen context facts, considering both useful orientations and
+four closers (`decide`, `assumption`, `simp,decide`, `simp,assumption`). The search only proposes a
+proof: a candidate is admitted solely when the checked engine solves the goal *and* the kernel
+replays the certificate it produced. The response states `candidates`, `tried` and `exhaustive`;
+`exhaustive` is false when a candidate wins early or a search cap truncates discovery. A returned
+rewrite step uses `by rewrite N` or `by rewriteback N`, where `N` is a zero-based context-fact index.
+`unrepaired` means no proof was found in the searched candidate space and never
+that the goal is false. A source that is not admissible (it failed to parse, import, type-check or
+form its propositions) is not searched: the status is `inadmissible` and the script is null, since
+`--script` would refuse any script found there. It exits `0` when a repair was found, `1` when none
+was or the source is inadmissible, and `2` when the goal id does not exist.
 
 `build/elisa-proof --repair-all file.elisa` walks every unresolved goal of a file in one pass,
 reporting each with its own verdict and script. It tries nothing the checker already proved, and
@@ -201,12 +206,15 @@ Goal-generated entries in `findings` also expose their exact `goal_id`; non-goal
 `null`.
 The `action_protocol` capability declaration identifies the Elisa-native `elisa-proof-tactics-v1`
 state API. It exposes kernel-backed `assumption`, `exact`, `decide`, `intro`, `apply`, `simp`,
-`have`, `instantiate`, `rewrite`, `split`, `left`, `right`, and `cases` operations; `simp` only
+`have`, `instantiate`, `rewrite`, `rewriteback`, `split`, `left`, `right`, and `cases` operations;
+`rewriteback` applies the selected equality in reverse, while `rewrite` uses its written direction.
+`simp` only
 folds checked closed constants, `instantiate` only admits a checked member of a finite integer
 range or literal collection, branch operations return independent child states, and a failed
 operation cannot mark a goal solved. The implementation is in
 `src/proof/tactics.elisa`, so AI or editor integrations can reuse the same state transitions
-instead of inventing proof facts from the JSON report. Each tactic state also retains its
+instead of inventing proof facts from the JSON report. Indexed rewrites retain the selected equality
+index in the trace, and both trace replay layers require that exact fact. Each tactic state also retains its
 initial facts/goal and a deterministic post-state trace with complete flat fact snapshots;
 `proof_tactic_replay` reconstructs that trace with the same kernel-backed operations and rejects
 any transition or final-state mismatch. `proof_tactic_kernel_trace_replay` independently lowers

@@ -58,7 +58,7 @@ extend ElisaProof:
             last: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
             match statement:
                 Ast::Stmt.Invalid:
-                    return last
+                    return ProofReplayTypeBoundSourceExtent{end_line: 4294967295, end_offset: 4294967295, offsets_complete: false}
                 Ast::Stmt.Expr(expression, position):
                     last <- proof_replay_type_bound_extent_from_position(position)
                     last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_expr_extent(expression, depth + 1))
@@ -99,6 +99,8 @@ extend ElisaProof:
                 Ast::Stmt.Contract(_, expression, position):
                     last <- proof_replay_type_bound_extent_from_position(position)
                     last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_expr_extent(expression, depth + 1))
+                _:
+                    return ProofReplayTypeBoundSourceExtent{end_line: 4294967295, end_offset: 4294967295, offsets_complete: false}
             return last
 
         def proof_replay_type_bound_stmts_extent(body: darray[Ast::Stmt]&, depth: usize) -> ProofReplayTypeBoundSourceExtent:
@@ -108,6 +110,24 @@ extend ElisaProof:
                 last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_stmt_extent(statement, depth + 1))
             return last
 
+        # The extent visitors below are deliberately simple tree folds. Preflight every body
+        # and report expression through the bounded source-use walker first, so wide child arrays
+        # cannot turn these folds into unbounded replay work. The impossible source-use query also
+        # makes an unknown AST constructor fail closed during the preflight.
+        def proof_replay_type_bound_extent_preflight(body: darray[Ast::Stmt]&, first: Ast::Expr, has_first: bool, second: Ast::Expr, has_second: bool) -> bool:
+            work: mutable usize = 0
+            dummy_use: Ast::Expr = Ast::Expr.Invalid
+            dummy_position: Ast::Pos = Ast::pos_at_line(0)
+            body_uses: usize = proof_replay_type_bound_index_use_body(body, "", dummy_use, 0, dummy_position, &work, 0)
+            return false if body_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            if has_first:
+                first_uses: usize = proof_replay_type_bound_index_use(first, "", dummy_use, 0, dummy_position, &work, 0)
+                return false if first_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            if has_second:
+                second_uses: usize = proof_replay_type_bound_index_use(second, "", dummy_use, 0, dummy_position, &work, 0)
+                return false if second_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return true
+
         # Composite node positions are often anchored at the opening token. Include every
         # child token and nested recovery statement, so same-line certificates can be ordered
         # against the initializer instead of treating a declaration line as atomic.
@@ -115,7 +135,9 @@ extend ElisaProof:
             return ProofReplayTypeBoundSourceExtent{end_line: 4294967295, end_offset: 4294967295, offsets_complete: false} if depth >= PROOF_REPLAY_TYPE_BOUND_AVAILABILITY_DEPTH_LIMIT
             last: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_from_position(Ast::expr_pos(expression))
             match expression:
-                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                Ast::Expr.Invalid:
+                    return ProofReplayTypeBoundSourceExtent{end_line: 4294967295, end_offset: 4294967295, offsets_complete: false}
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
                     pass
                 Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
                     last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_expr_extent(callee, depth + 1))
@@ -156,6 +178,8 @@ extend ElisaProof:
                 Ast::Expr.Block(body, value, _, _):
                     last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_stmts_extent(body, depth))
                     last <- proof_replay_type_bound_extent_merge(last, proof_replay_type_bound_expr_extent(value, depth + 1))
+                _:
+                    return ProofReplayTypeBoundSourceExtent{end_line: 4294967295, end_offset: 4294967295, offsets_complete: false}
             return last
 
         def proof_replay_type_bound_local_scalar_consumer_available(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&) -> bool:
@@ -163,6 +187,8 @@ extend ElisaProof:
             return false if report.trace_consumer_certificate_index > report.certificates.count or report.trace_owner_line == 0
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+            return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return false if not proof_replay_type_bound_extent_preflight(body, trace.expression, true, certificate.goal, true)
             source_matches: mutable usize = 0
             proof_replay_type_bound_consumer_source_site_in_body(body, certificate, &source_matches, 0)
             return false if source_matches != 1
@@ -204,6 +230,9 @@ extend ElisaProof:
             if has_consumer:
                 certificate: ProofGoalCertificate = report.certificates[certificate_index]
                 return false if certificate.name != trace_name or certificate.line != report.trace_owner_line
+                return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                consumer_goal <- certificate.goal
+                return false if not proof_replay_type_bound_extent_preflight(body, Ast::Expr.Absent, false, consumer_goal, true)
                 source_matches: mutable usize = 0
                 proof_replay_type_bound_consumer_source_site_in_body(body, certificate, &source_matches, 0)
                 return false if source_matches != 1
@@ -215,7 +244,8 @@ extend ElisaProof:
                     return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
                     attempt_matches <- attempt_matches + 1
                 return false if attempt_matches != 1
-                consumer_goal <- certificate.goal
+            else:
+                return false if not proof_replay_type_bound_extent_preflight(body, Ast::Expr.Absent, false, consumer_goal, false)
             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
             declarations: mutable usize = 0
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()

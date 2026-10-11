@@ -73,7 +73,8 @@ extend ElisaProof:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
                     return true
                 Ast::Expr.ShorthandMember(parts, _):
-                    return parts.count == 1 and parts[0] != ""
+                    return false if parts.count != 1 or parts[0] == ""
+                    return true
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
                     return proof_replay_control_match_guard_keeps_expression_facts(report, inner, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
@@ -126,10 +127,18 @@ extend ElisaProof:
                 return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 work <- work + 1
                 match declaration:
+                    Ast::Decl.Func(_, parameters, _, _, _, _, _):
+                        for _ in parameters |work, depth|:
+                            return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                            work <- work + 1
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_control_match_guard_charge_declarations(nested, work, depth + 1)
-                    _:
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
             return true
 
         def proof_replay_control_match_guard_function_collect(declarations: darray[Ast::Decl]&, name: sview, selected: mutable Ast::Decl&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
@@ -142,10 +151,17 @@ extend ElisaProof:
                         if found_name == name:
                             matches <- matches + 1
                             selected <- declaration
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                    Ast::Decl.Const(found_name, _, _, _, _) | Ast::Decl.Extern(found_name, _, _, _, _, _, _, _) | Ast::Decl.Struct(found_name, _, _, _, _, _, _) | Ast::Decl.Enum(found_name, _, _, _, _) | Ast::Decl.Alias(found_name, _, _) | Ast::Decl.Law(found_name, _, _):
+                        matches <- matches + 1 if found_name == name
+                    Ast::Decl.Module(module_name, nested, _):
+                        matches <- matches + 1 if module_name == name
                         return false if not proof_replay_control_match_guard_function_collect(nested, name, selected, matches, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_control_match_guard_function_collect(nested, name, selected, matches, work, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return false
                     _:
-                        pass
+                        return false
             return true
 
         def proof_replay_control_match_guard_scalar_type(expression: Ast::Expr) -> bool:
@@ -184,18 +200,14 @@ extend ElisaProof:
                 _:
                     return false
 
-        # Only simple predicate bodies are admitted here. The narrow body shape lets replay
+        # Only simple scalar-return bodies are admitted here. The narrow body shape lets replay
         # prove purity directly with the same shared budget, without trusting checker summary
         # bits or invoking an unbounded call-graph walk.
         def proof_replay_control_match_guard_pure_function(report: ProofReport&, name: sview, argument_count: usize, declaration: Ast::Decl, work: mutable usize&) -> bool:
             match declaration:
                 Ast::Decl.Func(found_name, parameters, return_type, body, effects, _, _):
                     return false if found_name != name or effects.count != 0 or parameters.count != argument_count or parameters.count > 64 or body.count != 1
-                    match return_type:
-                        Ast::Expr.Ident("bool", _):
-                            pass
-                        _:
-                            return false
+                    return false if not proof_replay_control_match_guard_scalar_type(return_type)
                     for parameter_index in 0..<parameters.count |parameter_index, parameters, work|:
                         return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                         work <- work + 1
@@ -215,7 +227,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_control_match_guard_call_is_pure(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> bool:
+        def proof_replay_control_match_guard_call_is_pure(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&, owner_source_work: usize) -> bool:
             return false if trace.name == "" or report.replay_owner_line == 0
             return false if report.source_annotations.count > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
             work <- work + report.source_annotations.count
@@ -232,52 +244,78 @@ extend ElisaProof:
                     return false if not proof_replay_control_match_guard_charge_declarations(report.source_declarations, work, 0)
                     return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
                     return false if not proof_replay_control_match_guard_charge_declarations(report.source_declarations, work, 0)
-                    # Owner source was fully counted before branch matching. Charge that
-                    # upper bound once more for the shadow scan's body traversal.
-                    return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
-                    work <- work + work
+                    return false if owner_source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+                    work <- work + owner_source_work
                     return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, name)
                     return true
                 _:
                     return false
 
-        def proof_replay_control_match_guard_stable_expression(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, call_sites: mutable usize&, depth: usize) -> bool:
+        # Resolve and copy the owner body in the same bounded declaration walk. Imports remain
+        # valid for source-local branch facts; pure helper name resolution applies its own stricter
+        # import checks only when a guard contains a call.
+        def proof_replay_control_find_owner_body(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if owner == "" or owner_line == 0 or owner_line == 4294967295 or depth >= 64
+            for declaration in declarations |owner, owner_line, body, matches, work, depth|:
+                return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, function_body, _, _, position):
+                        if name == owner and position.line == owner_line:
+                            matches <- matches + 1
+                            return false if matches != 1 or function_body.count > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+                            work <- work + function_body.count
+                            body.extend(function_body)
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_control_find_owner_body(nested, owner, owner_line, body, matches, work, depth + 1)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
+
+        def proof_replay_control_match_guard_stable_expression(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, depth: usize) -> bool:
             return false if depth >= 64 or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match expression:
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Ident(name, _):
-                    for pass in 0..<6 |pass, report, work|:
+                    # Stable-identifier validation performs at most three declaration walks:
+                    # global-constant lookup plus parameter/shadow checks, or owner lookup plus
+                    # integer and Boolean parameter checks. Charge those walks here; the owner
+                    # body scan is charged separately through owner_source_work below.
+                    for charge_index in 0..<3 |charge_index, report, work|:
                         return false if not proof_replay_control_match_guard_charge_declarations(report.source_declarations, work, 0)
-                    return false if work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
-                    work <- work + work
+                    return false if owner_source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - work
+                    work <- work + owner_source_work
                     return proof_replay_control_stable_identifier(report, trace, name)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_control_match_guard_stable_expression(report, trace, inner, work, call_sites, depth + 1)
+                    return proof_replay_control_match_guard_stable_expression(report, trace, inner, work, owner_source_work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator != TokenKind.Not and operator != TokenKind.Minus
                     protocol: sview = proof_builtin_unary_operator_protocol(operator)
                     return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source_primitive_operator_mask, protocol)
-                    return proof_replay_control_match_guard_stable_expression(report, trace, inner, work, call_sites, depth + 1)
+                    return proof_replay_control_match_guard_stable_expression(report, trace, inner, work, owner_source_work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
                     protocol: sview = proof_builtin_operator_protocol(operator)
                     return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source_primitive_operator_mask, protocol)
-                    return false if not proof_replay_control_match_guard_stable_expression(report, trace, left, work, call_sites, depth + 1)
-                    return proof_replay_control_match_guard_stable_expression(report, trace, right, work, call_sites, depth + 1)
+                    return false if not proof_replay_control_match_guard_stable_expression(report, trace, left, work, owner_source_work, depth + 1)
+                    return proof_replay_control_match_guard_stable_expression(report, trace, right, work, owner_source_work, depth + 1)
                 Ast::Expr.Call(_, arguments, _, _):
-                    call_sites <- call_sites + 1
-                    return false if call_sites > 1 or not proof_replay_control_match_guard_call_is_pure(report, trace, expression, work)
-                    for argument in arguments |report, trace, work, call_sites, depth|:
-                        return false if not proof_replay_control_match_guard_stable_expression(report, trace, argument, work, call_sites, depth + 1)
+                    return false if not proof_replay_control_match_guard_call_is_pure(report, trace, expression, work, owner_source_work)
+                    for argument in arguments |report, trace, work, owner_source_work, depth|:
+                        return false if not proof_replay_control_match_guard_stable_expression(report, trace, argument, work, owner_source_work, depth + 1)
                     return true
                 _:
                     return false
 
-        def proof_replay_control_match_arm_fact(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, scrutinee: Ast::Expr, arms: darray[Ast::MatchArm], match_position: Ast::Pos, stop_refutations_after_nonretaining_prior: bool, matches: mutable usize&, work: mutable usize&) -> bool:
+        def proof_replay_control_match_arm_fact(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, scrutinee: Ast::Expr, arms: darray[Ast::MatchArm], match_position: Ast::Pos, stop_refutations_after_nonretaining_prior: bool, owner_source_work: usize, matches: mutable usize&, work: mutable usize&) -> bool:
             return true if match_position.line != trace.line
-            for arm_index in 0..<arms.count |arm_index, report, trace, certificate, scrutinee, arms, match_position, stop_refutations_after_nonretaining_prior, matches, work|:
+            for arm_index in 0..<arms.count |arm_index, report, trace, certificate, scrutinee, arms, match_position, stop_refutations_after_nonretaining_prior, owner_source_work, matches, work|:
                 return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 work <- work + 1
                 arm: Ast::MatchArm = arms[arm_index]
@@ -291,7 +329,7 @@ extend ElisaProof:
                     matches <- matches + 1 if scope_matches == 1
                 # Earlier unguarded patterns refute later arms only while intervening guards
                 # leave the match fact state intact.
-                refutations_available: bool = guard_keeps_facts
+                refutations_available: mutable bool = guard_keeps_facts
                 if refutations_available and stop_refutations_after_nonretaining_prior:
                     for prior_index in 0..<arm_index |prior_index, report, trace, certificate, arms, matches, refutations_available, work|:
                         return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
@@ -318,99 +356,98 @@ extend ElisaProof:
                 if not guard_absent and proof_replay_control_expr_source_equal(trace.expression, arm.guard):
                     # Match the exact source guard before validating any calls. That keeps the
                     # declaration and shadow walk off unrelated arms in the owner's body.
-                    call_sites: mutable usize = 0
-                    if proof_replay_control_match_guard_stable_expression(report, trace, arm.guard, work, &call_sites, 0):
+                    if proof_replay_control_match_guard_stable_expression(report, trace, arm.guard, work, owner_source_work, 0):
                         scope_matches: mutable usize = 0
                         return false if not proof_replay_control_assertion_scan(arm.body, certificate, 0, &work, &scope_matches)
                         matches <- matches + 1 if scope_matches == 1
             return true
 
-        def proof_replay_control_match_expr_facts(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, expression: Ast::Expr, matches: mutable usize&, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_control_match_expr_facts(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, owner_source_work: usize, expression: Ast::Expr, matches: mutable usize&, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= 64 or work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             work <- work + 1
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Lambda(_, _, _):
                     pass
                 Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, callee, matches, depth + 1, work)
-                    for argument in arguments |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, argument, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, callee, matches, depth + 1, work)
+                    for argument in arguments |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, argument, matches, depth + 1, work)
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
-                    return proof_replay_control_match_expr_facts(report, trace, certificate, object, matches, depth + 1, work)
+                    return proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, object, matches, depth + 1, work)
                 Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _) | Ast::Expr.Refinement(object, index, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, object, matches, depth + 1, work)
-                    return proof_replay_control_match_expr_facts(report, trace, certificate, index, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, object, matches, depth + 1, work)
+                    return proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, index, matches, depth + 1, work)
                 Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, object, matches, depth + 1, work)
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, low, matches, depth + 1, work)
-                    return proof_replay_control_match_expr_facts(report, trace, certificate, high, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, object, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, low, matches, depth + 1, work)
+                    return proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, high, matches, depth + 1, work)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, object, matches, depth + 1, work)
-                    for argument in arguments |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, argument, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, object, matches, depth + 1, work)
+                    for argument in arguments |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, argument, matches, depth + 1, work)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, element, matches, depth + 1, work)
+                    for element in elements |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, element, matches, depth + 1, work)
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, entry.key, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, entry.value, matches, depth + 1, work)
+                    for entry in entries |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, entry.key, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, entry.value, matches, depth + 1, work)
                 Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, base, matches, depth + 1, work)
-                    for field in fields |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, field.value, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, base, matches, depth + 1, work)
+                    for field in fields |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, field.value, matches, depth + 1, work)
                 Ast::Expr.Match(subject, arms, position):
-                    return false if not proof_replay_control_match_arm_fact(report, trace, certificate, subject, arms, position, true, matches, work)
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, subject, matches, depth + 1, work)
-                    for arm in arms |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, arm.guard, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, arm.body, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_arm_fact(report, trace, certificate, subject, arms, position, true, owner_source_work, matches, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, subject, matches, depth + 1, work)
+                    for arm in arms |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, arm.guard, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, arm.body, matches, depth + 1, work)
                 Ast::Expr.Catch(subject, arms, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, subject, matches, depth + 1, work)
-                    for arm in arms |report, trace, certificate, depth, work, matches|:
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, arm.guard, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, arm.body, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, subject, matches, depth + 1, work)
+                    for arm in arms |report, trace, certificate, owner_source_work, depth, work, matches|:
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, arm.guard, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, arm.body, matches, depth + 1, work)
                 Ast::Expr.Comprehension(_, iterable, condition, value, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, iterable, matches, depth + 1, work)
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, condition, matches, depth + 1, work)
-                    return proof_replay_control_match_expr_facts(report, trace, certificate, value, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, iterable, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, condition, matches, depth + 1, work)
+                    return proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, value, matches, depth + 1, work)
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, guarded, matches, depth + 1, work)
-                    return proof_replay_control_match_facts(report, trace, certificate, recovery, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, guarded, matches, depth + 1, work)
+                    return proof_replay_control_match_facts(report, trace, certificate, owner_source_work, recovery, matches, depth + 1, work)
                 Ast::Expr.Block(statements, value, _, _):
-                    return false if not proof_replay_control_match_facts(report, trace, certificate, statements, matches, depth + 1, work)
-                    return proof_replay_control_match_expr_facts(report, trace, certificate, value, matches, depth + 1, work)
+                    return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, statements, matches, depth + 1, work)
+                    return proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, value, matches, depth + 1, work)
             return false
 
-        def proof_replay_control_match_facts(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, matches: mutable usize&, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_control_match_facts(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, owner_source_work: usize, body: darray[Ast::Stmt]&, matches: mutable usize&, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= 64
-            for statement in body |report, trace, certificate, body, matches, depth, work|:
+            for statement in body |report, trace, certificate, body, matches, owner_source_work, depth, work|:
                 return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
                 work <- work + 1
                 match statement:
                     Ast::Stmt.Match(scrutinee, arms, position):
-                        return false if not proof_replay_control_match_arm_fact(report, trace, certificate, scrutinee, arms, position, true, matches, work)
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, scrutinee, matches, depth + 1, work)
-                        for arm in arms |report, trace, certificate, matches, depth, work|:
-                            return false if not proof_replay_control_match_expr_facts(report, trace, certificate, arm.guard, matches, depth + 1, work)
-                            return false if not proof_replay_control_match_facts(report, trace, certificate, arm.body, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_arm_fact(report, trace, certificate, scrutinee, arms, position, true, owner_source_work, matches, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, scrutinee, matches, depth + 1, work)
+                        for arm in arms |report, trace, certificate, matches, owner_source_work, depth, work|:
+                            return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, arm.guard, matches, depth + 1, work)
+                            return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, arm.body, matches, depth + 1, work)
                     Ast::Stmt.If(condition, yes, no, _):
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, condition, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, yes, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, no, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, condition, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, yes, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, no, matches, depth + 1, work)
                     Ast::Stmt.While(condition, inner, _):
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, condition, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, inner, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, condition, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, inner, matches, depth + 1, work)
                     Ast::Stmt.For(_, _, iterable, inner, _):
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, iterable, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, inner, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, iterable, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, inner, matches, depth + 1, work)
                     Ast::Stmt.Block(_, _, _, inner, _):
-                        return false if not proof_replay_control_match_facts(report, trace, certificate, inner, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, inner, matches, depth + 1, work)
                     Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.VarDecl(_, _, expression, _) | Ast::Stmt.Contract(_, expression, _):
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, expression, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, expression, matches, depth + 1, work)
                     Ast::Stmt.Assign(target, _, value, _):
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, target, matches, depth + 1, work)
-                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, value, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, target, matches, depth + 1, work)
+                        return false if not proof_replay_control_match_expr_facts(report, trace, certificate, owner_source_work, value, matches, depth + 1, work)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
@@ -422,10 +459,13 @@ extend ElisaProof:
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             body: mutable darray[Ast::Stmt] = []
-            return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
-            matches: mutable usize = 0
             work: mutable usize = 0
+            owner_matches: mutable usize = 0
+            return false if not proof_replay_control_find_owner_body(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, &work, 0) or owner_matches != 1
+            matches: mutable usize = 0
+            declaration_work: usize = work
             return false if not proof_replay_control_assertion_unique_in_owner(report, body, certificate, &work)
+            owner_source_work: usize = work - declaration_work
             return false if not proof_replay_control_if_facts(report, trace, certificate, body, &matches, 0, &work)
-            return false if not proof_replay_control_match_facts(report, trace, certificate, body, &matches, 0, &work)
+            return false if not proof_replay_control_match_facts(report, trace, certificate, owner_source_work, body, &matches, 0, &work)
             matches == 1
