@@ -9586,3 +9586,41 @@ are checked out, and all five remaining branch refs without a worktree have uniq
 `git worktree prune --dry-run` reports no stale registrations. Keep those active, dirty, baseline,
 or uniquely committed checkouts. The proof repository itself remains one `main` branch and one
 worktree.
+
+### 23.27.97 Local consolidation and replay gate status (2026-10-11)
+
+Compiler `main` is at `01ddacf789aff79e6a73fa99a52b05ab49a7bc71` and matches
+`origin/main`. It now contains the published parameter-growth index, the bounded incremental-cache
+report-string fix, and the explicit Global grants required by the index. Fresh Stage1 provenance,
+the seven-case callee-field-growth smoke, and the incremental-cache cold/warm, revalidation,
+invalidation, generated-input, and corruption controls pass. The published-index candidate's
+24-check baseline/candidate correctness gate also passes. No timing run was collected, so the index
+is qualified for correctness only; it has no measured speedup claim.
+
+Proof `main` remains at `62a4cf55698fde30b2d01f49e92d47f37d148731`, four commits ahead of its
+remote-tracking branch. Its working-tree pin is being updated to the exact compiler revision above.
+The strict proof build and the mutable-global grant matrix pass against that Stage1 product. The
+direct API harness now resolves nested replay includes and omits the three runtime modules that
+Stage1 injects automatically. It compiles, but execution still fails at return 229 while replaying
+the source for a local fixed-array type-bound trace. The source validator rejects that trace too,
+so the direct API/replay gate is not yet green. The assert-by inventory check was corrected from one
+entry to two because its fixture contains both an outer Boolean target and a Boolean `assert` proof
+step; the remaining coverage and replay checks stay enabled. A test helper also now makes its
+operation-local Global grant explicit.
+
+Keep the proof pin and harness adjustments uncommitted until the return-229 provenance failure is
+explained and the full direct API gate passes. The immediate high-ROI order is: diagnose and fix the
+local fixed-array source-replay admission without weakening source or kernel checks; rerun the exact
+Stage1 proof, Global grant, and direct API gates; then commit the proof pin and test fixes together.
+After that, re-audit the outstanding `8d7cfca` backend/region-owner change and the pending
+`query_head_for` / `const_scope_owner` region annotations against current compiler `main` before
+integrating them. Resume performance comparisons only with an approved Linux benchmark host and
+seed-matched Stage1 products.
+
+The compiler cleanup removed two duplicate temporary seed worktrees, a second clean checkout at
+the retained `37a322e7` scoped-type baseline, and an obsolete generated Stage1 checkout. The current
+inventory is 63 local branches and 92 worktrees: 46 dirty, 46 clean, with seven clean checkouts
+already contained in `main` including the main worktree. Six clean non-main checkouts remain as
+distinct parser, annotation, scoped-type, or toolchain baselines. Dirty checkouts and the active
+published-index candidate are preserved; its `9cc40491` commit has the same patch ID as the merged
+`a84ba3ea` change, but its active task lane has not yet been released for removal.
