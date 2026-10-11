@@ -42,6 +42,10 @@ invalid += (
     "module SharedState:\n    public:\n        global mutable api_counter: i64 = 0\ndef checked() -> i64:\n    return SharedState::api_counter\n",
     "module SharedState:\n    public:\n        global mutable api_counter: i64 = 0\ndef checked() -> void:\n    SharedState::api_counter <- 1\n",
 )
+invalid += (
+    "struct GlobalApiRecord:\n    value: mutable i64\nglobal mutable api_record: GlobalApiRecord = GlobalApiRecord{value: 0}\ndef checked() -> i64:\n    return api_record.value\n",
+    "struct GlobalApiRecord:\n    value: mutable i64\nglobal mutable api_record: GlobalApiRecord = GlobalApiRecord{value: 0}\ndef checked() -> void can[Global.Read]:\n    can Global{Read}:\n        api_record.value <- 1\n",
+)
 global_grant_expectations = (
     ("Global.Read", "api_counter"),
     ("Global.Write", "api_counter"),
@@ -55,14 +59,18 @@ global_grant_expectations = (
     ("Global.Write", "api_values"),
     ("Global.Read", "api_counter"),
     ("Global.Write", "api_counter"),
+    ("Global.Read", "api_record"),
+    ("Global.Write", "api_record"),
 )
-assert len(invalid) == 19 and len(global_grant_expectations) == len(invalid) - 7
+assert len(invalid) == 21 and len(global_grant_expectations) == len(invalid) - 7
 constants = "const VALID_API_SOURCE: sview = " + json.dumps(valid) + "\n"
 constants += "const REFINEMENT_API_SOURCE: sview = " + json.dumps('type Positive = i64 where self >= 0\ndef checked(value: Positive) -> i64:\n    ensure result >= 0\n    return value\n') + "\n"
 constants += "const MUTUAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/mutual_structural_decreases.elisa").read_text().replace("structural_even", "checked")) + "\n"
 constants += "const UNKNOWN_API_SOURCE: sview = " + json.dumps("def checked(value: bool) -> bool:\n    ensure result == true\n    value\n") + "\n"
 constants += "const GLOBAL_READ_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        return api_counter\n") + "\n"
 constants += "const GLOBAL_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        api_counter <- 1\n") + "\n"
+constants += "const GLOBAL_RECORD_READ_API_SOURCE: sview = " + json.dumps("struct GlobalApiRecord:\n    value: mutable i64\nglobal mutable api_record: GlobalApiRecord = GlobalApiRecord{value: 0}\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        return api_record.value\n") + "\n"
+constants += "const GLOBAL_RECORD_WRITE_API_SOURCE: sview = " + json.dumps("struct GlobalApiRecord:\n    value: mutable i64\nglobal mutable api_record: GlobalApiRecord = GlobalApiRecord{value: 0}\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        api_record.value <- 1\n") + "\n"
 constants += "const GLOBAL_INDEXED_READ_API_SOURCE: sview = " + json.dumps("global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> i64 can[Global.Read]:\n    requires index < 1\n    can Global{Read}:\n        return api_values[index]\n") + "\n"
 constants += "const GLOBAL_INDEXED_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_values: i64[1] = [0]\ndef checked(index: usize) -> void can[Global.Write]:\n    requires index < 1\n    can Global{Write}:\n        api_values[index] <- 1\n") + "\n"
 constants += "const GLOBAL_MUTABLE_REFERENCE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read, Global.Write]:\n    can Global{Read,Write}:\n        borrowed: mutable i64& = &api_counter\n        return borrowed.i64()\n") + "\n"
@@ -83,9 +91,9 @@ constants += "const LOCAL_SCALAR_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("
 constants += "const FIXED_ARRAY_NO_BOUND_API_SOURCE: sview = " + json.dumps("def checked(values: i64[1], index: usize) -> i64:\n    return values[index]\n") + "\n"
 constants += "const DYNAMIC_ARRAY_GUARD_API_SOURCE: sview = " + json.dumps("def checked(values: darray[i64]&, index: usize) -> i64:\n    requires index >= 0\n    if index >= values.count:\n        return 0\n    return values[index]\n") + "\n"
 constants += "const DYNAMIC_ARRAY_SHADOWED_GUARD_API_SOURCE: sview = " + json.dumps("def checked(values: darray[i64]&, index: usize) -> i64:\n    requires index >= 0\n    values: darray[i64] = [7]\n    if index >= values.count:\n        return 0\n    return values[index]\n") + "\n"
-constants += "const INVALID_API_SOURCES: sview[19] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
-constants += "const INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS: sview[12] = [" + ", ".join(map(json.dumps, (effect for effect, _ in global_grant_expectations))) + "]\n"
-constants += "const INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS: sview[12] = [" + ", ".join(map(json.dumps, (global_name for _, global_name in global_grant_expectations))) + "]\n"
+constants += "const INVALID_API_SOURCES: sview[21] = [" + ", ".join(map(json.dumps, invalid)) + "]\n"
+constants += "const INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS: sview[14] = [" + ", ".join(map(json.dumps, (effect for effect, _ in global_grant_expectations))) + "]\n"
+constants += "const INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS: sview[14] = [" + ", ".join(map(json.dumps, (global_name for _, global_name in global_grant_expectations))) + "]\n"
 harness = prefix + constants + r'''
 def api_probe(text: sview, source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize) -> void can Memory.Allocate, Abort.Panic:
     source.clear()
@@ -257,7 +265,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             return 250 if report.replayed != 0
             (proof_replay_certificates(&report) can Global{Read,Write})
             return 251 if proof_report_source_admission_invariants_consistent(report)
-        for index in 0..<19 |index, route, source, report, diagnostics|:
+        for index in 0..<21 |index, route, source, report, diagnostics|:
             (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 170 if report.certificates.count == 0 or report.proven == 0
             (api_probe(INVALID_API_SOURCES[index], &source, &report, &diagnostics, route) can Global{Read,Write})
@@ -276,6 +284,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 195 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_RECORD_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 221 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
+        (api_probe(GLOBAL_RECORD_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 222 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_QUALIFIED_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 214 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0 or (route != 0 and any diagnostic in diagnostics where Semantic::diagnostic_severity(diagnostic) == 1)
         (api_probe(GLOBAL_QUALIFIED_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})

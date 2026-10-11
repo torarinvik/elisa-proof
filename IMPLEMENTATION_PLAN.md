@@ -9410,12 +9410,15 @@ enforcement.
 
 ### 23.27.95 Consolidated proof mainline and pending record-field grant controls (2026-10-10)
 
-Proof `main` is now `c28e6796`, 340 commits ahead of `origin/main`. The audited proof/replay,
+Proof `main` is now `83b166a8`, 343 commits ahead of `origin/main`. The audited proof/replay,
 source-binding, loop-certificate, denial, global-grant, and report-storage gains are represented on
 this branch. The performance corpus manifest now points at an available source revision; its 13
 identity tests pass. The only registered checkout and local branch are the proof `main` worktree and
 branch. Five obsolete worktrees and fourteen stale local branches were removed after their clean
 state was confirmed; sixteen named Git stashes still preserve their prior uncommitted snapshots.
+The latest kernel inventory audit now follows the replay facade's actual include closure, resolves
+bare and module-qualified helper calls, and records all nine kernel member operations; its five
+unit tests pass and the inventory reports 11 tables / 237 entries.
 No remote branch was changed.
 
 The proof pin and adjacent clean compiler `main` both identify Elisa Stage1 `a84089fd`.
@@ -9451,13 +9454,47 @@ source-obligation completeness and an exact-current performance baseline; the pr
 performance and kernel-reliability objective remains open.
 
 The adjacent compiler repository is a separate integration queue. Its `main` remains at
-`a84089fd`; after removing two clean branches whose commits were all patch-equivalent to `main`, it
-has 70 local branches and 87 worktrees, 35 of them dirty. The active authority qualification branch
-is clean at `997a617e` and 21 commits ahead of compiler `main`; the offered `8d7cfca` rename fix is
-superseded there, while its smoke repair remains a separate possible regression test. Review the
-branch's other unique changes before cleanup. Preserve dirty worktrees and active task checkouts;
-prune only clean worktrees whose commits are already represented on the target branch. The proof
-checkout itself remains consolidated to one `main` branch and one worktree.
+`a84089fd`. Two patch-equivalent branches and the unattached `codex/param-growth-carry-index` ref
+(retained by `codex/param-growth-index-reserve`) were removed. The latest audit counts 69 local
+branches and 84 worktrees: 40 dirty, 37 clean at commits outside `main`, and 7 clean at commits
+already in `main`. The already-merged `codex/enum-rank-scan` ref was removed;
+`git worktree prune --dry-run` reports no stale registrations. Preserve dirty
+worktrees and active task checkouts; remove only independently confirmed redundant branches or
+checkouts.
+
+The clean `codex/authority-replay-integration` branch remains at `997a617e`, 21 commits ahead of
+compiler `main`. Its correctness gates and 11-workload resource/output-parity probe pass; its
+timing against `main` is still open. The clean
+`codex/incremental-module-identity` branch is at `6ae734d6`, 33 commits ahead of `main` and 12
+beyond the authority branch. Its exact-head O0/O2 controls and strict O3 Stage1-to-Stage1
+self-host/product/runtime provenance checks pass. A completed 9-pair check/object comparison against
+`997a617e` found no full compiler-source speedup: module-identity median ratios were 0.9960 CPU /
+0.9973 wall for frontend check and 1.0029 CPU / 1.0010 wall for object emission. The synthetic
+include stress cases showed small workload-specific check improvements, but those are not general
+compiler evidence. Keep the module candidate as correctness groundwork rather than count it as a
+performance gain.
+`codex/partition-object-cache` is a combined 37-commit candidate at `fbf821dd`; it contains those
+changes plus stable object-partition caching and needs its own correctness and performance evidence.
+Do not integrate these candidates until their measured effects and qualification status are clear.
+The offered `8d7cfca` rename fix is superseded in the authority candidate; its owner-lookup smoke
+repair remains a separate regression possibility.
+
+The offline module-throughput harness had a workload-name shadowing bug that collapsed its two
+synthetic include graphs into one directory; it was fixed before any measurement. Its completed
+`module-throughput-6ae-r2/summary.json` pins both compiler heads, all 971 compiler-source files and
+20.1 MB of source, exact diagnostics and validated object parity across 144 measured trials, and
+stable input/product/provenance hashes. The compiler-source result is effectively flat; no performance
+claim is supported. The proof checkout itself remains consolidated to one `main` branch and one
+worktree.
+
+A second compiler candidate, `codex/incremental-module-identity`, now points to `6ae734d6`, 33
+commits ahead of compiler `main` and 12 commits beyond authority candidate `997a617e`. Its retained
+`build/module-identity-6ae734d6-runtime-corrected-evidence/summary.json` pins that exact head and
+reports PASS at O0/O2 with body, transitive, deletion, and cycle controls; input hashes are unchanged.
+Its `build/module-identity-qualification/summary.json` also records a strict O3 Stage1-to-Stage1
+full compiler build and own-root product/runtime validation PASS for that head. This establishes
+correctness and provenance, not a throughput gain. Keep it separate until candidate-specific timing
+is complete.
 
 The kernel-boundary inventory now follows the actual include closure of `kernel_replay.elisa` and
 checks every bare and module-qualified helper call against its defining kernel module. The previous
@@ -9467,3 +9504,69 @@ rejection, member-call detection, and comment/string/operator false positives; t
 11-table/237-entry inventory pass. The nine observed member operations are now explicitly listed as
 compiler/runtime primitives. This is a stronger static dependency guard, not a substitute for
 independently checking kernel semantics or replaying source-level proofs.
+
+### 23.27.96 Compiler mainline qualification and proof-build blocker (2026-10-11)
+
+The adjacent compiler `main` now contains the qualified mutable-global effect-closure worklist,
+inactive-span telemetry guards, Stage1 bootstrap checks, and a compiler regression for mutable record
+field grants. Its current local head is `d938bdad62a93cccee0151486445fe6a669959ef`, six commits
+beyond the recorded `a84089fd` baseline. The fresh Stage1 product passes its own-root provenance
+check; product SHA-256 is
+`d826cf21fd9ee76c855432ade362206d645d54f44492abc8376271a744d512dd`, with runtime SHA-256
+`e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`. The 34-case global-permission
+smoke passes Stage0/Stage1 parity for deep chains and cycles, plus accepted and rejected mutable
+record-field reads/writes. The candidate reduces authority edge visits from 16,384 to 640 at N=128
+(256 worklist visits) and from 65,536 to 1,280 at N=256 (512 worklist visits). Telemetry-only
+counters are disabled outside the measured span.
+
+Three full-source paired runs were output/hash-parity clean and measured −2.67% median wall / −4.80%
+CPU for `-emit check`, and −4.41% wall / −6.02% CPU for O0 object emission. The comparison used
+baseline Stage1 SHA `35dd969dd436d8b89ae4f8d7ab8afeeec4ed6aad36e5506f228a2a1e00de22f9` (10,100,184
+bytes) and candidate Stage1 SHA
+`7343dc18f47d029537f16e0e3c3dadb470311ddd3a5dbaafb2bdfd639c288436` (8,471,512 bytes), both with
+runtime SHA `e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`. Their build recipes
+differ and their provenance does not identify the bootstrap compiler. Both products also reached the
+fixed point in two fast scans, with zero queue visits on the full compiler, so this run does not
+establish that the worklist caused those deltas. A bounded N=128/N=256 Global-chain screen did enter
+the queue and passed all
+24 compile/link harness checks. Across three timed pairs, the candidate product arm was −7.5% wall /
+−4.5% CPU at N=128 and −8.2% wall / −10.6% CPU at N=256 against its baseline arm. Its median wall
+times were 24.76 ms and 30.35 ms; corresponding Rust times were 1,026.41 ms and 1,028.22 ms, while
+Zig Debug was 23–34× slower on these fixtures. These are scoped product-arm results, not general
+language comparisons.
+
+The record-aggregate N=128/N=256 and generic-instantiation N=128/N=256 sets completed 32 warmups
+and 48 measured builds; every object passed the common C harness. Candidate product-arm medians beat
+baseline by 8.3–13.9% wall and 11–24% CPU, and Rust by 1.29–1.42×. Those fixtures contain no mutable
+global accesses, so these gains cannot be attributed to the worklist. Repeat the source and
+cross-language comparisons with baseline and candidate products built from the same Stage1 seed
+before making a causal or broad performance claim.
+
+`ELISA_COMPILER_REV` now points at that exact local compiler head. The proof record-field grant
+fixtures use Elisa brace construction and cover accepted field reads/writes plus the two missing-grant
+cases. Python syntax and `git diff --check` pass. The proof build remains blocked: the
+last complete build attempts against compiler main `b9f16f53` and the independently qualified
+module-identity candidate `6ae734d6` each produced 227 compile diagnostics. They expose source
+integration drift already present in proof `main`, including duplicate `CorrFunction` fields,
+missing or out-of-order checker/replay declarations, stale call signatures, correspondence API
+mismatches, and missing Global.Read/Write grants. The captured set groups into 108 undefined
+identifiers, 37 missing Global grants, 16 struct-shape mismatches, 15 unknown types, 11 stale call
+signatures, and four duplicate declarations/fields; many follow-on type errors are cascades. The
+module-identity candidate produced the same
+failure profile and its full-source timing was effectively flat, so it does not resolve this blocker
+or qualify as a general performance improvement. The latest proof-side tests cannot run until the
+independent source-integration errors are repaired; keep that as the next mainline reliability task.
+
+This blocker moves ahead of additional proof features in the high-ROI queue: first restore a clean
+strict build of the current proof mainline and close its diagnostics without weakening kernel or
+Global.Read/Write checks; then run the record-field grant controls and direct API/replay gates against
+the exact pinned compiler; only then resume broad corpus/performance work. The compiler's corrected
+worklist timing and any later compiler candidates remain separate evidence.
+
+The cleanup audit found no further safe compiler branch/worktree deletion. Compiler `main` has 69
+local branches and 85 worktrees: 40 dirty and 45 clean; seven clean worktrees are at commits already
+contained in `main`, while the remaining clean worktrees preserve baselines or unique work. All five
+already-contained non-main branch refs are checked out, and all eleven branch refs without a
+worktree have unique commits. `git worktree prune --dry-run` reports no stale registrations. Keep
+those active, dirty, baseline, or uniquely committed checkouts. The proof repository itself remains
+one `main` branch and one worktree.

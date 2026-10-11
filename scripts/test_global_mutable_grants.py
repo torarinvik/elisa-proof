@@ -87,11 +87,13 @@ for route in ("function", "module"):
                  "local_shadow", "block_shadow_then_global", "forward_read", "inferred_read",
                  "indexed_read", "indexed_write", "indexed_parameter_shadow", "indexed_local_shadow",
                  "indexed_write_reads_mutable_global_index",
-                 "mutable_reference_acquisition"):
+                 "mutable_reference_acquisition", "read_record_field", "write_record_field"):
         code, report = run("global_mutable_grants.elisa", name, route)
-        if name in ("indexed_write_reads_mutable_global_index", "mutable_reference_acquisition"):
+        if name in ("indexed_write_reads_mutable_global_index", "mutable_reference_acquisition",
+                    "read_record_field", "write_record_field"):
             # This control isolates semantic grants even if the independent proof checker cannot
-            # yet close dynamic-index safety or model a mutable borrow of global storage.
+            # yet close dynamic-index safety, model a mutable borrow of global storage, or
+            # authenticate a source-backed global record field place.
             assert report["summary"]["semantic_errors"] == 0, context(route, name, report)
             continue
         assert code == 0 and report["status"] == "proved", context(route, name, report)
@@ -116,7 +118,8 @@ for route in ("function", "module"):
                  "indexed_target_missing_root_write", "mutable_reference_read_only",
                  "mutable_reference_write_only", "qualified_global_missing_read",
                  "qualified_global_missing_write", "qualified_global_write_only_read",
-                 "qualified_global_read_only_write"):
+                 "qualified_global_read_only_write", "record_field_write_only_read",
+                 "record_field_read_only_write"):
         module_qualified = name.startswith("qualified_global_")
         fixture = "global_mutable_grants_module.elisa" if module_qualified else "rejected_global_mutable_grants.elisa"
         code, report = run(fixture, name, route)
@@ -141,6 +144,8 @@ for route in ("function", "module"):
             "indexed_target_missing_root_write": ("Global.Write", "permission_values"),
             "mutable_reference_read_only": ("Global.Write", "permission_counter"),
             "mutable_reference_write_only": ("Global.Read", "permission_counter"),
+            "record_field_write_only_read": ("Global.Read", "permission_record"),
+            "record_field_read_only_write": ("Global.Write", "permission_record"),
         }.get(name)
         if required is not None:
             effect, actual = required
