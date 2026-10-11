@@ -9629,9 +9629,11 @@ no broad performance claim. The saved report is
 remains subject to the Linux benchmark gate and seed-matched Stage1 products.
 
 The compiler cleanup removed two duplicate temporary seed worktrees, a second clean checkout at
-the retained `37a322e7` scoped-type baseline, and an obsolete generated Stage1 checkout. The current
-inventory is 63 local branches and 92 worktrees: 46 dirty, 46 clean, with seven clean checkouts
-already contained in `main` including the main worktree. Six clean non-main checkouts remain as
-distinct parser, annotation, scoped-type, or toolchain baselines. Dirty checkouts and the active
-published-index candidate are preserved; its `9cc40491` commit has the same patch ID as the merged
-`a84ba3ea` change, but its active task lane has not yet been released for removal.
+the retained `37a322e7` scoped-type baseline, an obsolete generated Stage1 checkout, the completed
+`pgs-trust-candidate` checkout, and the clean `published-pgs-index` checkout/branch. The latter's
+`9cc40491` patch ID matched merged `a84ba3ea`; its Mac timing used `main`, and its parent commit
+remains available in the separate `extern-effect-line-index` worktree. The current inventory is 62
+local branches and 90 worktrees: 46 dirty and 44 clean. Six clean non-main checkouts remain as
+distinct parser, annotation, scoped-type, or toolchain baselines. Dirty worktrees, unique commits,
+and baseline products referenced by benchmark artifacts remain preserved; no other safe duplicate
+was identified in this pass.
