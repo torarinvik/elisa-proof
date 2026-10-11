@@ -14,6 +14,11 @@ extend ElisaProof:
     private:
         # The function declaration owning a trace at `line`, by the same rule certificates use.
         def proof_replay_trace_owner_function_line(report: ProofReport&, name: sview, line: u32) -> u32:
+            work: mutable usize = 0
+            return proof_replay_trace_owner_function_line_with_work(report, name, line, &work)
+
+        def proof_replay_trace_owner_function_line_with_work(report: ProofReport&, name: sview, line: u32, work: mutable usize&) -> u32:
+            return 0 if not proof_replay_summary_owner_source_preflight(report, name, 0, work)
             owner_line: mutable u32 = 0
             proof_replay_owner_function_line(report.source_declarations, name, line, &owner_line, 0)
             return owner_line
@@ -28,7 +33,8 @@ extend ElisaProof:
                     return false
 
         def proof_replay_literal_rebind_unique(report: ProofReport&, trace: ProofFactTrace, symbol: sview, symbol_position: Ast::Pos, literal: Ast::Expr) -> bool:
-            return proof_replay_rebind_definition_unique(report, trace, symbol, symbol_position, literal, false)
+            work: mutable usize = 0
+            return proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, literal, false, &work)
 
         # Separate loop preservation and decreases checks can instantiate the same assignment
         # with distinct fresh names. The loop source route has already reconstructed its exact
@@ -36,36 +42,48 @@ extend ElisaProof:
         # Other callers retain the single-symbol rule, and conflicting definitions or uses of
         # the requested symbol are refused in both modes.
         def proof_replay_rebind_definition_unique(report: ProofReport&, trace: ProofFactTrace, symbol: sview, symbol_position: Ast::Pos, literal: Ast::Expr, allow_loop_alias: bool) -> bool:
-            owner_line: u32 = proof_replay_trace_owner_function_line(report, trace.name, trace.line)
+            work: mutable usize = 0
+            return proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, literal, allow_loop_alias, &work)
+
+        def proof_replay_rebind_definition_unique_with_work(report: ProofReport&, trace: ProofFactTrace, symbol: sview, symbol_position: Ast::Pos, literal: Ast::Expr, allow_loop_alias: bool, work: mutable usize&) -> bool:
+            owner_line: u32 = proof_replay_trace_owner_function_line_with_work(report, trace.name, trace.line, work)
             return false if owner_line == 0 or owner_line != report.replay_owner_line
-            for candidate in report.traces.records |candidate, report, trace, symbol, symbol_position, literal, owner_line, allow_loop_alias|:
+            for candidate in report.traces.records |candidate, report, trace, symbol, symbol_position, literal, owner_line, allow_loop_alias, work|:
+                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                work <- work + 1
                 continue if candidate.name != trace.name
                 continue if candidate.kind != "local-binding" and candidate.kind != "function-summary"
-                continue if proof_replay_trace_owner_function_line(report, candidate.name, candidate.line) != owner_line
+                candidate_owner_line: u32 = proof_replay_trace_owner_function_line_with_work(report, candidate.name, candidate.line, work)
+                return false if candidate_owner_line == 0
+                continue if candidate_owner_line != owner_line
                 if candidate.kind == "local-binding":
                     # One source definition cannot acquire a second reserved symbol
                     # merely by appending an otherwise identical binding trace.
                     match candidate.expression:
                         Ast::Expr.Binary(Ast::Expr.Ident(other, other_position), TokenKind.EqEq, other_value, _):
-                            if not allow_loop_alias and proof_internal_name_is_rebind(symbol) and other != symbol and proof_internal_name_is_rebind(other) and candidate.line == trace.line and proof_replay_source_position_equal(other_position, symbol_position) and proof_replay_expr_equal(other_value, literal) and proof_replay_local_binding_expr_positions_match(other_value, literal):
+                            if not allow_loop_alias and proof_internal_name_is_rebind(symbol) and other != symbol and proof_internal_name_is_rebind(other) and candidate.line == trace.line and proof_replay_source_position_equal(other_position, symbol_position) and proof_replay_summary_expr_equal_with_work(other_value, literal, work) and proof_replay_local_binding_expr_positions_match(other_value, literal):
                                 return false
                         _:
                             pass
+                    return false if not proof_replay_summary_expr_charge_with_work(candidate.expression, work)
                     continue if not proof_expr_mentions_name(candidate.expression, symbol)
                     # Every binding that mentions the symbol must be this very definition.
                     return false if candidate.line != trace.line
                     match candidate.expression:
                         Ast::Expr.Binary(Ast::Expr.Ident(bound, bound_position), TokenKind.EqEq, value, _):
                             return false if bound != symbol or not proof_replay_source_position_equal(bound_position, symbol_position)
-                            return false if not proof_replay_expr_equal(value, literal) or not proof_replay_local_binding_expr_positions_match(value, literal)
+                            return false if not proof_replay_summary_expr_equal_with_work(value, literal, work) or not proof_replay_local_binding_expr_positions_match(value, literal)
                         _:
                             return false
                 else:
                     return false if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
-                    for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, trace, symbol, symbol_position|:
+                    return false if candidate.summary_bindings_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                    work <- work + candidate.summary_bindings_count
+                    for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, trace, symbol, symbol_position, work|:
                         value: Ast::Expr = report.traces.summary_values[candidate.summary_bindings_start + offset]
                         # The symbol's position is its call's span, which pins the site even when
                         # a restated summary is recorded at a multi-line statement's first line.
+                        return false if not proof_replay_summary_expr_charge_with_work(value, work)
                         continue if not proof_expr_mentions_name(value, symbol)
                         return false if not proof_replay_literal_rebind_summary_use_valid(value, symbol, symbol_position)
             return true
@@ -78,27 +96,36 @@ extend ElisaProof:
         # direct call at the binding's source span, with one literal argument that is recorded
         # for exactly one formal parameter in that call's summary.
         def proof_replay_local_binding_literal_call_argument_source_at(report: ProofReport&, trace: ProofFactTrace, rebind_depth: usize) -> bool:
+            work: mutable usize = 0
+            return proof_replay_local_binding_literal_call_argument_source_at_with_work(report, trace, rebind_depth, &work)
+
+        def proof_replay_local_binding_literal_call_argument_source_at_with_work(report: ProofReport&, trace: ProofFactTrace, rebind_depth: usize, work: mutable usize&) -> bool:
             return false if trace.name == "" or trace.line == 0
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, _):
                     return false if not proof_internal_name_is_rebind(symbol) or not proof_replay_literal_value(literal)
-                    return false if not proof_replay_literal_rebind_unique(report, trace, symbol, symbol_position, literal)
+                    return false if not proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, literal, false, work)
                     accepted_bindings: mutable usize = 0
                     accepted_call: mutable Ast::Expr = Ast::Expr.Invalid
-                    for candidate in report.traces.records |candidate, report, trace, symbol, literal, accepted_bindings, accepted_call, rebind_depth|:
+                    for candidate_index in 0..<report.traces.records.count |candidate_index, report, trace, symbol, literal, accepted_bindings, accepted_call, rebind_depth, work|:
+                        candidate: ProofFactTrace = report.traces.records[candidate_index]
+                        return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        work <- work + 1
                         continue if candidate.kind != "function-summary" or candidate.name != trace.name or candidate.line != trace.line
                         continue if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
                         continue if candidate.summary_bindings_start > report.traces.summary_names.count or candidate.summary_bindings_count > report.traces.summary_names.count - candidate.summary_bindings_start
                         continue if candidate.summary_bindings_count == 0
                         summary_found: mutable bool = false
                         summary: mutable ProofExecutableSummary = ProofExecutableSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, pure: false, verified: false, verification_reason: ""}
+                        return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + report.executables.summaries.count
                         for executable in report.executables.summaries |executable, candidate, summary_found, summary|:
                             if executable.name == candidate.dependency and (candidate.owner_line == 0 or executable.line == candidate.owner_line):
                                 return false if summary_found
                                 summary_found <- true
                                 summary <- executable
                         continue if not summary_found or summary.parameters_count == 0 or summary.parameters_start > report.executables.parameters.count or summary.parameters_count > report.executables.parameters.count - summary.parameters_start
-                        source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_at(report, candidate, summary, rebind_depth)
+                        source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_at_with_work(report, candidate, summary, rebind_depth, work)
                         continue if not source_call.known
                         call_owner_matches: bool = match source_call.call:
                             Ast::Expr.Call(callee, _, _, _): proof_replay_summary_owner_matches_call(report, candidate, summary, callee)
@@ -109,7 +136,10 @@ extend ElisaProof:
                                 continue if arguments.count > summary.parameters_count or (argument_names.count != 0 and argument_names.count != arguments.count)
                                 continue if arguments.count < summary.parameters_count and argument_names.count != 0
                                 matched_slots: mutable usize = 0
-                                for slot in 0..<summary.parameters_count |slot, arguments, argument_names, summary, report, candidate, symbol, literal, matched_slots|:
+                                if summary.parameters_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                                    return false
+                                work <- work + summary.parameters_count
+                                for slot in 0..<summary.parameters_count |slot, arguments, argument_names, summary, report, candidate, symbol, literal, matched_slots, work|:
                                     binding_index: usize = candidate.summary_bindings_start + slot
                                     continue if report.traces.summary_names[binding_index] != report.executables.parameters[summary.parameters_start + slot]
                                     bound_name_matches: mutable bool = false
@@ -131,31 +161,34 @@ extend ElisaProof:
                                         return false if saw_named
                                     if argument_names.count == 0 and argument_index >= arguments.count:
                                         # An omitted trailing slot takes the callee's literal default.
-                                        default_value = proof_replay_summary_parameter_default(report, summary, slot)
-                                        matched_slots <- matched_slots + 1 if default_value.known and proof_replay_expr_equal(default_value.value, literal)
+                                        default_value = proof_replay_summary_parameter_default_with_work(report, summary, slot, work)
+                                        matched_slots <- matched_slots + 1 if default_value.known and proof_replay_summary_expr_equal_with_work(default_value.value, literal, work)
                                         continue
                                     continue if argument_index >= arguments.count
                                     source_argument: Ast::Expr = arguments[argument_index]
-                                    source_argument_matches: bool = proof_replay_expr_equal(source_argument, literal) or proof_replay_summary_call_global_constant_matches(report, candidate, source_argument, literal)
+                                    source_argument_matches: bool = proof_replay_summary_expr_equal_with_work(source_argument, literal, work) or proof_replay_summary_call_global_constant_matches_with_work(report, candidate, source_argument, literal, work)
                                     continue if not source_argument_matches
-                                    continue if proof_replay_expr_equal(source_argument, literal) and not proof_replay_local_binding_expr_positions_match(literal, source_argument)
+                                    continue if proof_replay_summary_expr_equal_with_work(source_argument, literal, work) and not proof_replay_local_binding_expr_positions_match(literal, source_argument)
                                     matched_slots <- matched_slots + 1
                                 if matched_slots == 1:
                                     if accepted_bindings == 0:
                                         accepted_bindings <- 1
                                         accepted_call <- source_call.call
-                                    elif not proof_replay_summary_call_same_source_span(report, trace, source_call.call, accepted_call, rebind_depth):
+                                    else:
+                                        same_span_complete: mutable bool = true
+                                        return false if not proof_replay_summary_call_same_source_span(report, trace, source_call.call, accepted_call, rebind_depth, work, &same_span_complete, 0) or not same_span_complete
                                         return false
                             _:
                                 pass
-                    return accepted_bindings == 1 or proof_replay_literal_direct_call_source(report, trace, symbol_position, literal)
+                    return true if accepted_bindings == 1
+                    return proof_replay_literal_direct_call_source_with_work(report, trace, symbol_position, literal, work)
                 _:
                     return false
 
         # A literal-argument binding used to restate a call's preconditions over the literal: it
         # must have no derivation or summary payload of its own, be bound at the call's line,
         # and pass the same source reconstruction and uniqueness checks as the binding itself.
-        def proof_replay_literal_rebind_substitution_valid(report: ProofReport&, trace: ProofFactTrace, call_line: u32) -> bool:
+        def proof_replay_literal_rebind_substitution_valid(report: mutable ProofReport&, trace: ProofFactTrace, call_line: u32) -> bool:
             return false if trace.kind != "local-binding" or trace.line != call_line or call_line == 0
             return false if trace.dependency != "" or trace.premises_count != 0 or trace.kernel_premises_count != 0
             return false if trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0

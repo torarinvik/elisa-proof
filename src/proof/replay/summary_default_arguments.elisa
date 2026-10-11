@@ -5,36 +5,56 @@
 # unsupported.
 extend ElisaProof:
     private:
-        def proof_replay_summary_default_find(declarations: darray[Ast::Decl]&, name: sview, line: u32, slot: usize, value: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
-            for declaration in declarations |name, line, slot, value, matches, depth|:
+        def proof_replay_summary_default_find_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, slot: usize, value: mutable Ast::Expr&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                return false
+            work <- work + declarations.count
+            for declaration in declarations |name, line, slot, value, matches, work, depth|:
                 match declaration:
                     Ast::Decl.Func(declared_name, parameters, _, _, _, _, position):
                         if declared_name == name and position.line == line:
                             matches <- matches + 1
                             value <- Ast::Expr.Invalid
+                            return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + parameters.count
                             if slot < parameters.count:
                                 parameter: Ast::ParamDecl = parameters[slot]
                                 value <- parameter.default_value if parameter.has_default
                     Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_replay_summary_default_find(body, name, line, slot, value, matches, depth + 1)
+                        return false if not proof_replay_summary_default_find_with_work(body, name, line, slot, value, matches, work, depth + 1)
                     _:
                         pass
+            return true
+
+        def proof_replay_summary_default_find(declarations: darray[Ast::Decl]&, name: sview, line: u32, slot: usize, value: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> void:
+            work: mutable usize = 0
+            proof_replay_summary_default_find_with_work(declarations, name, line, slot, value, matches, &work, depth)
 
         def proof_replay_summary_parameter_default(report: ProofReport&, summary: ProofExecutableSummary, slot: usize) -> (known: bool, value: Ast::Expr):
+            work: mutable usize = 0
+            return proof_replay_summary_parameter_default_with_work(report, summary, slot, &work)
+
+        def proof_replay_summary_parameter_default_with_work(report: ProofReport&, summary: ProofExecutableSummary, slot: usize, work: mutable usize&) -> (known: bool, value: Ast::Expr):
             return (false, Ast::Expr.Invalid) if summary.name == "" or summary.line == 0 or slot >= summary.parameters_count
             value: mutable Ast::Expr = Ast::Expr.Invalid
             matches: mutable usize = 0
-            proof_replay_summary_default_find(report.source_declarations, summary.name, summary.line, slot, &value, &matches, 0)
+            return (false, Ast::Expr.Invalid) if not proof_replay_summary_default_find_with_work(report.source_declarations, summary.name, summary.line, slot, &value, &matches, work, 0)
             return (false, Ast::Expr.Invalid) if matches != 1 or not proof_replay_literal_value(value)
             return (true, value)
 
         # Every slot from `first_omitted` on is filled by a literal default the summary binds.
         def proof_replay_summary_omitted_defaults_match(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, first_omitted: usize) -> bool:
-            for slot in first_omitted..<summary.parameters_count |slot, report, trace, summary|:
-                default_value = proof_replay_summary_parameter_default(report, summary, slot)
+            work: mutable usize = 0
+            return proof_replay_summary_omitted_defaults_match_with_work(report, trace, summary, first_omitted, &work)
+
+        def proof_replay_summary_omitted_defaults_match_with_work(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, first_omitted: usize, work: mutable usize&) -> bool:
+            for slot in first_omitted..<summary.parameters_count |slot, report, trace, summary, work|:
+                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                work <- work + 1
+                default_value = proof_replay_summary_parameter_default_with_work(report, summary, slot, work)
                 return false if not default_value.known
                 binding_index: usize = trace.summary_bindings_start + slot
                 return false if binding_index >= report.traces.summary_values.count
-                return false if not proof_replay_summary_call_argument_equal(report, trace, default_value.value, report.traces.summary_values[binding_index], 0)
+                argument_complete: mutable bool = true
+                return false if not proof_replay_summary_call_argument_equal_with_work(report, trace, default_value.value, report.traces.summary_values[binding_index], 0, work, &argument_complete, 0) or not argument_complete
             return true

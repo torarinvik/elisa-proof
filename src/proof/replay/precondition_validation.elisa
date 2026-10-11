@@ -5,6 +5,23 @@ extend ElisaProof:
     private:
         const PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT: usize = 127
 
+        def proof_replay_precondition_source_tree_charge(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                return false
+            work <- work + declarations.count
+            for declaration in declarations |work, depth|:
+                match declaration:
+                    Ast::Decl.Alias(_, target, _):
+                        return false if not proof_replay_summary_expr_charge_with_work(target, work)
+                    Ast::Decl.Enum(_, variants, _, _, _):
+                        return false if variants.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + variants.count
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_precondition_source_tree_charge(nested, work, depth + 1)
+                    _:
+                        pass
+            return true
+
         def proof_replay_precondition_find_owner(declarations: darray[Ast::Decl]&, name: sview, line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_PRECONDITION_DEPTH_LIMIT
             for declaration in declarations |name, line, matches, parameters, body, depth|:
@@ -151,6 +168,43 @@ extend ElisaProof:
             return false
 
         def proof_replay_precondition_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+            work: mutable usize = 0
+            return proof_replay_precondition_source_valid_with_work(report, trace, &work)
+
+        def proof_replay_precondition_source_valid_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            return false if trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
+            source_start: usize = source_work
+            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, trace.line, source_work)
+            owner_scan_cost: usize = source_work - source_start
+            return false if not proof_replay_precondition_source_tree_charge(report.source_declarations, source_work, 0)
+            return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
+            return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.source_annotations.count
+            return false if report.traces.records.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.traces.records.count
+            constant_candidates: mutable usize = 0
+            for candidate in report.traces.records |source_work|:
+                candidate_name_work: usize = sview_len(candidate.name)
+                candidate_kind_work: usize = sview_len(candidate.kind)
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false if candidate_name_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + candidate_name_work
+                return false if candidate_kind_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + candidate_kind_work
+                if candidate.name == trace.name and candidate.owner_line == trace.line and (candidate.kind == "global-constant" or candidate.kind == "global-constant-qualified"):
+                    return false if not proof_replay_summary_expr_charge_with_work(candidate.expression, source_work)
+                    constant_candidates <- constant_candidates + 1
+            # The contract normalization validates only matching global-constant traces against
+            # source again. Reserve one source scan for each such candidate; charging all trace
+            # expressions here would multiply unrelated AST widths by every precondition check.
+            if constant_candidates != 0:
+                return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - owner_scan_cost
+                candidate_source_cost: usize = owner_scan_cost + report.source_annotations.count
+                return false if candidate_source_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / constant_candidates
+                source_work <- source_work + candidate_source_cost * constant_candidates
+            return proof_replay_precondition_source_valid_unmetered(report, trace)
+
+        def proof_replay_precondition_source_valid_unmetered(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return false if trace.kind != "precondition" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
             return false if report.replay_owner_line != 0 and report.replay_owner_line != trace.line
             matches: mutable usize = 0

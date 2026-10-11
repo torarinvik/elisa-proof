@@ -2,12 +2,17 @@ const PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS: u32 = 1
 
 extend ElisaProof:
     public:
+        def proof_replay_note_trace_lookup_budget(report: mutable ProofReport&) -> void:
+            proof_kernel_budget_note(report, "replay-trace-lookup") if report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+
         # Standalone provenance entry point for auditors and adversarial harnesses. Require both
         # independently implemented views so this audit API detects drift between source-level
         # reconstruction and the authoritative source-neutral kernel trace.
         def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
             return false if trace_index >= report.traces.records.count
             proof_replay_build_fact_trace_index(report)
+            proof_replay_note_trace_lookup_budget(report)
+            return false if report.kernel.budget_exhausted
             trace: ProofFactTrace = report.traces.records[trace_index]
             dependency_stack: mutable darray[sview] = [trace.name]
             active_certificates: mutable darray[usize] = []
@@ -19,18 +24,24 @@ extend ElisaProof:
             node_count: usize = report.kernel.nodes.count
             child_count: usize = report.kernel.children.count
             source_valid: bool = (proof_replay_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, active_certificates, validation_workspace) can Global{Read,Write})
+            proof_replay_note_trace_lookup_budget(report)
+            if report.kernel.budget_exhausted:
+                report.trace_owner_line <- saved_trace_owner_line
+                return false
             kernel_valid: mutable bool = (proof_replay_kernel_fact_trace_is_valid_with_stack(report, trace, trace.name, 0, dependency_stack, true, active_certificates, validation_workspace) can Global{Read,Write})
             if node_count != report.kernel.nodes.count or child_count != report.kernel.children.count:
                 report.kernel.arena_validated <- (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel.nodes, &report.kernel.children) can Global{Read,Write})
                 kernel_valid <- false if not report.kernel.arena_validated
             report.trace_owner_line <- saved_trace_owner_line
+            proof_replay_note_trace_lookup_budget(report)
+            return false if report.kernel.budget_exhausted
             return source_valid and kernel_valid
 
         def proof_replay_fact_trace_index(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
             # Once replay reports a resource-budget failure, do not turn an unavailable index
             # into a repeated full scan for every certificate fact. Such a report cannot prove
             # certificates, and the budget diagnostic remains authoritative.
-            return report.traces.records.count if report.kernel.budget_exhausted
+            return report.traces.records.count if report.kernel.budget_exhausted or report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
             index_capacity: usize = report.traces.index_values.count
             return report.traces.records.count if index_capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET
             index_ready: bool = index_capacity > 0 and report.traces.index_hashes.count == index_capacity and report.traces.next_indices.count == report.traces.records.count
@@ -39,10 +50,13 @@ extend ElisaProof:
             return report.traces.records.count if not index_ready
             indexed_head: usize = proof_replay_fact_trace_head(report, owner)
             return report.traces.records.count if indexed_head >= report.traces.records.count
+            return report.traces.records.count if not proof_replay_trace_expression_work(report, fact, 0)
             trace_index: mutable usize = indexed_head
             probes: mutable usize = 0
             while trace_index < report.traces.records.count and probes < report.traces.records.count |trace_index, report, fact, owner, probes|:
                 trace: ProofFactTrace = report.traces.records[trace_index]
+                return report.traces.records.count if not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
+                return report.traces.records.count if not proof_replay_trace_expression_work(report, trace.expression, 0)
                 return trace_index if trace.name == owner and proof_replay_expr_equal(trace.expression, fact)
                 trace_index <- proof_replay_trace_chain_next(report, trace_index)
                 probes <- probes + 1
@@ -60,20 +74,27 @@ extend ElisaProof:
             return if not proof_kernel_report_append_allowed(report, 0, report.certificates.count, "replay-fact-origins")
             report.traces.origin_indices.resize(report.certificate_facts.count)
             for index in 0..<report.traces.origin_indices.count |index, report, sentinel|:
+                return if not proof_replay_trace_lookup_charge(report)
                 report.traces.origin_indices[index] <- sentinel
-            for certificate in report.certificates |certificate, report|:
+            for certificate_index in 0..<report.certificates.count |certificate_index, report|:
+                certificate: ProofGoalCertificate = report.certificates[certificate_index]
+                return if not proof_replay_trace_lookup_charge(report)
                 return if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
                 for offset in 0..<certificate.facts_count |offset, certificate, report|:
+                    return if not proof_replay_trace_lookup_charge(report)
                     fact_index: usize = certificate.facts_start + offset
-                    report.traces.origin_indices[fact_index] <- proof_replay_fact_trace_index(report, report.certificate_facts[fact_index], certificate.name)
+                    fact: Ast::Expr = report.certificate_facts[fact_index]
+                    origin_index: usize = proof_replay_fact_trace_index(report, fact, certificate.name)
+                    report.traces.origin_indices[fact_index] <- origin_index
+                    return if report.kernel.budget_exhausted
 
-        def proof_replay_fact_origin_at(report: mutable ProofReport&, fact_index: usize, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+        def proof_replay_fact_origin_at(report: ProofReport&, fact_index: usize, owner: sview) -> (known: bool, kind: sview, line: u32, name: sview, dependency: sview, premises_count: usize):
+            return (false, "", 0, "", "", 0) if report.kernel.budget_exhausted or report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
             if fact_index < report.traces.origin_indices.count:
                 trace_index: usize = report.traces.origin_indices[fact_index]
                 if trace_index < report.traces.records.count and report.traces.records[trace_index].name == owner:
                     cached: ProofFactTrace = report.traces.records[trace_index]
                     return (true, cached.kind, cached.line, cached.name, cached.dependency, cached.premises_count)
-            return proof_replay_fact_origin(report, report.certificate_facts[fact_index], owner) if fact_index < report.certificate_facts.count
             return (false, "", 0, "", "", 0)
 
         # Output and theorem-catalog boundaries must not trust a mutable certificate index alone.
@@ -101,6 +122,13 @@ extend ElisaProof:
                 return false if attempt.proven and not proof_replay_attempt_certificate_replayed(report, attempt)
             return true
 
+        def proof_replay_revoke_certificate_batch(report: mutable ProofReport&) -> void:
+            report.replayed <- 0
+            report.replay_gaps <- 0
+            for certificate in report.certificates |certificate, report|:
+                certificate.replayed <- false
+                report.replay_gaps <- report.replay_gaps + 1
+
         def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> void can[Global.Read, Global.Write]:
             # Replay is a query over the current immutable certificate set. Reset presentation
             # counters and per-certificate flags so repeated API calls cannot accumulate stale
@@ -118,6 +146,10 @@ extend ElisaProof:
             validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
             proof_replay_build_fact_trace_index(report)
             proof_replay_cache_fact_origins(report)
+            proof_replay_note_trace_lookup_budget(report)
+            if report.kernel.budget_exhausted:
+                proof_replay_revoke_certificate_batch(report)
+                return
             if not proof_kernel_report_append_allowed(report, 0, report.certificates.count, "replay-certificates"):
                 max_gap_count: u32 = ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.u32()
                 report.replay_gaps <- max_gap_count if report.certificates.count > max_gap_count.usize() else report.certificates.count.u32()
@@ -127,6 +159,10 @@ extend ElisaProof:
                 node_count: usize = report.kernel.nodes.count
                 child_count: usize = report.kernel.children.count
                 replayed: mutable bool = (proof_replay_certificate(report, report.certificates[index], index, validation_workspace) can Global{Read,Write})
+                proof_replay_note_trace_lookup_budget(report)
+                if report.kernel.budget_exhausted:
+                    proof_replay_revoke_certificate_batch(report)
+                    return
                 # Quantifier instantiation and equality rewriting are intentionally append-only:
                 # they construct derived roots in the same arena while replaying a certificate.
                 # Each kernel rule independently checks the reachable facts/goal it consumes.
@@ -150,6 +186,5 @@ extend ElisaProof:
                     for certificate in report.certificates |certificate, report|:
                         certificate.replayed <- false
                         report.replay_gaps <- report.replay_gaps + 1
-            proof_replay_cache_fact_origins(report)
             if not proof_replay_certificates_complete(report) and report.replay_gaps == 0:
                 report.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS

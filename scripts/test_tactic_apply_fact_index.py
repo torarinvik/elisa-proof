@@ -91,6 +91,27 @@ assert rejected_step["has_argument_index"] and rejected_step["argument_index"] =
 assert report["state"]["facts"] == report["state"]["initial_facts"]
 assert report["state"]["goal"] == report["state"]["initial_goal"]
 
+# The report writer stores action indexes as U32. Preserve the largest admitted value exactly,
+# then reject a wider index before it can be narrowed and misreported in the trace.
+u32_max = {
+    "format": "elisa-proof-tactics-v1",
+    "initial": initial,
+    "actions": [{"action": "apply", "argument_index": 4294967295, "accepted": False}],
+}
+process, report = result_for(u32_max, portable_source)
+assert process.returncode == 1, (process.returncode, process.stderr, report)
+assert report["tactic"]["valid"] and report["tactic"]["kernel_trace_replayed"]
+assert report["state"]["trace"][0]["argument_index"] == 4294967295
+
+oversized = {
+    "format": "elisa-proof-tactics-v1",
+    "initial": initial,
+    "actions": [{"action": "apply", "argument_index": 4294967296, "accepted": False}],
+}
+process, report = result_for(oversized, portable_source)
+assert process.returncode == 1, (process.returncode, process.stderr, report)
+assert not report["tactic"]["valid"]
+
 # Exercise the same indexed refusal through source-bound goal selection. An invalid fact index
 # must not detach the script from the imported goal or bypass the source/kernel replay gates.
 source_bound = {

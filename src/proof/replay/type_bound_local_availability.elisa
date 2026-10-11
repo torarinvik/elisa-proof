@@ -116,16 +116,29 @@ extend ElisaProof:
         # makes an unknown AST constructor fail closed during the preflight.
         def proof_replay_type_bound_extent_preflight(body: darray[Ast::Stmt]&, first: Ast::Expr, has_first: bool, second: Ast::Expr, has_second: bool) -> bool:
             work: mutable usize = 0
+            return proof_replay_type_bound_extent_preflight_with_work(body, first, has_first, second, has_second, &work)
+
+        def proof_replay_type_bound_extent_preflight_with_work(body: darray[Ast::Stmt]&, first: Ast::Expr, has_first: bool, second: Ast::Expr, has_second: bool, work: mutable usize&) -> bool:
             dummy_use: Ast::Expr = Ast::Expr.Invalid
             dummy_position: Ast::Pos = Ast::pos_at_line(0)
-            body_uses: usize = proof_replay_type_bound_index_use_body(body, "", dummy_use, 0, dummy_position, &work, 0)
+            body_uses: usize = proof_replay_type_bound_index_use_body(body, "", dummy_use, 0, dummy_position, work, 0)
             return false if body_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             if has_first:
-                first_uses: usize = proof_replay_type_bound_index_use(first, "", dummy_use, 0, dummy_position, &work, 0)
+                first_uses: usize = proof_replay_type_bound_index_use(first, "", dummy_use, 0, dummy_position, work, 0)
                 return false if first_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             if has_second:
-                second_uses: usize = proof_replay_type_bound_index_use(second, "", dummy_use, 0, dummy_position, &work, 0)
+                second_uses: usize = proof_replay_type_bound_index_use(second, "", dummy_use, 0, dummy_position, work, 0)
                 return false if second_uses != 0 or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return true
+
+        # Some source predicates below still use the shared legacy walkers. Charge a complete
+        # bounded body walk before invoking each one, so repeated fact checks pay for those
+        # passes in the same report-level budget.
+        def proof_replay_type_bound_body_charge_with_work(body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_body(body, cost, work, 0)
+            return false if cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + cost
             return true
 
         # Composite node positions are often anchored at the opening token. Include every
@@ -183,15 +196,21 @@ extend ElisaProof:
             return last
 
         def proof_replay_type_bound_local_scalar_consumer_available(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, body, &work)
+
+        def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
             return true if report.trace_consumer_certificate_index == 0
             return false if report.trace_consumer_certificate_index > report.certificates.count or report.trace_owner_line == 0
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-            return false if not proof_replay_type_bound_extent_preflight(body, trace.expression, true, certificate.goal, true)
+            return false if not proof_replay_type_bound_extent_preflight_with_work(body, trace.expression, true, certificate.goal, true, work)
             source_matches: mutable usize = 0
-            proof_replay_type_bound_consumer_source_site_in_body(body, certificate, &source_matches, 0)
+            proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
             return false if source_matches != 1
+            return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + report.goal_attempts.count
             attempt_matches: mutable usize = 0
             for attempt in report.goal_attempts |report, certificate, attempt_matches|:
                 continue if not attempt.has_certificate or attempt.certificate_index != report.trace_consumer_certificate_index - 1
@@ -199,12 +218,14 @@ extend ElisaProof:
                 return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
                 attempt_matches <- attempt_matches + 1
             return false if attempt_matches != 1
+            return false if not proof_replay_type_bound_body_charge_with_work(body, work)
             declarations: mutable usize = 0
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
             for statement in body |trace, declarations, declaration_extent|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, local_type, initializer, position):
                         continue if local_name == "" or position.line != trace.line
+                        return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
                         continue if not proof_expr_mentions_name(trace.expression, local_name)
                         declarations <- declarations + 1
                         declaration_extent <- proof_replay_type_bound_extent_from_position(position)
@@ -222,6 +243,10 @@ extend ElisaProof:
         # declaration by name and source position instead of assuming it shares the fact line.
         # The local extent validator calls this only after resolving the fact's array root.
         def proof_replay_type_bound_local_array_consumer_available(report: ProofReport&, body: darray[Ast::Stmt]&, use_position: Ast::Pos, trace_name: sview, local_name: sview, local_position: Ast::Pos) -> bool:
+            work: mutable usize = 0
+            return proof_replay_type_bound_local_array_consumer_available_with_work(report, body, use_position, trace_name, local_name, local_position, &work)
+
+        def proof_replay_type_bound_local_array_consumer_available_with_work(report: ProofReport&, body: darray[Ast::Stmt]&, use_position: Ast::Pos, trace_name: sview, local_name: sview, local_position: Ast::Pos, work: mutable usize&) -> bool:
             return false if use_position.line == 0 or trace_name == "" or local_name == ""
             has_consumer: bool = report.trace_consumer_certificate_index != 0
             return false if has_consumer and (report.trace_consumer_certificate_index > report.certificates.count or report.trace_owner_line == 0)
@@ -232,10 +257,12 @@ extend ElisaProof:
                 return false if certificate.name != trace_name or certificate.line != report.trace_owner_line
                 return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
                 consumer_goal <- certificate.goal
-                return false if not proof_replay_type_bound_extent_preflight(body, Ast::Expr.Absent, false, consumer_goal, true)
+                return false if not proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, consumer_goal, true, work)
                 source_matches: mutable usize = 0
-                proof_replay_type_bound_consumer_source_site_in_body(body, certificate, &source_matches, 0)
+                proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
                 return false if source_matches != 1
+                return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+                work <- work + report.goal_attempts.count
                 attempt_matches: mutable usize = 0
                 for attempt in report.goal_attempts |report, certificate, certificate_index, attempt_matches|:
                     continue if not attempt.has_certificate or attempt.certificate_index != certificate_index
@@ -245,7 +272,9 @@ extend ElisaProof:
                     attempt_matches <- attempt_matches + 1
                 return false if attempt_matches != 1
             else:
-                return false if not proof_replay_type_bound_extent_preflight(body, Ast::Expr.Absent, false, consumer_goal, false)
+                return false if not proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, consumer_goal, false, work)
+            return false if not proof_replay_summary_owner_source_preflight(report, trace_name, report.replay_owner_line, work)
+            return false if not proof_replay_type_bound_body_charge_with_work(body, work)
             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
             declarations: mutable usize = 0
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()

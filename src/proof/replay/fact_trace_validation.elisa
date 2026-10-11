@@ -8,13 +8,86 @@ extend ElisaProof:
 
         # One report-wide budget covers hash probes and owner-chain walks during a replay batch.
         # A per-lookup cap alone would still multiply by the number of certificate facts.
-        def proof_replay_trace_lookup_charge(report: mutable ProofReport&) -> bool:
+        def proof_replay_trace_lookup_charge_amount(report: mutable ProofReport&, amount: usize) -> bool:
             return false if report.kernel.budget_exhausted
-            if report.traces.lookup_work_used >= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
-                proof_kernel_budget_note(report, "replay-trace-lookup")
+            if report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
                 return false
-            report.traces.lookup_work_used <- report.traces.lookup_work_used + 1
+            remaining: usize = PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET - report.traces.lookup_work_used
+            if amount > remaining:
+                report.traces.lookup_work_used <- PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET + 1
+                return false
+            report.traces.lookup_work_used <- report.traces.lookup_work_used + amount
             return true
+
+        def proof_replay_trace_lookup_charge(report: mutable ProofReport&) -> bool:
+            return proof_replay_trace_lookup_charge_amount(report, 1)
+
+        # Charge a conservative structural upper bound before source-expression equality. The
+        # equality helper has a depth bound, but its aggregate-child loops also need a report-wide
+        # cap because adversarial reports can contain very wide calls, tuples, or constructors.
+        def proof_replay_trace_statement_expression_work(report: mutable ProofReport&, statement: Ast::Stmt, depth: usize) -> bool:
+            match statement:
+                Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(name))
+                    return false if not proof_replay_trace_expression_work(report, type_expression, depth + 1)
+                    return proof_replay_trace_expression_work(report, initializer, depth + 1)
+                _:
+                    return true
+
+        def proof_replay_trace_expression_work(report: mutable ProofReport&, expression: Ast::Expr, depth: usize) -> bool:
+            return false if report.kernel.budget_exhausted
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            return false if not proof_replay_trace_lookup_charge(report)
+            match expression:
+                Ast::Expr.CharLit(value, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Expr.Ident(name, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(name))
+                Ast::Expr.StringLit(value, _):
+                    return proof_replay_trace_lookup_charge_amount(report, sview_len(value))
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    return proof_replay_trace_expression_work(report, inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_trace_expression_work(report, left, depth + 1)
+                    return proof_replay_trace_expression_work(report, right, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_replay_trace_expression_work(report, condition, depth + 1)
+                    return false if not proof_replay_trace_expression_work(report, then_expression, depth + 1)
+                    return proof_replay_trace_expression_work(report, else_expression, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, arguments.count)
+                    return false if not proof_replay_trace_lookup_charge_amount(report, argument_names.count)
+                    return false if not proof_replay_trace_expression_work(report, callee, depth + 1)
+                    for argument in arguments |argument, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, argument, depth + 1)
+                    for argument_name in argument_names |argument_name, report|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(argument_name))
+                    return true
+                Ast::Expr.Field(object, field, _) | Ast::Expr.Scope(object, field, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(field))
+                    return proof_replay_trace_expression_work(report, object, depth + 1)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, fields.count)
+                    return false if not proof_replay_trace_expression_work(report, type_expression, depth + 1)
+                    for field in fields |field, report, depth|:
+                        return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(field.name))
+                        return false if not proof_replay_trace_expression_work(report, field.value, depth + 1)
+                    return true
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    return false if not proof_replay_trace_lookup_charge_amount(report, elements.count)
+                    for element in elements |element, report, depth|:
+                        return false if not proof_replay_trace_expression_work(report, element, depth + 1)
+                    return true
+                Ast::Expr.Block(statements, body, captures, _):
+                    return true if captures.count != 0 or statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
+                    return false if not proof_replay_trace_lookup_charge_amount(report, statements.count)
+                    for statement in statements |statement, report, depth|:
+                        return false if not proof_replay_trace_statement_expression_work(report, statement, depth)
+                    return proof_replay_trace_expression_work(report, body, depth + 1)
+                _:
+                    # The source replay comparator rejects other variants at the outer match
+                    # without walking their children, so one node charge is a full upper bound.
+                    return true
 
         # Fact provenance is keyed by the owner name before exact expression/kernel equality is
         # checked. Hashes only select a probe path; the stored sview comparison remains the
@@ -50,6 +123,7 @@ extend ElisaProof:
             report.traces.next_indices.resize(count)
             index: mutable usize = 0
             while index < count:
+                return if not proof_replay_trace_lookup_charge(report)
                 report.traces.next_indices[index] <- sentinel
                 index <- index + 1
             capacity: usize = proof_replay_trace_index_capacity(count)
@@ -60,16 +134,19 @@ extend ElisaProof:
             report.traces.index_values.resize(capacity)
             slot: mutable usize = 0
             while slot < capacity:
+                return if not proof_replay_trace_lookup_charge(report)
                 report.traces.index_values[slot] <- sentinel
                 slot <- slot + 1
             index <- 0
             work: mutable usize = 0
             while index < count |index, report, sentinel, capacity, work|:
                 owner: sview = report.traces.records[index].name
+                return if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
                 hash: u32 = proof_replay_owner_hash(owner)
                 probe_slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
                 while probes < capacity |report, hash, owner, index, probe_slot, probes, capacity, work, sentinel|:
+                    return if not proof_replay_trace_lookup_charge(report)
                     if work >= PROOF_REPLAY_TRACE_INDEX_WORK_BUDGET:
                         report.traces.index_hashes.clear()
                         report.traces.index_values.clear()
@@ -82,10 +159,12 @@ extend ElisaProof:
                         report.traces.index_hashes[probe_slot] <- hash
                         report.traces.index_values[probe_slot] <- index
                         break
-                    if report.traces.index_hashes[probe_slot] == hash and report.traces.records[current].name == owner:
-                        report.traces.next_indices[index] <- current
-                        report.traces.index_values[probe_slot] <- index
-                        break
+                    if report.traces.index_hashes[probe_slot] == hash:
+                        return if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name))
+                        if report.traces.records[current].name == owner:
+                            report.traces.next_indices[index] <- current
+                            report.traces.index_values[probe_slot] <- index
+                            break
                     probe_slot <- (probe_slot + 1) % capacity
                     probes <- probes + 1
                 index <- index + 1
@@ -99,6 +178,7 @@ extend ElisaProof:
             # mutated one of them independently, abandon the index rather than dereferencing a
             # mismatched hash/next slot and turning malformed input into a replay crash.
             return count if report.traces.index_hashes.count != capacity or report.traces.next_indices.count != count
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(owner))
             hash: u32 = proof_replay_owner_hash(owner)
             slot: mutable usize = (hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
@@ -106,7 +186,9 @@ extend ElisaProof:
                 return count if not proof_replay_trace_lookup_charge(report)
                 index: usize = report.traces.index_values[slot]
                 return count if index >= count
-                return index if report.traces.index_hashes[slot] == hash and report.traces.records[index].name == owner
+                if report.traces.index_hashes[slot] == hash:
+                    return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[index].name))
+                    return index if report.traces.records[index].name == owner
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
             return count
@@ -120,6 +202,7 @@ extend ElisaProof:
             count: usize = report.traces.records.count
             return count if current >= count or current >= report.traces.next_indices.count
             return count if not proof_replay_trace_lookup_charge(report)
+            return count if not proof_replay_trace_lookup_charge_amount(report, sview_len(report.traces.records[current].name))
             next: usize = report.traces.next_indices[current]
             return count if next >= count or next >= current
             return next
@@ -132,8 +215,12 @@ extend ElisaProof:
 
         def proof_replay_fact_is_traced_with_stack(report: mutable ProofReport&, fact: Ast::Expr, owner: sview, dependency_stack: darray[sview]&, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool can[Global.Read, Global.Write]:
             trace_index: mutable usize = proof_replay_fact_trace_head(report, owner)
+            if trace_index < report.traces.records.count:
+                return false if not proof_replay_trace_expression_work(report, fact, 0)
             while trace_index < report.traces.records.count |trace_index, report, fact, owner, dependency_stack, active_certificates, validation_workspace|:
                 trace: ProofFactTrace = report.traces.records[trace_index]
+                return false if not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
+                return false if not proof_replay_trace_expression_work(report, trace.expression, 0)
                 return true if proof_replay_expr_equal(trace.expression, fact) and (proof_replay_fact_trace_is_valid_with_stack(report, trace, owner, 0, dependency_stack, active_certificates, validation_workspace) can Global{Read,Write})
                 trace_index <- proof_replay_trace_chain_next(report, trace_index)
             return false
@@ -225,7 +312,7 @@ extend ElisaProof:
                 trace_index: usize = report.traces.origin_indices[certificate.facts_start + index]
                 if trace_index < report.traces.records.count:
                     trace: ProofFactTrace = report.traces.records[trace_index]
-                    continue if trace.kind == "local-binding" and not proof_replay_local_binding_fact_live(report, trace)
+                    continue if trace.kind == "local-binding" and not proof_replay_local_binding_fact_live_with_work(report, trace, validation_workspace.source_scan_work_used)
                 # A certificate may serialize premises whose source provenance this replay
                 # deliberately does not support. They are not trusted: omit them and let the
                 # kernel determine whether the remaining validated facts suffice. Rejecting the

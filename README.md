@@ -133,8 +133,9 @@ then carries `"admissible": false`), and `2` for one that names no goal of this 
 
 `build/elisa-proof --script block.txt file.elisa` runs a proof written by hand in that same shape,
 so a person can propose a different proof of the goal rather than only compare against the recorded
-one. `by <action>` lines are the steps; `by rewrite <index>` and `by rewriteback <index>` select a
-zero-based equality fact for rewriting. The block header, `given`, `show` and `qed` lines are
+one. `by <action>` lines are the steps; `by apply <index>` selects an implication fact, while
+`by rewrite <index>` and `by rewriteback <index>` select a zero-based equality fact for rewriting.
+The block header, `given`, `show` and `qed` lines are
 documentation and carry no weight, since a source-bound script takes its hypotheses and conclusion
 from the goal itself. A line matching none of those refuses the whole script. The front end is
 untrusted elaboration: it translates the text into the same
@@ -145,9 +146,11 @@ branch scripts and must still be written as JSON.
 `build/elisa-proof --repair N file.elisa` searches a bounded tactic vocabulary for one that closes
 goal `N` and emits the winner in that same runnable shape, so the cycle closes: the report names a
 broken goal, repair proposes a proof, `--script` runs it, the kernel replays it. Alongside fixed
-argument-free sequences, it can derive rewrite candidates from up to four relevant explicit
-equality facts among the goal's first sixteen context facts, considering both useful orientations and
-four closers (`decide`, `assumption`, `simp,decide`, `simp,assumption`). The search only proposes a
+argument-free sequences, it can derive apply candidates from up to four matching effect-free
+implication facts among the goal's first sixteen context facts, with seven fixed closers. It can also
+derive rewrite candidates from up to four relevant explicit equality facts in that context,
+considering both useful orientations and four closers (`decide`, `assumption`, `simp,decide`,
+`simp,assumption`). The search only proposes a
 proof: a candidate is admitted solely when the checked engine solves the goal *and* the kernel
 replays the certificate it produced. The response states `candidates`, `tried` and `exhaustive`;
 `exhaustive` is false when a candidate wins early or a search cap truncates discovery. A returned
@@ -211,13 +214,19 @@ The `action_protocol` capability declaration identifies the Elisa-native `elisa-
 state API. It exposes kernel-backed `assumption`, `exact`, `decide`, `intro`, `apply`, `simp`,
 `have`, `instantiate`, `rewrite`, `rewriteback`, `split`, `left`, `right`, and `cases` operations;
 `rewriteback` applies the selected equality in reverse, while `rewrite` uses its written direction.
+`apply` accepts an optional zero-based context-fact index, as `by apply N` in a text script or
+`{"action":"apply","argument_index":N}` in JSON. Without an index it keeps the existing
+first-matching implication behavior; with an index it uses only that fact and records the choice
+in the tactic trace. An out-of-range index or a fact that is not an effect-free implication
+concluding the current goal is rejected without changing the state.
 `simp` only
 folds checked closed constants, `instantiate` only admits a checked member of a finite integer
 range or literal collection, branch operations return independent child states, and a failed
 operation cannot mark a goal solved. The implementation is in
 `src/proof/tactics.elisa`, so AI or editor integrations can reuse the same state transitions
 instead of inventing proof facts from the JSON report. Indexed rewrites retain the selected equality
-index in the trace, and both trace replay layers require that exact fact. Each tactic state also retains its
+index in the trace, and both trace replay layers require that exact fact. Indexed `apply` similarly
+binds the chosen implication in both replay layers. Each tactic state also retains its
 initial facts/goal and a deterministic post-state trace with complete flat fact snapshots;
 `proof_tactic_replay` reconstructs that trace with the same kernel-backed operations and rejects
 any transition or final-state mismatch. `proof_tactic_kernel_trace_replay` independently lowers

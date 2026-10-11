@@ -1,6 +1,7 @@
 const PROOF_REPAIR_REWRITE_FACT_LIMIT: usize = 4
 const PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT: usize = 16
 const PROOF_REPAIR_REWRITE_CLOSERS: usize = 4
+const PROOF_REPAIR_APPLY_FACT_LIMIT: usize = 4
 const PROOF_REPAIR_CONTEXT_FACT_LIMIT: usize = 512
 const PROOF_REPAIR_STATE_BYTE_LIMIT: usize = 262144
 
@@ -148,132 +149,8 @@ def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofRep
 # The check re-renders the canonical block for the goal the file names and compares the two, so an
 # edited `qed`, an invented hypothesis, a swapped conclusion, a renumbered certificate and a stale
 # source all show up the same way — as a divergence from what the report actually supports.
-def proof_rendered_line(contents: darray[u8]&, start: usize) -> (end: usize, next: usize) can[Memory.Allocate, Abort.Panic]:
-    cursor: mutable usize = start
-    while cursor < contents.count |cursor, contents|:
-        break if contents[cursor] == '\n'.u8()
-        cursor <- cursor + 1
-    return (cursor, cursor + 1 if cursor < contents.count else cursor)
-
-def proof_rendered_lines_equal(left: darray[u8]&, left_start: usize, left_end: usize, right: darray[u8]&, right_start: usize, right_end: usize) -> bool:
-    return false if left_end - left_start != right_end - right_start
-    for offset in 0..<(left_end - left_start) |offset, left, right, left_start, right_start|:
-        return false if left[left_start + offset] != right[right_start + offset]
-    return true
-
-def proof_push_json_byte_range(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize) -> void can[Memory.Allocate, Abort.Panic]:
-    buffer.push('"'.u8())
-    for index in start..<end |index, buffer, contents|:
-        byte: u8 = contents[index]
-        if byte == '"'.u8() or byte == '\\'.u8():
-            buffer.push('\\'.u8())
-            buffer.push(byte)
-        elif byte < 32:
-            buffer.push('?'.u8())
-        else:
-            buffer.push(byte)
-    buffer.push('"'.u8())
-
-# The goal id the block claims, read from its own header. A block that does not name one cannot be
-# checked against anything, which is itself a refusal rather than a pass.
-def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usize) can[Memory.Allocate, Abort.Panic]:
-    marker: sview = "# goal "
-    for start in 0..<contents.count |start, contents, marker|:
-        continue if start > 0 and contents[start - 1] != '\n'.u8()
-        matched: mutable bool = true
-        for offset in 0..<sview_len(marker) |offset, start, contents, marker, matched|:
-            matched <- false if start + offset >= contents.count or contents[start + offset] != sview_at(marker, offset)
-        continue if not matched
-        cursor: mutable usize = start + sview_len(marker)
-        value: mutable usize = 0
-        digits: mutable usize = 0
-        while cursor < contents.count |cursor, contents, value, digits|:
-            byte: u8 = contents[cursor]
-            break if byte < '0'.u8() or byte > '9'.u8()
-            break if digits >= 9
-            value <- value * 10 + (byte - '0'.u8()).usize()
-            digits <- digits + 1
-            cursor <- cursor + 1
-        return (true, value) if digits > 0
-    return (false, 0)
-
-# Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
-# 2 it names no goal of this source and so cannot be checked at all.
-# Translate a human-written proof script into the tactic interchange the checked engine already
-# consumes. This is untrusted elaboration and nothing more: it produces a script, it never decides
-# whether a goal holds, and the `proof`/`qed` words carry no weight here — only the tactic engine
-# and the kernel decide that. A line it does not recognize refuses the whole script rather than
-# being skipped, so a typo cannot quietly become a shorter proof than the author wrote.
-#
-# `given` and `show` lines are accepted and carry no effect: in a source-bound script the
-# hypotheses and the conclusion come from the goal itself, and the engine reports the state it
-# actually started from. Use `--check-proof` to confirm they say what the report supports.
-def proof_script_is_space(byte: u8) -> bool:
-    return byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()
-
-def proof_script_starts_with(contents: darray[u8]&, start: usize, end: usize, prefix: sview) -> bool:
-    return false if end - start < sview_len(prefix)
-    for offset in 0..<sview_len(prefix) |offset, contents, start, prefix|:
-        return false if contents[start + offset] != sview_at(prefix, offset)
-    return true
-
-def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize, emitted: usize) -> (ok: bool, emitted: usize) can[Memory.Allocate, Abort.Panic]:
-    cursor: mutable usize = start
-    while cursor < end |cursor, contents|:
-        break if not proof_script_is_space(contents[cursor])
-        cursor <- cursor + 1
-    stop: mutable usize = end
-    while stop > cursor |stop, contents|:
-        break if not proof_script_is_space(contents[stop - 1])
-        stop <- stop - 1
-    return (true, emitted) if cursor >= stop
-    return (true, emitted) if contents[cursor] == '#'.u8()
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "proof ")
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "open ")
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unchecked ")
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "given ")
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "show ")
-    return (true, emitted) if proof_script_starts_with(contents, cursor, stop, "unproved:")
-    return (true, emitted) if stop - cursor == 3 and proof_script_starts_with(contents, cursor, stop, "qed")
-    return (false, emitted) if not proof_script_starts_with(contents, cursor, stop, "by ")
-    cursor <- cursor + 3
-    while cursor < stop |cursor, contents|:
-        break if not proof_script_is_space(contents[cursor])
-        cursor <- cursor + 1
-    name_start: usize = cursor
-    while cursor < stop |cursor, contents|:
-        byte: u8 = contents[cursor]
-        break if byte < 'a'.u8() or byte > 'z'.u8()
-        cursor <- cursor + 1
-    return (false, emitted) if cursor == name_start
-    name_end: usize = cursor
-    while cursor < stop |cursor, contents|:
-        break if not proof_script_is_space(contents[cursor])
-        cursor <- cursor + 1
-    argument_value: mutable usize = 0
-    argument_digits: mutable usize = 0
-    while cursor < stop |cursor, contents, argument_value, argument_digits|:
-        byte: u8 = contents[cursor]
-        break if byte < '0'.u8() or byte > '9'.u8()
-        break if argument_digits >= 9
-        argument_value <- argument_value * 10 + (byte - '0'.u8()).usize()
-        argument_digits <- argument_digits + 1
-        cursor <- cursor + 1
-    indexed_rewrite: bool = (name_end - name_start == 7 and proof_script_starts_with(contents, name_start, name_end, "rewrite")) or (name_end - name_start == 11 and proof_script_starts_with(contents, name_start, name_end, "rewriteback"))
-    return (false, emitted) if argument_digits > 0 and not indexed_rewrite
-    # Anything after the action name and one optional index is not part of this grammar.
-    return (false, emitted) if cursor != stop
-    proof_push(buffer, ",") if emitted > 0
-    proof_push(buffer, "{\"action\":")
-    proof_push_json_byte_range(buffer, contents, name_start, name_end)
-    if argument_digits > 0:
-        proof_push(buffer, ",\"argument_index\":")
-        proof_push_number(buffer, argument_value.u32())
-    proof_push(buffer, "}")
-    return (true, emitted + 1)
-
-# The bounded, deterministic base vocabulary. Source-derived rewrites are appended separately
-# from at most four explicit equality facts in the selected goal's context.
+# The bounded, deterministic base vocabulary. Source-derived apply and rewrite candidates are
+# appended separately from a capped prefix of the selected goal's context.
 # Nothing here decides anything: a candidate is only ever a *proposal*, admitted solely if the
 # tactic engine accepts it and the kernel replays the certificate it produces.
 def proof_repair_candidates() -> darray[sview] can[Memory.Allocate, Abort.Panic]:
@@ -309,9 +186,9 @@ def proof_repair_check_candidate(report: ProofReport&, goal_id: usize, repair_st
             source_bound <- false if attempt.rule == "resource-safety" or attempt.rule == "structural-safety"
             source_bound <- false if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
             if source_bound:
-                source_bound <- not proof_source_expression_has_overloaded_operator(source_goal.value, report.source_primitive_operator_mask, 0)
+                source_bound <- not proof_source_tactic_expression_has_overloaded_operator(source_goal.value, report.source_primitive_operator_mask)
                 for fact in source_facts |fact, report, source_bound|:
-                    source_bound <- false if proof_source_expression_has_overloaded_operator(fact, report.source_primitive_operator_mask, 0)
+                    source_bound <- false if proof_source_tactic_expression_has_overloaded_operator(fact, report.source_primitive_operator_mask)
                 source_bound <- false if not proof_tactic_source_state_kernel_matches(report, goal_id, source_facts, source_goal.value)
             usable <- source_bound
         if usable:
@@ -367,9 +244,18 @@ def proof_repair_push_indexed_script_json(buffer: mutable darray[u8]&, goal_id: 
     proof_repair_push_actions(buffer, closer, true)
     proof_push(buffer, "]}")
 
+def proof_repair_push_indexed_apply_script_json(buffer: mutable darray[u8]&, goal_id: usize, fact_index: usize, closer: sview) -> void can[Memory.Allocate, Abort.Panic]:
+    proof_push(buffer, "{\"format\":\"elisa-proof-tactics-v1\",\"target\":{\"goal_id\":")
+    proof_push_number(buffer, goal_id.u32())
+    proof_push(buffer, "},\"actions\":[{\"action\":\"apply\",\"argument_index\":")
+    proof_push_number(buffer, fact_index.u32())
+    proof_push(buffer, "},")
+    proof_repair_push_actions(buffer, closer, true)
+    proof_push(buffer, "]}")
+
 # The proposal in the same shape `--proof` renders and `--script` runs, so a repair can be read,
 # edited and re-run without translation.
-def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, actions: sview, has_rewrite: bool, fact_index: usize, reverse: bool) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, actions: sview, has_rewrite: bool, has_apply: bool, fact_index: usize, reverse: bool) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "# goal ")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, "\nproof ")
@@ -377,7 +263,11 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
     proof_push(buffer, "_")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ":\n")
-    if has_rewrite:
+    if has_apply:
+        proof_push(buffer, "    by apply ")
+        proof_push_number(buffer, fact_index.u32())
+        proof_push(buffer, "\n")
+    elif has_rewrite:
         proof_push(buffer, "    by rewriteback " if reverse else "    by rewrite ")
         proof_push_number(buffer, fact_index.u32())
         proof_push(buffer, "\n")
@@ -387,7 +277,7 @@ def proof_repair_push_script_text(buffer: mutable darray[u8]&, report: ProofRepo
 # One goal's bounded search, shared by the single-goal and whole-file repair modes. It reports only
 # what was tried and which candidate the *checked engine* accepted; it never reaches a verdict of
 # its own. Rewrites are generated only from explicit equalities in this goal's own fact list.
-def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
+def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) can[Memory.Allocate, Memory.Release, Abort.Panic, Global.Read, Global.Write]:
     repair_state: mutable darray[u8] = []
     repair_goal: mutable Ast::Expr = Ast::Expr.Invalid
     repair_fact_start: mutable usize = 0
@@ -428,11 +318,13 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
     winning_fact_index: mutable usize = 0
     winning_reverse: mutable bool = false
     has_rewrite: mutable bool = false
+    has_apply: mutable bool = false
     candidate_context_usable: mutable bool = true
     candidate_context_prevalidated: mutable bool = false
     candidate_count: mutable usize = base_candidates.count if repair_state_complete else 0
     exhaustive: mutable bool = repair_state_complete
     rewrite_closers: darray[sview] = ["decide", "assumption", "simp,decide", "simp,assumption"]
+    apply_closers: darray[sview] = ["assumption", "exact", "decide", "simp", "simp,assumption", "simp,exact", "simp,decide"]
     region repair_region(PROOF_TACTIC_WORKSPACE_ARENA_BYTES):
         repair_store: Ast::Node.Store[Local] = Ast::Node.Store(repair_region)
         in repair_store:
@@ -457,11 +349,49 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
                         winning <- candidate
                         exhaustive <- false
                 if not repaired and candidate_context_usable:
-                    relevant_rewrite_facts: mutable usize = 0
                     fact_scan_count: mutable usize = repair_fact_count
                     if fact_scan_count > PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT:
                         fact_scan_count <- PROOF_REPAIR_REWRITE_FACT_SCAN_LIMIT
                         exhaustive <- false
+                    relevant_apply_facts: mutable usize = 0
+                    for fact_index in 0..<fact_scan_count |fact_index, repair_fact_start, report, repair_state, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_count, exhaustive, relevant_apply_facts, repair_goal, apply_closers, candidate_context_usable, candidate_context_prevalidated|:
+                        break if repaired or not candidate_context_usable
+                        fact: Ast::Expr = report.certificate_facts[repair_fact_start + fact_index]
+                        unwrapped_fact: (complete: bool, value: Ast::Expr) = proof_repair_strip_outer_parens(fact)
+                        if not unwrapped_fact.complete:
+                            exhaustive <- false
+                            continue
+                        match unwrapped_fact.value:
+                            Ast::Expr.Binary(_, TokenKind.FatArrow, consequent, _):
+                                continue if proof_expr_has_call(fact) or proof_expr_has_move(fact)
+                                continue if not (proof_expr_equal(consequent, repair_goal) or proof_quantifier_equal(consequent, repair_goal, report.source_annotations))
+                                if relevant_apply_facts >= PROOF_REPAIR_APPLY_FACT_LIMIT:
+                                    exhaustive <- false
+                                    break
+                                relevant_apply_facts <- relevant_apply_facts + 1
+                                candidate_count <- candidate_count + apply_closers.count
+                                for closer_index in 0..<apply_closers.count |closer_index, fact_index, apply_closers, repair_state, report, goal_id, repaired, searched, winning, winning_fact_index, has_apply, candidate_context_usable, candidate_context_prevalidated|:
+                                    break if repaired or not candidate_context_usable
+                                    closer: sview = apply_closers[closer_index]
+                                    script_text: mutable darray[u8] = []
+                                    proof_repair_push_indexed_apply_script_json(&script_text, goal_id, fact_index, closer)
+                                    candidate_check: (usable: bool, admitted: bool) = (proof_repair_check_candidate(report, goal_id, repair_state, script_text, candidate_context_prevalidated) can Global{Read,Write})
+                                    if not candidate_check.usable:
+                                        exhaustive <- false
+                                        candidate_context_usable <- false
+                                        break
+                                    else:
+                                        candidate_context_prevalidated <- true
+                                        searched <- searched + 1
+                                    if candidate_check.admitted:
+                                        repaired <- true
+                                        winning <- closer
+                                        winning_fact_index <- fact_index
+                                        has_apply <- true
+                                        exhaustive <- false
+                            _:
+                                pass
+                    relevant_rewrite_facts: mutable usize = 0
                     for fact_index in 0..<fact_scan_count |fact_index, repair_fact_start, report, rewrite_closers, repair_state, goal_id, repaired, searched, winning, winning_fact_index, winning_reverse, has_rewrite, candidate_count, exhaustive, relevant_rewrite_facts, repair_goal, candidate_context_usable, candidate_context_prevalidated|:
                         break if repaired or not candidate_context_usable
                         fact: Ast::Expr = report.certificate_facts[repair_fact_start + fact_index]
@@ -508,11 +438,11 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
                                             exhaustive <- false
                             _:
                                 pass
-    return (repaired, searched, candidate_count, exhaustive, winning, winning_fact_index, winning_reverse, has_rewrite)
+    return (repaired, searched, candidate_count, exhaustive, winning, winning_fact_index, winning_reverse, has_rewrite, has_apply)
 
 # One goal's entry in a whole-file repair report: what it is, whether a proposal survived the
 # kernel, and the runnable script when one did.
-def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool)) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool)) -> void can[Memory.Allocate, Abort.Panic]:
     proof_push(buffer, "{\"goal_id\":")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ",\"name\":")
@@ -532,7 +462,7 @@ def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, go
     proof_push(buffer, ",\"script\":")
     if found.repaired:
         script_body: mutable darray[u8] = []
-        proof_repair_push_script_text(&script_body, report, goal_id, found.actions, found.has_rewrite, found.rewrite_fact_index, found.rewrite_reverse)
+        proof_repair_push_script_text(&script_body, report, goal_id, found.actions, found.has_rewrite, found.has_apply, found.rewrite_fact_index, found.rewrite_reverse)
         proof_push_json_bytes(buffer, script_body)
     else:
         proof_push(buffer, "null")

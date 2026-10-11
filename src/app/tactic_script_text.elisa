@@ -1,0 +1,188 @@
+# Human-readable proof-script parsing for the source-bound tactic CLI.
+def proof_rendered_line(contents: darray[u8]&, start: usize) -> (end: usize, next: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < contents.count |cursor, contents|:
+        break if contents[cursor] == '\n'.u8()
+        cursor <- cursor + 1
+    return (cursor, cursor + 1 if cursor < contents.count else cursor)
+
+def proof_rendered_lines_equal(left: darray[u8]&, left_start: usize, left_end: usize, right: darray[u8]&, right_start: usize, right_end: usize) -> bool:
+    return false if left_end - left_start != right_end - right_start
+    for offset in 0..<(left_end - left_start) |offset, left, right, left_start, right_start|:
+        return false if left[left_start + offset] != right[right_start + offset]
+    return true
+
+def proof_push_json_byte_range(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize) -> void can[Memory.Allocate, Abort.Panic]:
+    buffer.push('"'.u8())
+    for index in start..<end |index, buffer, contents|:
+        byte: u8 = contents[index]
+        if byte == '"'.u8() or byte == '\\'.u8():
+            buffer.push('\\'.u8())
+            buffer.push(byte)
+        elif byte < 32:
+            buffer.push('?'.u8())
+        else:
+            buffer.push(byte)
+    buffer.push('"'.u8())
+
+# The goal id the block claims, read from its own header. A block that does not name one cannot be
+# checked against anything, which is itself a refusal rather than a pass.
+def proof_rendered_goal_id(contents: darray[u8]&) -> (known: bool, goal_id: usize) can[Memory.Allocate, Abort.Panic]:
+    label: sview = "# goal"
+    found: mutable bool = false
+    found_id: mutable usize = 0
+    line_start: mutable usize = 0
+    while line_start < contents.count |contents, label, found, found_id, line_start|:
+        line_end: mutable usize = line_start
+        while line_end < contents.count |contents, line_end|:
+            break if contents[line_end] == '\n'.u8()
+            line_end <- line_end + 1
+        label_matches: mutable bool = line_end - line_start >= sview_len(label)
+        if label_matches:
+            for offset in 0..<sview_len(label) |offset, contents, line_start, label_matches, label|:
+                label_matches <- false if contents[line_start + offset] != sview_at(label, offset)
+        label_end: usize = line_start + sview_len(label)
+        header_boundary: mutable bool = false
+        if line_end >= label_end:
+            header_boundary <- line_end == label_end or (line_end > label_end and (contents[label_end] == ' '.u8() or contents[label_end] == '\t'.u8() or contents[label_end] == '\r'.u8()))
+        if label_matches and header_boundary:
+            return (false, 0) if found
+            found <- true
+            # The rendered format uses exactly one ASCII space before the numeric id.
+            return (false, 0) if line_end <= label_end or contents[label_end] != ' '.u8()
+            cursor: mutable usize = label_end + 1
+            value: mutable usize = 0
+            digits: mutable usize = 0
+            overflow: mutable bool = false
+            while cursor < line_end |cursor, contents, value, digits, overflow|:
+                byte: u8 = contents[cursor]
+                break if byte < '0'.u8() or byte > '9'.u8()
+                digit: usize = (byte - '0'.u8()).usize()
+                overflow <- true if value > 429496729 or (value == 429496729 and digit > 5)
+                value <- value * 10 + digit if not overflow
+                digits <- digits + 1
+                cursor <- cursor + 1
+            return (false, 0) if digits == 0 or overflow
+            if cursor < line_end:
+                return (false, 0) if contents[cursor] != ' '.u8() and contents[cursor] != '\t'.u8() and contents[cursor] != '\r'.u8()
+                while cursor < line_end |cursor, contents|:
+                    break if contents[cursor] != ' '.u8() and contents[cursor] != '\t'.u8() and contents[cursor] != '\r'.u8()
+                    cursor <- cursor + 1
+            if cursor < line_end:
+                suffix: sview = "of "
+                for offset in 0..<sview_len(suffix) |offset, contents, cursor, suffix|:
+                    return (false, 0) if cursor + offset >= line_end or contents[cursor + offset] != sview_at(suffix, offset)
+                cursor <- cursor + sview_len(suffix)
+                count_digits: mutable usize = 0
+                while cursor < line_end |cursor, contents, count_digits|:
+                    byte: u8 = contents[cursor]
+                    break if byte < '0'.u8() or byte > '9'.u8()
+                    count_digits <- count_digits + 1
+                    cursor <- cursor + 1
+                return (false, 0) if count_digits == 0
+                rule_suffix: sview = ", rule "
+                for offset in 0..<sview_len(rule_suffix) |offset, contents, cursor, rule_suffix|:
+                    return (false, 0) if cursor + offset >= line_end or contents[cursor + offset] != sview_at(rule_suffix, offset)
+                cursor <- cursor + sview_len(rule_suffix)
+                return (false, 0) if cursor >= line_end
+            found_id <- value
+        line_start <- line_end + 1 if line_end < contents.count else line_end
+    return (true, found_id) if found
+    return (false, 0)
+
+# Returns the process exit code: 0 the block matches what the report supports, 1 it diverges,
+# 2 it names no goal of this source and so cannot be checked at all.
+# Translate a human-written proof script into the tactic interchange the checked engine already
+# consumes. This is untrusted elaboration and nothing more: it produces a script, it never decides
+# whether a goal holds, and the `proof`/`qed` words carry no weight here — only the tactic engine
+# and the kernel decide that. A line it does not recognize refuses the whole script rather than
+# being skipped, so a typo cannot quietly become a shorter proof than the author wrote.
+#
+# `given` and `show` lines are accepted and carry no effect: in a source-bound script the
+# hypotheses and the conclusion come from the goal itself, and the engine reports the state it
+# actually started from. Use `--check-proof` to confirm they say what the report supports.
+def proof_script_is_space(byte: u8) -> bool:
+    return byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()
+
+def proof_script_starts_with(contents: darray[u8]&, start: usize, end: usize, prefix: sview) -> bool:
+    return false if end - start < sview_len(prefix)
+    for offset in 0..<sview_len(prefix) |offset, contents, start, prefix|:
+        return false if contents[start + offset] != sview_at(prefix, offset)
+    return true
+
+def proof_script_block_declaration_valid(contents: darray[u8]&, start: usize, end: usize, keyword: sview) -> bool:
+    return false if not proof_script_starts_with(contents, start, end, keyword)
+    label_start: usize = start + sview_len(keyword)
+    return false if label_start >= end or contents[end - 1] != ':'.u8()
+    return false if label_start + 1 >= end - 1
+    for index in label_start..<end - 1 |index, contents|:
+        byte: u8 = contents[index]
+        return false if byte == ' '.u8() or byte == '\t'.u8() or byte == '\r'.u8()
+    return true
+
+def proof_script_metadata_payload_valid(contents: darray[u8]&, start: usize, end: usize, prefix: sview) -> bool:
+    return false if not proof_script_starts_with(contents, start, end, prefix)
+    cursor: mutable usize = start + sview_len(prefix)
+    while cursor < end |cursor, contents|:
+        break if contents[cursor] != ' '.u8() and contents[cursor] != '\t'.u8() and contents[cursor] != '\r'.u8()
+        cursor <- cursor + 1
+    return cursor < end
+
+def proof_script_line_to_json(buffer: mutable darray[u8]&, contents: darray[u8]&, start: usize, end: usize, emitted: usize) -> (ok: bool, emitted: usize) can[Memory.Allocate, Abort.Panic]:
+    cursor: mutable usize = start
+    while cursor < end |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    stop: mutable usize = end
+    while stop > cursor |stop, contents|:
+        break if not proof_script_is_space(contents[stop - 1])
+        stop <- stop - 1
+    return (true, emitted) if cursor >= stop
+    return (true, emitted) if contents[cursor] == '#'.u8()
+    return (true, emitted) if proof_script_block_declaration_valid(contents, cursor, stop, "proof ")
+    return (true, emitted) if proof_script_block_declaration_valid(contents, cursor, stop, "open ")
+    return (true, emitted) if proof_script_block_declaration_valid(contents, cursor, stop, "unchecked ")
+    return (true, emitted) if proof_script_metadata_payload_valid(contents, cursor, stop, "given ")
+    return (true, emitted) if proof_script_metadata_payload_valid(contents, cursor, stop, "show ")
+    return (true, emitted) if proof_script_metadata_payload_valid(contents, cursor, stop, "unproved:")
+    return (true, emitted) if stop - cursor == 3 and proof_script_starts_with(contents, cursor, stop, "qed")
+    return (false, emitted) if not proof_script_starts_with(contents, cursor, stop, "by ")
+    cursor <- cursor + 3
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        cursor <- cursor + 1
+    name_start: usize = cursor
+    while cursor < stop |cursor, contents|:
+        byte: u8 = contents[cursor]
+        break if byte < 'a'.u8() or byte > 'z'.u8()
+        cursor <- cursor + 1
+    return (false, emitted) if cursor == name_start
+    name_end: usize = cursor
+    argument_separator: mutable bool = false
+    while cursor < stop |cursor, contents|:
+        break if not proof_script_is_space(contents[cursor])
+        argument_separator <- true
+        cursor <- cursor + 1
+    argument_value: mutable usize = 0
+    argument_digits: mutable usize = 0
+    while cursor < stop |cursor, contents, argument_value, argument_digits|:
+        byte: u8 = contents[cursor]
+        break if byte < '0'.u8() or byte > '9'.u8()
+        break if argument_digits >= 10
+        argument_value <- argument_value * 10 + (byte - '0'.u8()).usize()
+        argument_digits <- argument_digits + 1
+        cursor <- cursor + 1
+    indexed_action: bool = (name_end - name_start == 5 and proof_script_starts_with(contents, name_start, name_end, "apply")) or (name_end - name_start == 7 and proof_script_starts_with(contents, name_start, name_end, "rewrite")) or (name_end - name_start == 11 and proof_script_starts_with(contents, name_start, name_end, "rewriteback"))
+    return (false, emitted) if argument_digits > 0 and not argument_separator
+    return (false, emitted) if argument_digits > 0 and (not indexed_action or argument_value > 4294967295)
+    # Anything after the action name and one optional index is not part of this grammar.
+    return (false, emitted) if cursor != stop
+    proof_push(buffer, ",") if emitted > 0
+    proof_push(buffer, "{\"action\":")
+    proof_push_json_byte_range(buffer, contents, name_start, name_end)
+    if argument_digits > 0:
+        proof_push(buffer, ",\"argument_index\":")
+        proof_push_number(buffer, argument_value.u32())
+    proof_push(buffer, "}")
+    return (true, emitted + 1)
+

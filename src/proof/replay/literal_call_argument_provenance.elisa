@@ -166,20 +166,35 @@ extend ElisaProof:
             return signed_found
 
         def proof_replay_literal_binding_unique(report: ProofReport&, symbol: sview, expected: Ast::Expr, owner: sview, call_line: u32) -> bool:
-            for trace in report.traces.records |trace, symbol, expected, owner, call_line|:
+            work: mutable usize = 0
+            return proof_replay_literal_binding_unique_with_work(report, symbol, expected, owner, call_line, &work)
+
+        def proof_replay_literal_binding_unique_with_work(report: ProofReport&, symbol: sview, expected: Ast::Expr, owner: sview, call_line: u32, work: mutable usize&) -> bool:
+            return false if report.traces.records.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + report.traces.records.count
+            for trace in report.traces.records |trace, symbol, expected, owner, call_line, work|:
                 continue if trace.kind != "local-binding" or trace.name != owner or trace.line != call_line
                 match trace.expression:
                     Ast::Expr.Binary(Ast::Expr.Ident(name, _), TokenKind.EqEq, _, _) if name == symbol:
-                        return false if not proof_replay_expr_equal(trace.expression, expected)
+                        return false if not proof_replay_summary_expr_equal_with_work(trace.expression, expected, work)
                         return false if not proof_replay_source_position_equal(Ast::expr_pos(trace.expression), Ast::expr_pos(expected))
                     _:
                         pass
             return true
 
-        def proof_replay_literal_call_argument_binding_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_literal_call_argument_binding_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
+            work: mutable usize = 0
+            return proof_replay_literal_call_argument_binding_valid_with_work(report, trace, &work)
+
+        def proof_replay_literal_call_argument_binding_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, work: mutable usize&) -> bool:
             return false if report.trace_owner_line != trace.line
             return false if report.replay_owner_line == 0 or report.replay_owner_line == 4294967295
+            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, work)
+            return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + report.source_annotations.count
             return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
+            return false if report.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + report.source_declarations.count
             return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, position):
@@ -190,9 +205,11 @@ extend ElisaProof:
                     # scratch for whichever function was checked last. The reserved spelling
                     # plus exact source-call evidence is the stable identity; do not trust that
                     # transient counter during replay.
-                    return false if symbol_index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT or not proof_replay_literal_binding_unique(report, symbol, trace.expression, trace.name, trace.line)
+                    return false if symbol_index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT or not proof_replay_literal_binding_unique_with_work(report, symbol, trace.expression, trace.name, trace.line, work)
                     caller_module: mutable sview = ""
                     caller_count: mutable usize = 0
+                    return false if report.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                    work <- work + report.source_declarations.count
                     proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_module, &caller_count, 0)
                     return false if caller_count != 1
                     source_matches: mutable usize = 0
@@ -206,10 +223,13 @@ extend ElisaProof:
                             return false if not proof_replay_source_position_equal(call_position, position)
                             argument_index: mutable usize = arguments.count
                             for index in 0..<arguments.count |index, arguments, literal, argument_index|:
-                                if proof_replay_source_position_equal(Ast::expr_pos(arguments[index]), Ast::expr_pos(literal)) and proof_replay_expr_equal(arguments[index], literal):
+                                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                work <- work + 1
+                                if proof_replay_source_position_equal(Ast::expr_pos(arguments[index]), Ast::expr_pos(literal)) and proof_replay_summary_expr_equal_with_work(arguments[index], literal, work):
                                     return false if argument_index != arguments.count
                                     argument_index <- index
                             return false if argument_index >= arguments.count
+                            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, work)
                             overload_count: mutable usize = 0
                             return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, caller_module, "", &overload_count, 0)
                             return false if overload_count != 1
