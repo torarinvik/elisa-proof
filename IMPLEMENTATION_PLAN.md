@@ -9850,6 +9850,12 @@ fixture is being changed to a handle-backed hierarchy before the exact-current-s
 runtime regression. Reconcile task-declaration lowering against a focused control that verifies
 the selected pool and exactly-once task-group capture.
 
+Static review of the uncommitted source-literal work-limit change found a likely undercharge in
+`proof_source_literal_ensure_expected_coverage_with_work`: it charges the expected returned
+parameter bytes twice, while matching also reads the identifier bytes in the attempt's goal AST.
+Verify and correct the charge, then include a long-identifier budget-exhaustion control before
+qualifying the source-bound replay work.
+
 The next work order is: (1) finish and commit the explicit-pool declaration fix plus positive,
 negative, same-line selector, and task-store-capture controls; (2) seed the exact committed latest
 compiler tree with its matching runtime, then verify Stage1 provenance; (3) update the proof pin
