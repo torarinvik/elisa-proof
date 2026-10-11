@@ -12,9 +12,12 @@
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${ELISA_REMOTE_WORK:-${TMPDIR:-/tmp}/elisa-proof-remote-build}"
-# The first host runs the serial assertions, incl. the 180 s-watchdog kernel audit: put the
-# least contended host first (vast3's quota is shared with other agents' jobs).
-read -r -a FARM <<<"${ELISA_FARM:-root@171.227.197.156#47777 root@184.144.152.26#34348 root@76.71.171.67#40919}"
+# Optional remote execution requires a currently verified, explicit host inventory.
+if [[ -z "${ELISA_FARM:-}" ]]; then
+    echo "farm.sh: set ELISA_FARM explicitly; use scripts/test.sh for local execution" >&2
+    exit 2
+fi
+read -r -a FARM <<<"$ELISA_FARM"
 CTL="/tmp/epf-$(id -u)"; mkdir -p "$CTL"  # short: macOS caps socket paths at 104 bytes
 T0=$(date +%s); step() { echo "[$(( $(date +%s) - T0 ))s] $*"; }
 

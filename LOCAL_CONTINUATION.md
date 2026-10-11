@@ -3,6 +3,10 @@
 The proof checkout, local products, compiler provenance, direct-API regression harness, and
 benchmark checkpoint are saved on the Mac. Work can continue without the Vast instance.
 
+Current policy: use local compute. Historical remote endpoints and recovery notes below
+are archival evidence, not instructions to reconnect or wait. Remote farm execution
+requires an explicitly configured, currently verified `ELISA_FARM`.
+
 ## Proof assistant checkout
 
 The active branch is `codex/vast-local-checkpoint-20261009`. It contains the source-validated
