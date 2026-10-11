@@ -9622,9 +9622,13 @@ and cherry-picking it produced no unique changes. The `query_head_for` / `const_
 annotations still need an exact commit and validation report before integration. The PGS compile-time
 comparison completed as an exploratory Mac run: 12 cases, 24 warmups, and 108 measured pairs; all
 outputs matched and input/product postflight checks passed. The median of the 12 per-case paired
-baseline/candidate ratios is 1.0824, with substantial case-to-case spread. Its metadata sets
-`timing_eligible=false` because this 10-core Mac run is exploratory and non-qualifying; it supports
-no broad performance claim. The saved report is
+baseline/candidate ratios is 1.0824. The geometric mean speedups are 1.158 for wall time and 1.088
+for child CPU time; the candidate is faster in 9/12 wall-time cases and 11/12 CPU cases, with a
+large regression on the 2,000-function / 16-calls-per-function case. Case-to-case spread remains
+substantial. Its metadata sets `timing_eligible=false` because this 10-core Mac run is exploratory
+and non-qualifying; it supports no broad performance claim. The highest-ROI next compiler probe is
+the repeated callee-lookup path behind that large-case regression, with the full parity gate required
+before any later timing comparison. The saved report is
 `/private/tmp/elisa-pgs-index-mac-exploratory-01ddacf7-20261011/summary.json`. Cross-language timing
 remains subject to the Linux benchmark gate and seed-matched Stage1 products.
 
