@@ -26,29 +26,34 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
 
     copied_helpers = set()
 
+    def rebase_nested_includes(owner: Path, source: str) -> str:
+        return re.sub(
+            r'^include "([^"]+)"$',
+            lambda match: harness_include((owner.parent / match.group(1)).resolve()),
+            source,
+            flags=re.MULTILINE,
+        )
+
     def harness_include(original: Path) -> str:
         if not original.is_file():
             raise AssertionError(f"replay include does not exist: {original}")
         if original in private_helpers:
             source = original.read_text(encoding="utf-8")
+            source = rebase_nested_includes(original, source)
             private_label = "    private:"
-            if source.count(private_label) != 1:
-                raise AssertionError(f"expected one private section in {original}")
-            # Only the standalone harness receives these public helper copies.
+            if source.count(private_label) < 1:
+                raise AssertionError(f"expected at least one private section in {original}")
+            # Only the standalone harness receives these public helper copies. A module may
+            # reopen its private section after explanatory documentation or additional helpers.
             generated = scratch / private_helpers[original]
-            generated.write_text(source.replace(private_label, "    public:", 1), encoding="utf-8")
+            generated.write_text(source.replace(private_label, "    public:"), encoding="utf-8")
             copied_helpers.add(generated.name)
             original = generated
         elif original == (root / "src/proof/replay/source_call_coverage.elisa").resolve():
             # This facade owns the transitive cast helper include. Rebase all its includes
             # to their original locations while substituting the private helper copy.
             source = original.read_text(encoding="utf-8")
-            source = re.sub(
-                r'^include "([^"]+)"$',
-                lambda match: harness_include((original.parent / match.group(1)).resolve()),
-                source,
-                flags=re.MULTILINE,
-            )
+            source = rebase_nested_includes(original, source)
             generated = scratch / "source_call_coverage_test.elisa"
             generated.write_text(source, encoding="utf-8")
             original = generated
@@ -144,6 +149,15 @@ def run_source_binding_replay_harness(
         harness = replay_harness
         for marker, source in sources.items():
             harness = harness.replace(marker, json.dumps(source))
+        # Current Stage1 injects the canonical runtime modules for executable builds.
+        # The source-binding fixture predates that behavior and explicitly included
+        # the same modules, which now duplicates declarations from profiler hooks.
+        harness = re.sub(
+            r'^include "[^"\n]*/elisacore_std/(?:elisacore_runtime_prelude|collections|elisacore_runtime_strings)\.elisa"\n',
+            "",
+            harness,
+            flags=re.MULTILINE,
+        )
         harness = harness.replace(
             'include "../src/proof/replay.elisa"', _test_replay_includes(root, scratch)
         )

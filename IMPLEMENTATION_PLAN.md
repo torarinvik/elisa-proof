@@ -9600,24 +9600,29 @@ is qualified for correctness only; it has no measured speedup claim.
 Proof `main` retains source baseline `62a4cf55698fde30b2d01f49e92d47f37d148731`; documentation-only
 updates record this consolidation. Its working-tree pin is being updated to the exact compiler
 revision above.
-The strict proof build and the mutable-global grant matrix pass against that Stage1 product. The
-direct API harness now resolves nested replay includes and omits the three runtime modules that
-Stage1 injects automatically. It compiles, but execution still fails at return 229 while replaying
-the source for a local fixed-array type-bound trace. The source validator rejects that trace too,
-so the direct API/replay gate is not yet green. The assert-by inventory check was corrected from one
-entry to two because its fixture contains both an outer Boolean target and a Boolean `assert` proof
-step; the remaining coverage and replay checks stay enabled. A test helper also now makes its
-operation-local Global grant explicit.
+The strict proof build, mutable-global grant matrix, and direct API harness now pass against that
+Stage1 product. The harness resolves nested replay includes, omits the three runtime modules that
+Stage1 injects automatically, expects both Boolean source goals, and grants the test helper's
+operation-local Global effects. Its fixed-array replay path now accepts the producer's compact
+`Index.All` witness only when it matches the unique local fixed-array declaration and scalar element
+type. This closes the former return-229 failure without broadening parameter or ambiguous-binding
+admission.
 
-Keep the proof pin and harness adjustments uncommitted until the return-229 provenance failure is
-explained and the full direct API gate passes. The immediate high-ROI order is: diagnose and fix the
-local fixed-array source-replay admission without weakening source or kernel checks; rerun the exact
-Stage1 proof, Global grant, and direct API gates; then commit the proof pin and test fixes together.
+The broader `test_fixed_array_literal_type_bound_replay.py` still fails only in its nested temporary
+array variant (`[values[1]][0]`): the report has one `expression-unsupported` finding, zero semantic
+errors, and zero replay gaps. Direct and parenthesized indexing pass. Keep this expression rejected
+until the proof checker can authenticate both accesses and their bounds; compare it with the prior
+proof revision before treating it as a regression from this compiler pin. The strict build and focused
+Global.Read/Write controls are green, so commit the pin, harness compatibility fixes, and narrow
+`Index.All` source-replay correction together while tracking the nested-expression case separately.
+
 The separate `8d7cfca` backend/region-owner commit was re-audited: its rename is superseded by
 `resolved_error_family(...)` on current compiler `main`, its native owner-lookup smoke passes there,
 and cherry-picking it produced no unique changes. The `query_head_for` / `const_scope_owner` region
-annotations still need an exact commit and validation report before integration. Resume performance
-comparisons only with an approved Linux benchmark host and seed-matched Stage1 products.
+annotations still need an exact commit and validation report before integration. The PGS compile-time
+comparison is an exploratory Mac run with non-qualifying metadata; wait for that run to exit before
+any further compiler-backed checks. Cross-language timing remains subject to the Linux benchmark
+gate and seed-matched Stage1 products.
 
 The compiler cleanup removed two duplicate temporary seed worktrees, a second clean checkout at
 the retained `37a322e7` scoped-type baseline, and an obsolete generated Stage1 checkout. The current

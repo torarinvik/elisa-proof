@@ -84,7 +84,7 @@ extend ElisaProof:
         def proof_test_typed_return_constant_source(source_text: sview, value: i64, expect_valid: bool) -> bool can Memory.Allocate, Abort.Panic:
             source: mutable darray[u8] = []
             report: mutable ProofReport = proof_empty_report()
-            proof_test_parse_declarations(source_text, &source, &report)
+            (proof_test_parse_declarations(source_text, &source, &report) can Global{Read,Write})
             owner_line: mutable u32 = 0
             for declaration in report.source_declarations |owner_line|:
                 match declaration:

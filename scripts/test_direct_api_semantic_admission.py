@@ -235,7 +235,9 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             (api_probe_before_replay(SOURCE_ASSERT_BY_POSITIVE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
             return 247 if report.failed != 0 or report.findings.count != 0 or report.replayed != 0
             source_assert_by_goals: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, supported: bool)] = proof_source_assert_by_inventory(report.source_declarations)
-            return 252 if source_assert_by_goals.count != 1
+            # The fixture contributes its outer Boolean target and its Boolean `assert`
+            # proof step to this inventory; both need a source-bound attempt and replay.
+            return 252 if source_assert_by_goals.count != 2
             return 253 if not proof_source_assert_by_attempt_coverage(source_assert_by_goals, report)
             return 254 if proof_source_assert_by_coverage(source_assert_by_goals, report)
             (proof_replay_certificates(&report) can Global{Read,Write})
