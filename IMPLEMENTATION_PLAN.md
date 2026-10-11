@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-11. **§23.27.104 is the live integration gate; §23.27.71 remains the authoritative high-ROI order.** The last fully qualified proof product remains §23.27.100 (compiler `2efa1ca5`, LLVM 23.1.3). Earlier semantic-options cache-key, Global.Read/Write, global-authority, lexer, and PGS memo controls passed on their recorded revisions and are already on compiler `main`; those results do not qualify later source. Proof `main` still pins compiler `7e125178` through `ELISA_COMPILER_REV`. The source-admission and receipt changes are unqualified: the exact-pin strict O2 build stopped on source errors before regressions ran. Compiler `main` is `1c8d6106`, three local commits ahead of `origin/main`, with additional uncommitted compiler and proof-admission edits; its installed Stage1 fails provenance checks. The parallel-runtime Global effect grants are committed and passed the focused semantic control. Elisa-core `main` includes scalar-enum/match-fact SMT, alias-member, and literal-string-result fixes through `71bdb70f`; full semantic and backend package suites pass. The native candidate proves all production token-display contracts with zero failures, while a deliberately wrong spelling is rejected; eight `u8`/`u16` overflow, in-range refusal, and valid-result controls pass. The prior Stage1 attempt stopped before product generation on region and permission-row errors. A fresh reduced control now isolates a generic `can P` permission-forwarding failure that still blocks Stage1 qualification. Recent compiler snapshots also exposed an explicit-pool task-declaration backend decline at `par_pass_run@220` and three invalid `else if` clauses. The clauses were corrected to Elisa’s `elif` syntax, and `3dd2a857` fixes an IndexMap success arm that did not return its inserted index. The store-capture fix is integrated into Elisa-core `main` as `05fc6717` (cherry-picked from `9fb4ac52` on base `9db54e43`); the full backend package passes with LLVM 23. Native controls pass at O0/O2, the negative mutation control fails, and the latest five-submission O2 fixture passes LLVM verification and three executable runs. Correct generic permission forwarding and the task declaration path, then build from a stable latest-source snapshot before updating the proof compiler pin. Per the latest user instruction, skip timing and integrate only correctness-qualified changes. Mutable receipt/source binding, adversarial pattern collisions, loop result-symbol provenance, and current-revision Global grant matrices remain release blockers.
+Status refreshed 2026-10-11. **§23.27.104 is the live integration gate; §23.27.71 remains the authoritative high-ROI order.** The last fully qualified proof product remains §23.27.100 (compiler `2efa1ca5`, LLVM 23.1.3). Earlier semantic-options cache-key, Global.Read/Write, global-authority, lexer, and PGS memo controls passed on their recorded revisions and are already on compiler `main`; those results do not qualify later source. Proof `main` still pins compiler `7e125178` through `ELISA_COMPILER_REV`. The source-admission and receipt changes are unqualified: the exact-pin strict O2 build stopped on source errors before regressions ran. Compiler `main` is `c75a821d`, four local commits ahead of `origin/main`, with additional uncommitted compiler and proof-admission edits; its installed Stage1 fails provenance checks. The parallel-runtime Global effect grants are committed and passed the focused semantic control. Elisa-core `main` includes scalar-enum/match-fact SMT, alias-member, and literal-string-result fixes through `71bdb70f`; full semantic and backend package suites pass. The native candidate proves all production token-display contracts with zero failures, while a deliberately wrong spelling is rejected; eight `u8`/`u16` overflow, in-range refusal, and valid-result controls pass. The prior Stage1 attempt stopped before product generation on region and permission-row errors. A fresh reduced control isolated three concurrency `can P` permission-forwarding failures; Stage1 commit `c75a821d` now forwards those rows through `spawn1`, `task`, and `pool_submit1`. The current Stage0 accepts the positive permission control and rejects a worker write without local `Global.Write`; generated-code controls pass verification and three runs at O0/O2. Full Stage1 admission remains blocked by separate source diagnostics. Recent compiler snapshots also exposed an explicit-pool task-declaration backend decline at `par_pass_run@220` and three invalid `else if` clauses. The clauses were corrected to Elisa’s `elif` syntax, and `3dd2a857` fixes an IndexMap success arm that did not return its inserted index. The store-capture fix is integrated into Elisa-core `main` as `05fc6717` (cherry-picked from `9fb4ac52` on base `9db54e43`); the full backend package passes with LLVM 23. Native controls pass at O0/O2, the negative mutation control fails, and the latest five-submission O2 fixture passes LLVM verification and three executable runs. Correct generic permission forwarding and the task declaration path, then build from a stable latest-source snapshot before updating the proof compiler pin. Per the latest user instruction, skip timing and integrate only correctness-qualified changes. Mutable receipt/source binding, adversarial pattern collisions, loop result-symbol provenance, and current-revision Global grant matrices remain release blockers.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -9838,9 +9838,9 @@ validated product.
 
 ### 23.27.104 Current high-ROI integration gate (2026-10-11)
 
-The compiler mainline is `1c8d6106`, three local commits ahead of `origin/main`, with additional
+The compiler mainline is `c75a821d`, four local commits ahead of `origin/main`, with additional
 uncommitted compiler and proof-admission work. Its installed Stage1 product is stale, and no
-Stage1 product has yet verified `1c8d6106`. The Global effects grant fix for parallel runtime
+Stage1 product has yet verified `c75a821d`. The Global effects grant fix for parallel runtime
 submissions is committed and passed its focused semantic control. A 5bb source snapshot failed
 self-hosting at `par_pass_run@220`: this is the declaration
 `task: Task[u32, Pending] = submit[shared_pool] par_pass_worker(...)` inside a local Global grant.
@@ -9860,9 +9860,32 @@ spelling is rejected, and eight narrow-integer match controls pass. The addition
 commit is test-only; the qualified string-proof code is `145f6fa5`. Two completed core candidate
 worktrees were removed after verifying patch equivalence on main, with their native binaries and
 qualification manifests preserved under `/private/tmp/elisa-core-qualified`. Retry the latest
-compiler source with refreshed Stage0, resolve the generic `can P` permission-forwarding failure
-and remaining region/permission-row errors, and qualify Stage1/runtime before updating the proof compiler pin. The explicit-pool control must continue
+compiler source with refreshed Stage0, resolve the remaining region/permission-row errors, and
+qualify Stage1/runtime before updating the proof compiler pin. The explicit-pool control must continue
 checking selected-pool identity and exactly-once task-group capture.
+
+Elisa-core `main` has since advanced to `717df3ef`, fixing native parsing for null `is` targets and
+nested values in decision-table rows. The full parser and semantic suites pass; generated null and
+nested-decision controls pass LLVM verification and three runtime executions at both O0 and O2, and
+an integer `is null` input is rejected. The installed `elisac-stage0` reports this exact clean
+revision. This removes all 11 parser errors from the frozen Stage1 source-admission snapshot, but
+that snapshot still fails semantic admission with 481 hard diagnostics, including 264 static
+precondition diagnostics. Those counts are snapshot-specific; Stage1, proof-source, and replay
+qualification remain open.
+
+The Stage1 concurrency library now carries the matching permission-forwarding fix in `c75a821d`.
+Against the installed Stage0 at `717df3ef`, the baseline had three missing-`P` diagnostics and exited
+with failure; the candidate semantic control passes. Its generated code passes LLVM verification
+and three executions at O0 and O2. A negative worker control still rejects a mutable global write
+when the worker has only `Global.Read`, confirming that the caller's grants do not authorize the
+worker body. This focused result does not qualify the full Stage1 source tree.
+
+The installed Stage0 also exposed two stale proof-source forms: range-based `any` in an ordinary
+function body and statement-position `A if condition else B` expressions. Commit `fec254ef`
+replaces them with bounded loops and explicit `if/else` statements. AST parsing of both touched
+files passes. A current-root Stage0 semantic run emitted no parser diagnostics, then failed on
+semantic, grant, and region diagnostics in the broader moving compiler/proof tree; it is a
+diagnostic result, not a frozen qualification run.
 
 The uncommitted source-literal work-limit change now charges the actual identifier bytes read from
 `attempt.goal` and `certificate.goal` before equality, as well as the expected identifier and AST
@@ -9871,10 +9894,205 @@ unqualified until a current Stage1 build runs a long-identifier budget-exhaustio
 
 The next work order is: (1) finish and commit the explicit-pool declaration fix plus positive,
 negative, same-line selector, and task-store-capture controls; (2) seed the exact committed latest
-compiler tree with its matching runtime, then verify Stage1 provenance; (3) update the proof pin
+compiler tree with its matching runtime, then verify Stage1 provenance using the refreshed Stage0
+at `717df3ef`; (3) update the proof pin
 and build manifest to that product, compile the proof tool in strict O2, and run the adversarial
 pattern-collision, receipt/source-binding, loop-result-symbol, and Global.Read/Write matrices;
 (4) integrate only changes that pass those checks, and retain the remaining active, dirty, unique,
 or evidence-backed worktrees until their owners release them. The user has directed this task to
 skip timing and merge only correctness-qualified code. No current proof-source edits are qualified
 by the old 7e pin: its attempted strict O2 build stopped on source errors before replay controls.
+
+### 23.27.105 Native short-circuit guard facts and current Stage0 (2026-10-11)
+
+Elisa-core `main` is now at `2e90f66736cf55d055cee314d144924cc1bd847b`, including the three
+short-circuit proof-fact commits `83ea79d7`, `f8a34e7c`, and `2e90f667`. The checker analyzes
+left-associated guard chains in evaluation order, retains only facts that survive mutation, and
+refuses value-snapshot reasoning for mutable globals and shared static references (including an
+immutable alias to a mutable static reference). The full semantic suite passed in 33.292 seconds;
+the focused alias control passed. The exact build emitted valid O0/O2 LLVM, passed LLVM 23
+verification, and both executables returned success. The installed Stage0 reports revision
+`2e90f66736cf55d055cee314d144924cc1bd847b` with `vcs.modified=false`. No performance timing was
+run, per the user's direction.
+
+The frozen Stage1 forwarding-admission snapshot still reports 481 hard diagnostics and 40,641
+warnings under this compiler. The largest hard-error groups are 157 ownership-binding lookup
+diagnostics, 79 submit-store-capture diagnostics, and 50 semantic API diagnostics; 150 failures are
+unproven `ownership_binding_at_position` postconditions, 48 report stored-reference lifetime
+errors, and submit-store helpers still lack local `Global` grants. These are admission blockers,
+not regressions attributed to the short-circuit change. Preserve the full log at
+`/private/tmp/elisa-stage1-short-circuit-admission.log`.
+
+The clean `codex/mainline-consolidation-20261011` Stage1 branch remains a review candidate: its 25
+commits lack authoritative current qualification evidence. The stale `codex/region-owner-smc-fix`
+branch was removed after its patch conflicted with newer `resolved_error_family` and region-table
+code already on compiler `main`. Keep dirty or unique worktrees until their owners release them.
+
+A separate Stage1 DArray loop bounds-check candidate (`3eb3aaca`) is also not integrated. Static
+review found that its eligibility helper only recognizes DArrays present in the local scope, so
+mutable globals remain unmodeled and cannot receive the proof; the address-tracking paths for
+reference construction, field/call borrows, generic calls, and task submission are also covered.
+The candidate still needs its exact mutation/alias controls and a current-compiler check before
+merging. Its escape-slot deduplication has a linear scan per address and may cost O(E²) for E
+escaped DArray headers, an unmeasured compile-time tradeoff. The user asked to skip timing, so
+qualification remains correctness-focused.
+
+**Next high-return order:** (1) close the mutable-global `Global.Read`/`Global.Write` positive and
+negative matrix, including submit-store helpers; (2) resolve the ownership-binding postcondition
+and borrowed-reference lifetime failures; (3) rebuild a clean Stage1 product from the installed
+`2e90f667` Stage0 and rerun source admission and self-host checks; then (4) update the proof pin to
+that exact product and run strict O2 plus the adversarial source-binding, receipt, pattern, and
+loop-result matrices. Merge only after those correctness gates pass; continue to skip timing.
+
+### 23.27.106 Latest local qualification and cleanup boundary (2026-10-11)
+
+The installed Elisa-core Stage0 is still the exact clean `2e90f667` product. A clean detached
+compiler-main checkout at `c75a821d` was seeded with it, but the self-host compile failed before
+producing Stage1; its lifetime and contract diagnostics remain admission blockers. Do not publish
+or pin a Stage1 product from that attempt. The prior exact Stage1 product for the proof pin
+`7e125178` remains available and provenance-valid at
+`/private/tmp/elisa-compiler-proof-pin.a59wvz/bin/elisac-stage1`.
+
+A strict O2 proof build using that exact Stage1 reached semantic checking after correcting the
+loop capture in `verification_schedule.elisa` to capture `lemmas` rather than the field expression.
+It then stopped with 36 hard diagnostics and 22 reference-style warnings. Thirty hard failures
+are stale region dependencies after `destroy r` in `app/cli.elisa`; the rest include missing local
+`Global.Read` grants and region-polymorphic return requirements. No proof binary was emitted and
+no source-admission or replay matrix was run. Treat the one-line capture correction and all
+current dirty proof changes as unqualified until the corrected tree builds cleanly.
+
+The active soundness audit found a higher-priority `assert_by` issue: a proof-impure assert
+expression may still enter source admission and contribute facts after the purity pass reports a
+refusal. A qualified fix must stop both certification and fact insertion for impure/call-bearing
+expressions, then pass positive and negative replay controls. Qualified lemma calls must also keep
+their module/declaration identity end to end; retain duplicate-name fail-closed behavior until
+ordinary, extern, and imported call resolution agree on that identity.
+
+The user directed us to skip compiler timing and merge only correctness-qualified changes. The
+compiler candidates already ancestral to `main` each still have dirty follow-up edits in their
+worktrees; every proof worktree also has at least one dirty file. The temporary detached compiler
+seed worktree created for this check was removed. Preserve the remaining worktrees and branches
+until their dirty edits are qualified or their owners release them.
+
+**Next high-return order:** (1) stop impure `assert_by` inputs from certifying or producing facts,
+and add mutation controls for qualified extern/import calls; (2) resolve the region-lifetime and
+grant diagnostics blocking strict O2; (3) rerun source admission and replay controls on the exact
+current proof tree; (4) close the `Global.Read`/`Global.Write` matrix, including submit-store
+helpers; (5) merge only changes with focused correctness evidence, then remove only clean,
+released branches and worktrees. Continue to skip timing.
+
+### 23.27.107 Correctness-qualified analyzer gains and current proof gate (2026-10-12)
+
+Elisa-core `main` advanced to `dbedb74e` with three analyzer optimizations: bounded shared-AST
+and predicate work (`f685ea49`), skip packed-store analysis when region-backed enums are absent
+(`82a3a957`), and visit shared packed-variant nodes once (`dbedb74e`). A clean candidate based on
+`6301fb4e` passed `go test -p 1 ./src/semantic ./src/backend -count=1`; the main worktree's
+separate TaskGroup edits were preserved. No timing was run, so these commits have correctness
+qualification but no measured speedup claim. The private-fresh provenance memo remains isolated:
+review found header-rebinding and borrowed-view escape cases that can invalidate no-alias facts.
+
+The proof checkout remains on `fec254ef` with broad uncommitted checker, replay, CLI, and test
+changes. `ELISA_COMPILER_REV` is still `7e125178`; the dirty compiler `main` at `c75a821d` has not
+produced a qualified Stage1 product for this proof revision. The latest recorded exact-pin strict
+O2 attempt stopped before binary generation with 142 compiler diagnostics, including repeated
+already-a-reference errors and region-dependency failures after `destroy r`; no replay or runtime
+matrix ran. Current `python3 scripts/check_source_length.py` and `git diff --check` pass, but do not
+qualify the proof changes. Keep the pin unchanged until the newest compiler tree and runtime are
+cleanly built and the complete proof gates pass.
+
+**Next high-return order:** (1) finish the assert-by purity and nested-goal isolation fixes, with
+fact-insertion, mutation, and budget-exhaustion controls; (2) close qualified call identity and
+source/receipt binding under shadowing and adversarial pattern inputs; (3) resolve the current
+region and explicit-effect diagnostics, then build Stage1 from an immutable snapshot of the newest
+compiler and its matching runtime; (4) build strict O2 from that exact tuple and run the source
+admission, replay, `Global.Read`/`Global.Write`, and full regression matrices. Merge only the
+changes that pass those gates, and continue to skip timing.
+
+### 23.27.108 Merge decision after skipping timing (2026-10-12)
+
+No additional compiler change qualified for integration in this pass. Elisa-core `main` already
+contains the three qualified analyzer commits listed above. The private-fresh provenance memo is
+still isolated while its owner tightens builtin-push handling and backing-buffer escape tracking;
+an earlier full backend run lost two positive disjoint-parameter optimizations. A later push/reserve
+identity revision passed the full semantic suite (32.010s) and backend suite (2.443s), restoring
+those positives while retaining the header-rebind negative. However, recursive borrow-return and
+nested-DArray freshness guards then passed both full suites. The owner has since deferred call-site
+provenance until all function bodies are analyzed and added a before/after-growth regression; this
+latest change is under validation, so the current draft still needs a fresh complete run. No A/B
+timing was run, as requested.
+
+The separate compiler commit `8d7cfca2` is not an eligible cherry-pick: it is outside current
+compiler `main`, and the current source already has the updated region-owner fixture and no longer
+declares the colliding local. Its older fixture failed to compile against a clean `dbedb74e`
+Stage0, so it supplies no current qualification evidence. The isolated test and Stage0 worktrees
+created to check it were removed afterward.
+
+The proof `main` tip (`fec254ef`) already contains the committed tips of the proof Bool-implication
+and identity-law branches. Their worktrees contain active uncommitted edits, as do the other proof
+worktrees, so retain them for their owners rather than deleting or folding them into `main` before
+qualification. The temporary qualification worktree and branch are already removed. Compiler
+Stage0 snapshot worktrees remain in use by active compiler tasks and stay intact.
+
+The newer scoped-region strict-O2 experiment removed the earlier stale-region cascade but still
+failed: `checked_view.elisa:55` returns a value tied to the temporary `token_scope`. Its log also
+contains 91 already-a-reference diagnostics. No proof binary or replay result was produced. The
+current shared proof checkout passes `git diff --check` and the 600-line source cap, but those
+static checks do not qualify its broad uncommitted changes. Keep the compiler pin and merge gates
+unchanged until a clean newest-compiler build produces a binary and the source-admission and replay
+matrices pass.
+
+**Next high-return order:** (1) fix the `checked_view` token-scope escape and strict reference
+diagnostics on an immutable snapshot; (2) finish the assert-by purity, callback-shadowing, and
+source/receipt binding controls; (3) build the newest Elisa compiler/runtime tuple and rerun strict
+O2, source admission, replay, and the `Global.Read`/`Global.Write` matrix. Merge only fully
+qualified changes and continue to skip timing.
+
+### 23.27.109 Qualified provenance integration and cleanup boundary (2026-10-12)
+
+Elisa-core `main` now contains `44c68e0b` (`fix: finalize private buffer provenance after body
+analysis`) and `47ba3be6` (`perf: share completed container header stability summaries`). The first
+integrates the memoized scan and deferred call-site provenance from candidate commits `41475a0c`
+and `c5d6bdc4`; its integrated tree matches the tested `c5d6bdc4` tree exactly. Its frozen source
+manifest matched after the full semantic suite passed (25.466s) and backend suite passed (0.754s).
+The second integrates candidate `86ef9703`; its tree matches that tested candidate exactly, after
+semantic passed (19.420s) and backend passed (0.710s). No A/B timing was run. Elisa-core `main` is
+17 commits ahead of origin; the separate uncommitted TaskGroup changes in its main worktree remain
+unstaged and intact.
+
+The post-commit hook refreshed `~/.elisac/elisac-stage0` (SHA-256
+`3024a51caf78020f0f175020643985a4d8d8d6fe03a9689cc4fe69ea90343c30`), but it builds from the
+working tree, which still contains uncommitted TaskGroup changes. Do not treat that binary as a
+clean product of `47ba3be6`. The newest provenance-recorded Stage1 available to the proof checkout
+remains `/private/tmp/elisa-compiler-proof-pin.a59wvz/bin/elisac-stage1`, SHA-256
+`9a35cd62a132d14519fc63c53a66e2ff13baaa3c807df3dd8c7f82d022548c72`, pinned to source revision
+`7e125178` with tree hash `ca7db88792c0bb146dc8b6495d14948ad3f42f7e8927e837f212b76b31a48787`.
+The installed Stage1 product is older (`5cda9b4e`) despite sharing that tree hash. Compiler `main`
+at `c75a821d` has not produced a clean Stage1, so leave the proof pin unchanged.
+
+The completed-header-summary cache optimization passed its full gate and is integrated as
+`47ba3be6`. The now-clean duplicate worktree `/private/tmp/elisa-core-short-circuit-memo` and local
+branch `codex/native-short-circuit-memo` were removed after confirming their tree matched Elisa-core
+`main`. At this checkpoint the incremental-anchor candidate remained off main; its later focused
+correctness integration is recorded in §23.27.110. The proof checkout remains on `20aca4c`, 12
+commits ahead of origin, with broad dirty checker, replay,
+CLI, and test changes. Its Bool-implication and identity-law commits are already ancestors of proof
+`main`, but both linked worktrees still contain active dirty edits. Other proof worktrees are also
+dirty; retain them and the active Stage0 snapshots. Elisa-core's remaining protocol-borrow and
+transpiler branches are tied to separate downstream checkouts. Neither repository reports a
+prunable stale worktree.
+
+The current high-return proof work remains: close module-alias and source/receipt identity in replay;
+stop impure `assert_by` expressions from certifying or contributing facts; finish callback shadowing
+and literal/pattern collision controls; then qualify strict O2 on the newest immutable compiler and
+runtime before the `Global.Read`/`Global.Write` and replay matrices. Keep the compiler pin unchanged
+until those proof gates pass, and continue to skip timing.
+
+### 23.27.110 Token-anchor integration after correctness controls (2026-10-12)
+
+Elisa-compiler `main` now contains commit `5e4ede82` (`perf(ifc): binary-search incremental token anchors`). It replaces the linear token scan used to map source offsets to function-body anchors with a lower-bound search over ordered token spans. The invalid-range guard returns the no-anchor sentinel before indexing. The parity gate now runs a differential control that compares the optimized search with the former scan across every byte boundary and body subrange of real lexer output, including a 72-token input and invalid ranges.
+
+The control passed at O0 and O2 using the provenance-recorded Stage1 product SHA-256 `9a35cd62a132d14519fc63c53a66e2ff13baaa3c807df3dd8c7f82d022548c72` (source revision `7e125178`). This validates the source behavior under that compiler/runtime tuple; no full candidate self-host build was claimed. No timing was run, so the change carries no measured speedup claim. The optional paired timing harness and its load/provenance follow-up remain outside `main` because the user chose to skip timing. Their commits are preserved on `codex/ifc-anchor-benchmark-followup`; the clean candidate worktree was removed after integration.
+
+The surrounding incremental-prior-key parity gate passed its first six controls, including the anchor differential, then exited 2 in the final shadow-gate control because `pymodule-ordinary.cold.json` was missing. Commit `a81a1bf45` now requires successful, nonempty module emissions and prints their diagnostics before artifact comparison. Bash syntax and mock cases passed; the complete composite gate has not been rerun, so it remains open.
+
+This does not change the proof tool's compiler pin or qualify the broader dirty proof-source work. The high-priority proof gates remain source/receipt identity, impure `assert_by` isolation, callback shadowing and literal/pattern collision controls, followed by strict O2 and the `Global.Read`/`Global.Write` replay matrix on a clean product from the newest compiler/runtime. Keep the remaining distinct dirty proof worktrees and downstream compiler Stage0 checkouts until their owners release or qualify them; continue to remove only clean, unused snapshots.
