@@ -83,24 +83,35 @@ fi
 # The portable checker links only the kernel and the package reader; build it with the same
 # compiler, in the same call, so the self-audit packages below replay outside the tool that
 # produced them.
-ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
+REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
+PROBE_PREFETCH_PID=""
+trap 'if [[ -n "$PROBE_PREFETCH_PID" ]]; then kill "$PROBE_PREFETCH_PID" 2>/dev/null || true; fi; rm -rf "$REPORT_DIR"' EXIT
+DOGFOOD_PAIR_JSON_PATH="$REPORT_DIR/product-pair.json"
+# Capture the verified immutable pair before build.sh releases its publication lock. A separate
+# resolve after return could observe another build's CURRENT pointer.
+ELISA_COMPILER_BIN="$COMPILER" ELISA_RUNTIME_OBJ="$RUNTIME_OBJ" \
+    ELISA_PROOF_GENERATION_ROOT="${ELISA_PROOF_GENERATION_ROOT:-$ROOT_DIR/build/elisa-proof-generations}" \
+    ELISA_PROOF_PAIR_OUTPUT="$DOGFOOD_PAIR_JSON_PATH" ELISA_PROOF_PRODUCTS=all \
+    "$ROOT_DIR/scripts/build.sh"
+DOGFOOD_PAIR_JSON="$(<"$DOGFOOD_PAIR_JSON_PATH")"
+IFS=$'\t' read -r ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN <<<"$(python3 -c 'import json, sys; pair=json.load(sys.stdin)["products"]; print("\t".join((pair["elisa-proof"]["binary"], pair["elisa-proof-replay"]["binary"])))' <<<"$DOGFOOD_PAIR_JSON")"
+if [[ ! -x "$ELISA_PROOF_BIN" || ! -x "$ELISA_PROOF_REPLAY_BIN" ]]; then
+    printf 'dogfood failed: generation resolver did not return executable proof/replay products\n' >&2
+    exit 1
+fi
+export ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN
 # build.sh has just refreshed the snapshot; the executable harnesses below that
 # include compiler sources must compile from the same pinned export.
 # shellcheck source=scripts/compiler_snapshot.sh
 source "$ROOT_DIR/scripts/compiler_snapshot.sh"
 
-REPORT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-dogfood.XXXXXX")"
-PROBE_PREFETCH_PID=""
-# The prefetcher has usually finished by now; a failed kill must not end the trap under set -e,
-# which would skip the cleanup and turn a passing run into exit status 1.
-trap 'if [[ -n "$PROBE_PREFETCH_PID" ]]; then kill "$PROBE_PREFETCH_PID" 2>/dev/null || true; fi; rm -rf "$REPORT_DIR"' EXIT
 # ELISA_PROOF_JOBS>1 runs both verifier runs of every literal run_probe line in parallel first;
 # run_probe then reads those stored runs in its usual order (scripts/prefetch_probes.py).
 PROBE_CACHE=""
 if [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
     PROBE_CACHE="$REPORT_DIR/probe-cache"
     mkdir -p "$PROBE_CACHE"
-    python3 "$ROOT_DIR/scripts/prefetch_probes.py" "$ROOT_DIR/scripts/dogfood.sh" "$ROOT_DIR/build/elisa-proof" "$PROBE_CACHE" "$ROOT_DIR" "$ELISA_PROOF_JOBS" &
+    python3 "$ROOT_DIR/scripts/prefetch_probes.py" "$ROOT_DIR/scripts/dogfood.sh" "$ELISA_PROOF_BIN" "$PROBE_CACHE" "$ROOT_DIR" "$ELISA_PROOF_JOBS" &
     PROBE_PREFETCH_PID=$!
 fi
 PROFILE_HOOKS_SOURCE="${ELISA_PROFILE_HOOKS_SOURCE:-$SNAPSHOT_COMPILER/test/parity/profile_hooks.c}"
@@ -135,7 +146,7 @@ probe_verifier_run() {
         return 0
     fi
     set +e
-    "$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/$source" >"$output"
+    "$ELISA_PROOF_BIN" --json "$ROOT_DIR/$source" >"$output"
     probe_status=$?
     set -e
 }
@@ -206,12 +217,8 @@ for path, proven in zip(sys.argv[1:], (37, 50)):
 PY
 # The kernel's own audit, exported as a package, replays in the separate checker theorem by
 # theorem: the package carries every replayed goal, and the checker trusts no fingerprint.
-portable_pair_json="$(python3 "$ROOT_DIR/scripts/verify_product_pair.py" resolve \
-    --generation-root "${ELISA_PROOF_GENERATION_ROOT:-$ROOT_DIR/build/elisa-proof-generations}")"
-portable_pair_paths="$(python3 -c 'import json, sys; pair = json.loads(sys.argv[1])["products"]; print(pair["elisa-proof"]["binary"]); print(pair["elisa-proof-replay"]["binary"])' \
-    "$portable_pair_json")"
-PORTABLE_PROOF_BIN="${portable_pair_paths%%$'\n'*}"
-PORTABLE_REPLAY_BIN="${portable_pair_paths#*$'\n'}"
+PORTABLE_PROOF_BIN="$ELISA_PROOF_BIN"
+PORTABLE_REPLAY_BIN="$ELISA_PROOF_REPLAY_BIN"
 for label in kernel_core kernel_core_fixture; do
     source_path="src/proof/kernel_core.elisa"
     [[ "$label" == kernel_core_fixture ]] && source_path="examples/dogfood_kernel_core.elisa"
@@ -295,7 +302,7 @@ if "$COMPILER" -permissive -emit obj -O0 -o "$nul_include_dir/entry.o" "$nul_inc
     exit 1
 fi
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$nul_include_dir/entry.elisa" >"$nul_include_dir/proof.json"
+"$ELISA_PROOF_BIN" --json "$nul_include_dir/entry.elisa" >"$nul_include_dir/proof.json"
 nul_include_status=$?
 set -e
 if [[ "$nul_include_status" -ne 1 ]]; then
@@ -340,7 +347,7 @@ if "$COMPILER" -permissive -emit obj -O0 -o "$REPORT_DIR/nul-root.o" "$nul_root_
     exit 1
 fi
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$nul_root_source" >"$REPORT_DIR/nul-root.json"
+"$ELISA_PROOF_BIN" --json "$nul_root_source" >"$REPORT_DIR/nul-root.json"
 nul_root_status=$?
 set -e
 if [[ "$nul_root_status" -ne 1 ]]; then
@@ -373,7 +380,7 @@ PY
 # native stack. Stage0 accepts this source in permissive mode; proof import must fail
 # closed with a valid, replay-gap-free report rather than crash.
 if [[ -n "$BOOTSTRAP_COMPILER" ]]; then
-python3 - "$BOOTSTRAP_COMPILER" "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR/deep_expression.elisa" "$REPORT_DIR/deep_expression.o" <<'PY'
+python3 - "$BOOTSTRAP_COMPILER" "$ELISA_PROOF_BIN" "$REPORT_DIR/deep_expression.elisa" "$REPORT_DIR/deep_expression.o" <<'PY'
 import json
 import subprocess
 import sys
@@ -418,7 +425,7 @@ fi
 # Elisa accepts legacy single-byte Latin-1 letters in identifiers as well as UTF-8 names. The
 # report encoder must therefore escape malformed UTF-8 bytes without damaging valid multibyte
 # text, so ordinary JSON clients can still parse every compiler-accepted report.
-python3 - "$COMPILER" "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR/latin1_identifier.elisa" "$REPORT_DIR/latin1_identifier.o" <<'PY'
+python3 - "$COMPILER" "$ELISA_PROOF_BIN" "$REPORT_DIR/latin1_identifier.elisa" "$REPORT_DIR/latin1_identifier.o" <<'PY'
 import json
 import subprocess
 import sys
@@ -492,7 +499,7 @@ absolute_include_entry="$absolute_include_dir/entry.elisa"
 printf 'def absolute_include_value() -> i64:\n    ensure result == 42\n    return 42\n' >"$absolute_include_library"
 printf 'include "%s"\ndef absolute_include_entry() -> i64:\n    ensure result == 42\n    return 42\n' "$absolute_include_library" >"$absolute_include_entry"
 "$COMPILER" -emit obj -O0 -o "$absolute_include_dir/entry.o" "$absolute_include_entry" >/dev/null 2>&1
-"$ROOT_DIR/build/elisa-proof" --json "$absolute_include_entry" >"$REPORT_DIR/include_absolute.json"
+"$ELISA_PROOF_BIN" --json "$absolute_include_entry" >"$REPORT_DIR/include_absolute.json"
 python3 - "$REPORT_DIR/include_absolute.json" <<'PY'
 import json
 import sys
@@ -522,7 +529,7 @@ printf 'include "./library.elisa"\ndef imported_entry() -> i64:\n    ensure resu
         printf 'dogfood failed: compiler accepted duplicate includes through distinct symlink paths\n' >&2
         exit 1
     fi
-    if "$ROOT_DIR/build/elisa-proof" --json duplicate_entry.elisa >"$REPORT_DIR/include_symlink_cwd.json"; then
+    if "$ELISA_PROOF_BIN" --json duplicate_entry.elisa >"$REPORT_DIR/include_symlink_cwd.json"; then
         printf 'dogfood failed: proof importer merged paths that compiler keeps distinct\n' >&2
         exit 1
     fi
@@ -541,7 +548,7 @@ PY
 (
     cd "$physical_working_dir"
     PWD="$stale_working_dir" "$COMPILER" -emit obj -O0 -o "$working_directory_dir/stale-pwd.o" stale_pwd_entry.elisa >/dev/null 2>&1
-    PWD="$stale_working_dir" "$ROOT_DIR/build/elisa-proof" --json stale_pwd_entry.elisa >"$REPORT_DIR/include_stale_pwd.json"
+    PWD="$stale_working_dir" "$ELISA_PROOF_BIN" --json stale_pwd_entry.elisa >"$REPORT_DIR/include_stale_pwd.json"
 )
 python3 - "$REPORT_DIR/include_stale_pwd.json" <<'PY'
 import json

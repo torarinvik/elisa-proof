@@ -17,6 +17,8 @@ import shutil
 import sys
 import tempfile
 
+from strict_json import loads as strict_json_loads
+
 
 PRODUCTS = ("elisa-proof", "elisa-proof-replay")
 BUILD_IDENTITY_FIELDS = (
@@ -54,7 +56,7 @@ def read_manifest(binary: Path, generation: str) -> dict:
         if artifact.is_symlink() or not artifact.is_file():
             raise ValueError(f"generation artifact is not a regular file: {artifact}")
     raw = manifest_path.read_bytes()
-    manifest = json.loads(raw)
+    manifest = strict_json_loads(raw)
     if not isinstance(manifest, dict):
         raise ValueError(f"manifest root is not an object: {manifest_path}")
     recorded_manifest_digest = checksum_path.read_text(encoding="ascii").strip()
@@ -198,7 +200,9 @@ def publish(arguments: argparse.Namespace) -> int:
     sources = [Path(arguments.proof_binary), Path(arguments.replay_binary)]
     manifests = [Path(arguments.proof_manifest), Path(arguments.replay_manifest)]
     for manifest in manifests:
-        parsed = json.loads(manifest.read_text(encoding="utf-8"))
+        parsed = strict_json_loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(parsed, dict):
+            raise ValueError(f"staged manifest root is not an object: {manifest}")
         if parsed.get("pair_generation") != generation:
             raise ValueError(f"staged manifest has wrong pair_generation: {manifest}")
     staged_pair = [read_manifest(binary, generation) for binary in sources]
@@ -215,7 +219,9 @@ def publish(arguments: argparse.Namespace) -> int:
             binary = temporary / product
             shutil.copyfile(source, binary)
             os.chmod(binary, 0o555)
-            manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+            manifest = strict_json_loads(source_manifest.read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict):
+                raise ValueError(f"staged manifest root is not an object: {source_manifest}")
             manifest["binary"]["path"] = str(final / product)
             encoded = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
             manifest_path = binary.with_name(binary.name + ".manifest.json")
@@ -250,8 +256,9 @@ def publish(arguments: argparse.Namespace) -> int:
     return 0
 
 
-def resolve(arguments: argparse.Namespace) -> int:
-    root = Path(arguments.generation_root).resolve()
+def resolve_pair_with_manifests(generation_root: Path) -> tuple[dict, dict[str, dict]]:
+    """Resolve and verify CURRENT once, returning paths under that immutable generation."""
+    root = generation_root.resolve()
     pointer = root / "CURRENT"
     generation = pointer.read_text(encoding="ascii").strip()
     if not generation or any(c not in "0123456789abcdef" for c in generation):
@@ -275,6 +282,17 @@ def resolve(arguments: argparse.Namespace) -> int:
             for index, (name, binary) in enumerate(zip(PRODUCTS, binaries))
         },
     }
+    return result, dict(zip(PRODUCTS, pair))
+
+
+def resolve_pair(generation_root: Path) -> dict:
+    """Resolve CURRENT and return the stable, checksum-verified pair description."""
+    result, _ = resolve_pair_with_manifests(generation_root)
+    return result
+
+
+def resolve(arguments: argparse.Namespace) -> int:
+    result = resolve_pair(Path(arguments.generation_root))
     print(json.dumps(result, sort_keys=True))
     return 0
 
@@ -284,7 +302,7 @@ def read_compatibility_manifest(binary: Path, manifest_path: Path, checksum_path
         if artifact.is_symlink() or not artifact.is_file():
             raise ValueError(f"expected build artifact is not a regular file: {artifact}")
     raw = manifest_path.read_bytes()
-    manifest = json.loads(raw)
+    manifest = strict_json_loads(raw)
     if not isinstance(manifest, dict):
         raise ValueError(f"expected manifest root is not an object: {manifest_path}")
     if checksum_path.read_text(encoding="ascii").strip() != hashlib.sha256(raw).hexdigest():

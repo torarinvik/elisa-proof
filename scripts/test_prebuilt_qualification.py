@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import tarfile
 import tempfile
+from unittest.mock import patch
+
+import prebuilt_qualification
 
 from prebuilt_qualification import (
     validate_compiler_snapshot_tree, validate_frontend_metadata, validate_source_metadata,
@@ -28,6 +31,47 @@ def manifest(stage="stage1"):
             "source_dirty": False,
         },
     }
+
+
+# Qualification and the test runner must keep using the generation selected by one atomic
+# resolve even if another build replaces CURRENT immediately afterward.
+with tempfile.TemporaryDirectory(prefix="elisa-qualified-pair-race-") as directory:
+    root = Path(directory)
+    generation_root = root / "build/elisa-proof-generations"
+    generation_root.mkdir(parents=True)
+    selected_generation = "a" * 32
+    concurrent_generation = "b" * 32
+    current = generation_root / "CURRENT"
+    current.write_text(selected_generation + "\n", encoding="ascii")
+    resolved_products = {
+        name: {
+            "binary": str(generation_root / selected_generation / name),
+            "manifest": str(generation_root / selected_generation / (name + ".manifest.json")),
+        }
+        for name in ("elisa-proof", "elisa-proof-replay")
+    }
+    selected_manifests = {
+        name: {"generation": selected_generation}
+        for name in ("elisa-proof", "elisa-proof-replay")
+    }
+    resolve_calls = 0
+
+    def resolve_then_publish(directory):
+        global resolve_calls
+        assert directory == generation_root
+        assert current.read_text(encoding="ascii").strip() == selected_generation
+        resolve_calls += 1
+        # Simulate a different build publishing after the resolver captures its generation.
+        current.write_text(concurrent_generation + "\n", encoding="ascii")
+        return ({"pair_generation": selected_generation, "products": resolved_products}, selected_manifests)
+
+    with patch.object(prebuilt_qualification, "resolve_pair_with_manifests", resolve_then_publish):
+        generation, manifests, binaries = prebuilt_qualification._read_pair(root)
+    assert resolve_calls == 1
+    assert generation == selected_generation
+    assert manifests == selected_manifests
+    assert all(path.parent.name == selected_generation for path in binaries.values())
+    assert current.read_text(encoding="ascii").strip() == concurrent_generation
 
 
 with tempfile.TemporaryDirectory(prefix="elisa-prebuilt-qualification-") as directory:

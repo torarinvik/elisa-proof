@@ -4,7 +4,7 @@ for typed_goal in 1 9; do
     typed_script="$standalone_probe_dir/typed_unsigned_decide_$typed_goal.json"
     printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":%s,"goal_fingerprint":%s},"actions":[{"action":"decide"}]}' "$typed_goal" "$(typed_goal_fingerprint "$typed_goal")" >"$typed_script"
     set +e
-    typed_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
+    typed_result="$("${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$typed_script" "$ROOT_DIR/examples/typed_unsigned_literals.elisa")"
     set -e
     if ! printf '%s' "$typed_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["source_goal_binding"]["fingerprint_match"] is True; assert t["valid"] is False and t["solved"] is False and t["accepted_count"] == 0; assert r["status"] == "failed"; assert t["reason"] == "tactic action outcome contradicted the script\x27s expected acceptance"' "$typed_goal"; then
         printf 'proof test matrix failed: typed unsigned decide tactic on goal %s\n' "$typed_goal" >&2
@@ -16,7 +16,7 @@ stale_script="$standalone_probe_dir/typed_unsigned_stale_v1.json"
 readonly STALE_TYPED_LITERAL_GOAL_FINGERPRINT=3959704679
 printf '{"format":"elisa-proof-tactics-v1","target":{"goal_id":7,"goal_fingerprint":%s},"actions":[{"action":"decide","accepted":false}]}' "$STALE_TYPED_LITERAL_GOAL_FINGERPRINT" >"$stale_script"
 set +e
-stale_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
+stale_result="$("${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$stale_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa")"
 set -e
 if ! printf '%s' "$stale_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); b=r["source_goal_binding"]; assert r["status"] == "failed" and b["fingerprint_match"] is False and b["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert r["tactic"]["reason"] == "target.goal_fingerprint does not match the imported kernel goal and hypotheses"'; then
     printf 'proof test matrix failed: a stale v1 goal fingerprint still bound a typed-literal goal\n' >&2
@@ -28,7 +28,7 @@ for typed_offset in '-3' '"x"' '4294967296' '120'; do
     offset_script="$standalone_probe_dir/typed_unsigned_offset.json"
     printf '{"format":"elisa-proof-tactics-v1","initial":{"facts":[],"goal":{"kind":"binary","operator":">","left":{"kind":"int","value":-1,"line":6,"offset":%s},"right":{"kind":"int","value":0}}},"actions":[{"action":"decide","accepted":false}]}' "$typed_offset" >"$offset_script"
     set +e
-    offset_result="$("$ROOT_DIR/build/elisa-proof" --tactics "$offset_script" "$ROOT_DIR/examples/verified.elisa")"
+    offset_result="$("${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$offset_script" "$ROOT_DIR/examples/verified.elisa")"
     set -e
     if ! printf '%s' "$offset_result" | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "failed" and t["solved"] is False; assert t["valid"] is (sys.argv[1] == "120"); assert t["valid"] or t["reason"] == "invalid proof script"' "$typed_offset"; then
         printf 'proof test matrix failed: typed literal offset %s\n' "$typed_offset" >&2
@@ -38,7 +38,7 @@ done
 
 # Safe small arithmetic remains available to tactics, and the independently replayed kernel
 # must accept the same bottom-up simplification as the source tactic.
-if ! "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_safe_small_constant_simp.json" "$ROOT_DIR/examples/replay_constant.elisa" \
+if ! "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_safe_small_constant_simp.json" "$ROOT_DIR/examples/replay_constant.elisa" \
     | python3 -c 'import json,sys; r=json.load(sys.stdin); t=r["tactic"]; assert r["status"] == "proved"; assert t["valid"] is True and t["solved"] is True; assert t["kernel_trace_replayed"] is True and t["certificate_replayed"] is True'; then
     printf 'proof test matrix failed: safe small-constant simp did not replay successfully\n' >&2
     exit 1

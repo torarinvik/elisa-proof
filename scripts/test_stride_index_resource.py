@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 
@@ -9,7 +10,7 @@ for fixture, expected in (
     ("stride_index_write_probe.elisa", [("rejected_stride_index_write_missing_bound", "index-upper-unproven")]),
     ("stride_index_borrow_probe.elisa", [("stride_index_borrow_disjoint", "borrow-overlap-unproven"),
                                        ("rejected_stride_index_borrow_same_element", "borrow-overlap-unproven")])):
-    run = subprocess.run([str(ROOT / "build/elisa-proof"), "--json", str(ROOT / "test" / fixture)],
+    run = subprocess.run([os.environ.get("ELISA_PROOF_BIN", str(ROOT / "build/elisa-proof")), "--json", str(ROOT / "test" / fixture)],
                          capture_output=True, text=True, timeout=60)
     r = json.loads(run.stdout)
     assert run.returncode == 1 and r["summary"]["semantic_errors"] == 0

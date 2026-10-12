@@ -22,6 +22,10 @@ elisa_default_stage1() {
     if [[ -z "$pinned_revision" && -f "$root_dir/ELISA_COMPILER_REV" ]]; then
         pinned_revision="$(tr -d '[:space:]' < "$root_dir/ELISA_COMPILER_REV")"
     fi
+    if [[ ! "$pinned_revision" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'Stage1 compiler pin must be an exact 40-character commit hash\n' >&2
+        return 2
+    fi
     if [[ -f "$installed_root/SNAPSHOT" ]]; then
         while IFS=' :' read -r snapshot_key snapshot_value _; do
             if [[ "$snapshot_key" == "source_revision" ]]; then
@@ -33,7 +37,7 @@ elisa_default_stage1() {
     # Prefer an installed compiler only when its immutable source snapshot matches the
     # front end this project imports. This avoids silently building against an older live
     # sibling checkout when a newer, pinned Stage1 product is already installed.
-    if [[ -z "${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-}}" && -x "$installed_product" && -n "$pinned_revision" && -n "$installed_revision" && "$installed_revision" == "$pinned_revision"* ]]; then
+    if [[ -z "${ELISA_COMPILER_ROOT:-${ELISA_COMPILER_SRC:-}}" && -x "$installed_product" && "$installed_revision" == "$pinned_revision" ]]; then
         printf '%s\n' "$installed_product"
         return 0
     fi
@@ -92,11 +96,15 @@ elisa_verify_stage0_provenance() {
         return 2
     fi
     expected="$(tr -d '[:space:]' < "$expected_file")"
+    if [[ ! "$expected" =~ ^[0-9a-f]{40}$ ]]; then
+        printf 'stage0 provenance unavailable: expected pin is not an exact 40-character commit hash\n' >&2
+        return 2
+    fi
     if [[ -z "$revision" || -z "$expected" ]]; then
         printf 'stage0 provenance unavailable: compiler has no embedded VCS revision\n' >&2
         return 2
     fi
-    if [[ "$revision" != "$expected"* ]]; then
+    if [[ "$revision" != "$expected" ]]; then
         printf 'stage0 provenance mismatch: binary=%s expected=%s\n' "$revision" "$expected" >&2
         return 2
     fi

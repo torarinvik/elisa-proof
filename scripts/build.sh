@@ -51,6 +51,11 @@ for PROOF_MAIN in "${PRODUCT_MAINS[@]}"; do
         *) printf 'ELISA_PROOF_MAIN must be src/main.elisa or src/replay_main.elisa (got %s)\n' "$PROOF_MAIN" >&2; exit 2 ;;
     esac
 done
+PAIR_OUTPUT_PATH="${ELISA_PROOF_PAIR_OUTPUT:-}"
+if [[ -n "$PAIR_OUTPUT_PATH" && "${ELISA_PROOF_PRODUCTS:-one}" != "all" ]]; then
+    printf 'build: ELISA_PROOF_PAIR_OUTPUT requires ELISA_PROOF_PRODUCTS=all\n' >&2
+    exit 2
+fi
 BUILD_JOBS="${ELISA_PROOF_BUILD_JOBS:-2}"
 case "$BUILD_JOBS" in
     ''|*[!0-9]*|0) printf 'ELISA_PROOF_BUILD_JOBS must be a positive integer (got %s)\n' "$BUILD_JOBS" >&2; exit 2 ;;
@@ -105,14 +110,6 @@ if [[ -n "$RUNTIME_OBJ" && ! -f "$RUNTIME_OBJ" ]]; then
     printf 'Elisa runtime object not found: %s\n' "$RUNTIME_OBJ" >&2
     exit 2
 fi
-CLANG_TOOL="$(elisa_resolve_clang)" || exit $?
-
-# Resolve link inputs before compiling either product. A misspelled override
-# must not consume a full compiler run or silently select another runtime.
-if [[ -n "$RUNTIME_OBJ" && ! -f "$RUNTIME_OBJ" ]]; then
-    printf 'Elisa runtime object not found: %s\n' "$RUNTIME_OBJ" >&2
-    exit 2
-fi
 if [[ "$COMPILER_IS_STAGE1" -eq 1 && -z "$RUNTIME_OBJ" ]]; then
     printf 'Stage1 requires its matching runtime object; set ELISA_RUNTIME_OBJ\n' >&2
     exit 2
@@ -138,7 +135,8 @@ BUILD_TOKEN="$$"
 PAIR_GENERATION=""
 PAIR_NEEDS_PUBLISH=0
 PAIR_MANIFEST_ARGS=()
-PAIR_GENERATION_ROOT="$ROOT_DIR/build/elisa-proof-generations"
+PAIR_GENERATION_ROOT="${ELISA_PROOF_GENERATION_ROOT:-$ROOT_DIR/build/elisa-proof-generations}"
+PAIR_OUTPUT_TEMP=""
 if [[ "${ELISA_PROOF_PRODUCTS:-one}" == all ]]; then
     PAIR_GENERATION="$(python3 "$ROOT_DIR/scripts/build_manifest.py" --new-pair-generation)"
     PAIR_MANIFEST_ARGS=(--pair-generation "$PAIR_GENERATION")
@@ -164,6 +162,7 @@ cleanup_build() {
             "$(manifest_checksum_temp_of "$index")"
     done
     rm -f "$PROFILE_HOOKS_TEMP" "$BUILD_LOCK/pid"
+    [[ -z "$PAIR_OUTPUT_TEMP" ]] || rm -f "$PAIR_OUTPUT_TEMP"
     rmdir "$BUILD_LOCK" 2>/dev/null || true
 }
 trap cleanup_build EXIT
@@ -559,3 +558,15 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         rm -f "$(stage_object_of "$index")"
     fi
 done
+
+# Optional consumers can capture the exact immutable pair while this build still owns the
+# publication lock. Resolving CURRENT after this process exits could select a concurrent build.
+if [[ -n "$PAIR_OUTPUT_PATH" ]]; then
+    pair_output_dir="$(dirname -- "$PAIR_OUTPUT_PATH")"
+    mkdir -p "$pair_output_dir"
+    PAIR_OUTPUT_TEMP="$PAIR_OUTPUT_PATH.tmp.$BUILD_TOKEN"
+    python3 "$ROOT_DIR/scripts/verify_product_pair.py" resolve \
+        --generation-root "$PAIR_GENERATION_ROOT" >"$PAIR_OUTPUT_TEMP"
+    mv -f "$PAIR_OUTPUT_TEMP" "$PAIR_OUTPUT_PATH"
+    PAIR_OUTPUT_TEMP=""
+fi

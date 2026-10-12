@@ -12,7 +12,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else ROOT / "build/elisa-proof"
+binary = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 system = platform.system()
 if system not in ("Darwin", "Linux"):
     raise SystemExit("output-write regression requires macOS or Linux")

@@ -8,6 +8,8 @@ import os
 import tempfile
 from pathlib import Path
 
+from strict_json import loads as strict_json_loads
+
 
 def file_identity(path: Path) -> dict:
     digest = hashlib.sha256()
@@ -45,8 +47,8 @@ def read_build_manifest(binary: Path, label: str) -> dict:
     try:
         manifest_bytes = manifest_path.read_bytes()
         recorded_checksum = checksum_path.read_text(encoding="ascii").strip()
-        manifest = json.loads(manifest_bytes)
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        manifest = strict_json_loads(manifest_bytes)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"{label} build manifest is missing or invalid: {error}") from error
     if recorded_checksum != hashlib.sha256(manifest_bytes).hexdigest():
         raise RuntimeError(f"{label} build manifest checksum does not match its sidecar")

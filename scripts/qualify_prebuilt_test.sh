@@ -8,4 +8,4 @@ python3 "$ROOT_DIR/scripts/prebuilt_qualification.py" \
     --proof-root "$ROOT_DIR" \
     --snapshot-root "$SNAPSHOT_ROOT" \
     --compiler-snapshot "$SNAPSHOT_COMPILER" \
-    --compiler-repository "${ELISA_COMPILER_SRC:-$ROOT_DIR/../Elisa-compiler}"
+    --compiler-repository "${ELISA_COMPILER_SRC:-$ROOT_DIR/../Elisa-compiler}" "$@"

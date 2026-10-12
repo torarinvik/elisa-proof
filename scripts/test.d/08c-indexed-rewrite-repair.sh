@@ -2,7 +2,7 @@
 # its selected source fact and the text script remains runnable through the checked tactic path.
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair 1 "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_repair.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair 1 "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_repair.json"
 indexed_repair_status=$?
 set -e
 if [[ "$indexed_repair_status" -ne 0 ]]; then
@@ -44,9 +44,9 @@ with open(os.path.join(directory, "indexed_rewrite_bad_index.json"), "w", encodi
 PY
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/indexed_repair.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_repair_rerun.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/indexed_repair.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_repair_rerun.json"
 indexed_repair_rerun_status=$?
-"$ROOT_DIR/build/elisa-proof" --tactics "$proof_render_dir/indexed_rewrite_bad_index.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_rewrite_bad_index_result.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$proof_render_dir/indexed_rewrite_bad_index.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_rewrite_bad_index_result.json"
 indexed_rewrite_bad_index_status=$?
 set -e
 if [[ "$indexed_repair_rerun_status" -ne 0 ]]; then
@@ -85,7 +85,7 @@ fi
 
 # A second in-range equality must not be substituted for the equality selected by the script.
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair 1 "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_repair.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair 1 "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_repair.json"
 two_equalities_repair_status=$?
 set -e
 if [[ "$two_equalities_repair_status" -ne 0 ]]; then
@@ -107,7 +107,7 @@ with open(os.path.join(directory, "two_equalities_repair.proof"), "w", encoding=
     handle.write(report["script"])
 PY
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/two_equalities_repair.proof" "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_rerun.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/two_equalities_repair.proof" "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_rerun.json"
 two_equalities_rerun_status=$?
 set -e
 if [[ "$two_equalities_rerun_status" -ne 0 ]]; then
@@ -146,7 +146,7 @@ with open(os.path.join(directory, "two_equalities_wrong_fact.json"), "w", encodi
     json.dump({"format": "elisa-proof-tactics-v1", "target": {"goal_id": 1}, "actions": actions}, handle)
 PY
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$proof_render_dir/two_equalities_wrong_fact.json" "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_wrong_fact_result.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$proof_render_dir/two_equalities_wrong_fact.json" "$ROOT_DIR/examples/tactic_repair_two_equalities.elisa" > "$proof_render_dir/two_equalities_wrong_fact_result.json"
 two_equalities_wrong_fact_status=$?
 set -e
 set +e

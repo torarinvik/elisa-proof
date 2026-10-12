@@ -1,11 +1,12 @@
 """A return-only guard does not obscure the subsequent local call result."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / 'build/elisa-proof'
+prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(os.environ.get('ELISA_PROOF_BIN', root / 'build/elisa-proof'))
 for name, accepted in (('guarded_call_result_bound', True),
         ('rejected_guarded_call_result_bound', False)):
     result = subprocess.run([str(prover), '--json',

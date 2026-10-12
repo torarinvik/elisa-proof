@@ -1,8 +1,8 @@
 # shellcheck shell=bash
 # Checker goal, theorem-catalog, index and replay API regressions.
-"$ROOT_DIR/build/elisa-proof" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal -1 "$ROOT_DIR/examples/verified.elisa" >/dev/null
 focused_negative_goal_status=$?
-"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["format"] == "elisa-proof-theorems-v1"; assert catalog["source"]["complete"] is True; assert [item["name"] for item in catalog["theorems"]] == ["nonnegative", "named_nonnegative"]; assert all(item["verified"] and item["signature_valid"] and item["proof_goals_valid"] and item["proof_replay_complete"] for item in catalog["theorems"]); assert all(theorem["proof_goals"] and all(goal["proven"] and goal["replayed"] and isinstance(goal["certificate_id"], int) for goal in theorem["proof_goals"]) for theorem in catalog["theorems"]); assert catalog["theorems"][0]["parameters"] == ["x"]; assert catalog["theorems"][0]["parameter_types"] == [{"kind": "ident", "name": "i64", "line": 1}]; assert [item["name"] for item in catalog["theorems"][1]["parameter_types"]] == ["i64", "i64"]; assert len(catalog["theorems"][1]["requires"]) == 2; assert len(catalog["theorems"][1]["ensures"]) == 1'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --theorems "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["format"] == "elisa-proof-theorems-v1"; assert catalog["source"]["complete"] is True; assert [item["name"] for item in catalog["theorems"]] == ["nonnegative", "named_nonnegative"]; assert all(item["verified"] and item["signature_valid"] and item["proof_goals_valid"] and item["proof_replay_complete"] for item in catalog["theorems"]); assert all(theorem["proof_goals"] and all(goal["proven"] and goal["replayed"] and isinstance(goal["certificate_id"], int) for goal in theorem["proof_goals"]) for theorem in catalog["theorems"]); assert catalog["theorems"][0]["parameters"] == ["x"]; assert catalog["theorems"][0]["parameter_types"] == [{"kind": "ident", "name": "i64", "line": 1}]; assert [item["name"] for item in catalog["theorems"][1]["parameter_types"]] == ["i64", "i64"]; assert len(catalog["theorems"][1]["requires"]) == 2; assert len(catalog["theorems"][1]["ensures"]) == 1'
 theorem_catalog_statuses=("${PIPESTATUS[@]}")
 theorem_catalog_status=${theorem_catalog_statuses[0]}
 theorem_catalog_json_status=${theorem_catalog_statuses[1]}
@@ -10,15 +10,15 @@ run_json_report "$ROOT_DIR/examples/lemma.elisa" | python3 -c 'import json, sys;
 lemma_summary_provenance_statuses=("${PIPESTATUS[@]}")
 lemma_summary_provenance_status=${lemma_summary_provenance_statuses[0]}
 lemma_summary_provenance_json_status=${lemma_summary_provenance_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["source"]["complete"] is False; assert len(catalog["theorems"]) == 1; theorem = catalog["theorems"][0]; assert theorem["name"] == "unsound"; assert theorem["verified"] is False; assert theorem["verification_reason"] == "body-unverified"; assert theorem["signature_valid"] is True; assert theorem["proof_goals_valid"] is True; assert theorem["proof_replay_complete"] is False; assert any(not goal["proven"] and goal["certificate_id"] is None and not goal["replayed"] for goal in theorem["proof_goals"])'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --theorems "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; catalog = json.load(sys.stdin); assert catalog["source"]["complete"] is False; assert len(catalog["theorems"]) == 1; theorem = catalog["theorems"][0]; assert theorem["name"] == "unsound"; assert theorem["verified"] is False; assert theorem["verification_reason"] == "body-unverified"; assert theorem["signature_valid"] is True; assert theorem["proof_goals_valid"] is True; assert theorem["proof_replay_complete"] is False; assert any(not goal["proven"] and goal["certificate_id"] is None and not goal["replayed"] for goal in theorem["proof_goals"])'
 rejected_theorem_catalog_statuses=("${PIPESTATUS[@]}")
 rejected_theorem_catalog_status=${rejected_theorem_catalog_statuses[0]}
 rejected_theorem_catalog_json_status=${rejected_theorem_catalog_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7, "line": 1, "column": 44, "offset": 43}]'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --theorems "$ROOT_DIR/examples/lemma_default_catalog.elisa" | python3 -c 'import json, sys; theorem = json.load(sys.stdin)["theorems"][0]; assert theorem["verified"] is True; assert theorem["parameters"] == ["x", "amount"]; assert theorem["parameter_defaults"] == [None, {"kind": "int", "value": 7, "line": 1, "column": 44, "offset": 43}]'
 default_theorem_catalog_statuses=("${PIPESTATUS[@]}")
 default_theorem_catalog_status=${default_theorem_catalog_statuses[0]}
 default_theorem_catalog_json_status=${default_theorem_catalog_statuses[1]}
-python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/theorem_fingerprint_a.elisa" "$ROOT_DIR/examples/theorem_fingerprint_b.elisa" "$ROOT_DIR/examples/theorem_fingerprint_changed.elisa" <<'PY'
+python3 - "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/theorem_fingerprint_a.elisa" "$ROOT_DIR/examples/theorem_fingerprint_b.elisa" "$ROOT_DIR/examples/theorem_fingerprint_changed.elisa" <<'PY'
 import json, subprocess, sys
 def fingerprint(path):
     catalog = json.loads(subprocess.check_output([sys.argv[1], "--theorems", path]))
@@ -32,30 +32,30 @@ assert original == shifted
 assert original != changed
 PY
 stable_theorem_fingerprint_status=$?
-"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --suggest 4 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["format"] == "elisa-proof-suggestions-v1"; assert result["status"] == "ok"; assert result["source"]["admissible"] is True; assert result["goal_id"] == 4; assert result["goal_fingerprint"]["algorithm"] == "fnv1a32-kernel-goal-v2"; assert isinstance(result["goal_fingerprint"]["value"], int); assert len(result["candidates"]) == 1; candidate = result["candidates"][0]; assert candidate["theorem"] == "double_three"; assert candidate["ensure_index"] == 0; assert candidate["bindings"][0]["parameter"] == "value"; assert candidate["bindings"][0]["value"]["operator"] == "+"; assert candidate["premises"][0]["satisfied"] is True; assert candidate["premises_satisfied"] is True; assert candidate["applicable"] is True'
 theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_status=${theorem_suggestion_statuses[0]}
 theorem_suggestion_json_status=${theorem_suggestion_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --suggest 1 "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["admissible"] is False; assert result["candidates"] == []'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --suggest 1 "$ROOT_DIR/examples/rejected_lemma.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["admissible"] is False; assert result["candidates"] == []'
 unverified_theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 unverified_theorem_suggestion_status=${unverified_theorem_suggestion_statuses[0]}
 unverified_theorem_suggestion_json_status=${unverified_theorem_suggestion_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --suggest 8 "$ROOT_DIR/examples/theorem_suggestion_defaults.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["complete"] is True; assert [candidate["theorem"] for candidate in result["candidates"]] == ["safe_default"]; candidate = result["candidates"][0]; assert candidate["bindings"][1] == {"parameter": "amount", "value": {"kind": "int", "value": 7, "line": 4, "column": 46, "offset": 90}}; assert candidate["applicable"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --suggest 8 "$ROOT_DIR/examples/theorem_suggestion_defaults.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["source"]["complete"] is True; assert [candidate["theorem"] for candidate in result["candidates"]] == ["safe_default"]; candidate = result["candidates"][0]; assert candidate["bindings"][1] == {"parameter": "amount", "value": {"kind": "int", "value": 7, "line": 4, "column": 46, "offset": 90}}; assert candidate["applicable"] is True'
 theorem_suggestion_default_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_default_status=${theorem_suggestion_default_statuses[0]}
 theorem_suggestion_default_json_status=${theorem_suggestion_default_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --suggest 4 "$ROOT_DIR/examples/theorem_suggestion_structured.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["status"] == "not_found"; assert result["source"]["admissible"] is False; assert result["candidates"] == []'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --suggest 4 "$ROOT_DIR/examples/theorem_suggestion_structured.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["status"] == "not_found"; assert result["source"]["admissible"] is False; assert result["candidates"] == []'
 theorem_suggestion_structured_statuses=("${PIPESTATUS[@]}")
 theorem_suggestion_structured_status=${theorem_suggestion_structured_statuses[0]}
 theorem_suggestion_structured_json_status=${theorem_suggestion_structured_statuses[1]}
-python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/theorem_suggestions.elisa" <<'PY'
+python3 - "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/theorem_suggestions.elisa" <<'PY'
 import subprocess, sys
 first = subprocess.check_output([sys.argv[1], "--suggest", "4", sys.argv[2]])
 second = subprocess.check_output([sys.argv[1], "--suggest", "4", sys.argv[2]])
 assert first == second
 PY
 deterministic_theorem_suggestion_status=$?
-"$ROOT_DIR/build/elisa-proof" --suggest 999999 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["status"] == "not_found"; assert result["goal_fingerprint"] is None; assert result["candidates"] == []'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --suggest 999999 "$ROOT_DIR/examples/theorem_suggestions.elisa" | python3 -c 'import json, sys; result = json.load(sys.stdin); assert result["status"] == "not_found"; assert result["goal_fingerprint"] is None; assert result["candidates"] == []'
 missing_theorem_suggestion_statuses=("${PIPESTATUS[@]}")
 missing_theorem_suggestion_status=${missing_theorem_suggestion_statuses[0]}
 missing_theorem_suggestion_json_status=${missing_theorem_suggestion_statuses[1]}
@@ -126,37 +126,37 @@ if [[ "$duplicate_quantifier_status" -ne 1 || "$duplicate_quantifier_json_status
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["format"] == "elisa-proof-tactic-result-v1"; assert report["status"] == "proved"; assert report["source"]["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["tactic"]["kernel_trace_replayed"] is True; assert len(report["state"]["trace"]) == 2'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["format"] == "elisa-proof-tactic-result-v1"; assert report["status"] == "proved"; assert report["source"]["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["tactic"]["kernel_trace_replayed"] is True; assert len(report["state"]["trace"]) == 2'
 portable_script_status=${PIPESTATUS[0]}
 if [[ "$portable_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: portable tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["solved"] and report["branches"]["right"]["solved"]'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["solved"] and report["branches"]["right"]["solved"]'
 portable_branch_status=${PIPESTATUS[0]}
 if [[ "$portable_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: portable branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_nested_branch.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["left"]["solved"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_nested_branch.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["left"]["solved"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
 portable_nested_branch_status=${PIPESTATUS[0]}
 if [[ "$portable_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: nested portable branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_nested_cases.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["trace"][-1]["action"] == "cases"; assert report["branches"]["left"]["branches"]["left"]["facts"] == [{"kind": "bool", "value": True}]'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_nested_cases.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["branch_certificate_replayed"] is True; assert report["branches"]["left"]["trace"][-1]["action"] == "cases"; assert report["branches"]["left"]["branches"]["left"]["facts"] == [{"kind": "bool", "value": True}]'
 portable_nested_cases_status=${PIPESTATUS[0]}
 if [[ "$portable_nested_cases_status" -ne 0 ]]; then
     printf 'proof test matrix failed: nested portable cases tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 1 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 1 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert report["branches"]["left"]["branches"]["right"]["solved"] is True'
 source_nested_branch_status=${PIPESTATUS[0]}
 if [[ "$source_nested_branch_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound nested branch tactic script\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 3; assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type" for fact in report["state"]["initial_facts"]); assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_signed_type_bound" for fact in report["state"]["initial_facts"])'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["bound"] and binding["goal_id"] == 7 and binding["previously_proven"]; assert binding["fingerprint_match"] is True; assert report["tactic"]["status"] == "proved"; assert len(report["state"]["initial_facts"]) == 3; assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_primitive_scalar_type" for fact in report["state"]["initial_facts"]); assert any(fact["kind"] == "call" and fact["callee"]["name"] == "__elisa_signed_type_bound" for fact in report["state"]["initial_facts"])'
 source_bound_script_status=${PIPESTATUS[0]}
 if [[ "$source_bound_script_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic script\n' >&2
@@ -164,7 +164,7 @@ if [[ "$source_bound_script_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_struct_rewrite.json" "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 14; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False; assert report["state"]["trace"][0]["accepted"] is False; assert "primitive-scalar" in report["state"]["trace"][0]["reason"]'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_struct_rewrite.json" "$ROOT_DIR/examples/rejected_congruence.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 14; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False; assert report["state"]["trace"][0]["accepted"] is False; assert "primitive-scalar" in report["state"]["trace"][0]["reason"]'
 source_bound_struct_rewrite_statuses=("${PIPESTATUS[@]}")
 source_bound_struct_rewrite_status=${source_bound_struct_rewrite_statuses[0]}
 source_bound_struct_rewrite_json_status=${source_bound_struct_rewrite_statuses[1]}
@@ -174,14 +174,14 @@ if [[ "$source_bound_struct_rewrite_status" -ne 1 || "$source_bound_struct_rewri
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 2903951783 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert report["admission_scope"] == "target"; assert report["source"]["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is True; assert binding["bound"] and binding["goal_id"] == 1 and not binding["previously_proven"]; assert binding["goal_fingerprint"]["value"] == 2903951783 and binding["fingerprint_match"] is True; assert report["tactic"]["certificate_replayed"] is True; assert any(fact["kind"] == "call" and not fact.get("argument_names") for fact in report["state"]["initial_facts"])'
 repair_target_status=${PIPESTATUS[0]}
 if [[ "$repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: source-bound tactic could not repair an open target\n' >&2
     exit 1
 fi
 
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 2903951783; assert binding["fingerprint_match"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_shifted.json" "$ROOT_DIR/examples/tactic_repair_target_shifted.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "proved"; assert binding["goal_id"] == 2; assert binding["goal_fingerprint"]["value"] == 2903951783; assert binding["fingerprint_match"] is True'
 shifted_repair_target_status=${PIPESTATUS[0]}
 if [[ "$shifted_repair_target_status" -ne 0 ]]; then
     printf 'proof test matrix failed: stable target proof did not survive unrelated source insertion\n' >&2
@@ -189,7 +189,7 @@ if [[ "$shifted_repair_target_status" -ne 0 ]]; then
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_stale_goal.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["fingerprint_match"] is False; assert report["tactic"]["valid"] is False; assert "goal_fingerprint" in report["tactic"]["reason"]'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_repair_target_stale_goal.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["fingerprint_match"] is False; assert report["tactic"]["valid"] is False; assert "goal_fingerprint" in report["tactic"]["reason"]'
 stale_repair_target_statuses=("${PIPESTATUS[@]}")
 stale_repair_target_status=${stale_repair_target_statuses[0]}
 stale_repair_target_json_status=${stale_repair_target_statuses[1]}
@@ -200,7 +200,7 @@ if [[ "$stale_repair_target_status" -ne 1 || "$stale_repair_target_json_status" 
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_semantic.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is False; assert report["tactic"]["certificate_replayed"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_semantic.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source"]["complete"] is False; assert report["source"]["admissible"] is False; assert report["tactic"]["certificate_replayed"] is True'
 semantic_repair_statuses=("${PIPESTATUS[@]}")
 semantic_repair_status=${semantic_repair_statuses[0]}
 semantic_repair_json_status=${semantic_repair_statuses[1]}
@@ -211,11 +211,11 @@ if [[ "$semantic_repair_status" -ne 1 || "$semantic_repair_json_status" -ne 0 ]]
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert any(finding["kind"] == "contract-proposition-type" and finding["name"] == "rejected_nonboolean_ensure" for finding in report["findings"])'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --json "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert any(finding["kind"] == "contract-proposition-type" and finding["name"] == "rejected_nonboolean_ensure" for finding in report["findings"])'
 proposition_source_statuses=("${PIPESTATUS[@]}")
 proposition_source_status=${proposition_source_statuses[0]}
 proposition_source_json_status=${proposition_source_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "failed"; assert report["source"]["admissible"] is False; assert binding["bound"] and binding["goal_id"] == 1 and binding["fingerprint_match"] is True; assert report["tactic"]["valid"] is True and report["tactic"]["certificate_replayed"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/rejected_tactic_repair_proposition_type.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); binding = report["source_goal_binding"]; assert report["status"] == "failed"; assert report["source"]["admissible"] is False; assert binding["bound"] and binding["goal_id"] == 1 and binding["fingerprint_match"] is True; assert report["tactic"]["valid"] is True and report["tactic"]["certificate_replayed"] is True'
 proposition_tactic_statuses=("${PIPESTATUS[@]}")
 proposition_tactic_status=${proposition_tactic_statuses[0]}
 proposition_tactic_json_status=${proposition_tactic_statuses[1]}
@@ -227,7 +227,7 @@ if [[ "$proposition_source_status" -ne 1 || "$proposition_source_json_status" -n
 fi
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_forged_resource_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 0; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_forged_resource_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["source_goal_binding"]["goal_id"] == 0; assert report["tactic"]["valid"] is False; assert report["tactic"]["certificate_replayed"] is False'
 resource_target_statuses=("${PIPESTATUS[@]}")
 resource_target_status=${resource_target_statuses[0]}
 resource_target_json_status=${resource_target_statuses[1]}

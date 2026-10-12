@@ -2,8 +2,8 @@
 the rest in parallel.
 
 scripts/test.sh exports ELISA_PROOF_REPORT_CACHE when ELISA_PROOF_JOBS>1; its entries were made
-by scripts/prefetch_reports.py with build/elisa-proof in this same run, so a cached entry is
-reused only for that binary. Anything else runs the verifier as before.
+by scripts/prefetch_reports.py with ELISA_PROOF_BIN in this same run, so a cached entry is
+reused only for that binary. Anything else runs the selected verifier as before.
 """
 import concurrent.futures
 import contextlib
@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_BINARY = ROOT / "build/elisa-proof"
+DEFAULT_BINARY = Path(os.environ.get("ELISA_PROOF_BIN") or ROOT / "build/elisa-proof")
 REPORT_CACHE_SCHEMA = b"elisa-proof-report-cache-v3\0"
 INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"', re.MULTILINE)
 PENDING_WAIT_SECONDS = 10.0

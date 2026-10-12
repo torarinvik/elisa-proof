@@ -12,9 +12,11 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
+from strict_json import loads as strict_json_loads
 from census_input_identity import compiler_export_digest, input_identity
 from report_cache import effective_cpus
 from report_exit_status import expected_exit as report_expected_exit
@@ -50,7 +52,7 @@ def validate_census_source_root():
             if (not (source_root / directory).is_dir()
                     or tree_sha256(source_root / directory) != tree_sha256(ROOT / directory)):
                 raise RuntimeError(f"census snapshot {directory} does not match current proof inputs")
-        manifest = json.loads(Path(str(BINARY) + ".manifest.json").read_text())
+        manifest = strict_json_loads(Path(str(BINARY) + ".manifest.json").read_text())
         compiler = manifest.get("compiler", {})
         revision = manifest.get("frontend", {}).get("revision")
         compiler_root = source_root.parent / "Elisa-compiler"
@@ -96,8 +98,8 @@ def run(path, timeout):
             timeout=timeout,
         )
         try:
-            data = json.loads(result.stdout)
-        except json.JSONDecodeError:
+            data = strict_json_loads(result.stdout)
+        except (json.JSONDecodeError, ValueError):
             return data_key(path), None, time.monotonic() - started, "invalid-json"
         returncode = result.returncode
         # Parsing creates a separate object graph. Release stdout/stderr before
@@ -133,7 +135,7 @@ def data_key(path):
 def previous_seconds(path):
     """Per-input seconds from an earlier measurements sidecar, or {} when there is none."""
     try:
-        files = json.loads(Path(path).read_text()).get("files", {})
+        files = strict_json_loads(Path(path).read_text()).get("files", {})
     except (OSError, ValueError, AttributeError):
         return {}
     return {name: entry.get("seconds", 0) for name, entry in files.items() if isinstance(entry, dict)}
@@ -226,8 +228,8 @@ def measurements(results, run_date, toolchain):
 def toolchain_identity():
     manifest_path = Path(str(BINARY) + ".manifest.json")
     try:
-        manifest = json.loads(manifest_path.read_text())
-    except (OSError, json.JSONDecodeError) as error:
+        manifest = strict_json_loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError, ValueError) as error:
         raise RuntimeError(f"cannot read proof build manifest {manifest_path}: {error}")
     compiler = manifest.get("compiler", {})
     frontend = manifest.get("frontend", {})
@@ -241,10 +243,9 @@ def toolchain_identity():
     current_source_digest = tree_sha256(ROOT / "src")
     if proof.get("source_tree_sha256") != current_source_digest:
         raise RuntimeError("proof source tree changed since the proof binary was built")
-    if expected_revision and (
-        not compiler_revision or not compiler_revision.startswith(expected_revision)
-        or frontend_revision != expected_revision
-    ):
+    if (re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
+            or compiler_revision != expected_revision
+            or frontend_revision != expected_revision):
         raise RuntimeError(
             f"compiler/frontend provenance does not match ELISA_COMPILER_REV {expected_revision}"
         )

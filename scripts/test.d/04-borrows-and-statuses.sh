@@ -1,150 +1,150 @@
 # shellcheck shell=bash
 # Part 4 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_disjoint_fields.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_nested_disjoint_fields.elisa" >/dev/null
 borrow_nested_disjoint_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_four_nested_fields.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_four_nested_fields.elisa" >/dev/null
 borrow_four_nested_fields_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_four_nested_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_four_nested_alias.elisa" >/dev/null
 rejected_borrow_four_nested_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_move_disjoint_field.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_move_disjoint_field.elisa" >/dev/null
 borrow_move_disjoint_field_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_call_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_call_summary.elisa" >/dev/null
 borrow_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_indexed_places.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_indexed_places.elisa" >/dev/null
 borrow_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_multi_indexed_places.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_multi_indexed_places.elisa" >/dev/null
 borrow_multi_indexed_places_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_whole_root.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_dynamic_whole_root.elisa" >/dev/null
 borrow_dynamic_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_dynamic_multi_whole_root.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_dynamic_multi_whole_root.elisa" >/dev/null
 borrow_dynamic_multi_whole_root_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_symbolic_disjoint.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_symbolic_disjoint.elisa" >/dev/null
 borrow_symbolic_disjoint_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_symbolic_alias.elisa" >/dev/null
 rejected_borrow_symbolic_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_nested_expression.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_nested_expression.elisa" >/dev/null
 borrow_nested_expression_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_reference_return_summary.elisa" >/dev/null
 borrow_reference_return_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_pure_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/value_match_pure_call.elisa" >/dev/null
 value_match_pure_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_named_payload.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/value_match_named_payload.elisa" >/dev/null
 value_match_named_payload_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/catch_pure_arm_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/catch_pure_arm_call.elisa" >/dev/null
 catch_pure_arm_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/catch_nested_pure_arm_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/catch_nested_pure_arm_call.elisa" >/dev/null
 catch_nested_pure_arm_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/value_match_nested_pure_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/value_match_nested_pure_call.elisa" >/dev/null
 value_match_nested_pure_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/index_call_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/index_call_summary.elisa" >/dev/null
 index_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/indexn_call_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/indexn_call_summary.elisa" >/dev/null
 indexn_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/slice_call_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/slice_call_summary.elisa" >/dev/null
 slice_call_summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/resource_branch_join.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/resource_branch_join.elisa" >/dev/null
 resource_branch_join_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_write.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_write.elisa" >/dev/null
 rejected_borrow_write_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_alias.elisa" >/dev/null
 rejected_borrow_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_field_write.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_field_write.elisa" >/dev/null
 rejected_borrow_field_write_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_field_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_field_alias.elisa" >/dev/null
 rejected_borrow_field_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_nested_prefix.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_nested_prefix.elisa" >/dev/null
 rejected_borrow_nested_prefix_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_move_parent.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_move_parent.elisa" >/dev/null
 rejected_borrow_move_parent_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_resource_use_after_move.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_resource_use_after_move.elisa" >/dev/null
 rejected_resource_use_after_move_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_move.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_move.elisa" >/dev/null
 rejected_borrow_move_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_escape.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_escape.elisa" >/dev/null
 rejected_borrow_escape_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_call.elisa" >/dev/null
 rejected_borrow_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_index_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_index_alias.elisa" >/dev/null
 rejected_borrow_index_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_multi_index_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_multi_index_alias.elisa" >/dev/null
 rejected_borrow_multi_index_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_dynamic_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_dynamic_alias.elisa" >/dev/null
 rejected_borrow_dynamic_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_dynamic_multi_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_dynamic_multi_alias.elisa" >/dev/null
 rejected_borrow_dynamic_multi_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_call_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_call_alias.elisa" >/dev/null
 rejected_borrow_call_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_resource_branch_move.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_resource_branch_move.elisa" >/dev/null
 rejected_resource_branch_move_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_mutable_source.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_mutable_source.elisa" >/dev/null
 rejected_borrow_mutable_source_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_nested_catch.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_nested_catch.elisa" >/dev/null
 rejected_borrow_nested_catch_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_borrow_nested_match.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_borrow_nested_match.elisa" >/dev/null
 rejected_borrow_nested_match_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match_impure_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_value_match_impure_call.elisa" >/dev/null
 rejected_value_match_impure_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/with_include.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/with_include.elisa" >/dev/null
 include_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/include_macro.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/include_macro.elisa" >/dev/null
 if [[ "$?" -ne 0 ]]; then
     include_status=1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/lemma.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/lemma.elisa" >/dev/null
 lemma_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/recursive_lemma_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/recursive_lemma_decreases.elisa" >/dev/null
 recursive_lemma_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_recursive_lemmas.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/mutual_recursive_lemmas.elisa" >/dev/null
 mutual_recursive_lemmas_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/lexicographic_recursive_lemma.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/lexicographic_recursive_lemma.elisa" >/dev/null
 lexicographic_recursive_lemma_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/function_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/function_summary.elisa" >/dev/null
 summary_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/framed_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/framed_call.elisa" >/dev/null
 framed_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/nested_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/nested_frame.elisa" >/dev/null
 nested_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/indexed_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/indexed_frame.elisa" >/dev/null
 indexed_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/header_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/header_frame.elisa" >/dev/null
 header_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/branch_negation.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/branch_negation.elisa" >/dev/null
 branch_negation_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/old_state.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/old_state.elisa" >/dev/null
 old_state_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/structured_result.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/structured_result.elisa" >/dev/null
 structured_result_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/assert_by_local.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/assert_by_local.elisa" >/dev/null
 assert_by_local_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/pattern_proof.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/pattern_proof.elisa" >/dev/null
 pattern_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/total_match.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/total_match.elisa" >/dev/null
 total_match_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/arithmetic_identity.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/arithmetic_identity.elisa" >/dev/null
 arithmetic_identity_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/equality_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/equality_alias.elisa" >/dev/null
 equality_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/quantifier.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/quantifier.elisa" >/dev/null
 quantifier_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/collection_quantifier.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/collection_quantifier.elisa" >/dev/null
 collection_quantifier_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/void_postcondition.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/void_postcondition.elisa" >/dev/null
 void_postcondition_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/multiple_invariants.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/multiple_invariants.elisa" >/dev/null
 multiple_invariants_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/named_arguments.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/named_arguments.elisa" >/dev/null
 named_arguments_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/default_arguments.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/default_arguments.elisa" >/dev/null
 default_arguments_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/assignment_rhs_state.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/assignment_rhs_state.elisa" >/dev/null
 assignment_rhs_state_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/pure_contract_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/pure_contract_call.elisa" >/dev/null
 pure_contract_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/recursive_pure_contract_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/recursive_pure_contract_call.elisa" >/dev/null
 recursive_pure_contract_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/pure_default_contract_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/pure_default_contract_call.elisa" >/dev/null
 pure_default_contract_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_recursive_pure_contract_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/mutual_recursive_pure_contract_call.elisa" >/dev/null
 mutual_recursive_pure_contract_call_status=$?
 run_json_report "$ROOT_DIR/examples/structural_recursive_summary.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["gaps"] == 0'
 structural_recursive_summary_status=${PIPESTATUS[1]}
@@ -154,95 +154,95 @@ if [[ "$structural_recursive_summary_status" -ne 0 || "$rejected_structural_recu
     printf 'structural recursive summary checks failed: proved=%s rejected=%s\n' "$structural_recursive_summary_status" "$rejected_structural_recursive_summary_status" >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/recursive_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/recursive_decreases.elisa" >/dev/null
 recursive_decreases_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/mutual_decreases.elisa" >/dev/null
 mutual_decreases_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/mutual_structural_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/mutual_structural_decreases.elisa" >/dev/null
 mutual_structural_decreases_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/lexicographic_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/lexicographic_decreases.elisa" >/dev/null
 lexicographic_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/structural_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/structural_decreases.elisa" >/dev/null
 structural_decreases_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/difference_constraints.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/difference_constraints.elisa" >/dev/null
 difference_constraints_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/disjunctive_facts.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/disjunctive_facts.elisa" >/dev/null
 disjunctive_facts_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/modulo_division_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/modulo_division_bounds.elisa" >/dev/null
 modulo_division_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected.elisa" >/dev/null
 rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_lemma.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_lemma.elisa" >/dev/null
 rejected_lemma_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_self_assert.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_self_assert.elisa" >/dev/null
 self_assert_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_overflow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_overflow.elisa" >/dev/null
 overflow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_underflow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_underflow.elisa" >/dev/null
 underflow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_min_modulo_overflow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_min_modulo_overflow.elisa" >/dev/null
 rejected_min_modulo_overflow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_stale_branch.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_stale_branch.elisa" >/dev/null
 stale_branch_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_branch_stale_return.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_branch_stale_return.elisa" >/dev/null
 branch_stale_return_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_fallthrough.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_fallthrough.elisa" >/dev/null
 fallthrough_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_invariant.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_invariant.elisa" >/dev/null
 invariant_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_for_invariant.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_for_invariant.elisa" >/dev/null
 rejected_for_invariant_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_for_invariant_scope.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_for_invariant_scope.elisa" >/dev/null
 rejected_for_invariant_scope_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_call_precondition.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_call_precondition.elisa" >/dev/null
 call_precondition_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_lemma_result.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_lemma_result.elisa" >/dev/null
 lemma_result_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_compound_assignment.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_compound_assignment.elisa" >/dev/null
 compound_assignment_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_frame_write.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_frame_write.elisa" >/dev/null
 frame_write_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_counterexample.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_counterexample.elisa" >/dev/null
 counterexample_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_frame_preserve.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_frame_preserve.elisa" >/dev/null
 frame_preserve_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_frame_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_frame_call.elisa" >/dev/null
 frame_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_nested_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_nested_frame.elisa" >/dev/null
 rejected_nested_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_deep_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_deep_frame.elisa" >/dev/null
 rejected_deep_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_indexed_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_indexed_frame.elisa" >/dev/null
 rejected_indexed_frame_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_index_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_index_bounds.elisa" >/dev/null
 rejected_index_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_index_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_index_call.elisa" >/dev/null
 rejected_index_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_index_pure_result.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_index_pure_result.elisa" >/dev/null
 rejected_index_pure_result_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_fixed_array_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_fixed_array_bounds.elisa" >/dev/null
 rejected_fixed_array_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_slice_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_slice_bounds.elisa" >/dev/null
 rejected_slice_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_fixed_array_slice_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_fixed_array_slice_bounds.elisa" >/dev/null
 rejected_fixed_array_slice_bounds_status=$?
 run_json_report "$ROOT_DIR/examples/captured_structural_accumulator.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert not report["findings"]; assert all(goal["proven"] for goal in report["goals"] if goal["rule"] == "structural-safety"); assert report["replay"]["gaps"] == 0'
 captured_structural_accumulator_status=${PIPESTATUS[1]}
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_field_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_field_alias.elisa" >/dev/null
 rejected_field_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_header_frame.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_header_frame.elisa" >/dev/null
 header_frame_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_header_frame_root.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_header_frame_root.elisa" >/dev/null
 header_frame_root_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_frame_condition_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_frame_condition_call.elisa" >/dev/null
 frame_condition_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_frame_alias.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_frame_alias.elisa" >/dev/null
 frame_alias_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_old_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_old_call.elisa" >/dev/null
 old_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_quantifier.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_quantifier.elisa" >/dev/null
 quantifier_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_collection_quantifier.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_collection_quantifier.elisa" >/dev/null
 collection_quantifier_rejected_status=$?
 run_json_report "$ROOT_DIR/examples/rejected_quantifier_capture.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["replay"]["gaps"] == 0; assert not any(goal["rule"] == "quantifier-forall" and goal["proven"] for goal in report["goals"]); assert any(finding["kind"] == "ensure-unproven" and finding["name"] == "dictionary_key_name_must_not_be_captured" for finding in report["findings"])'
 quantifier_capture_statuses=("${PIPESTATUS[@]}")
@@ -250,27 +250,27 @@ if [[ "${quantifier_capture_statuses[0]}" -ne 1 || "${quantifier_capture_statuse
     printf 'proof test matrix failed: dictionary quantifier binder capture was not rejected cleanly\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_void_postcondition.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_void_postcondition.elisa" >/dev/null
 void_postcondition_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_named_arguments.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_named_arguments.elisa" >/dev/null
 named_arguments_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_default_arguments.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_default_arguments.elisa" >/dev/null
 default_arguments_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_assert_call_stale.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_assert_call_stale.elisa" >/dev/null
 assert_call_stale_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_assert_by_call_stale.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_assert_by_call_stale.elisa" >/dev/null
 assert_by_call_stale_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_decreases.elisa" >/dev/null
 decreases_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_loop_break.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_loop_break.elisa" >/dev/null
 loop_break_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_loop_control_invariant.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_loop_control_invariant.elisa" >/dev/null
 rejected_loop_control_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_getelse_recovery.elisa" >/dev/null
 rejected_getelse_recovery_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_catch_error_postcondition.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_catch_error_postcondition.elisa" >/dev/null
 rejected_catch_error_postcondition_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_continue_decreases_nonprogress.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_continue_decreases_nonprogress.elisa" >/dev/null
 rejected_continue_decreases_nonprogress_status=$?
 run_json_report "$ROOT_DIR/examples/rejected_continue_decreases_nonprogress.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert any(finding["kind"] == "loop-decreases-unproven" for finding in report["findings"])'
 rejected_continue_decreases_nonprogress_probe_status=${PIPESTATUS[1]}
@@ -278,85 +278,85 @@ if [[ "$rejected_continue_decreases_nonprogress_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: non-progressing continue edge was not rejected by termination checking\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_summary.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_summary.elisa" >/dev/null
 recursive_summary_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_decreases.elisa" >/dev/null
 recursive_decreases_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_assert.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_assert.elisa" >/dev/null
 recursive_assert_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_lemma.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_lemma.elisa" >/dev/null
 recursive_lemma_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_lemma_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_lemma_decreases.elisa" >/dev/null
 recursive_lemma_decreases_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_recursive_lemma_in_proof_block.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_recursive_lemma_in_proof_block.elisa" >/dev/null
 recursive_lemma_in_proof_block_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_lexicographic_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_lexicographic_decreases.elisa" >/dev/null
 lexicographic_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_nested_call_precondition.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_nested_call_precondition.elisa" >/dev/null
 nested_call_precondition_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_structural_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_structural_decreases.elisa" >/dev/null
 structural_decreases_rejected_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_structural_decreases_star.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_structural_decreases_star.elisa" >/dev/null
 structural_decreases_star_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_structural_shadow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_structural_shadow.elisa" >/dev/null
 structural_shadow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_mutual_structural_decreases.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_mutual_structural_decreases.elisa" >/dev/null
 rejected_mutual_structural_decreases_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_decreases_post_nonnegative.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_decreases_post_nonnegative.elisa" >/dev/null
 decreases_post_nonnegative_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_difference_constraints.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_difference_constraints.elisa" >/dev/null
 rejected_difference_constraints_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_disjunctive_facts.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_disjunctive_facts.elisa" >/dev/null
 rejected_disjunctive_facts_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_modulo_division_bounds.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_modulo_division_bounds.elisa" >/dev/null
 rejected_modulo_division_bounds_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_impure_proof.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_impure_proof.elisa" >/dev/null
 rejected_impure_proof_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_nested_call_symbolic_value.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_nested_call_symbolic_value.elisa" >/dev/null
 rejected_nested_call_symbolic_value_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_loop_invariant_scope.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_loop_invariant_scope.elisa" >/dev/null
 rejected_loop_invariant_scope_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" >/dev/null
 rejected_checked_index_nested_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_for_shadow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_for_shadow.elisa" >/dev/null
 rejected_for_shadow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_match_shadow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_match_shadow.elisa" >/dev/null
 rejected_match_shadow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_match_shadow_fact.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_match_shadow_fact.elisa" >/dev/null
 rejected_match_shadow_fact_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_value_match.elisa" >/dev/null
 rejected_value_match_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match_payload_shadow.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_value_match_payload_shadow.elisa" >/dev/null
 rejected_value_match_payload_shadow_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_value_match_positional_payload.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_value_match_positional_payload.elisa" >/dev/null
 rejected_value_match_positional_payload_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_catch_impure_arm_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_catch_impure_arm_call.elisa" >/dev/null
 rejected_catch_impure_arm_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_contract_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_contract_call.elisa" >/dev/null
 rejected_contract_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_mutable_pure_contract.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_mutable_pure_contract.elisa" >/dev/null
 rejected_mutable_pure_contract_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_pure_default_contract.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_pure_default_contract.elisa" >/dev/null
 rejected_pure_default_contract_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_resource_expression.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_resource_expression.elisa" >/dev/null
 rejected_resource_expression_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_parallel_proof_state.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_parallel_proof_state.elisa" >/dev/null
 rejected_parallel_proof_state_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_parallel_nested_state.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_parallel_nested_state.elisa" >/dev/null
 rejected_parallel_nested_state_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_move_use_after.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_move_use_after.elisa" >/dev/null
 rejected_move_use_after_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_early_return_index_guard.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_early_return_index_guard.elisa" >/dev/null
 rejected_early_return_index_guard_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_unknown_call_result.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_unknown_call_result.elisa" >/dev/null
 rejected_unknown_call_result_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_unknown_assert_reuse.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_unknown_assert_reuse.elisa" >/dev/null
 rejected_unknown_assert_reuse_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_assert_nested_call.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_assert_nested_call.elisa" >/dev/null
 rejected_assert_nested_call_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_mutual_recursive_pure_impure_member.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_mutual_recursive_pure_impure_member.elisa" >/dev/null
 rejected_mutual_recursive_pure_impure_member_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_mutable_global_pure_contract.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_mutable_global_pure_contract.elisa" >/dev/null
 rejected_mutable_global_pure_contract_status=$?
 run_json_report "$ROOT_DIR/examples/borrow_shared_read.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["findings"] == []; assert report["replay"]["gaps"] == 0; assert any(certificate["rule"] == "resource-safety" and certificate["replayed"] for certificate in report["certificates"]); assert any(node["kind"] == "resource-safety" for node in report["kernel"]["nodes"])'
 borrow_shared_probe_status=${PIPESTATUS[1]}
@@ -570,19 +570,19 @@ run_json_report "$ROOT_DIR/examples/rejected_void_postcondition.elisa" | python3
 void_postcondition_goal_statuses=("${PIPESTATUS[@]}")
 void_postcondition_goal_status=${void_postcondition_goal_statuses[0]}
 void_postcondition_goal_json_status=${void_postcondition_goal_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --goal 3 "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["format"] == "elisa-proof-goal-v1"; assert goal["status"] == "unknown"; assert goal["goal_id"] == 3; assert goal["goal"]["rule"] == "index-upper"; assert goal["goal"]["proposition"]["operator"] == "<"; assert goal["failure"]["goal_id"] == 3; assert goal["source"]["complete"] is False; assert "kernel" not in goal'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal 3 "$ROOT_DIR/examples/rejected_checked_index_nested.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["format"] == "elisa-proof-goal-v1"; assert goal["status"] == "unknown"; assert goal["goal_id"] == 3; assert goal["goal"]["rule"] == "index-upper"; assert goal["goal"]["proposition"]["operator"] == "<"; assert goal["failure"]["goal_id"] == 3; assert goal["source"]["complete"] is False; assert "kernel" not in goal'
 focused_open_goal_statuses=("${PIPESTATUS[@]}")
 focused_open_goal_status=${focused_open_goal_statuses[0]}
 focused_open_goal_json_status=${focused_open_goal_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --goal 7 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "proved"; assert goal["goal"]["replay_status"] == "replayed"; assert goal["failure"] is None; assert goal["source"]["complete"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal 7 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "proved"; assert goal["goal"]["replay_status"] == "replayed"; assert goal["failure"] is None; assert goal["source"]["complete"] is True'
 focused_proved_goal_statuses=("${PIPESTATUS[@]}")
 focused_proved_goal_status=${focused_proved_goal_statuses[0]}
 focused_proved_goal_json_status=${focused_proved_goal_statuses[1]}
-"$ROOT_DIR/build/elisa-proof" --goal 999999 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "not_found"; assert goal["goal"] is None; assert goal["failure"] is None'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal 999999 "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; goal = json.load(sys.stdin); assert goal["status"] == "not_found"; assert goal["goal"] is None; assert goal["failure"] is None'
 focused_missing_goal_statuses=("${PIPESTATUS[@]}")
 focused_missing_goal_status=${focused_missing_goal_statuses[0]}
 focused_missing_goal_json_status=${focused_missing_goal_statuses[1]}
-python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/goal_fingerprint_a.elisa" "$ROOT_DIR/examples/goal_fingerprint_b.elisa" <<'PY'
+python3 - "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/goal_fingerprint_a.elisa" "$ROOT_DIR/examples/goal_fingerprint_b.elisa" <<'PY'
 import json
 import subprocess
 import sys
@@ -593,5 +593,5 @@ assert first["goal_fingerprint"] == shifted["goal_fingerprint"]
 assert first["goal"]["line"] != shifted["goal"]["line"]
 PY
 stable_goal_fingerprint_status=$?
-"$ROOT_DIR/build/elisa-proof" --goal 4294967296 "$ROOT_DIR/examples/verified.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal 4294967296 "$ROOT_DIR/examples/verified.elisa" >/dev/null
 focused_overflow_goal_status=$?

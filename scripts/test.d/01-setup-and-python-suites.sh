@@ -12,8 +12,11 @@ if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
     ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
 fi
 
-# Test reports count only when the actual pair matches the current source/toolchain snapshot.
-bash "$ROOT_DIR/scripts/qualify_prebuilt_test.sh"
+# Qualification resolves and validates CURRENT once, then returns those immutable generation paths.
+QUALIFICATION_JSON="$(bash "$ROOT_DIR/scripts/qualify_prebuilt_test.sh" --json)"
+IFS=$'\t' read -r ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN <<<"$(python3 -c 'import json, sys; result=json.load(sys.stdin); paths=(result.get("proof_binary"), result.get("replay_binary")); assert all(isinstance(path, str) and path for path in paths); print("\t".join(paths))' <<<"$QUALIFICATION_JSON")"
+[[ -n "$ELISA_PROOF_BIN" && -n "$ELISA_PROOF_REPLAY_BIN" ]] || { printf 'proof test matrix failed: qualification did not return both product paths\n' >&2; exit 1; }
+export ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN
 
 # ELISA_PROOF_JOBS>1 runs every literal run_json_report fixture in parallel first; the serial
 # assertions below then read those stored reports (scripts/prefetch_reports.py).
@@ -26,7 +29,7 @@ if [[ -n "$REPORT_CACHE" ]]; then
 elif [[ "${ELISA_PROOF_JOBS:-1}" -gt 1 ]]; then
     REPORT_CACHE="$(mktemp -d "${TMPDIR:-/tmp}/elisa-proof-reports.XXXXXX")"
     TEST_CLEANUP+=("$REPORT_CACHE")
-    python3 "$ROOT_DIR/scripts/prefetch_reports.py" "$ROOT_DIR/scripts/test.sh" "$ROOT_DIR/build/elisa-proof" "$REPORT_CACHE" "$ROOT_DIR" "$(( ELISA_PROOF_JOBS > 2 ? ELISA_PROOF_JOBS - 1 : ELISA_PROOF_JOBS ))" &
+    python3 "$ROOT_DIR/scripts/prefetch_reports.py" "$ROOT_DIR/scripts/test.sh" "$ELISA_PROOF_BIN" "$REPORT_CACHE" "$ROOT_DIR" "$(( ELISA_PROOF_JOBS > 2 ? ELISA_PROOF_JOBS - 1 : ELISA_PROOF_JOBS ))" &
     REPORT_PREFETCH_PID=$!
     export ELISA_PROOF_REPORT_CACHE="$REPORT_CACHE" ELISA_PROOF_JOBS
 fi
@@ -35,7 +38,7 @@ fi
 # holds a heavy-fixture slot so the prefetch cannot starve it of memory. Completion
 # is not proof: unresolved obligations remain visible in the report.
 if ! ELISA_FULL_AUDIT_SOURCE="$ROOT_DIR/test/repro/audit_unsigned_marker.elisa" \
-    ELISA_FULL_AUDIT_BINARY="$ROOT_DIR/build/elisa-proof" \
+    ELISA_FULL_AUDIT_BINARY="$ELISA_PROOF_BIN" \
     python3 "$ROOT_DIR/scripts/report_cache.py" --slot "$ROOT_DIR/test/repro/audit_unsigned_marker.elisa" -- "$ROOT_DIR/scripts/audit_full_source.sh" | python3 -c 'import json, sys; audit=json.load(sys.stdin); assert audit["complete"]; assert audit["replay_gaps"] == 0'; then
     printf 'proof test matrix failed: unsigned-marker audit did not complete with clean replay\n' >&2
     exit 1
@@ -138,7 +141,7 @@ run_json_report() {
     fi
     local cache_key=""
     if [[ -n "$REPORT_CACHE" ]]; then
-        cache_key="$REPORT_CACHE/$(python3 "$ROOT_DIR/scripts/report_cache.py" --key "$source_path" "$ROOT_DIR/build/elisa-proof")"
+        cache_key="$REPORT_CACHE/$(python3 "$ROOT_DIR/scripts/report_cache.py" --key "$source_path" "$ELISA_PROOF_BIN")"
         # Wait for a prefetched fixture's entry while the prefetcher still runs.
         while [[ ! -f "$cache_key.rc" ]] && [[ -n "$REPORT_PREFETCH_PID" ]] && kill -0 "$REPORT_PREFETCH_PID" 2>/dev/null; do
             sleep 1  # poll-ok: local file from our own prefetcher
@@ -148,7 +151,7 @@ run_json_report() {
     if [[ -n "$cache_key" && -f "$cache_key.rc" ]]; then
         cp "$cache_key.json" "$report_path"
         proof_status="$(cat "$cache_key.rc")"
-    elif "$ROOT_DIR/build/elisa-proof" --json "$source_path" >"$report_path"; then
+    elif "$ELISA_PROOF_BIN" --json "$source_path" >"$report_path"; then
         proof_status=0
     else
         proof_status=$?

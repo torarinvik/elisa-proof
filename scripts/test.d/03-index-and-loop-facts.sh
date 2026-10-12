@@ -335,7 +335,7 @@ fi
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); fs=r["findings"]; ds=[d for d in r["declaration_details"] if d["kind"]=="function"]; assert r["status"]=="failed" and r["replay"]["gaps"]==0 and r["replay"]["certificates"]==r["replay"]["replayed"]; assert any(f["kind"]=="contract-proposition-type" and f["name"]=="rejected_optional_result_comparison" for f in fs); assert any(f["kind"]=="function-summary-unverified" and f["name"]=="rejected_optional_getelse_summary" for f in fs); assert all(not d["verified"] for d in ds); assert not any(dep["kind"]=="function-summary" and dep["name"]=="rejected_optional_result_comparison" for g in r["goals"] for dep in g["dependencies"])' "$optional_result_report"
 optional_repair_report="$standalone_probe_dir/rejected-optional-result-repair.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_repair_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair-all "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_repair_report"
 optional_repair_status=$?
 set -e
 if [[ "$optional_repair_status" -ne 1 ]]; then
@@ -345,7 +345,7 @@ fi
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"]=="inadmissible" and r["source"]["admissible"] is False; assert any(g["name"]=="rejected_optional_getelse_summary" and g["status"]=="unrepaired" and g["tried"]==0 for g in r["goals"])' "$optional_repair_report"
 optional_target_tactic_report="$standalone_probe_dir/rejected-optional-result-target-tactic.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_malformed_source_target.json" "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_target_tactic_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_malformed_source_target.json" "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_target_tactic_report"
 optional_target_tactic_status=$?
 set -e
 if [[ "$optional_target_tactic_status" -ne 1 ]]; then
@@ -355,7 +355,7 @@ fi
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"]=="failed" and r["source"]["status"]=="failed" and r["source"]["admissible"] is False; assert r["source_goal_binding"]["bound"] is True and r["source_goal_binding"]["goal_id"]==2; assert r["tactic"]["certificate_replayed"] is False' "$optional_target_tactic_report"
 optional_valid_target_report="$standalone_probe_dir/rejected-optional-result-valid-target-tactic.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_malformed_source_valid_target.json" "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_valid_target_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_malformed_source_valid_target.json" "$ROOT_DIR/examples/rejected_optional_result_comparison.elisa" >"$optional_valid_target_report"
 optional_valid_target_status=$?
 set -e
 if [[ "$optional_valid_target_status" -ne 1 ]]; then
@@ -425,7 +425,7 @@ fi
 python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["status"] == "failed" and r["summary"]["semantic_errors"] > 0; assert any(f["kind"] == "contract-proposition-type" for f in r["findings"]); assert not any(g["rule"] == "proof-step" and g["proven"] for g in r["goals"]); f=next(d for d in r["declaration_details"] if d["name"] == "rejected_nonbool_assert_call"); assert not f["verified"] and f["verification_reason"] == "body-unverified"; assert r["replay"]["gaps"] == 0' "$assertion_proposition_report"
 # An inadmissible source is never repaired, so the batch exits 1 as well.
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "inadmissible" and r["source"]["admissible"] is False and r["summary"]["repaired"] == 0 and all(g["script"] is None for g in r["goals"])'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair-all "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "inadmissible" and r["source"]["admissible"] is False and r["summary"]["repaired"] == 0 and all(g["script"] is None for g in r["goals"])'
 repair_proposition_probe_statuses=("${PIPESTATUS[@]}")
 set -e
 repair_proposition_probe_status=${repair_proposition_probe_statuses[1]}
@@ -435,7 +435,7 @@ if [[ "$repair_proposition_probe_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "failed" and r["source"]["status"] == "failed"; assert r["source_goal_binding"]["bound"] is False; assert r["tactic"]["status"] == "proved" and r["tactic"]["valid"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/rejected_nonbool_hypothesis_reuse.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["status"] == "failed" and r["source"]["status"] == "failed"; assert r["source_goal_binding"]["bound"] is False; assert r["tactic"]["status"] == "proved" and r["tactic"]["valid"] is True'
 portable_proposition_tactic_statuses=("${PIPESTATUS[@]}")
 set -e
 if [[ "${portable_proposition_tactic_statuses[0]}" -ne 1 || "${portable_proposition_tactic_statuses[1]}" -ne 0 ]]; then
@@ -559,29 +559,29 @@ if [[ "${dogfood_kernel_core_probe_statuses[0]}" -ne 1 || "${dogfood_kernel_core
     printf 'proof test matrix failed: rejected kernel-core fixture pipeline returned unexpected statuses\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/verified.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/verified.elisa" >/dev/null
 verified_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/bounded_model.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/bounded_model.elisa" >/dev/null
 bounded_model_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/dogfood_kernel.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/dogfood_kernel.elisa" >/dev/null
 dogfood_kernel_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/dogfood_kernel_core.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/dogfood_kernel_core.elisa" >/dev/null
 dogfood_kernel_core_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/rejected_dogfood_kernel_core.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/rejected_dogfood_kernel_core.elisa" >/dev/null
 rejected_dogfood_kernel_core_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/replay_constant.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/replay_constant.elisa" >/dev/null
 replay_constant_status=$?
 if [[ "$replay_constant_status" -ne 0 ]]; then
     printf 'proof test matrix failed: replay_constant=%s\n' "$replay_constant_status" >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/move_runtime_value.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/move_runtime_value.elisa" >/dev/null
 move_runtime_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_shared_read.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_shared_read.elisa" >/dev/null
 borrow_shared_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_mutable_write.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_mutable_write.elisa" >/dev/null
 borrow_mutable_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_lexical_scope.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_lexical_scope.elisa" >/dev/null
 borrow_lexical_scope_status=$?
-"$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/borrow_disjoint_fields.elisa" >/dev/null
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" "$ROOT_DIR/examples/borrow_disjoint_fields.elisa" >/dev/null
 borrow_disjoint_fields_status=$?

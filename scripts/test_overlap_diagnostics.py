@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Distinguish conservative footprints from demonstrated resource overlaps."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = ROOT / "build/elisa-proof"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 CASES = {
     "unknown_widened_borrow_move": ("borrow-overlap-unproven", "unknown"),
     "rejected_borrow_move": ("borrow-move-conflict", "disproved"),

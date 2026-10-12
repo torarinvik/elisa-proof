@@ -173,7 +173,7 @@ printf 'dogfood summary_replay: mismatched lemma/function instantiations and AST
 portable_output="$REPORT_DIR/tactic-script.json"
 portable_repeat_output="$REPORT_DIR/tactic-script.repeat.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" >"$portable_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" >"$portable_output"
 portable_status=$?
 set -e
 if [[ "$portable_status" -ne 0 ]]; then
@@ -181,7 +181,7 @@ if [[ "$portable_status" -ne 0 ]]; then
     exit 1
 fi
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" >"$portable_repeat_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script.json" "$ROOT_DIR/examples/verified.elisa" >"$portable_repeat_output"
 portable_repeat_status=$?
 set -e
 if [[ "$portable_repeat_status" -ne 0 ]] || ! cmp -s "$portable_output" "$portable_repeat_output"; then
@@ -210,7 +210,7 @@ print("dogfood tactic_script: portable JSON trace and certificate passed")
 PY
 quantifier_output="$REPORT_DIR/tactic-script-quantifier.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/verified.elisa" >"$quantifier_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/verified.elisa" >"$quantifier_output"
 quantifier_status=$?
 set -e
 if [[ "$quantifier_status" -ne 0 ]]; then
@@ -235,7 +235,7 @@ PY
 for rejected_line_fixture in tactic_script_rejected_large_line tactic_script_rejected_large_expr_line; do
     rejected_line_output="$REPORT_DIR/$rejected_line_fixture.json"
     set +e
-    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/$rejected_line_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_line_output"
+    "$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/$rejected_line_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_line_output"
     rejected_line_status=$?
     set -e
     if [[ "$rejected_line_status" -ne 1 ]]; then
@@ -256,7 +256,7 @@ done
 printf 'dogfood tactic_json_lines: overflowing source and expression lines were rejected\n'
 branch_output="$REPORT_DIR/tactic-script-branch.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$branch_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$branch_output"
 branch_status=$?
 set -e
 if [[ "$branch_status" -ne 0 ]]; then
@@ -286,7 +286,7 @@ print("dogfood tactic_script_branch: both serialized child certificates replayed
 PY
 nested_branch_output="$REPORT_DIR/tactic-script-nested-branch.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_nested_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$nested_branch_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_nested_branch.json" "$ROOT_DIR/examples/verified.elisa" >"$nested_branch_output"
 nested_branch_status=$?
 set -e
 if [[ "$nested_branch_status" -ne 0 ]]; then
@@ -312,7 +312,7 @@ print("dogfood tactic_script_nested_branch: recursively replayed branch tree pas
 PY
 nested_cases_output="$REPORT_DIR/tactic-script-nested-cases.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_nested_cases.json" "$ROOT_DIR/examples/verified.elisa" >"$nested_cases_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_nested_cases.json" "$ROOT_DIR/examples/verified.elisa" >"$nested_cases_output"
 nested_cases_status=$?
 set -e
 if [[ "$nested_cases_status" -ne 0 ]]; then
@@ -335,7 +335,7 @@ print("dogfood tactic_script_nested_cases: recursive disjunction context replay 
 PY
 source_nested_branch_output="$REPORT_DIR/tactic-script-target-nested-branch.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" >"$source_nested_branch_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_target_nested_branch.json" "$ROOT_DIR/examples/verified_branch.elisa" >"$source_nested_branch_output"
 source_nested_branch_status=$?
 set -e
 if [[ "$source_nested_branch_status" -ne 0 ]]; then
@@ -358,7 +358,7 @@ print("dogfood tactic_script_target_nested_branch: source-bound tree certificate
 PY
 incomplete_branch_output="$REPORT_DIR/tactic-script-branch-incomplete.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_branch_incomplete.json" "$ROOT_DIR/examples/verified.elisa" >"$incomplete_branch_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_branch_incomplete.json" "$ROOT_DIR/examples/verified.elisa" >"$incomplete_branch_output"
 incomplete_branch_status=$?
 set -e
 if [[ "$incomplete_branch_status" -ne 1 ]]; then
@@ -381,7 +381,7 @@ print("dogfood tactic_script_branch_incomplete: an open child blocked admission"
 PY
 target_output="$REPORT_DIR/tactic-script-target.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" >"$target_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" >"$target_output"
 target_status=$?
 set -e
 if [[ "$target_status" -ne 0 ]]; then
@@ -414,7 +414,7 @@ print("dogfood tactic_script_target: imported goal and facts were bound before r
 PY
 repair_target_output="$REPORT_DIR/tactic-script-repair-target.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" >"$repair_target_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_repair_target.json" "$ROOT_DIR/examples/tactic_repair_target.elisa" >"$repair_target_output"
 repair_target_status=$?
 set -e
 if [[ "$repair_target_status" -ne 0 ]]; then
@@ -442,7 +442,7 @@ print("dogfood tactic_script_repair_target: an open imported goal was independen
 PY
 forged_target_output="$REPORT_DIR/tactic-script-target-forged.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target_forged.json" "$ROOT_DIR/examples/verified.elisa" >"$forged_target_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_target_forged.json" "$ROOT_DIR/examples/verified.elisa" >"$forged_target_output"
 forged_target_status=$?
 set -e
 if [[ "$forged_target_status" -ne 1 ]]; then
@@ -465,7 +465,7 @@ print("dogfood tactic_script_target_forged: imported state could not be replaced
 PY
 forged_quantifier_output="$REPORT_DIR/tactic-script-source-bound-forged-quantifier.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_quantifier.json" "$ROOT_DIR/examples/rejected_source_bound_exists.elisa" >"$forged_quantifier_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_quantifier.json" "$ROOT_DIR/examples/rejected_source_bound_exists.elisa" >"$forged_quantifier_output"
 forged_quantifier_status=$?
 set -e
 if [[ "$forged_quantifier_status" -ne 1 ]]; then
@@ -489,7 +489,7 @@ assert report["state"]["initial_goal"]["kind"] == "block"
 print("dogfood tactic_script_source_bound_forged_quantifier: compiler quantifier kind remained authoritative")
 PY
 forged_instantiation_output="$REPORT_DIR/forged-instantiation.json"
-if "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_instantiation.json" "$ROOT_DIR/examples/source_bound_exists.elisa" >"$forged_instantiation_output"; then
+if "$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_source_bound_forged_instantiation.json" "$ROOT_DIR/examples/source_bound_exists.elisa" >"$forged_instantiation_output"; then
     printf 'dogfood failed: existential source hypothesis admitted universal instantiation\n' >&2
     exit 1
 fi
@@ -507,7 +507,7 @@ assert report["state"]["trace"][0]["accepted"] is False
 print("dogfood forged_instantiation: existential hypothesis cannot be relabeled universal")
 PY
 exact_integer_output="$REPORT_DIR/tactic-integer-exact.json"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/tactic_integer_exact_boundary.elisa" >"$exact_integer_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/tactic_integer_exact_boundary.elisa" >"$exact_integer_output"
 python3 - "$exact_integer_output" <<'PY'
 import json
 import sys
@@ -518,7 +518,7 @@ assert report["tactic"]["certificate_replayed"] is True
 assert report["state"]["initial_goal"]["left"]["value"] == 9007199254740991
 PY
 rounding_output="$REPORT_DIR/tactic-integer-rounding.json"
-if "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/rejected_tactic_integer_rounding.elisa" >"$rounding_output"; then
+if "$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_integer_rounding.json" "$ROOT_DIR/examples/rejected_tactic_integer_rounding.elisa" >"$rounding_output"; then
     printf 'dogfood failed: rounded integers admitted a false source equality\n' >&2
     exit 1
 fi
@@ -536,7 +536,7 @@ print("dogfood integer_rounding: lossy JSON numbers cannot prove a different sou
 PY
 stale_output="$REPORT_DIR/tactic-script-stale.json"
 set +e
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_stale.json" "$ROOT_DIR/examples/verified.elisa" >"$stale_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_stale.json" "$ROOT_DIR/examples/verified.elisa" >"$stale_output"
 stale_status=$?
 set -e
 if [[ "$stale_status" -ne 1 ]]; then

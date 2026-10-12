@@ -372,7 +372,7 @@ PY
 # without one, and `open` otherwise. A renderer that overstated a verdict would be a false claim in
 # the most human-facing surface there is.
 for render_example in condition_call_positions rejected_condition_call_positions writable_lend_calls region_lend_calls; do
-    python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" <<'PY'
+    python3 - "$ELISA_PROOF_BIN" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" <<'PY'
 import json
 import subprocess
 import sys
@@ -408,7 +408,7 @@ printf 'dogfood proof_render: every rendered block matches the report verdict an
 # line of it must be reported as a divergence. A checker that accepted an edited block would make
 # the readable surface forgeable.
 for render_example in condition_call_positions rejected_condition_call_positions; do
-    python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" "$REPORT_DIR" <<'PY'
+    python3 - "$ELISA_PROOF_BIN" "$ROOT_DIR/examples/$render_example.elisa" "$REPORT_DIR/$render_example.json" "$REPORT_DIR" <<'PY'
 import json
 import os
 import subprocess
@@ -445,13 +445,13 @@ printf 'dogfood proof_check: rendered blocks round-trip and any edited line is r
 # and running that must give the identical verdict, and every malformed shape must be refused.
 script_text_output="$REPORT_DIR/script_text.json"
 script_json_output="$REPORT_DIR/script_json.json"
-"$ROOT_DIR/build/elisa-proof" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" >"$script_text_output"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" >"$script_json_output"
+"$ELISA_PROOF_BIN" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" >"$script_text_output"
+"$ELISA_PROOF_BIN" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" >"$script_json_output"
 if ! cmp -s "$script_text_output" "$script_json_output"; then
     printf 'dogfood failed: a text proof script diverged from its JSON equivalent\n' >&2
     exit 1
 fi
-python3 - "$ROOT_DIR/build/elisa-proof" "$ROOT_DIR/examples/verified.elisa" "$REPORT_DIR" <<'PY'
+python3 - "$ELISA_PROOF_BIN" "$ROOT_DIR/examples/verified.elisa" "$REPORT_DIR" <<'PY'
 import json
 import os
 import subprocess
@@ -488,7 +488,7 @@ printf 'dogfood proof_script: a written script runs the checked engine and nothi
 # Repair proposes and the kernel disposes. Across every goal of a proved fixture and an adversarial
 # one, a repair that reports success must emit a script that re-runs and replays, and a repair that
 # reports failure must emit none — and no goal of the adversarial fixture may be repaired at all.
-python3 - "$ROOT_DIR/build/elisa-proof" "$REPORT_DIR" <<'PY'
+python3 - "$ELISA_PROOF_BIN" "$REPORT_DIR" <<'PY'
 import json
 import os
 import subprocess
@@ -527,7 +527,7 @@ printf 'dogfood proof_repair: every proposal the search admits re-runs and repla
 # The whole-file walk must agree with the per-goal one exactly: the same goals, the same verdicts,
 # the same scripts. A batch that disagreed with the single-goal answer would mean one of them is
 # reporting something the engine did not decide.
-python3 - "$ROOT_DIR/build/elisa-proof" <<'PY'
+python3 - "$ELISA_PROOF_BIN" <<'PY'
 import json
 import os
 import subprocess

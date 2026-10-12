@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Check the near_miss explanation on every unproven goal of the rejected examples (BACKLOG H-03)."""
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -8,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from report_cache import json_runs  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = ROOT / "build/elisa-proof"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
 def names(expr, out):

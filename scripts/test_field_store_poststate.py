@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "examples/field_store_poststate_probe.elisa"
-PROVER = ROOT / "build/elisa-proof"
+PROVER = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 POSITIVE = {
     "scalar_field_store_updates_poststate",

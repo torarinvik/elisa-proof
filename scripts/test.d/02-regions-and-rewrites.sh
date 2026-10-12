@@ -219,7 +219,7 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); assert r
 fi
 set +e
 rejected_overloaded_literal_simp_report="$standalone_probe_dir/rejected-overloaded-literal-simp.json"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_equality.json" "$ROOT_DIR/examples/rejected_overloaded_literal_equality.elisa" >"$rejected_overloaded_literal_simp_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_equality.json" "$ROOT_DIR/examples/rejected_overloaded_literal_equality.elisa" >"$rejected_overloaded_literal_simp_report"
 rejected_overloaded_literal_simp_status=$?
 set -e
 if [[ "$rejected_overloaded_literal_simp_status" -ne 1 ]]; then
@@ -232,7 +232,7 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=r
 fi
 set +e
 rejected_overloaded_literal_have_report="$standalone_probe_dir/rejected-overloaded-literal-have.json"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_fact.json" "$ROOT_DIR/examples/rejected_overloaded_literal_fact.elisa" >"$rejected_overloaded_literal_have_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_fact.json" "$ROOT_DIR/examples/rejected_overloaded_literal_fact.elisa" >"$rejected_overloaded_literal_have_report"
 rejected_overloaded_literal_have_status=$?
 set -e
 if [[ "$rejected_overloaded_literal_have_status" -ne 1 ]]; then
@@ -245,7 +245,7 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=r
 fi
 set +e
 rejected_overloaded_literal_rewrite_report="$standalone_probe_dir/rejected-overloaded-literal-rewrite.json"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_rewrite.json" "$ROOT_DIR/examples/rejected_overloaded_literal_rewrite.elisa" >"$rejected_overloaded_literal_rewrite_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_rewrite.json" "$ROOT_DIR/examples/rejected_overloaded_literal_rewrite.elisa" >"$rejected_overloaded_literal_rewrite_report"
 rejected_overloaded_literal_rewrite_status=$?
 set -e
 if [[ "$rejected_overloaded_literal_rewrite_status" -ne 1 ]]; then
@@ -258,7 +258,7 @@ if ! python3 -c 'import json, sys; report=json.load(open(sys.argv[1])); tactic=r
 fi
 set +e
 rejected_overloaded_literal_decide_report="$standalone_probe_dir/rejected-overloaded-literal-decide.json"
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_decide.json" "$ROOT_DIR/examples/rejected_overloaded_literal_equality.elisa" >"$rejected_overloaded_literal_decide_report"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_rejected_overloaded_literal_decide.json" "$ROOT_DIR/examples/rejected_overloaded_literal_equality.elisa" >"$rejected_overloaded_literal_decide_report"
 rejected_overloaded_literal_decide_status=$?
 set -e
 if [[ "$rejected_overloaded_literal_decide_status" -ne 1 ]]; then

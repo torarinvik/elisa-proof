@@ -56,7 +56,7 @@ for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide reject
     esac
     tactic_report="$standalone_probe_dir/$tactic_fixture.json"
     set +e
-    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$tactic_report"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$tactic_report"
     tactic_exit=$?
     set -e
     if [[ "$tactic_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; binding=r["source_goal_binding"]; assert r["status"] == "failed" and binding["goal_id"] == int(sys.argv[2]); assert binding["fingerprint_match"] is True and binding["goal_fingerprint"]["value"] == int(sys.argv[3]); assert t["valid"] is False and t["solved"] is False; assert t["reason"] == "tactic action outcome contradicted the script'"'"'s expected acceptance" and t["action_count"] == 1 and t["accepted_count"] == 0' "$tactic_report" "$tactic_source_goal" "$tactic_goal_fingerprint"; then
@@ -69,7 +69,7 @@ for tactic_fixture in rejected_u64_max_decide rejected_u8_overflow_decide reject
     python3 -c 'import json,sys; s=json.load(open(sys.argv[1])); [a.__setitem__("accepted", False) for a in s["actions"]]; json.dump(s, open(sys.argv[2], "w"))' "$ROOT_DIR/examples/tactic_script_$tactic_fixture.json" "$refused_script"
     refused_report="$standalone_probe_dir/$tactic_fixture.refused.report.json"
     set +e
-    "$ROOT_DIR/build/elisa-proof" --tactics "$refused_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$refused_report"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$refused_script" "$ROOT_DIR/examples/rejected_u64_max_conflict.elisa" >"$refused_report"
     refused_exit=$?
     set -e
     if [[ "$refused_exit" -ne 1 ]] || ! python3 -c 'import json,sys; r=json.load(open(sys.argv[1])); t=r["tactic"]; assert r["status"] == "failed"; assert t["valid"] is True and t["solved"] is False; assert t["action_count"] == 1 and t["accepted_count"] == 0' "$refused_report"; then
@@ -90,7 +90,7 @@ if [[ "$typed_unsigned_status" -ne 0 ]]; then
     exit 1
 fi
 typed_goal_fingerprint() {
-    "$ROOT_DIR/build/elisa-proof" --goal "$1" "$ROOT_DIR/examples/typed_unsigned_literals.elisa" \
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal "$1" "$ROOT_DIR/examples/typed_unsigned_literals.elisa" \
         | python3 -c 'import json,sys; g=json.load(sys.stdin)["goal_fingerprint"]; assert g["algorithm"] == "fnv1a32-kernel-goal-v2"; print(g["value"])'
 }
 # Goal 1 is `0xFFFFFFFFFFFFFFFFu64 > 0u64` (true), goal 9 is `... < 0u64` (false). The

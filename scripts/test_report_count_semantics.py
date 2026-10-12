@@ -1,10 +1,11 @@
 """The JSON summary distinguishes unresolved obligations from finding records."""
 import json
+import os
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = ROOT / "build/elisa-proof"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
 def run(name):

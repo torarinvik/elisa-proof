@@ -19,13 +19,12 @@ import subprocess
 import tarfile
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 from build_manifest_hashes import tree_digest
 from build_manifest import stage1_provenance_revision
 from perf_build_provenance import require_clean_toolchain, verify_build_artifacts
 from stage1_provenance_validation import validate_stage0_build_info
-from verify_product_pair import check_current, read_manifest, require_matching_build_identity
+from verify_product_pair import resolve_pair_with_manifests
 
 
 PRODUCTS = ("elisa-proof", "elisa-proof-replay")
@@ -149,8 +148,11 @@ def validate_frontend_metadata(
     """Require the compiler recorded by both products to match the checked-in pins."""
     if re.fullmatch(r"[0-9a-f]{40}", snapshot_revision) is None:
         raise ValueError("compiler snapshot has no exact source revision")
-    if not pinned_frontend_revision or not snapshot_revision.startswith(pinned_frontend_revision):
+    if (re.fullmatch(r"[0-9a-f]{40}", pinned_frontend_revision) is None
+            or snapshot_revision != pinned_frontend_revision):
         raise ValueError("compiler snapshot revision does not match ELISA_COMPILER_REV")
+    if re.fullmatch(r"[0-9a-f]{40}", pinned_stage0_revision) is None:
+        raise ValueError("ELISA_STAGE0_REV must be an exact 40-character commit hash")
 
     for role, manifest in manifests.items():
         frontend = manifest.get("frontend")
@@ -177,7 +179,7 @@ def validate_frontend_metadata(
                     and (not isinstance(stage0_source_revision, str)
                          or re.fullmatch(r"[0-9a-f]{40}", stage0_source_revision) is None
                          or not pinned_stage0_revision
-                         or not stage0_source_revision.startswith(pinned_stage0_revision))):
+                         or stage0_source_revision != pinned_stage0_revision)):
                 raise ValueError(f"{role} Stage0 source revision does not match ELISA_STAGE0_REV")
         else:
             raise ValueError(f"{role} manifest names an unsupported compiler stage")
@@ -196,37 +198,22 @@ def verify_stage0_binary(manifest: dict, pinned_revision: str, label: str) -> st
     return validate_stage0_build_info(result.stdout, pinned_revision)
 
 
-def _read_pair(root: Path) -> tuple[str, dict[str, dict]]:
+def _read_pair(root: Path) -> tuple[str, dict[str, dict], dict[str, Path]]:
     generation_root = root / "build/elisa-proof-generations"
-    # Also require the legacy paths consumed by the test suite to be the exact pair
-    # published as CURRENT. A valid but unrelated generation is insufficient.
-    status = check_current(SimpleNamespace(
-        generation_root=str(generation_root),
-        proof_binary=str(root / "build/elisa-proof"),
-        proof_manifest=str(root / "build/elisa-proof.manifest.json"),
-        proof_manifest_sha256=str(root / "build/elisa-proof.manifest.json.sha256"),
-        replay_binary=str(root / "build/elisa-proof-replay"),
-        replay_manifest=str(root / "build/elisa-proof-replay.manifest.json"),
-        replay_manifest_sha256=str(root / "build/elisa-proof-replay.manifest.json.sha256"),
-    ))
-    if status != 0:
-        raise ValueError("prebuilt binaries are not the current manifest-bound proof/replay pair")
-
-    generation = (generation_root / "CURRENT").read_text(encoding="ascii").strip()
+    resolved, manifests = resolve_pair_with_manifests(generation_root)
+    generation = resolved["pair_generation"]
     if re.fullmatch(r"[0-9a-f]{32}", generation) is None:
         raise ValueError("CURRENT has an invalid product generation identity")
-    directory = generation_root / generation
-    manifests = {
-        name: read_manifest(directory / name, generation)
+    binaries = {
+        name: Path(resolved["products"][name]["binary"])
         for name in PRODUCTS
     }
-    require_matching_build_identity(manifests[PRODUCTS[0]], manifests[PRODUCTS[1]])
-    return generation, manifests
+    return generation, manifests, binaries
 
 
 def qualify_prebuilt(root: Path, snapshot_root: Path, compiler_snapshot: Path,
                      compiler_repository: Path) -> dict:
-    generation, manifests = _read_pair(root)
+    generation, manifests, binaries = _read_pair(root)
     proof = manifests[PRODUCTS[0]].get("proof", {})
     source_head = _git(root, "rev-parse", "HEAD")
     source_dirty = bool(_git(root, "status", "--porcelain", "--", "src"))
@@ -264,6 +251,8 @@ def qualify_prebuilt(root: Path, snapshot_root: Path, compiler_snapshot: Path,
                 raise ValueError(f"{role} Stage1 product source differs from the pinned frontend")
     return {
         "generation": generation,
+        "proof_binary": str(binaries[PRODUCTS[0]]),
+        "replay_binary": str(binaries[PRODUCTS[1]]),
         "proof_source_head": source_head,
         "proof_source_dirty": proof["source_dirty"],
         "proof_source_tree_sha256": source_digest,
@@ -281,6 +270,7 @@ def main() -> int:
     parser.add_argument("--snapshot-root", required=True, type=Path)
     parser.add_argument("--compiler-snapshot", required=True, type=Path)
     parser.add_argument("--compiler-repository", required=True, type=Path)
+    parser.add_argument("--json", action="store_true", help="emit only the qualification JSON object")
     arguments = parser.parse_args()
     try:
         result = qualify_prebuilt(
@@ -290,7 +280,8 @@ def main() -> int:
     except (OSError, ValueError, subprocess.CalledProcessError, KeyError) as error:
         print(f"prebuilt qualification refused: {error}", file=sys.stderr)
         return 2
-    print("prebuilt qualification: " + json.dumps(result, sort_keys=True))
+    encoded = json.dumps(result, sort_keys=True)
+    print(encoded if arguments.json else "prebuilt qualification: " + encoded)
     return 0
 
 

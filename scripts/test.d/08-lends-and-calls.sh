@@ -384,12 +384,12 @@ proof_render_dir="$(mktemp -d)"
 TEST_CLEANUP+=("$proof_render_dir")
 set +e
 proved_goal=$(run_json_report "$ROOT_DIR/examples/early_return_index_guard.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if goal["rule"] == "index-upper" and goal["proven"]))')
-"$ROOT_DIR/build/elisa-proof" --proof "$proved_goal" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/proved.txt"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --proof "$proved_goal" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/proved.txt"
 proof_render_proved_status=$?
 open_goal=$(run_json_report "$ROOT_DIR/examples/tactic_repair_target.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); print(next(index for index, goal in enumerate(report["goals"]) if not goal["proven"]))')
-"$ROOT_DIR/build/elisa-proof" --proof "$open_goal" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/open.txt"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --proof "$open_goal" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/open.txt"
 proof_render_open_status=$?
-"$ROOT_DIR/build/elisa-proof" --proof 99999 "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/missing.txt"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --proof 99999 "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/missing.txt"
 proof_render_missing_status=$?
 set -e
 if [[ "$proof_render_proved_status" -ne 0 || "$proof_render_open_status" -ne 1 || "$proof_render_missing_status" -ne 2 ]]; then
@@ -426,18 +426,18 @@ fi
 # untrusted input: an edited keyword, an invented hypothesis, a swapped conclusion or a block from
 # another source must all diverge, and a block naming no goal of this source cannot be checked.
 set +e
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/faithful.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/faithful.json"
 proof_check_faithful_status=$?
 python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); open(sys.argv[2], "w", encoding="utf-8").write(text.replace("    show ", "    given values.count > 1000\n    show ", 1))' "$proof_render_dir/proved.txt" "$proof_render_dir/extra_given.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/extra_given.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/extra_given.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --check-proof "$proof_render_dir/extra_given.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/extra_given.json"
 proof_check_extra_status=$?
 python3 -c 'import sys; text = open(sys.argv[1], encoding="utf-8").read(); lines = [line for line in text.splitlines() if not line.startswith("    unproved:")]; lines = [line.replace("open ", "proof ", 1) if line.startswith("open ") else line for line in lines]; lines.append("qed"); open(sys.argv[2], "w", encoding="utf-8").write("\n".join(lines) + "\n")' "$proof_render_dir/open.txt" "$proof_render_dir/forged.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/forged.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/forged.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --check-proof "$proof_render_dir/forged.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/forged.json"
 proof_check_forged_status=$?
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/foreign.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --check-proof "$proof_render_dir/proved.txt" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/foreign.json"
 proof_check_foreign_status=$?
 printf 'not a proof block\n' > "$proof_render_dir/junk.txt"
-"$ROOT_DIR/build/elisa-proof" --check-proof "$proof_render_dir/junk.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/junk.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --check-proof "$proof_render_dir/junk.txt" "$ROOT_DIR/examples/early_return_index_guard.elisa" > "$proof_render_dir/junk.json"
 proof_check_junk_status=$?
 set -e
 if [[ "$proof_check_faithful_status" -ne 0 || "$proof_check_extra_status" -ne 1 || "$proof_check_forged_status" -ne 1 || "$proof_check_foreign_status" -ne 1 || "$proof_check_junk_status" -ne 2 ]]; then
@@ -487,9 +487,9 @@ fi
 # produce byte-identical verdicts. The elaboration decides nothing — an unknown action, an
 # unrecognized line, and a script with no steps must each be refused, and `qed` carries no weight.
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_text.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$ROOT_DIR/examples/proof_script_target.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_text.json"
 proof_script_text_status=$?
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_json.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_target.json" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/script_json.json"
 proof_script_json_status=$?
 set -e
 if [[ "$proof_script_text_status" -ne 0 || "$proof_script_json_status" -ne 0 ]]; then
@@ -506,7 +506,7 @@ printf '# goal 7\nproof p:\nqed\n' > "$proof_render_dir/no_steps.proof"
 printf '# goal 7\nproof p:\n    by intro\nqed\n' > "$proof_render_dir/wrong_step.proof"
 set +e
 for refused_script in unknown_action bad_line no_steps wrong_step; do
-    "$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/$refused_script.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/$refused_script.json"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/$refused_script.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/$refused_script.json"
 done
 python3 - "$proof_render_dir" <<'PY'
 import json
@@ -537,13 +537,13 @@ fi
 # admits one only if the checked engine solves the goal and the kernel replays its certificate.
 # The proposal it emits must itself run: a repair that cannot be re-checked is a claim, not a proof.
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair.json"
 proof_repair_status=$?
-"$ROOT_DIR/build/elisa-proof" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_again.json"
-"$ROOT_DIR/build/elisa-proof" --repair 9999 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_missing.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair 7 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_again.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair 9999 "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_missing.json"
 proof_repair_missing_status=$?
 for unrepairable_goal in 1 3 5; do
-    "$ROOT_DIR/build/elisa-proof" --repair "$unrepairable_goal" "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/unrepaired_$unrepairable_goal.json"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair "$unrepairable_goal" "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/unrepaired_$unrepairable_goal.json"
     if [[ $? -ne 1 ]]; then
         printf 'proof test matrix failed: --repair did not report goal %s as unrepaired\n' "$unrepairable_goal" >&2
         exit 1
@@ -560,7 +560,7 @@ if ! cmp -s "$proof_render_dir/repair.json" "$proof_render_dir/repair_again.json
 fi
 python3 -c 'import json, sys; payload = json.load(open(sys.argv[1], encoding="utf-8")); assert payload["status"] == "repaired"; open(sys.argv[2], "w", encoding="utf-8").write(payload["script"])' "$proof_render_dir/repair.json" "$proof_render_dir/repair.proof"
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/repair.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_rerun.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/repair.proof" "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/repair_rerun.json"
 proof_repair_rerun_status=$?
 python3 - "$proof_render_dir" <<'PY'
 import json

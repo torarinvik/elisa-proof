@@ -1,12 +1,13 @@
 """Selected-proof CLI results are successful only for complete, admitted kernel proofs."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
-BINARY = ROOT / "build/elisa-proof"
+BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
 
 
 def invoke(*args):

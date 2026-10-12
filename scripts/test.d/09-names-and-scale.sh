@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # Part 9 of the proof test matrix; sourced in order by scripts/test.sh, never run alone.
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair-all "$ROOT_DIR/examples/rejected_repair_target.elisa" > "$proof_render_dir/batch_open.json"
 proof_batch_open_status=$?
 set -e
 if [[ "$proof_batch_clean_status" -ne 0 || "$proof_batch_open_status" -ne 1 ]]; then
@@ -72,7 +72,7 @@ if [[ "$normalized_ground_difference_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a ground difference replayed outside its width guards\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --goal 1 "$ROOT_DIR/examples/rejected_budget.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "timeout"; assert report["failure"]["status"] == "timeout"; assert report["failure"]["counterexample_found"] is False'
 budget_goal_status=${PIPESTATUS[1]}
 if [[ "$budget_goal_status" -ne 0 ]]; then
     printf 'proof test matrix failed: the focused-goal API did not report an exhausted search as a timeout\n' >&2
@@ -125,7 +125,7 @@ if [[ "$empty_import_status" -ne 0 ]]; then
     exit 1
 fi
 
-if "$ROOT_DIR/build/elisa-proof" --unknown-option "$ROOT_DIR/examples/verified.elisa" >/dev/null 2>&1; then
+if "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --unknown-option "$ROOT_DIR/examples/verified.elisa" >/dev/null 2>&1; then
     printf 'proof test matrix failed: unknown CLI option was accepted\n' >&2
     exit 1
 fi
@@ -186,7 +186,7 @@ run_json_report "$ROOT_DIR/examples/rejected_global_constant_collision.elisa" | 
 rejected_global_constant_collision_status=${PIPESTATUS[1]}
 run_json_report "$ROOT_DIR/examples/rejected_global_constant_usize_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "unknown"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "wrong" and f["status"] == "unknown" and not f["counterexample_found"] for f in report["findings"])'
 rejected_global_constant_usize_collision_status=${PIPESTATUS[1]}
-"$ROOT_DIR/build/elisa-proof" --json "$ROOT_DIR/examples/rejected_global_constant_function_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "check" and f["line"] == 14 and f["status"] == "disproved" and f["counterexample_found"] and f["counterexample"] == [] for f in report["findings"]); assert len(report["findings"]) == 1; checks = {item["line"]: item["verified"] for item in report["declaration_details"] if item["kind"] == "function" and item["name"] == "check"}; assert checks == {6: True, 12: False}'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --json "$ROOT_DIR/examples/rejected_global_constant_function_collision.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["verification_state"] == "disproved"; assert report["replay"]["gaps"] == 0; assert report["replay"]["certificates"] == report["replay"]["replayed"]; assert any(f["kind"] == "ensure-unproven" and f["name"] == "check" and f["line"] == 14 and f["status"] == "disproved" and f["counterexample_found"] and f["counterexample"] == [] for f in report["findings"]); assert len(report["findings"]) == 1; checks = {item["line"]: item["verified"] for item in report["declaration_details"] if item["kind"] == "function" and item["name"] == "check"}; assert checks == {6: True, 12: False}'
 rejected_global_constant_function_collision_status=${PIPESTATUS[1]}
 set -e
 if [[ "$global_constant_module_status" -ne 0 || "$rejected_global_constant_collision_status" -ne 0 || "$rejected_global_constant_usize_collision_status" -ne 0 || "$rejected_global_constant_function_collision_status" -ne 0 ]]; then

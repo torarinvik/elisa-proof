@@ -31,7 +31,7 @@ if [[ -z "$PINNED_REV" ]]; then
     [[ -f "$SNAPSHOT_ROOT_DIR/ELISA_COMPILER_REV" ]] || snapshot_fail "ELISA_COMPILER_REV file is missing"
     PINNED_REV="$(tr -d '[:space:]' < "$SNAPSHOT_ROOT_DIR/ELISA_COMPILER_REV")"
 fi
-[[ -n "$PINNED_REV" ]] || snapshot_fail "pinned compiler revision is empty"
+[[ "$PINNED_REV" =~ ^[0-9a-f]{40}$ ]] || snapshot_fail "ELISA_COMPILER_REV must be an exact 40-character commit hash"
 [[ -d "$COMPILER_SRC" ]] || snapshot_fail "compiler repository not found at $COMPILER_SRC (set ELISA_COMPILER_SRC)"
 git -C "$COMPILER_SRC" rev-parse --verify --quiet "${PINNED_REV}^{commit}" >/dev/null \
     || snapshot_fail "revision $PINNED_REV is not a commit in $COMPILER_SRC (fetch it, or update ELISA_COMPILER_REV)"

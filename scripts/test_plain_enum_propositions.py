@@ -1,11 +1,12 @@
 """Ordinary enum members are typed values; another enum's member is refused."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 
 root = Path(__file__).resolve().parents[1]
-prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / "build/elisa-proof"
+prover = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path(os.environ.get("ELISA_PROOF_BIN", root / "build/elisa-proof"))
 for name, accepted in (("plain_enum_member_proposition", True),
         ("rejected_plain_enum_owner_proposition", False),
         ("rejected_plain_enum_overloaded_equality", False),

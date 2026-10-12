@@ -5,5 +5,5 @@
 # checker already proved, reports each open goal separately, and its verdict is the conjunction of
 # the per-goal ones — a file with any unrepaired goal is `partial` and exits non-zero.
 set +e
-"$ROOT_DIR/build/elisa-proof" --repair-all "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/batch_clean.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --repair-all "$ROOT_DIR/examples/verified.elisa" > "$proof_render_dir/batch_clean.json"
 proof_batch_clean_status=$?

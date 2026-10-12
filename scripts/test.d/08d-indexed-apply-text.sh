@@ -8,7 +8,7 @@ qed
 PROOF
 
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/indexed_apply_text.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_apply_text.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/indexed_apply_text.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_apply_text.json"
 indexed_apply_text_status=$?
 set -e
 if [[ "$indexed_apply_text_status" -ne 1 ]]; then
@@ -40,7 +40,7 @@ proof p:
 qed
 PROOF
 set +e
-"$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/indexed_apply_stale_source.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_apply_stale_source.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/indexed_apply_stale_source.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/indexed_apply_stale_source.json"
 stale_source_status=$?
 set -e
 if [[ "$stale_source_status" -ne 1 ]]; then
@@ -87,7 +87,7 @@ qed
 PROOF
 for invalid_script in indexed_apply_missing_separator indexed_apply_duplicate_header indexed_apply_bad_declaration indexed_apply_duplicate_source_fingerprint; do
     set +e
-    "$ROOT_DIR/build/elisa-proof" --script "$proof_render_dir/$invalid_script.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/$invalid_script.json"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --script "$proof_render_dir/$invalid_script.proof" "$ROOT_DIR/examples/tactic_repair_target.elisa" > "$proof_render_dir/$invalid_script.json"
     invalid_script_status=$?
     set -e
     if [[ "$invalid_script_status" -ne 1 ]]; then

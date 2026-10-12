@@ -12,13 +12,13 @@ fi
 
 # A quantified tactic result is accepted only after both its tactic trace and proof certificate
 # replay. The adjacent negative case ensures wrapped integer bounds cannot justify vacuity.
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["valid"] is True; assert report["tactic"]["solved"] is True; assert report["tactic"]["kernel_trace_replayed"] is True; assert report["tactic"]["kernel_replayed"] is True; assert report["tactic"]["certificate_replayed"] is True'
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_quantifier.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["tactic"]["valid"] is True; assert report["tactic"]["solved"] is True; assert report["tactic"]["kernel_trace_replayed"] is True; assert report["tactic"]["kernel_replayed"] is True; assert report["tactic"]["certificate_replayed"] is True'
 quantifier_tactic_probe_status=${PIPESTATUS[1]}
 if [[ "$quantifier_tactic_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: portable quantifier tactic was not independently replayed\n' >&2
     exit 1
 fi
-"$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/tactic_script_rejected_ambiguous_range_quantifier.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["tactic"]["valid"] is False; assert report["tactic"]["solved"] is False; assert report["tactic"]["kernel_replayed"] is False' && ambiguous_range_quantifier_status=0 || ambiguous_range_quantifier_status=${PIPESTATUS[1]}
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/tactic_script_rejected_ambiguous_range_quantifier.json" "$ROOT_DIR/examples/verified.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["tactic"]["valid"] is False; assert report["tactic"]["solved"] is False; assert report["tactic"]["kernel_replayed"] is False' && ambiguous_range_quantifier_status=0 || ambiguous_range_quantifier_status=${PIPESTATUS[1]}
 if [[ "$ambiguous_range_quantifier_status" -ne 0 ]]; then
     printf 'proof test matrix failed: a quantifier over an ambiguous range bound was admitted\n' >&2
     exit 1
@@ -27,7 +27,7 @@ fi
 # Reject malformed-size tactic input before recording any partially admitted actions.
 for rejected_tactic_fixture in tactic_script_rejected_large_line tactic_script_rejected_large_expr_line; do
     rejected_tactic_report="$standalone_probe_dir/$rejected_tactic_fixture.json"
-    "$ROOT_DIR/build/elisa-proof" --tactics "$ROOT_DIR/examples/$rejected_tactic_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_tactic_report"
+    "${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$ROOT_DIR/examples/$rejected_tactic_fixture.json" "$ROOT_DIR/examples/verified.elisa" >"$rejected_tactic_report"
     rejected_tactic_status=$?
     if [[ "$rejected_tactic_status" -ne 1 ]]; then
         printf 'proof test matrix failed: overflowing JSON line was accepted for %s\n' "$rejected_tactic_fixture" >&2
@@ -53,7 +53,7 @@ script = {
 with open(sys.argv[1], "w", encoding="utf-8") as handle:
     json.dump(script, handle)
 PY
-"$ROOT_DIR/build/elisa-proof" --tactics "$oversized_action_script" "$ROOT_DIR/examples/verified.elisa" >"$standalone_probe_dir/tactic-script-oversized-actions-report.json"
+"${ELISA_PROOF_BIN:-$ROOT_DIR/build/elisa-proof}" --tactics "$oversized_action_script" "$ROOT_DIR/examples/verified.elisa" >"$standalone_probe_dir/tactic-script-oversized-actions-report.json"
 oversized_action_status=$?
 if [[ "$oversized_action_status" -ne 1 ]]; then
     printf 'proof test matrix failed: oversized tactic action array was accepted\n' >&2
