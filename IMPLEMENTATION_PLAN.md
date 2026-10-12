@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-11. **§23.27.104 is the live integration gate; §23.27.71 remains the authoritative high-ROI order.** The last fully qualified proof product remains §23.27.100 (compiler `2efa1ca5`, LLVM 23.1.3). Earlier semantic-options cache-key, Global.Read/Write, global-authority, lexer, and PGS memo controls passed on their recorded revisions and are already on compiler `main`; those results do not qualify later source. Proof `main` still pins compiler `7e125178` through `ELISA_COMPILER_REV`. The source-admission and receipt changes are unqualified: the exact-pin strict O2 build stopped on source errors before regressions ran. Compiler `main` is `c75a821d`, four local commits ahead of `origin/main`, with additional uncommitted compiler and proof-admission edits; its installed Stage1 fails provenance checks. The parallel-runtime Global effect grants are committed and passed the focused semantic control. Elisa-core `main` includes scalar-enum/match-fact SMT, alias-member, and literal-string-result fixes through `71bdb70f`; full semantic and backend package suites pass. The native candidate proves all production token-display contracts with zero failures, while a deliberately wrong spelling is rejected; eight `u8`/`u16` overflow, in-range refusal, and valid-result controls pass. The prior Stage1 attempt stopped before product generation on region and permission-row errors. A fresh reduced control isolated three concurrency `can P` permission-forwarding failures; Stage1 commit `c75a821d` now forwards those rows through `spawn1`, `task`, and `pool_submit1`. The current Stage0 accepts the positive permission control and rejects a worker write without local `Global.Write`; generated-code controls pass verification and three runs at O0/O2. Full Stage1 admission remains blocked by separate source diagnostics. Recent compiler snapshots also exposed an explicit-pool task-declaration backend decline at `par_pass_run@220` and three invalid `else if` clauses. The clauses were corrected to Elisa’s `elif` syntax, and `3dd2a857` fixes an IndexMap success arm that did not return its inserted index. The store-capture fix is integrated into Elisa-core `main` as `05fc6717` (cherry-picked from `9fb4ac52` on base `9db54e43`); the full backend package passes with LLVM 23. Native controls pass at O0/O2, the negative mutation control fails, and the latest five-submission O2 fixture passes LLVM verification and three executable runs. Correct generic permission forwarding and the task declaration path, then build from a stable latest-source snapshot before updating the proof compiler pin. Per the latest user instruction, skip timing and integrate only correctness-qualified changes. Mutable receipt/source binding, adversarial pattern collisions, loop result-symbol provenance, and current-revision Global grant matrices remain release blockers.
+Status refreshed 2026-10-12. **§23.27.113 is the live integration gate; its priority order supersedes §23.27.71.** Proof `main` still pins compiler `7e125178` until a fresh newest-Stage1 proof product qualifies. Elisa-core `main` now contains the classifier proof fix (`4a6fc6d7`, `c06e6e55`) and clean-install guard (`100f3232`); Elisa-compiler `main` contains the pure runtime-symbol union (`e1361c201`). The runtime-symbol source check and O2 equivalence control pass for all 98 registered names and five rejection cases; no timing was run. A strict O2 proof build using clean Stage0 `677fedbc` and compiler `e1361c201` still fails on ownership and region diagnostics. Proof commit `371dc721` binds the CLI source map to its caller arena and clears its three direct region-inference errors, but the full build remains red. The compiler table/filter candidate source check remains failing; the earlier named-field projection commit `76772032` is unsafe by itself. The revised projection work has reproduced two false-proof paths (reordered named fields and later argument mutation); the candidate is being corrected and is not yet qualified. The TaskGroup join path also has an uncommitted soundness gap: a submit must be proven added to the same group before wait. Keep timing skipped and integrate only changes with focused positive and negative correctness evidence.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -10091,8 +10091,202 @@ until those proof gates pass, and continue to skip timing.
 
 Elisa-compiler `main` now contains commit `5e4ede82` (`perf(ifc): binary-search incremental token anchors`). It replaces the linear token scan used to map source offsets to function-body anchors with a lower-bound search over ordered token spans. The invalid-range guard returns the no-anchor sentinel before indexing. The parity gate now runs a differential control that compares the optimized search with the former scan across every byte boundary and body subrange of real lexer output, including a 72-token input and invalid ranges.
 
-The control passed at O0 and O2 using the provenance-recorded Stage1 product SHA-256 `9a35cd62a132d14519fc63c53a66e2ff13baaa3c807df3dd8c7f82d022548c72` (source revision `7e125178`). This validates the source behavior under that compiler/runtime tuple; no full candidate self-host build was claimed. No timing was run, so the change carries no measured speedup claim. The optional paired timing harness and its load/provenance follow-up remain outside `main` because the user chose to skip timing. Their commits are preserved on `codex/ifc-anchor-benchmark-followup`; the clean candidate worktree was removed after integration.
+The control passed at O0 and O2 using the provenance-recorded Stage1 product SHA-256 `9a35cd62a132d14519fc63c53a66e2ff13baaa3c807df3dd8c7f82d022548c72` (source revision `7e125178`). This validates the source behavior under that compiler/runtime tuple; no full candidate self-host build was claimed. No timing was run, so the change carries no measured speedup claim. The optional timing harness was skipped. Its branch was removed after confirming the current `main` already has the invalid-range sentinel guard and the same differential parity-control file; there was no timing worktree to clean up.
 
 The surrounding incremental-prior-key parity gate passed its first six controls, including the anchor differential, then exited 2 in the final shadow-gate control because `pymodule-ordinary.cold.json` was missing. Commit `a81a1bf45` now requires successful, nonempty module emissions and prints their diagnostics before artifact comparison. Bash syntax and mock cases passed; the complete composite gate has not been rerun, so it remains open.
 
 This does not change the proof tool's compiler pin or qualify the broader dirty proof-source work. The high-priority proof gates remain source/receipt identity, impure `assert_by` isolation, callback shadowing and literal/pattern collision controls, followed by strict O2 and the `Global.Read`/`Global.Write` replay matrix on a clean product from the newest compiler/runtime. Keep the remaining distinct dirty proof worktrees and downstream compiler Stage0 checkouts until their owners release or qualify them; continue to remove only clean, unused snapshots.
+
+### 23.27.111 Qualified index and Boolean-field fixes; newest Stage1 bootstrap blocker (2026-10-12)
+
+Elisa-compiler `main` now includes `e7192ae92`, `2f93a4ead`, and `3d1f3bfff`. These change the
+incremental candidate and prior-key indices to caller-owned records and add reuse controls for
+empty and malformed inputs. The O0/O2 controls passed on the then-available Stage1 product
+(source revision `7e125178`); this is focused qualification, not a fresh self-host build or a timing
+claim. The clean candidate worktree and redundant branch were removed after fast-forwarding `main`.
+The large unrelated dirty compiler changes were restored intact.
+
+Elisa-core `main` now includes `2e93e9bf` (`fix(smt): resolve Boolean constructor result fields`).
+The semantic and backend suites passed, with focused positive/negative controls for identity,
+negation, mixed Boolean fields, and swapped fields. Its clean candidate worktree and branch were
+removed after integration; the separate dirty TaskGroup changes remain intact.
+
+A fresh clean Stage1 seed from Elisa-compiler `main` at `3d1f3bfff` exited 1 before producing a
+compiler. The first diagnostic is `c_header.elisa:203:35`: region inference cannot determine
+`__rg_structs` for `Backend.register_fn_signatures`; analogous generated-struct and `semantic_api`
+reference-retention errors follow. The unannotated factory reproducer is intentionally refused by
+`TestRegionStructLocalFromBuilderCallIsRefusedNotMiscompiled`; that negative control protects
+against a use-after-free and must remain rejected. A stronger positive case using
+`make_table[@r]() -> Table@r` inside caller region `r` still cannot infer the region at a subsequent
+mutable helper call. The target is propagation of an explicit factory return-region contract to
+that helper call, not ambient-region inference. Keep the proof compiler pin at `7e125178` until
+this targeted compiler fix produces a clean newest Stage1 product and the proof gates pass.
+
+Since that failed seed, Elisa-core `main` has advanced to `38e55f7f` with the targeted explicit
+return-region propagation fix and exact LLVM arena-routing assertions. The semantic and backend
+suites passed before the assertion-only follow-up; the strengthened backend test then passed with
+checks that both the factory and mutating helper receive the scoped owner and both allocation and
+reallocation use the helper's hidden arena argument. The change preserves rejection of unannotated
+factories. It does not yet repair the compiler seed. An isolated `codex/local-struct-table-owner`
+candidate now constructs local tables at the four `new_struct_table` production call sites and
+changes the ABI registration helper to fill caller-owned storage. The corresponding owner inference
+diagnostics disappeared, but a full semantic check still exits on 315 independent tuple/contract,
+`semantic_api` retention, and TaskGroup diagnostics; its native runtime smoke stops before
+execution. The updated fixture compiles, links, and runs successfully with the older pinned Stage1
+product, which is source behavior evidence only. Its O2 header driver also compiles, links, and runs
+under that product; focused and broad generated headers match the native oracle after normalizing
+guards/whitespace, and Clang accepts the C/C++ declarations. These checks do not provide a fresh
+product from current compiler `main`; the candidate remains unmerged until newest Stage1/proof gates
+qualify it. The Stage0 hook rebuilt from a dirty core worktree, so do not treat its installed binary
+as a clean product of `38e55f7f`.
+
+The proof tree remains broadly dirty and unqualified. Its kernel type-index owner-path copy now
+uses the caller-provided entries region, but that change has not been checked by a fresh compiler.
+The previously recorded `checked_view.elisa:55` `token_scope` diagnostic belongs to an older source
+snapshot: no `token_scope` identifier remains in the current proof source. Re-run strict O2 on the
+exact current tree once the compiler can bootstrap; only then update that diagnosis.
+
+**Next high-return order:** (1) qualify the isolated caller-owned table candidate against a clean
+Stage0/newest Stage1 pair and separate its effects from existing tuple/contract, API-retention, and
+TaskGroup failures; (2) build the newest Stage1 and qualify current proof strict O2, resolving its
+actual region, reference-style, and explicit-effect diagnostics; (3) close impure `assert_by`,
+callback-shadowing, and source/receipt identity controls; (4) run source-admission, replay, and the
+`Global.Read`/`Global.Write` matrix on that exact matched pair. Keep timing skipped and integrate
+only changes with focused correctness evidence.
+
+### 23.27.112 Tuple-result SMT fix and remaining table-owner parity gate (2026-10-12)
+
+Elisa-core `main` now contains `df6ce0e2` (`fix(smt): resolve typed tuple result field projections`),
+cherry-picked from candidate `0d7a3cba`. It resolves named fields only from context-typed tuple
+literals and keeps swapped, negated, and changed-value contracts negative. The focused Go test
+passed again after integration; the candidate also passed the complete semantic and backend suites
+and an exact native compiler build. With that product, the Stage1 source check dropped from 315 to
+168 primary diagnostics, clearing 147 including decimal and layout-arithmetic contracts. Retention
+and other proof failures remain, so this is not a successful bootstrap. The post-commit hook rebuilt
+the installed Stage0 from the dirty core worktree, so it is not an exact product of `df6ce0e2`.
+
+The allocation-free direct-projection follow-up `203a26b0` is also on Elisa-core `main`. It scans
+the already typed tuple fields instead of constructing a map for every direct SMT projection. The
+full semantic suite, ambiguous/missing-field controls, and zero-allocation assertion passed on its
+candidate; the focused tests passed again after integration. The cached result-field map remains
+unchanged. No elapsed-time performance claim was measured. The clean candidate worktree, whose tree
+matched core `main` exactly and had no ignored artifacts or active processes, and its two integrated
+branch refs were removed; the build product and logs remain outside the checkout.
+
+Elisa-compiler `main` now contains the test-only `62d150618` call-site grant for
+`Global{Read,Write}` in the header-driver fixture. The candidate's O2 driver and focused/broad
+header parity checks passed under the then-pinned Stage1; a repeat compile from the current broad
+dirty compiler checkout fails on unrelated source diagnostics, so this does not qualify a fresh
+compiler product.
+
+The caller-owned table implementation remains isolated. Its canonical no-profile report matches
+the native oracle, but for the same `build_heavy` input the Stage1 source driver reports
+`variant-sparse` with no profile while native `-emit packed` reports
+`index-soa/build-heavy/dense-fixed/common-only`. Keep the implementation unmerged until this
+profile discrepancy and the clean newest-Stage1 build gate are resolved. No timing run was done.
+
+A fresh candidate seed was attempted with the provenance-pinned Stage1 compiler (`7e125178`) and
+the matching saved runtime object. It exited before producing a Stage1 product because the backend
+declined `par_pass_run@220` as a call expression. The site is the explicit
+`submit[shared_pool] par_pass_worker(...)` in `semantic_parallel.elisa`; preserve this parallel path
+while fixing its lowering. This is a separate emission blocker; the seed did not reach a linkable
+object or parallel object emission.
+
+The follow-up repro narrows that blocker to bootstrap capability: the pinned compiler predates the
+store-capturing `Task` initializer lowering used by this callback. A minimal module-scoped callback
+with an explicit shared-pool `Task`/add/wait sequence fails similarly, while direct low-level
+`pool_submit1` compiles. Replacing the code with bare submit is not a safe workaround: the pinned
+lowering depends on lexical pool discovery and does not preserve this explicit shared-pool path.
+Treat the failed seed as an unmet newest-bootstrap gate, not proof that the candidate introduced a
+regression; do not weaken the ownership checks or serialize the work to get a seed through.
+
+The compiler cleanup inventory found seven merged named branches, each still checked out in a
+worktree with uncommitted files. Keep those checkouts until their owners release or integrate the
+remaining work. The caller-owned table candidate also remains isolated because its packed-report
+and newest-product gates are open.
+
+No proof worktrees were removed: all remaining proof checkouts have distinct dirty changes, and
+related Codex tasks are active. Preserve those checkouts while the current Stage1 and proof gates
+run; delete a branch or worktree only after its changes are integrated or its owner releases it.
+
+**Next high-return order:** (1) produce and verify a newest bootstrap with the store-capturing submit
+lowering, then rerun the candidate seed; (2) resolve the `build_heavy` packed-report mismatch and
+qualify the caller-owned table change against that clean Stage0/Stage1 pair; (3) address the remaining
+168 Stage1 source diagnostics; (4) qualify current proof strict O2, then run purity/source-receipt,
+source-admission, replay, and global-grant matrices. Keep timing skipped.
+
+
+### 23.27.113 Current integration and high-return order (2026-10-12)
+
+The local main branches now include the qualified core classifier proof fix (`4a6fc6d7`,
+`c06e6e55`), a clean compiler-install publication guard (`100f3232`), the Elisa-compiler
+runtime-symbol union (`e1361c201`), and the proof CLI source-map region binding (`371dc721`).
+The core classifier fix passed the complete semantic and backend package suites plus positive,
+negative, and zero-allocation controls. The runtime-symbol union passed a native semantic check and
+an O2 consumer-equivalence control covering all 98 names plus five unknown/external-only names.
+The source-map change removes three inference errors in the strict latest-source compile. These are
+correctness/compiler-compatibility results; no performance measurement was taken.
+
+The newest strict proof build used the clean Stage0 binary whose embedded revision is
+`677fedbcab49306bb29e952fc0eacf94e86b7fbd` and Elisa-compiler `e1361c20151cdbd3d3b564dac33622e125c5cf27`.
+It still exits before producing a proof executable because of remaining ownership and region
+errors, including unresolved diagnostic retention paths. Keep the proof pin at `7e125178` until a
+fresh current-compiler Stage1 and strict O2 proof artifact pass the existing provenance and replay
+gates; continue testing against the newest compiler source in isolated snapshots meanwhile.
+
+A candidate for nested tuple/struct literal projection uncovered a real false-proof case when
+named constructor fields are reordered. Do not merge its earlier commit `76772032` alone. The
+revised candidate uses canonical declaration order, refuses incomplete metadata and captured
+mutable values, and is awaiting its full semantic suite and review. A separate uncommitted
+TaskGroup check is also not qualified: the current window logic can count a bare pool submission as
+joined without proving that the returned task was added to that same group. Preserve the existing
+conservative rejection until the exact task-to-group-to-wait relationship is checked.
+
+The local struct-table branch still contains unqualified caller-owned-table/filter commits
+(`1f9546c44`, `069f01922`, `8acccf034`) and remains available without a worktree. Its full source
+check has not passed, so keep those commits out of main. Three stale proof build checkouts were
+removed after their source deltas and build snapshots were archived in
+`/private/tmp/elisa-proof-retired-worktrees-20261012`; worktrees with distinct uncommitted source
+changes remain intact.
+
+**Next high-return order:** (1) finish and review the corrected named-field projection fix with
+reordered-field, wrong-value, and captured-mutation negatives; (2) fix TaskGroup admission so only
+the exact submitted task added to the same group and covered by its wait is accepted; (3) resolve the
+newest Stage1 ownership/region blockers and produce a provenance-matched strict O2 proof build;
+(4) requalify the table/filter candidates against that product and exact output parity; (5) run the
+source-admission, replay, and `Global.Read`/`Global.Write` matrices on the same build. Keep timing
+skipped as requested.
+
+
+### 23.27.114 Nested projection integrated; refresh the newest bootstrap (2026-10-12)
+
+The corrected nested tuple/struct literal projection is now integrated on Elisa-core `main` as
+`5b86045e` and `ccef3880`. The complete semantic package suite passed, including reordered-field,
+wrong-value, captured-mutation, boolean, ambiguous-field, and zero-allocation controls. A clean
+native Stage0 build rejects the reproduced false contract and accepts the valid nested projection;
+the binary reports `vcs.modified=false`, and its source tree matches core `main` at `ccef3880`. Its
+SHA-256 is `e56672d1330e19cf35d1394ca84568560459ae185dbb32532bfc1404f0dadf64`. The binary is
+installed at `~/.elisac/elisac-stage0` and the core compiler's `compiler/bin/elisac`; prior products
+were retained as backups. No timing was run.
+
+The latest compiler-source validation found a parser bootstrap failure on a parenthesized multiline
+`when` header in `wasm_typescript_type.ensure`. An isolated core candidate now tracks grouped
+`when`/`match` header context; lexer and parser suites pass, while its full semantic suite and
+independent review are still in progress. Do not install or merge it until those gates pass, then
+rebuild Stage0 from the exact clean `main` tree and retry the source and Stage1 checks.
+
+The annotation-filter fast paths (`069f01922`, `8acccf034`) remain outside main. Their source-level
+change is a no-op when the corresponding annotation table is empty, but the candidate smoke uses an
+obsolete backend-table constructor and the current clean Stage0 also reports unrelated region
+inference failures in the compiler source. Existing old-product O2 controls are insufficient for
+qualification against the newest compiler. Port the tests to current APIs and rerun them after the
+bootstrap is restored. The separate TaskGroup/`pool_await` behavior also remains unqualified; keep
+the exact same-group submit/wait proof and the existing consuming-await controls intact.
+
+**Next high-return order:** (1) finish review and semantic validation of grouped-pattern parsing,
+then rebuild the clean newest Stage0/Stage1 pair; (2) fix and test `pool_await` admission for
+consuming awaits and exact TaskGroup membership; (3) resolve the current proof source region and
+effect diagnostics and produce strict O2; (4) requalify annotation-filter and caller-owned-table
+candidates against that same product; (5) run source-admission, replay, and `Global.Read`/
+`Global.Write` matrices. Remove only branches and worktrees whose changes are integrated or whose
+owners have released them. Keep timing skipped.
