@@ -1,13 +1,17 @@
 extend ElisaProof:
     private:
-        def proof_certify_loop_invariant_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, phase: sview) -> bool can[Global.Read, Global.Write]:
+        def proof_certify_loop_invariant_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, phase: sview) -> bool can[Global.Read, Global.Write]:
             previous_phase: sview = report.current_loop_invariant_phase
             report.current_loop_invariant_phase <- phase
+            if proof_expression_has_fresh_runtime_value(goal, functions, 0) or (proof_expr_has_call(goal) and (proof_fact_expression_has_fresh_runtime_value(report, goal) or not proof_contract_calls_are_pure(goal, functions))):
+                proof_add_goal_attempt(report, facts, goal, line, name, "goal", false)
+                report.current_loop_invariant_phase <- previous_phase
+                return false
             proven: bool = (proof_certify_goal(facts, goal, report, line, name, annotations) can Global{Read,Write})
             report.current_loop_invariant_phase <- previous_phase
             return proven
 
-        def proof_check_return_loops(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool can[Global.Read, Global.Write]:
+        def proof_check_return_loops(statement: Ast::Stmt, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> bool can[Global.Read, Global.Write]:
             match statement:
                 Ast::Stmt.While(condition, while_body, position):
                     # The containing statement has consumed one analysis step already. If that
@@ -22,11 +26,11 @@ extend ElisaProof:
                     # establish and check preservation on the one symbolic iteration.
                     invariants: darray[Ast::Expr] = proof_contracts(while_body, "invariant")
                     loop_condition_has_overloaded_operator: bool = proof_source_expression_has_overloaded_operator(condition, report.source_primitive_operator_mask, 0)
-                    loop_condition_may_mutate_state: bool = proof_expr_has_call(condition) or loop_condition_has_overloaded_operator
                     loop_condition_value: mutable Ast::Expr = proof_substitute(condition, names, values)
+                    loop_condition_may_mutate_state: bool = proof_expr_has_call(condition) or proof_expr_has_move(loop_condition_value) or loop_condition_has_overloaded_operator or proof_expression_has_fresh_runtime_value(loop_condition_value, functions, 0)
                     (proof_check_frame_calls_in_expression(condition, facts, names, values, frame_parameters, changes, preserves, functions, report, name, annotations) can Global{Read,Write}) if proof_expr_has_call(condition)
                     loop_condition_value <- proof_substitute(condition, names, values) if proof_expr_has_call(condition)
-                    proof_add_finding(report, "loop-condition-opaque", position.line, name, "loop condition may mutate state and has no frame model") if loop_condition_may_mutate_state
+                    proof_add_finding(report, "loop-condition-opaque", position.line, name, "loop condition may mutate state or use fresh values that have no proof identity model") if loop_condition_may_mutate_state
                     proof_forget_values(names, values, position) if loop_condition_may_mutate_state
                     (proof_clear_facts_after_call(facts, names, frame_parameters, report, name) can Global{Read,Write}) if loop_condition_may_mutate_state
                     loop_exit_valid: mutable bool = invariants.count > 0 and not loop_condition_may_mutate_state
@@ -69,7 +73,7 @@ extend ElisaProof:
                         established_invariants: mutable darray[Ast::Expr] = []
                         for invariant in invariants |report, name, facts, names, values, condition, while_body, position, established_invariants|:
                             entry: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
-                            established: bool = (proof_certify_loop_invariant_goal(facts, entry, report, position.line, name, annotations, "loop-invariant-entry") can Global{Read,Write})
+                            established: bool = (proof_certify_loop_invariant_goal(facts, entry, report, functions, position.line, name, annotations, "loop-invariant-entry") can Global{Read,Write})
                             report.proof_obligation(established)
                             proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "loop invariant is not established") if not established
                             loop_exit_valid <- false if not established
@@ -94,7 +98,8 @@ extend ElisaProof:
                             proof_forget_loop_entry(loop_names, &loop_values, &loop_facts, while_body, functions, frame_parameters, report, name, position)
                             proof_add_traced_fact(loop_facts, report, proof_substitute(condition, loop_names, loop_values), "loop-condition", position.line, name) if not loop_condition_may_mutate_state
                             for invariant in established_invariants |loop_facts, loop_names, loop_values, frame_parameters, old_values, loop_scope_count, report, name, position|:
-                                proof_add_traced_fact(loop_facts, report, proof_substitute_scoped_contract(invariant, loop_names, loop_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                                loop_invariant_value: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_names, loop_values, loop_scope_count, frame_parameters, old_values)
+                                proof_add_traced_fact(loop_facts, report, loop_invariant_value, "loop-invariant", position.line, name) if not proof_expression_has_fresh_runtime_value(loop_invariant_value, functions, 0)
                             (proof_check_returns(while_body, &loop_names, &loop_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &loop_body_flow) can Global{Read,Write})
                             proof_replace_names(&loop_end_names, loop_names)
                             proof_replace_exprs(&loop_end_values, loop_values)
@@ -108,7 +113,7 @@ extend ElisaProof:
                             for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values|:
                                 preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_end_names, loop_end_values, loop_scope_count, frame_parameters, old_values)
                                 (proof_add_quantified_call_summaries(preserved, &loop_end_facts, functions, annotations, report, name) can Global{Read,Write}) if proof_expr_has_call(preserved)
-                                preservation_proven: bool = (proof_certify_loop_invariant_goal(loop_end_facts, preserved, report, position.line, name, annotations, "loop-invariant-preservation") can Global{Read,Write})
+                                preservation_proven: bool = (proof_certify_loop_invariant_goal(loop_end_facts, preserved, report, functions, position.line, name, annotations, "loop-invariant-preservation") can Global{Read,Write})
                                 report.proof_obligation(preservation_proven)
                                 proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "loop body does not re-establish the invariant") if not preservation_proven
                                 loop_exit_valid <- false if not preservation_proven
@@ -143,8 +148,9 @@ extend ElisaProof:
                         measure_components: mutable darray[Ast::Expr] = []
                         for component in decreases_components |measure_components, termination_entry_names, termination_entry_values|:
                             measure_components.push(proof_substitute(component, termination_entry_names, termination_entry_values))
-                        for invariant in invariants |termination_facts, termination_entry_names, termination_entry_values, report, name, position|:
-                            proof_add_traced_fact(termination_facts, report, proof_substitute_scoped_contract(invariant, termination_entry_names, termination_entry_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                        for invariant in invariants |termination_facts, termination_entry_names, termination_entry_values, report, name, position, functions|:
+                            termination_invariant: Ast::Expr = proof_substitute_scoped_contract(invariant, termination_entry_names, termination_entry_values, loop_scope_count, frame_parameters, old_values)
+                            proof_add_traced_fact(termination_facts, report, termination_invariant, "loop-invariant", position.line, name) if not proof_expression_has_fresh_runtime_value(termination_invariant, functions, 0) and (not proof_expr_has_call(termination_invariant) or (not proof_fact_expression_has_fresh_runtime_value(report, invariant) and proof_contract_calls_are_pure(termination_invariant, functions)))
                         proof_add_traced_fact(termination_facts, report, proof_substitute(condition, termination_entry_names, termination_entry_values), "loop-condition", position.line, name) if not loop_condition_may_mutate_state
                         nonnegative_proven: mutable bool = true
                         for measure in measure_components |termination_facts, annotations, report, name, position, nonnegative_proven|:
@@ -225,7 +231,8 @@ extend ElisaProof:
                         # locals, which the captured-block spelling of the same loop kept.
                         proof_forget_loop_entry(names, values, facts, while_body, functions, frame_parameters, report, name, position)
                         for invariant in invariants |facts, names, values, report, name, position|:
-                            proof_add_traced_fact(facts, report, proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                            post_invariant: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
+                            proof_add_traced_fact(facts, report, post_invariant, "loop-invariant", position.line, name) if not proof_expression_has_fresh_runtime_value(post_invariant, functions, 0)
                         exit_condition: Ast::Expr = proof_substitute(condition, names, values)
                         # A break can leave while the condition is still true. In that case
                         # the invariant is the only sound post-loop fact; adding `not
@@ -364,7 +371,7 @@ extend ElisaProof:
                                 proof_add_finding(report, "loop-invariant-scope", position.line, name, "for-loop invariants may refer only to bindings that remain in scope after the loop")
                             else:
                                 entry: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
-                                established: bool = (proof_certify_loop_invariant_goal(facts, entry, report, position.line, name, annotations, "loop-invariant-entry") can Global{Read,Write})
+                                established: bool = (proof_certify_loop_invariant_goal(facts, entry, report, functions, position.line, name, annotations, "loop-invariant-entry") can Global{Read,Write})
                                 report.proof_obligation(established)
                                 loop_exit_valid <- false if not established
                                 proof_add_latest_goal_finding(report, "invariant-unproven", position.line, name, "for-loop invariant is not established") if not established
@@ -380,7 +387,8 @@ extend ElisaProof:
                         else:
                             proof_forget_loop_entry(for_names, &for_values, &loop_facts, for_body, functions, frame_parameters, report, name, position)
                             for invariant in established_invariants |loop_facts, for_names, for_values, loop_scope_count, frame_parameters, old_values, report, name, position|:
-                                proof_add_traced_fact(loop_facts, report, proof_substitute_scoped_contract(invariant, for_names, for_values, loop_scope_count, frame_parameters, old_values), "loop-invariant", position.line, name)
+                                loop_invariant_value: Ast::Expr = proof_substitute_scoped_contract(invariant, for_names, for_values, loop_scope_count, frame_parameters, old_values)
+                                proof_add_traced_fact(loop_facts, report, loop_invariant_value, "loop-invariant", position.line, name) if not proof_expression_has_fresh_runtime_value(loop_invariant_value, functions, 0)
                             (proof_check_returns(for_body, &for_names, &for_values, &loop_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth + 1, "", invariants, loop_scope_count, &for_body_flow) can Global{Read,Write})
                             proof_replace_names(&loop_end_names, for_names)
                             proof_replace_exprs(&loop_end_values, for_values)
@@ -394,7 +402,7 @@ extend ElisaProof:
                             for invariant in invariants |report, name, loop_end_facts, loop_end_names, loop_end_values, frame_parameters, old_values, position, loop_exit_valid|:
                                 preserved: Ast::Expr = proof_substitute_scoped_contract(invariant, loop_end_names, loop_end_values, loop_scope_count, frame_parameters, old_values)
                                 (proof_add_quantified_call_summaries(preserved, &loop_end_facts, functions, annotations, report, name) can Global{Read,Write}) if proof_expr_has_call(preserved)
-                                preservation_proven: bool = (proof_certify_loop_invariant_goal(loop_end_facts, preserved, report, position.line, name, annotations, "loop-invariant-preservation") can Global{Read,Write})
+                                preservation_proven: bool = (proof_certify_loop_invariant_goal(loop_end_facts, preserved, report, functions, position.line, name, annotations, "loop-invariant-preservation") can Global{Read,Write})
                                 report.proof_obligation(preservation_proven)
                                 proof_add_latest_goal_finding(report, "invariant-not-preserved", position.line, name, "for-loop body does not re-establish the invariant") if not preservation_proven
                                 loop_exit_valid <- false if not preservation_proven
@@ -406,7 +414,7 @@ extend ElisaProof:
                             proof_forget_loop_mutated_reference_parameters(names, values, for_body, functions, frame_parameters, name, fixed_names, fixed_extents)
                             for invariant in invariants |facts, names, values, frame_parameters, old_values, loop_scope_count, report, name, position|:
                                 post_invariant: Ast::Expr = proof_substitute_scoped_contract(invariant, names, values, loop_scope_count, frame_parameters, old_values)
-                                proof_add_traced_fact(facts, report, post_invariant, "loop-invariant", position.line, name)
+                                proof_add_traced_fact(facts, report, post_invariant, "loop-invariant", position.line, name) if not proof_expression_has_fresh_runtime_value(post_invariant, functions, 0)
                         else:
                             proof_forget_values(names, values, position)
                             proof_forget_loop_mutated_reference_parameters(names, values, for_body, functions, frame_parameters, name, fixed_names, fixed_extents)

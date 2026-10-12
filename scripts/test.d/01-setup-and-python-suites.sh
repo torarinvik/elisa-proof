@@ -91,8 +91,13 @@ run_py_test test_range_binder_resources.py
 run_py_test test_admission_invariant_diagnostics.py
 run_py_test test_frame_source_cli.py
 run_py_test test_frame_call_cli.py
+run_py_test test_local_function_frame_shadow.py
 run_py_test test_source_call_result_alias.py
 run_py_test test_stable_conditional_predicates.py
+run_py_test test_pattern_literal_collisions.py
+run_py_test test_fresh_loop_invariant.py
+run_py_test test_impure_proof_body.py
+run_py_test test_module_scoped_proposition.py
 run_py_test test_literal_quotient_denial.py
 run_py_test test_captured_initializer_entry.py
 run_py_test test_mutable_for_entry.py
@@ -204,6 +209,7 @@ run_py_test test_match_exhaustiveness.py
 run_py_test test_chained_pure_calls.py
 run_py_test test_pure_postcondition_calls.py
 run_py_test test_pure_contract_summary_replay.py
+run_py_test test_signature_contract_guardrails.py
 run_py_test test_dispatcher_budget.py
 run_py_test test_qualified_initializer_replay.py
 run_py_test test_mutable_qualified_assignment_replay.py

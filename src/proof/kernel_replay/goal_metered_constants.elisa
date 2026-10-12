@@ -1,0 +1,92 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Constant evaluation compares node tags and, for field leaves, names. Charge the text
+        # read alongside the node visit so a serialized arena cannot hide long-string work.
+        def proof_kernel_replay_goal_search_charge_node_text(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> bool:
+            return false if root >= nodes.count
+            return false if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(nodes[root].kind))
+            return false if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(nodes[root].operator))
+            return false if not proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(nodes[root].name))
+            proof_kernel_replay_goal_search_charge_amount(work_used, sview_len(nodes[root].secondary_name))
+
+        # Equality-literal transport can inspect a constant on every fact. Carry the report meter
+        # through the same bounded evaluator so shared-child arithmetic DAGs cannot reset work.
+        def proof_kernel_replay_small_constant_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if root >= nodes.count
+            return empty if not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            match nodes[root].kind:
+                "int":
+                    return proof_kernel_replay_small_range(ProofKernelReplayInt{known: true, value: nodes[root].value})
+                "field":
+                    return proof_kernel_replay_constant_leaf_with_goal_work(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value, work_used)
+                "unary":
+                    return empty if remaining < 1 or nodes[root].operator != "+"
+                    inner: ProofKernelReplayInt = proof_kernel_replay_small_constant_with_goal_work(nodes, nodes[root].left, remaining - 1, work_used)
+                    return proof_kernel_replay_small_range(inner)
+                "binary":
+                    return empty if remaining < 1 or not proof_kernel_replay_integer_arithmetic_operator(nodes[root].operator)
+                    left: ProofKernelReplayInt = proof_kernel_replay_small_constant_with_goal_work(nodes, nodes[root].left, remaining - 1, work_used)
+                    right: ProofKernelReplayInt = proof_kernel_replay_small_constant_with_goal_work(nodes, nodes[root].right, remaining - 1, work_used)
+                    shift: bool = nodes[root].operator == "<<" or nodes[root].operator == ">>"
+                    return empty if shift and (not right.known or right.value >= 7)
+                    combined: ProofKernelReplayInt = proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
+                    return proof_kernel_replay_small_range(combined)
+                _:
+                    return empty
+
+        # Exact counterpart of the legacy integer evaluator with byte-aware goal accounting.
+        # Unlike the deliberately small comparison-literal helper above, this preserves unary
+        # negation and all constant integer operators used by width and product witnesses.
+        def proof_kernel_replay_constant_int_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            decreases remaining
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if root >= nodes.count or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if nodes[root].kind == "unary":
+                return empty if remaining < 1
+                inner: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, nodes[root].left, remaining - 1, work_used)
+                return proof_kernel_replay_constant_unary(nodes[root].operator, inner)
+            if nodes[root].kind == "binary":
+                return empty if remaining < 1
+                left: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, nodes[root].left, remaining - 1, work_used)
+                return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return empty if not left.known
+                right: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, nodes[root].right, remaining - 1, work_used)
+                return proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
+            if proof_kernel_replay_int_tagged(nodes[root]):
+                return empty
+            if nodes[root].kind == "field":
+                return proof_kernel_replay_constant_leaf_with_goal_work(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value, work_used)
+            proof_kernel_replay_constant_leaf_with_goal_work(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value, work_used)
+
+        # Call after charging the source node's text. Field constants inspect one additional
+        # arena node (the literal-backed array), so charge that visit and its text here.
+        def proof_kernel_replay_constant_leaf_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, kind: sview, name: sview, left: usize, value: i64, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            if kind == "int":
+                return ProofKernelReplayInt{known: true, value: value}
+            return empty if kind != "field" or name != "count" or left >= nodes.count
+            return empty if not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge_node_text(nodes, left, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or nodes[left].kind != "array"
+            proof_kernel_replay_small_count(nodes[left].children_count)
+
+        def proof_kernel_replay_signed_negated_literal_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, signed: bool, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not signed or not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or nodes[root].kind != "unary" or nodes[root].operator != "-"
+            operand: usize = nodes[root].left
+            return empty if operand >= nodes.count or not proof_kernel_replay_valid(nodes, operand)
+            return empty if not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge_node_text(nodes, operand, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or nodes[operand].kind != "int" or nodes[operand].value < 0
+            ProofKernelReplayInt{known: true, value: 0 - nodes[operand].value}
+
+        def proof_kernel_replay_linear_literal_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or nodes[root].kind != "int" or nodes[root].value < 0
+            ProofKernelReplayInt{known: true, value: nodes[root].value}

@@ -1,0 +1,90 @@
+# Aggregate copy and source-scan costs for erased proof blocks.
+extend ElisaProof:
+    private:
+        def proof_block_budget_factor_add(factor: mutable usize&, count: usize, multiplier: usize) -> bool:
+            return false if factor > PROOF_PURITY_WALK_WORK_LIMIT or multiplier == 0 or count > (PROOF_PURITY_WALK_WORK_LIMIT - factor) / multiplier
+            factor <- factor + count * multiplier
+            return true
+
+        def proof_block_work_budget_failure(report: mutable ProofReport&, name: sview, line: u32, work: mutable ProofBlockPurityWork&) -> bool:
+            proof_purity_budget_finding(report, name, line, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+            return false
+
+        def proof_block_source_name_factor(name: sview, factor: mutable usize&, work: mutable ProofBlockPurityWork&, multiplier: usize) -> bool:
+            bytes: usize = sview_len(name)
+            return false if not proof_purity_work_charge(bytes, work) or not proof_block_budget_factor_add(factor, bytes, multiplier)
+            true
+
+        def proof_block_table_expression_factor(expression: Ast::Expr, factor: mutable usize&, work: mutable ProofBlockPurityWork&, multiplier: usize) -> bool:
+            return false if work.used >= PROOF_PURITY_WALK_WORK_LIMIT
+            scan_limit: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            remaining: usize = PROOF_PURITY_WALK_WORK_LIMIT - work.used
+            scan_limit <- remaining if remaining < scan_limit
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(expression, &cost, 0, scan_limit) or not proof_purity_work_charge(cost, work) or not proof_block_budget_factor_add(factor, cost, multiplier)
+            true
+
+        # Charge the full nested declaration tree and the bytes compared while scoped facts
+        # revalidate enum-member witnesses. This keeps deeply nested modules and long names in
+        # the same meter as the repeated fact scans that consult them.
+        def proof_block_source_declaration_factor(declarations: darray[Ast::Decl]&, factor: mutable usize&, work: mutable ProofBlockPurityWork&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_purity_work_charge(declarations.count, work)
+            for declaration in declarations |declaration, factor, work, depth|:
+                return false if not proof_purity_work_charge(1, work) or not proof_block_budget_factor_add(factor, 1, 6)
+                match declaration:
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_block_source_name_factor(module_name, factor, work, 6) or not proof_block_source_declaration_factor(nested, factor, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_block_source_declaration_factor(nested, factor, work, depth + 1)
+                    Ast::Decl.Alias(alias_name, target, _):
+                        return false if not proof_block_source_name_factor(alias_name, factor, work, 6) or not proof_block_table_expression_factor(target, factor, work, 6)
+                    Ast::Decl.Struct(type_name, _, _, _, _, _, _):
+                        return false if not proof_block_source_name_factor(type_name, factor, work, 6)
+                    Ast::Decl.Enum(type_name, variants, _, _, _):
+                        return false if not proof_block_source_name_factor(type_name, factor, work, 6) or not proof_purity_work_charge(variants.count, work)
+                        for variant in variants |variant, factor, work|:
+                            return false if not proof_purity_work_charge(1, work) or not proof_block_source_name_factor(variant.name, factor, work, 6)
+                    _:
+                        pass
+            return true
+
+        # Nested blocks copy their seed facts. Scoped blocks then compare each fact with names
+        # and source tables while retaining only independent type facts. Reserve the copy and
+        # estimated scan before making the copy or running that filter.
+        def proof_block_seed_facts_reserve(facts: darray[Ast::Expr]&, scoped: bool, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, work: mutable ProofBlockPurityWork&, name: sview, line: u32) -> bool:
+            return false if work.reported
+            if not proof_purity_work_charge(facts.count, work):
+                proof_purity_budget_finding(report, name, line, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                return false
+            return true if facts.count == 0
+            factor: mutable usize = 0
+            if scoped:
+                factor <- 8
+                if not proof_block_budget_factor_add(factor, names.count, 4) or not proof_block_budget_factor_add(factor, parameters.count, 4) or not proof_block_budget_factor_add(factor, report.type_bounds.seen.count, 1) or not proof_block_budget_factor_add(factor, report.traces.records.count, 3) or not proof_block_budget_factor_add(factor, report.global_constant_trace_ids.count, 1) or not proof_block_source_declaration_factor(report.source_declarations, factor, work, 0):
+                    proof_purity_budget_finding(report, name, line, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                    return false
+                for candidate_name in names |candidate_name, factor, work|:
+                    return proof_block_work_budget_failure(report, name, line, work) if not proof_purity_work_charge(1, work) or not proof_block_source_name_factor(candidate_name, factor, work, 4)
+                for parameter_name in parameters |parameter_name, factor, work|:
+                    return proof_block_work_budget_failure(report, name, line, work) if not proof_purity_work_charge(1, work) or not proof_block_source_name_factor(parameter_name, factor, work, 4)
+                for implementation in report.operator_impls.rows |implementation, factor, work|:
+                    return proof_block_work_budget_failure(report, name, line, work) if not proof_purity_work_charge(1, work) or not proof_block_budget_factor_add(factor, 1, 7) or not proof_block_source_name_factor(implementation.concrete, factor, work, 7) or not proof_block_source_name_factor(implementation.protocol, factor, work, 7)
+                for fact in report.type_bounds.seen |fact, factor, work|:
+                    return proof_block_work_budget_failure(report, name, line, work) if not proof_block_table_expression_factor(fact, factor, work, 1)
+                for trace in report.traces.records |trace, factor, work|:
+                    return proof_block_work_budget_failure(report, name, line, work) if not proof_purity_work_charge(1, work) or not proof_block_source_name_factor(trace.name, factor, work, 3) or not proof_block_source_name_factor(trace.kind, factor, work, 3) or not proof_block_source_name_factor(name, factor, work, 3) or not proof_block_table_expression_factor(trace.expression, factor, work, 3)
+            for fact in facts |fact, factor, work, report, name, line|:
+                return false if not proof_purity_expression_charge(fact, factor, work, report, name, line)
+            return true
+
+        # A successful nested proof exports a derived fact with every current fact as an
+        # explicit replay premise. Charge the vector copy and expression encoding before the
+        # goal certificate is emitted.
+        def proof_block_premise_snapshot_reserve(facts: darray[Ast::Expr]&, work: mutable ProofBlockPurityWork&, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return false if work.reported
+            if not proof_purity_work_charge(facts.count, work):
+                proof_purity_budget_finding(report, name, line, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                return false
+            for fact in facts |fact, work, report, name, line|:
+                return false if not proof_purity_expression_charge(fact, 4, work, report, name, line)
+            return true

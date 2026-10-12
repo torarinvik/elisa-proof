@@ -3,21 +3,43 @@ extend ElisaProofKernelReplay:
     private:
         def proof_kernel_replay_fact_contains(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            return true if proof_kernel_replay_expr_equal(nodes, children, root, goal_root, 0)
-            return proof_kernel_replay_fact_contains_signed(nodes, children, root, goal_root, false, depth)
+            work_used: mutable usize = 0
+            proof_kernel_replay_fact_contains_with_work(nodes, children, root, goal_root, &work_used, depth)
 
-        def proof_kernel_replay_fact_contains_negated(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, target_root: usize, depth: usize) -> bool:
+        def proof_kernel_replay_goal_search_expr_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, work_used: mutable usize&) -> bool:
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if work_used == PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            remaining: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+            comparison_work: mutable usize = 0
+            equal: bool = proof_kernel_replay_expr_equal_with_work(nodes, children, left_root, right_root, 0, remaining, &comparison_work)
+            if not equal and comparison_work >= remaining:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            return false if comparison_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+            work_used <- work_used + comparison_work
+            equal
+
+        def proof_kernel_replay_fact_contains_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, work_used: mutable usize&, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, root, goal_root, work_used)
+            proof_kernel_replay_fact_contains_signed_with_work(nodes, children, root, goal_root, false, work_used, depth)
+
+        def proof_kernel_replay_fact_contains_negated(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, target_root: usize, work_used: mutable usize&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
             return false if not ElisaProofKernelCore::depth_valid(depth)
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if root >= nodes.count
             return false if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "unary" and node.operator == "not":
-                return true if proof_kernel_replay_expr_equal(nodes, children, node.left, target_root, 0)
+                return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, node.left, target_root, work_used)
             if node.kind == "binary" and node.operator == "and":
-                return proof_kernel_replay_fact_contains_negated(nodes, children, node.left, target_root, depth + 1) or proof_kernel_replay_fact_contains_negated(nodes, children, node.right, target_root, depth + 1)
+                return proof_kernel_replay_fact_contains_negated(nodes, children, node.left, target_root, work_used, depth + 1) or proof_kernel_replay_fact_contains_negated(nodes, children, node.right, target_root, work_used, depth + 1)
             return false
 
         # A function-summary fact equates a call term with its postcondition. If the same Boolean
@@ -25,9 +47,14 @@ extend ElisaProofKernelReplay:
         # the corresponding postcondition. This is intentionally independent of the producer's
         # implementation and remains limited to exact canonical call roots.
         def proof_kernel_replay_fact_proves_call_summary(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
+            work_used: mutable usize = 0
+            proof_kernel_replay_fact_proves_call_summary_with_work(nodes, children, facts, goal_root, &work_used)
+
+        def proof_kernel_replay_fact_proves_call_summary_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, work_used: mutable usize&) -> bool:
             return false if not proof_kernel_replay_valid(nodes, goal_root)
             goal: ElisaProofKernelCore::ProofKernelNode = nodes[goal_root]
-            for summary_root in facts |summary_root, nodes, children, facts, goal_root, goal|:
+            for summary_root in facts |summary_root, nodes, children, facts, goal_root, goal, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 return false if not proof_kernel_replay_valid(nodes, summary_root)
                 summary_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, summary_root)
                 continue if not summary_located.known
@@ -38,15 +65,16 @@ extend ElisaProofKernelReplay:
                 right: ElisaProofKernelCore::ProofKernelNode = nodes[summary.right]
                 left_is_call: bool = left.kind == "call"
                 right_is_call: bool = right.kind == "call"
-                for fact_root in facts |fact_root, nodes, children, summary, goal_root, left_is_call, right_is_call, goal|:
-                    if left_is_call and proof_kernel_replay_fact_contains(nodes, children, fact_root, summary.left, 0):
-                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.right, goal_root, 0)
+            for fact_root in facts |fact_root, nodes, children, summary, goal_root, left_is_call, right_is_call, goal, work_used|:
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                    if left_is_call and proof_kernel_replay_fact_contains_with_work(nodes, children, fact_root, summary.left, work_used, 0):
+                        return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, summary.right, goal_root, work_used)
                     if left_is_call and goal.kind == "unary" and goal.operator == "not" and proof_kernel_replay_valid(nodes, goal.left):
-                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.right, goal.left, 0) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.left, 0)
-                    if right_is_call and proof_kernel_replay_fact_contains(nodes, children, fact_root, summary.right, 0):
-                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.left, goal_root, 0)
+                        return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, summary.right, goal.left, work_used) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.left, work_used, 0)
+                    if right_is_call and proof_kernel_replay_fact_contains_with_work(nodes, children, fact_root, summary.right, work_used, 0):
+                        return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, summary.left, goal_root, work_used)
                     if right_is_call and goal.kind == "unary" and goal.operator == "not" and proof_kernel_replay_valid(nodes, goal.left):
-                        return true if proof_kernel_replay_expr_equal(nodes, children, summary.left, goal.left, 0) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.right, 0)
+                        return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, summary.left, goal.left, work_used) and proof_kernel_replay_fact_contains_negated(nodes, children, fact_root, summary.right, work_used, 0)
             return false
 
         # Mirror of the producer's constant pins. A structurally exact identifier or qualified

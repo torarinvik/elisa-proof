@@ -136,6 +136,30 @@ checked_helper_package = package(checked_helper_summary)
 checked_helper_report = expect(checked_helper_package, checked_helper_summary,
                                {"one": ("checked", None), "caller": ("checked", None)}, 0)
 assert checked_helper_report["source_admissible"] is True, checked_helper_report
+
+# A simple source theorem is accepted and serialized. Mutating its body so the result is justified
+# only by a fresh aggregate runtime assertion must not preserve the old package's checked status:
+# the replay kernel has no allocation-identity witness for the fresh literal.
+stable_assert_source = write("stable_scalar_fact", """def asserted_identity(value: i64, expected: i64) -> i64:
+    ensure result == expected
+    return expected
+""")
+stable_assert_package = package(stable_assert_source)
+stable_assert_report = expect(stable_assert_package, stable_assert_source,
+                              {"asserted_identity": ("checked", None)}, 0)
+assert stable_assert_report["package"]["status"] == "replayed", stable_assert_report
+fresh_aggregate_assert_source = write("fresh_aggregate_runtime_assert", """def asserted_identity(value: i64, expected: i64) -> i64:
+    ensure result == expected
+    assert [value] == [expected]
+    return value
+""")
+fresh_aggregate_mutation = correspond(stable_assert_package, fresh_aggregate_assert_source, 1)
+fresh_mutation_status = statuses(fresh_aggregate_mutation)
+assert set(fresh_mutation_status) == {"asserted_identity"}, fresh_aggregate_mutation
+assert fresh_mutation_status["asserted_identity"][0] != "checked", fresh_aggregate_mutation
+assert fresh_aggregate_mutation["package"]["status"] == "replayed", fresh_aggregate_mutation
+assert fresh_aggregate_mutation["source_admissible"] is True, fresh_aggregate_mutation
+
 for name, divisor in (("zero_divisor", "0"), ("negative_divisor", "-1")):
     refused_division = write(name, f"""def quotient(value: i64) -> i64:
     ensure result == value / {divisor}

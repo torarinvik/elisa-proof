@@ -1,0 +1,271 @@
+# Qualified module paths for named types used by record constructors.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_type_scope_group_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, type_identity: usize, owner: sview, path_count: usize, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
+            empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
+            return (false, empty) if type_identity == 0 or sview_len(owner) == 0 or path_count == 0 or path_count > 128
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return (false, empty) if start_index == 0 or start_index >= total_bindings or path_count > total_bindings - start_index
+            selected: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index - 1)
+            return (false, empty) if selected.kind != "type" or selected.type_identity != type_identity or not proof_kernel_replay_type_text_equal(selected.name, owner, work) or not proof_kernel_replay_type_text_equal(selected.type_name, owner, work) or selected.sort != "named"
+            for segment in 0..<path_count |segment, environment, start_index, type_identity, owner, path_count, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index + segment)
+                return (false, empty) if candidate.kind != "type-scope-segment" or candidate.type_identity != type_identity or not proof_kernel_replay_type_text_equal(candidate.owner, owner, work) or not proof_kernel_replay_type_text_equal(candidate.type_name, owner, work) or candidate.sort != "named" or candidate.parameter_index != segment or candidate.parameter_count != path_count
+                return (false, empty) if segment + 1 == path_count and not proof_kernel_replay_type_text_equal(candidate.name, owner, work)
+            return (true, selected)
+
+        def proof_kernel_replay_type_scope_path_segment(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, type_identity: usize, index: usize, path_count: usize, work: mutable usize&) -> sview:
+            return "" if index >= path_count or not proof_kernel_replay_type_work_consume(work)
+            binding_index: usize = start_index + index
+            return "" if binding_index >= proof_kernel_replay_type_environment_binding_count(environment)
+            binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+            return binding.name if binding.kind == "type-scope-segment" and binding.type_identity == type_identity and binding.parameter_index == index and binding.parameter_count == path_count
+            return ""
+
+        def proof_kernel_replay_type_scope_owner_path_start(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, work: mutable usize&) -> (known: bool, start_index: usize, path_count: usize):
+            found: mutable bool = false
+            start: mutable usize = 0
+            count: mutable usize = 0
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            for index in 0..<total_bindings |index, environment, owner_identity, found, start, count, work|:
+                return (false, 0, 0) if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != 0
+                return (false, 0, 0) if found or binding.parameter_count == 0
+                start <- index
+                count <- binding.parameter_count
+                found <- true
+            return (found, start, count)
+
+        def proof_kernel_replay_type_scope_owner_path_segment(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, index: usize, path_count: usize, work: mutable usize&) -> sview:
+            return "" if index >= path_count or not proof_kernel_replay_type_work_consume(work)
+            binding_index: usize = start_index + index
+            return "" if binding_index >= proof_kernel_replay_type_environment_binding_count(environment)
+            binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+            return binding.name if binding.kind == "module-owner-segment" and binding.parameter_index == index and binding.parameter_count == path_count
+            return ""
+
+        def proof_kernel_replay_type_scope_identity_insert(identity: usize, capacity: usize, slots: mutable darray[usize]&, work: mutable usize&) -> bool:
+            return false if identity == 0 or capacity == 0 or slots.count != capacity
+            slot: mutable usize = (identity % capacity).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, identity, slots, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                current: usize = slots[slot]
+                if current == 0:
+                    slots[slot] <- identity
+                    return true
+                return false if current == identity
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false
+
+        # Source type-scope rows are emitted directly after their canonical type row. Validate
+        # each run once by adjacency, including every segment and its canonical terminal spelling.
+        def proof_kernel_replay_type_scope_bindings_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> bool:
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            capacity: mutable usize = 1
+            while capacity < total_bindings * 2 |capacity, total_bindings|:
+                capacity <- capacity * 2
+            type_identity_slots: mutable darray[usize] = []
+            scope_identity_slots: mutable darray[usize] = []
+            enum_scope_identity_slots: mutable darray[usize] = []
+            type_identity_slots.resize(capacity)
+            scope_identity_slots.resize(capacity)
+            enum_scope_identity_slots.resize(capacity)
+            for slot in 0..<capacity |slot, type_identity_slots, scope_identity_slots, enum_scope_identity_slots, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                type_identity_slots[slot] <- 0
+                return false if not proof_kernel_replay_type_work_consume(work)
+                scope_identity_slots[slot] <- 0
+                return false if not proof_kernel_replay_type_work_consume(work)
+                enum_scope_identity_slots[slot] <- 0
+            # Insert canonical declaration identities and path-group identities once. The
+            # bounded open-addressed tables catch duplicate root types and duplicate scoped paths.
+            for index in 0..<total_bindings |index, environment, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                identity: usize = row.type_identity if row.kind == "type" and row.sort == "named" else row.type_identity if row.kind == "type-scope-segment" and row.parameter_index == 0 else row.type_identity if row.kind == "enum-scope-segment" and row.parameter_index == 0 else 0
+                continue if identity == 0
+                inserted: mutable bool = false
+                if row.kind == "type" and row.sort == "named":
+                    inserted <- proof_kernel_replay_type_scope_identity_insert(identity, capacity, type_identity_slots, work)
+                elif row.kind == "type-scope-segment" and row.parameter_index == 0:
+                    inserted <- proof_kernel_replay_type_scope_identity_insert(identity, capacity, scope_identity_slots, work)
+                elif row.kind == "enum-scope-segment" and row.parameter_index == 0:
+                    inserted <- proof_kernel_replay_type_scope_identity_insert(identity, capacity, enum_scope_identity_slots, work)
+                return false if not inserted
+            # Validate every adjacent segment row and its canonical terminal spelling. Segment
+            # zero validates the whole run; later rows only need to point back to that start.
+            for index in 0..<total_bindings |index, environment, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if row.kind != "type-scope-segment"
+                return false if row.parameter_count == 0 or row.parameter_count > 128 or row.parameter_index >= row.parameter_count or sview_len(row.name) == 0 or sview_len(row.owner) == 0 or row.type_identity == 0
+                return false if not proof_kernel_replay_type_text_equal(row.owner, row.type_name, work) or row.sort != "named" or row.owner_type_identity != 0 or row.element_sort != "" or row.element_type_name != "" or row.element_type_identity != 0 or row.signature_identity != 0 or row.parameter_has_default or row.parameter_by_reference
+                return false if index < row.parameter_index
+                start_index: usize = index - row.parameter_index
+                start: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index)
+                return false if start.kind != "type-scope-segment" or start.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(start.owner, row.owner, work) or start.parameter_count != row.parameter_count or start.parameter_index != 0
+                if row.parameter_index == 0:
+                    return false if start_index == 0
+                    canonical: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index - 1)
+                    return false if canonical.kind != "type" or not proof_kernel_replay_type_text_equal(canonical.name, row.owner, work) or not proof_kernel_replay_type_text_equal(canonical.type_name, row.owner, work) or canonical.sort != "named" or canonical.type_identity != row.type_identity
+                    return false if row.parameter_count > total_bindings - start_index
+                    for segment in 0..<row.parameter_count |segment, environment, start_index, row, work|:
+                        return false if not proof_kernel_replay_type_work_consume(work)
+                        candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index + segment)
+                        return false if candidate.kind != "type-scope-segment" or candidate.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(candidate.owner, row.owner, work) or not proof_kernel_replay_type_text_equal(candidate.type_name, row.owner, work) or candidate.sort != "named" or candidate.parameter_index != segment or candidate.parameter_count != row.parameter_count
+                        return false if segment + 1 == row.parameter_count and not proof_kernel_replay_type_text_equal(candidate.name, row.owner, work)
+            # Enum path rows use the same contiguous layout, but remain a separate binding kind
+            # so record constructor lookup can never turn an ordinary field into an enum tag.
+            for index in 0..<total_bindings |index, environment, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if row.kind != "enum-scope-segment"
+                return false if row.parameter_count == 0 or row.parameter_count > 128 or row.parameter_index >= row.parameter_count or sview_len(row.name) == 0 or sview_len(row.owner) == 0 or row.type_identity == 0
+                return false if not proof_kernel_replay_type_text_equal(row.owner, row.type_name, work) or row.sort != "named" or row.owner_type_identity != row.type_identity or row.element_sort != "" or row.element_type_name != "" or row.element_type_identity != 0 or row.signature_identity != 0 or row.parameter_has_default or row.parameter_by_reference
+                return false if index < row.parameter_index
+                start_index: usize = index - row.parameter_index
+                start: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index)
+                return false if start.kind != "enum-scope-segment" or start.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(start.owner, row.owner, work) or start.parameter_count != row.parameter_count or start.parameter_index != 0
+                if row.parameter_index == 0:
+                    return false if start_index == 0 or row.parameter_count > total_bindings - start_index
+                    for segment in 0..<row.parameter_count |segment, environment, start_index, row, work|:
+                        return false if not proof_kernel_replay_type_work_consume(work)
+                        candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index + segment)
+                        return false if candidate.kind != "enum-scope-segment" or candidate.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(candidate.owner, row.owner, work) or not proof_kernel_replay_type_text_equal(candidate.type_name, row.owner, work) or candidate.sort != "named" or candidate.parameter_index != segment or candidate.parameter_count != row.parameter_count
+                        return false if segment + 1 == row.parameter_count and not proof_kernel_replay_type_text_equal(candidate.name, row.owner, work)
+                    previous: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index - 1)
+                    canonical_index: mutable usize = start_index - 1
+                    if previous.kind == "type-scope-segment":
+                        return false if start_index <= row.parameter_count
+                        type_scope_start: usize = start_index - row.parameter_count
+                        canonical_index <- type_scope_start - 1
+                        return false if canonical_index >= total_bindings
+                        for segment in 0..<row.parameter_count |segment, environment, type_scope_start, row, work|:
+                            return false if not proof_kernel_replay_type_work_consume(work)
+                            type_segment: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, type_scope_start + segment)
+                            enum_segment: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index + segment)
+                            return false if type_segment.kind != "type-scope-segment" or type_segment.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(type_segment.owner, row.owner, work) or type_segment.parameter_index != segment or type_segment.parameter_count != row.parameter_count or not proof_kernel_replay_type_text_equal(type_segment.name, enum_segment.name, work)
+                    else:
+                        # A root enum has only its canonical leaf path. Accepting a longer
+                        # enum-only path here would let a forged environment invent a scoped
+                        # spelling that has no matching type-scope evidence.
+                        return false if row.parameter_count != 1
+                    canonical: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, canonical_index)
+                    return false if canonical.kind != "type" or canonical.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(canonical.name, row.owner, work) or not proof_kernel_replay_type_text_equal(canonical.type_name, row.owner, work) or canonical.sort != "named"
+            return true
+
+        # Match a written qualified path against a canonical declaration path. The compiler
+        # permits the full path or an ancestor prefix of the current module followed by that
+        # path; among matches, nominal lookup selects the deepest owner and rejects tied identities.
+        def proof_kernel_replay_type_scope_query_matches(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, query_count: usize, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, type_identity: usize, candidate_count: usize, context_start: usize, context_count: usize, context_seen: bool, work: mutable usize&) -> bool:
+            return false if query_count == 0 or candidate_count == 0
+            if candidate_count == query_count:
+                for segment in 0..<query_count |segment, nodes, root, environment, start_index, type_identity, query_count, work|:
+                    actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, segment, candidate_count, work)
+                    expected: sview = proof_kernel_replay_scope_path_segment(nodes, root, segment, 0)
+                    return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+                return true
+            return false if candidate_count < query_count or not context_seen
+            ancestor_depth: usize = candidate_count - query_count
+            return false if ancestor_depth == 0 or ancestor_depth > context_count
+            for segment in 0..<ancestor_depth |segment, environment, start_index, type_identity, candidate_count, context_start, context_count, work|:
+                actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, segment, candidate_count, work)
+                expected: sview = proof_kernel_replay_type_scope_owner_path_segment(environment, context_start, segment, context_count, work)
+                return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+            for segment in 0..<query_count |segment, nodes, root, environment, start_index, type_identity, ancestor_depth, candidate_count, work|:
+                actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, ancestor_depth + segment, candidate_count, work)
+                expected: sview = proof_kernel_replay_scope_path_segment(nodes, root, segment, 0)
+                return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+            return true
+
+        def proof_kernel_replay_find_type_binding_for_symbol(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, symbol_root: usize, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
+            empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
+            return (false, empty) if symbol_root >= nodes.count
+            path_count: usize = proof_kernel_replay_scope_path_count(nodes, symbol_root, 0)
+            return (false, empty) if path_count == 0 or path_count > 128
+            context_identity: mutable usize = 0
+            context_seen: mutable bool = false
+            for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, context_identity, context_seen, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                context: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if context.kind != "module-context"
+                return (false, empty) if context_seen or not proof_kernel_replay_owner_identity_recorded(environment, context.owner_type_identity, work)
+                context_identity <- context.owner_type_identity
+                context_seen <- true
+            context_start: mutable usize = 0
+            context_count: mutable usize = 0
+            if context_seen:
+                context_path: (known: bool, start_index: usize, path_count: usize) = proof_kernel_replay_type_scope_owner_path_start(environment, context_identity, work)
+                return (false, empty) if not context_path.known
+                context_start <- context_path.start_index
+                context_count <- context_path.path_count
+            wanted_leaf: sview = proof_kernel_replay_scope_path_segment(nodes, symbol_root, path_count - 1, 0)
+            return (false, empty) if wanted_leaf == ""
+            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
+            selected_depth: mutable usize = 0
+            found: mutable bool = false
+            ambiguous: mutable bool = false
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            if path_count > 1:
+                for index in 0..<total_bindings |index, nodes, environment, symbol_root, path_count, context_identity, context_seen, context_count, selected, selected_depth, found, ambiguous, work|:
+                    return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                    start: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                    continue if start.kind != "type-scope-segment" or start.parameter_index != 0
+                    group: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_type_scope_group_binding(environment, index, start.type_identity, start.owner, start.parameter_count, work)
+                    continue if not group.known
+                    continue if not proof_kernel_replay_type_scope_query_matches(nodes, symbol_root, path_count, environment, index, start.type_identity, start.parameter_count, context_start, context_count, context_seen, work)
+                    if not found or start.parameter_count > selected_depth:
+                        selected <- group.binding
+                        selected_depth <- start.parameter_count
+                        found <- true
+                        ambiguous <- false
+                    elif start.parameter_count == selected_depth and selected.type_identity != group.binding.type_identity:
+                        ambiguous <- true
+                return (found and not ambiguous, selected)
+
+            # Unqualified names follow lexical lookup. Module-owned declarations shadow root
+            # declarations; sibling modules and deeper nested modules are never leaf fallbacks.
+            for index in 0..<total_bindings |index, environment, wanted_leaf, selected, selected_depth, found, ambiguous, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if candidate.kind != "type" or candidate.sort != "named" or not proof_kernel_replay_type_text_equal(candidate.name, wanted_leaf, work) or candidate.owner != "" or candidate.owner_type_identity != 0
+                has_scope_rows: mutable bool = false
+                if index + 1 < total_bindings:
+                    following: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index + 1)
+                    has_scope_rows <- following.kind == "type-scope-segment" and following.type_identity == candidate.type_identity and following.parameter_index == 0
+                continue if has_scope_rows
+                if not found:
+                    selected <- candidate
+                    selected_depth <- 0
+                    found <- true
+                elif selected_depth == 0 and selected.type_identity != candidate.type_identity:
+                    ambiguous <- true
+            for index in 0..<total_bindings |index, environment, wanted_leaf, context_identity, context_seen, context_count, selected, selected_depth, found, ambiguous, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                start: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if start.kind != "type-scope-segment" or start.parameter_index != 0 or start.parameter_count == 0
+                depth: usize = start.parameter_count - 1
+                continue if depth > context_count or (not context_seen and depth != 0)
+                group: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_type_scope_group_binding(environment, index, start.type_identity, start.owner, start.parameter_count, work)
+                continue if not group.known
+                leaf: sview = proof_kernel_replay_type_scope_path_segment(environment, index, start.type_identity, depth, start.parameter_count, work)
+                continue if not proof_kernel_replay_type_text_equal(leaf, wanted_leaf, work)
+                prefix_matches: mutable bool = true
+                for segment in 0..<depth |segment, environment, index, start, context_start, context_count, prefix_matches, work|:
+                    actual: sview = proof_kernel_replay_type_scope_path_segment(environment, index, start.type_identity, segment, start.parameter_count, work)
+                    expected: sview = proof_kernel_replay_type_scope_owner_path_segment(environment, context_start, segment, context_count, work) if context_seen else ""
+                    prefix_matches <- false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+                continue if not prefix_matches
+                if not found or depth > selected_depth:
+                    selected <- group.binding
+                    selected_depth <- depth
+                    found <- true
+                    ambiguous <- false
+                elif depth == selected_depth and selected.type_identity != group.binding.type_identity:
+                    ambiguous <- true
+            return (found and not ambiguous, selected)

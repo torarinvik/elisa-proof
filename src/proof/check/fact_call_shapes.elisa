@@ -1,0 +1,564 @@
+# The generic fact publishers do not have the live ProofFunctionTable in their API.
+# Keep the minimal source-derived resolver data in the report so every publisher can
+# apply the same return-shape rule without trusting an unqualified leaf-name map.
+extend ElisaProof:
+    private:
+        const PROOF_FACT_CALL_SHADOW_QUERY_LIMIT: usize = 4096
+        const PROOF_FACT_CALL_SHADOW_QUERY_INDEX_CAPACITY: usize = 8192
+
+        def proof_fact_numeric_cast_target_index(target: sview) -> usize:
+            return when target:
+                "i8" -> 0
+                "i16" -> 1
+                "i32" -> 2
+                "i64" -> 3
+                "int" -> 4
+                "isize" -> 5
+                "u8" -> 6
+                "u16" -> 7
+                "u32" -> 8
+                "u64" -> 9
+                "usize" -> 10
+                "uintptr" -> 11
+                "f32" -> 12
+                "f64" -> 13
+                _ -> 14
+
+        def proof_fact_numeric_cast_target_at(index: usize) -> sview:
+            return when index:
+                0 -> "i8"
+                1 -> "i16"
+                2 -> "i32"
+                3 -> "i64"
+                4 -> "int"
+                5 -> "isize"
+                6 -> "u8"
+                7 -> "u16"
+                8 -> "u32"
+                9 -> "u64"
+                10 -> "usize"
+                11 -> "uintptr"
+                12 -> "f32"
+                13 -> "f64"
+                _ -> ""
+
+        def proof_fact_extern_name_declared(functions: ProofFunctionTable&, name: sview) -> bool:
+            count: usize = functions.extern_signatures.count
+            return false if count == 0
+            capacity: usize = functions.extern_index_values.count
+            return true if capacity == 0 or capacity != functions.extern_index_hashes.count or capacity != functions.extern_index_ambiguous.count
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, functions, capacity, count|:
+                current: usize = functions.extern_index_values[slot]
+                return false if current == count
+                return true if current > count
+                if functions.extern_index_hashes[slot] == wanted_hash:
+                    return true if current >= functions.extern_signatures.count
+                    return true if functions.extern_signatures[current].name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return true
+
+        def proof_build_fact_call_shape_indexes(functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            functions.extern_index_hashes.clear()
+            functions.extern_index_values.clear()
+            functions.extern_index_ambiguous.clear()
+            extern_count: usize = functions.extern_signatures.count
+            if extern_count > 0:
+                capacity: usize = proof_name_index_capacity(extern_count)
+                return (false, "extern-name-index-entries", extern_count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if capacity == 0
+                return (false, "extern-name-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity, source_work)
+                return (false, "extern-name-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(extern_count, source_work)
+                functions.extern_index_hashes.resize(capacity)
+                functions.extern_index_values.resize(capacity)
+                functions.extern_index_ambiguous.resize(capacity)
+                for slot in 0..<capacity |slot, functions, extern_count|:
+                    functions.extern_index_values[slot] <- extern_count
+                    functions.extern_index_ambiguous[slot] <- false
+                for index in 0..<extern_count |index, functions, capacity, extern_count|:
+                    signature: ProofExternSignature = functions.extern_signatures[index]
+                    return (false, "extern-name-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(signature.name), source_work)
+                    hash: u32 = proof_name_hash(signature.name)
+                    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    placed: mutable bool = false
+                    while probes < capacity |probes, slot, hash, index, functions, capacity, extern_count, placed|:
+                        return (false, "extern-name-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                        current: usize = functions.extern_index_values[slot]
+                        if current == extern_count:
+                            functions.extern_index_hashes[slot] <- hash
+                            functions.extern_index_values[slot] <- index
+                            placed <- true
+                            break
+                        if current < extern_count and functions.extern_index_hashes[slot] == hash:
+                            current_name: sview = functions.extern_signatures[current].name
+                            return (false, "extern-name-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                            if current_name == signature.name:
+                                functions.extern_index_ambiguous[slot] <- true
+                                placed <- true
+                                break
+                        slot <- (slot + 1) % capacity
+                        probes <- probes + 1
+                    return (false, "extern-name-index-insertion", probes, capacity) if not placed
+                cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(functions.extern_index_values, extern_count, source_work)
+                return (false, "extern-name-index-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+                return (false, "extern-name-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+
+            functions.numeric_cast_shadowed.clear()
+            functions.numeric_cast_shadowed.resize(14)
+            return (false, "numeric-cast-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(14 * 128, source_work)
+            for index in 0..<14 |index, functions|:
+                target: sview = proof_fact_numeric_cast_target_at(index)
+                source_shadowed: mutable bool = false
+                if functions.names.count > 0:
+                    source_index: usize = proof_function_index(functions, target)
+                    source_shadowed <- source_index < functions.names.count or proof_function_name_may_repeat(functions, target)
+                external_shadowed: bool = proof_fact_extern_name_declared(functions, target)
+                functions.numeric_cast_shadowed[index] <- source_shadowed or external_shadowed
+            functions.custom_cast_hook_present <- false
+            if functions.names.count > 0:
+                source_hook: usize = proof_function_index(functions, "__cast__")
+                functions.custom_cast_hook_present <- source_hook < functions.names.count or proof_function_name_may_repeat(functions, "__cast__")
+            for signature in functions.extern_signatures |functions, source_work|:
+                return (false, "numeric-cast-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (false, "numeric-cast-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(signature.name), source_work)
+                functions.custom_cast_hook_present <- true if signature.name == "__cast__" and signature.declared_arity == 1 and signature.callable
+            return (true, "", 0, 0)
+
+        def proof_fact_call_shape_snapshot_reset(snapshot: mutable ProofFactCallShapeSnapshot&) -> void:
+            snapshot.initialized <- false
+            snapshot.complete <- false
+            snapshot.source_check_active <- false
+            snapshot.source_identity <- 0
+            snapshot.source_fingerprint <- 0
+            snapshot.active_caller <- 0
+            snapshot.active_caller_line <- 0
+            snapshot.lookup_work_used <- 0
+            snapshot.lookup_work_exhausted <- false
+            snapshot.lookup_budget_reported <- false
+            snapshot.function_names.clear()
+            snapshot.function_lines.clear()
+            snapshot.owner_modules.clear()
+            snapshot.module_aliases.names.clear()
+            snapshot.module_aliases.targets.clear()
+            snapshot.module_aliases.scopes.clear()
+            snapshot.module_aliases.lines.clear()
+            snapshot.module_aliases.offsets.clear()
+            snapshot.module_aliases.alias_lookup_hashes.clear()
+            snapshot.module_aliases.alias_lookup_values.clear()
+            snapshot.module_aliases.alias_lookup_ambiguous.clear()
+            snapshot.module_aliases.global_alias_lookup_hashes.clear()
+            snapshot.module_aliases.global_alias_lookup_values.clear()
+            snapshot.module_aliases.function_lookup_hashes.clear()
+            snapshot.module_aliases.function_lookup_values.clear()
+            snapshot.module_aliases.function_lookup_ambiguous.clear()
+            snapshot.module_aliases.function_lookup_complete <- false
+            snapshot.module_aliases.complete <- false
+            snapshot.module_prefixes.clear()
+            snapshot.declaration_path_starts.clear()
+            snapshot.declaration_path_counts.clear()
+            snapshot.all_declaration_path.clear()
+            snapshot.name_hashes.clear()
+            snapshot.index_hashes.clear()
+            snapshot.index_values.clear()
+            snapshot.index_ambiguous.clear()
+            snapshot.return_scalar.clear()
+            snapshot.return_pure.clear()
+            snapshot.return_deterministic.clear()
+            snapshot.return_verified.clear()
+            snapshot.return_verification_reasons.clear()
+            snapshot.param_starts.clear()
+            snapshot.param_counts.clear()
+            snapshot.all_params.clear()
+            snapshot.signature_contract_starts.clear()
+            snapshot.signature_contract_counts.clear()
+            snapshot.all_signature_contracts.clear()
+            snapshot.extern_names.clear()
+            snapshot.extern_arities.clear()
+            snapshot.extern_callable.clear()
+            snapshot.extern_index_hashes.clear()
+            snapshot.extern_index_values.clear()
+            snapshot.extern_index_ambiguous.clear()
+            snapshot.numeric_cast_shadowed.clear()
+            snapshot.custom_cast_hook_present <- false
+            snapshot.shadow_query_callers.clear()
+            snapshot.shadow_query_hashes.clear()
+            snapshot.shadow_query_offsets.clear()
+            snapshot.shadow_query_names.clear()
+            snapshot.shadow_query_results.clear()
+            snapshot.shadow_query_index.clear()
+
+        def proof_fact_call_shape_charge(snapshot: mutable ProofFactCallShapeSnapshot&, amount: usize) -> bool:
+            if snapshot.lookup_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                snapshot.lookup_work_exhausted <- true
+                return false
+            if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - snapshot.lookup_work_used:
+                snapshot.lookup_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                snapshot.lookup_work_exhausted <- true
+                return false
+            snapshot.lookup_work_used <- snapshot.lookup_work_used + amount
+            true
+
+        def proof_fact_call_shape_begin_caller(report: mutable ProofReport&, functions: mutable ProofFunctionTable&, target: usize) -> usize:
+            saved_caller: usize = functions.current_caller
+            functions.current_caller <- target
+            report.fact_call_shapes.active_caller <- target
+            report.fact_call_shapes.active_caller_line <- functions.lines[target] if target < functions.lines.count else 0
+            report.finding_function <- functions.names[target]
+            report.finding_owner <- functions.owner_modules[target]
+            report.finding_line <- functions.lines[target] if target < functions.lines.count else 0
+            report.finding_caller_index <- target
+            return saved_caller
+
+        def proof_fact_call_shape_end_caller(report: mutable ProofReport&, functions: mutable ProofFunctionTable&, saved_caller: usize) -> void:
+            report.finding_function <- ""
+            report.finding_owner <- ""
+            report.finding_line <- 0
+            report.finding_caller_index <- functions.names.count
+            functions.current_caller <- saved_caller
+            report.fact_call_shapes.active_caller <- functions.names.count
+            report.fact_call_shapes.active_caller_line <- 0
+
+        # Called by proof_check_core after function resolution and before any function body can
+        # publish a fact. The source identity is pre-stamped only by the checked source entry
+        # point; compatibility checks therefore keep call-bearing generic facts disabled.
+        def proof_build_fact_call_shape_snapshot(file: Ast::File&, report: mutable ProofReport&, functions: ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            snapshot: mutable ProofFactCallShapeSnapshot& = &report.fact_call_shapes
+            source_identity: uintptr = snapshot.source_identity if snapshot.source_check_active else 0
+            source_fingerprint: u32 = snapshot.source_fingerprint if snapshot.source_check_active else 0
+            snapshot.initialized <- false
+            snapshot.complete <- false
+            snapshot.source_identity <- source_identity
+            snapshot.source_fingerprint <- source_fingerprint
+            snapshot.active_caller <- functions.names.count
+            snapshot.active_caller_line <- 0
+            snapshot.lookup_work_used <- 0
+            snapshot.lookup_work_exhausted <- false
+            snapshot.lookup_budget_reported <- false
+            snapshot.function_names.clear()
+            snapshot.function_lines.clear()
+            snapshot.owner_modules.clear()
+            snapshot.module_aliases.names.clear()
+            snapshot.module_aliases.targets.clear()
+            snapshot.module_aliases.scopes.clear()
+            snapshot.module_aliases.lines.clear()
+            snapshot.module_aliases.offsets.clear()
+            snapshot.module_aliases.alias_lookup_hashes.clear()
+            snapshot.module_aliases.alias_lookup_values.clear()
+            snapshot.module_aliases.alias_lookup_ambiguous.clear()
+            snapshot.module_aliases.global_alias_lookup_hashes.clear()
+            snapshot.module_aliases.global_alias_lookup_values.clear()
+            snapshot.module_aliases.function_lookup_hashes.clear()
+            snapshot.module_aliases.function_lookup_values.clear()
+            snapshot.module_aliases.function_lookup_ambiguous.clear()
+            snapshot.module_aliases.function_lookup_complete <- false
+            snapshot.module_aliases.complete <- false
+            snapshot.module_prefixes.clear()
+            snapshot.declaration_path_starts.clear()
+            snapshot.declaration_path_counts.clear()
+            snapshot.all_declaration_path.clear()
+            snapshot.name_hashes.clear()
+            snapshot.index_hashes.clear()
+            snapshot.index_values.clear()
+            snapshot.index_ambiguous.clear()
+            snapshot.return_scalar.clear()
+            snapshot.return_pure.clear()
+            snapshot.return_deterministic.clear()
+            snapshot.return_verified.clear()
+            snapshot.return_verification_reasons.clear()
+            snapshot.param_starts.clear()
+            snapshot.param_counts.clear()
+            snapshot.all_params.clear()
+            snapshot.signature_contract_starts.clear()
+            snapshot.signature_contract_counts.clear()
+            snapshot.all_signature_contracts.clear()
+            snapshot.extern_names.clear()
+            snapshot.extern_arities.clear()
+            snapshot.extern_callable.clear()
+            snapshot.extern_index_hashes.clear()
+            snapshot.extern_index_values.clear()
+            snapshot.extern_index_ambiguous.clear()
+            snapshot.numeric_cast_shadowed.clear()
+            snapshot.shadow_query_callers.clear()
+            snapshot.shadow_query_hashes.clear()
+            snapshot.shadow_query_offsets.clear()
+            snapshot.shadow_query_names.clear()
+            snapshot.shadow_query_results.clear()
+            snapshot.shadow_query_index.clear()
+            return (false, "fact-call-shape-table", functions.names.count, 0) if functions.names.count != functions.lines.count or functions.names.count != functions.owner_modules.count or functions.names.count != functions.module_prefixes.count or functions.names.count != functions.declaration_path_starts.count or functions.names.count != functions.declaration_path_counts.count or functions.names.count != functions.return_scalar.count or functions.names.count != functions.param_starts.count or functions.names.count != functions.param_counts.count
+            return (false, "fact-call-shape-index", functions.index_values.count, functions.index_hashes.count) if functions.index_values.count != functions.index_hashes.count or functions.index_values.count != functions.index_ambiguous.count
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.names.count * 10, source_work)
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.all_declaration_path.count, source_work)
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.all_params.count, source_work)
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.extern_signatures.count * 3, source_work)
+            snapshot.function_names.extend(functions.names)
+            snapshot.function_lines.extend(functions.lines)
+            snapshot.owner_modules.extend(functions.owner_modules)
+            if functions.module_aliases.names.count != functions.module_aliases.targets.count or functions.module_aliases.names.count != functions.module_aliases.scopes.count or functions.module_aliases.names.count != functions.module_aliases.lines.count or functions.module_aliases.names.count != functions.module_aliases.offsets.count:
+                return (false, "fact-call-shape-alias-table", functions.module_aliases.names.count, functions.module_aliases.targets.count)
+            alias_capacity: usize = functions.module_aliases.alias_lookup_values.count
+            return (false, "fact-call-shape-alias-index", alias_capacity, functions.module_aliases.alias_lookup_hashes.count) if alias_capacity != functions.module_aliases.alias_lookup_hashes.count or alias_capacity != functions.module_aliases.alias_lookup_ambiguous.count or alias_capacity != proof_name_index_capacity(functions.module_aliases.names.count)
+            global_alias_capacity: usize = functions.module_aliases.global_alias_lookup_values.count
+            return (false, "fact-call-shape-global-alias-index", global_alias_capacity, functions.module_aliases.global_alias_lookup_hashes.count) if global_alias_capacity != functions.module_aliases.global_alias_lookup_hashes.count or global_alias_capacity != alias_capacity
+            function_capacity: usize = functions.module_aliases.function_lookup_values.count
+            return (false, "fact-call-shape-function-index", function_capacity, functions.module_aliases.function_lookup_hashes.count) if not functions.module_aliases.function_lookup_complete or function_capacity != functions.module_aliases.function_lookup_hashes.count or function_capacity != functions.module_aliases.function_lookup_ambiguous.count or function_capacity != proof_name_index_capacity(functions.names.count)
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if functions.module_aliases.names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 5
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.module_aliases.names.count * 5, source_work)
+            for alias_index in 0..<functions.module_aliases.names.count |alias_index, functions, source_work|:
+                return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.module_aliases.names[alias_index]), source_work)
+                return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.module_aliases.targets[alias_index]), source_work)
+                return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.module_aliases.scopes[alias_index]), source_work)
+            snapshot.module_aliases.names.extend(functions.module_aliases.names)
+            snapshot.module_aliases.targets.extend(functions.module_aliases.targets)
+            snapshot.module_aliases.scopes.extend(functions.module_aliases.scopes)
+            snapshot.module_aliases.lines.extend(functions.module_aliases.lines)
+            snapshot.module_aliases.offsets.extend(functions.module_aliases.offsets)
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if alias_capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3 or global_alias_capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2 or function_capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(alias_capacity * 3, source_work) or not proof_report_source_work_charge(global_alias_capacity * 2, source_work) or not proof_report_source_work_charge(function_capacity * 3, source_work)
+            snapshot.module_aliases.alias_lookup_hashes.extend(functions.module_aliases.alias_lookup_hashes)
+            snapshot.module_aliases.alias_lookup_values.extend(functions.module_aliases.alias_lookup_values)
+            snapshot.module_aliases.alias_lookup_ambiguous.extend(functions.module_aliases.alias_lookup_ambiguous)
+            snapshot.module_aliases.global_alias_lookup_hashes.extend(functions.module_aliases.global_alias_lookup_hashes)
+            snapshot.module_aliases.global_alias_lookup_values.extend(functions.module_aliases.global_alias_lookup_values)
+            snapshot.module_aliases.function_lookup_hashes.extend(functions.module_aliases.function_lookup_hashes)
+            snapshot.module_aliases.function_lookup_values.extend(functions.module_aliases.function_lookup_values)
+            snapshot.module_aliases.function_lookup_ambiguous.extend(functions.module_aliases.function_lookup_ambiguous)
+            snapshot.module_aliases.function_lookup_complete <- functions.module_aliases.function_lookup_complete
+            snapshot.module_aliases.complete <- functions.module_aliases.complete
+            snapshot.module_prefixes.extend(functions.module_prefixes)
+            snapshot.declaration_path_starts.extend(functions.declaration_path_starts)
+            snapshot.declaration_path_counts.extend(functions.declaration_path_counts)
+            snapshot.all_declaration_path.extend(functions.all_declaration_path)
+            snapshot.name_hashes.extend(functions.name_hashes)
+            snapshot.index_hashes.extend(functions.index_hashes)
+            snapshot.index_values.extend(functions.index_values)
+            snapshot.index_ambiguous.extend(functions.index_ambiguous)
+            snapshot.return_scalar.extend(functions.return_scalar)
+            snapshot.return_pure.resize(functions.names.count)
+            snapshot.return_deterministic.resize(functions.names.count)
+            snapshot.return_verified.resize(functions.names.count)
+            snapshot.return_verification_reasons.resize(functions.names.count)
+            snapshot.param_starts.extend(functions.param_starts)
+            snapshot.param_counts.extend(functions.param_counts)
+            snapshot.all_params.extend(functions.all_params)
+            contract_rows: usize = file.signature_contract_lines.count
+            return (false, "fact-call-shape-contract-table", contract_rows, file.signature_contract_exprs.count) if contract_rows != file.signature_contract_kinds.count or contract_rows != file.signature_contract_exprs.count
+            contract_cursor: mutable usize = 0
+            previous_contract_line: mutable u32 = 0
+            contract_line_seen: mutable bool = false
+            pending_contract_row_charged: mutable bool = false
+            previous_function_line: mutable u32 = 0
+            function_line_seen: mutable bool = false
+            active_group_line: mutable u32 = 0
+            active_group_start: mutable usize = 0
+            active_group_count: mutable usize = 0
+            active_group_seen: mutable bool = false
+            for caller in 0..<functions.names.count |caller, functions, file, snapshot, contract_rows, source_work, contract_cursor, previous_contract_line, contract_line_seen, pending_contract_row_charged, previous_function_line, function_line_seen, active_group_line, active_group_start, active_group_count, active_group_seen|:
+                return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (false, "fact-call-shape-contract-table", caller, functions.lines.count) if caller >= functions.lines.count
+                function_line: u32 = functions.lines[caller]
+                return (false, "fact-call-shape-function-line-order", function_line, previous_function_line) if function_line_seen and function_line < previous_function_line
+                previous_function_line <- function_line
+                function_line_seen <- true
+                if not active_group_seen or function_line != active_group_line:
+                    active_group_seen <- true
+                    active_group_line <- function_line
+                    active_group_start <- snapshot.all_signature_contracts.count
+                    active_group_count <- 0
+                    while contract_cursor < contract_rows |contract_cursor, file, snapshot, contract_rows, source_work, previous_contract_line, contract_line_seen, pending_contract_row_charged, function_line, active_group_count|:
+                        row_line: u32 = file.signature_contract_lines[contract_cursor]
+                        return (false, "fact-call-shape-contract-line-order", row_line, previous_contract_line) if contract_line_seen and row_line < previous_contract_line
+                        previous_contract_line <- row_line
+                        contract_line_seen <- true
+                        kind: sview = file.signature_contract_kinds[contract_cursor]
+                        if not pending_contract_row_charged:
+                            return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                            return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(kind), source_work)
+                            pending_contract_row_charged <- true
+                        if row_line > function_line:
+                            break
+                        if row_line == function_line and (kind == "requires" or kind == "ensure"):
+                            expression: Ast::Expr = file.signature_contract_exprs[contract_cursor]
+                            position: Ast::Pos = Ast::expr_pos(expression)
+                            expression_span: (valid: bool, contains: bool) = proof_fact_call_shape_source_span_contains(position, position.offset)
+                            return (false, "fact-call-shape-contract-span", contract_cursor, contract_rows) if not expression_span.valid
+                            return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if position.end_offset < position.offset
+                            return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge((position.end_offset - position.offset).usize(), source_work)
+                            snapshot.all_signature_contracts.push(expression)
+                            active_group_count <- active_group_count + 1
+                        contract_cursor <- contract_cursor + 1
+                        pending_contract_row_charged <- false
+                return (false, "fact-call-shape-contract-range", active_group_start, snapshot.all_signature_contracts.count) if active_group_start > snapshot.all_signature_contracts.count
+                return (false, "fact-call-shape-contract-range", active_group_count, snapshot.all_signature_contracts.count - active_group_start) if active_group_count > snapshot.all_signature_contracts.count - active_group_start
+                snapshot.signature_contract_starts.push(active_group_start)
+                snapshot.signature_contract_counts.push(active_group_count)
+            while contract_cursor < contract_rows |contract_cursor, file, contract_rows, source_work, previous_contract_line, contract_line_seen, pending_contract_row_charged|:
+                row_line: u32 = file.signature_contract_lines[contract_cursor]
+                return (false, "fact-call-shape-contract-line-order", row_line, previous_contract_line) if contract_line_seen and row_line < previous_contract_line
+                previous_contract_line <- row_line
+                contract_line_seen <- true
+                kind: sview = file.signature_contract_kinds[contract_cursor]
+                if not pending_contract_row_charged:
+                    return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    return (false, "fact-call-shape-contract-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(kind), source_work)
+                contract_cursor <- contract_cursor + 1
+                pending_contract_row_charged <- false
+            return (false, "fact-call-shape-contract-shape", snapshot.signature_contract_starts.count, functions.names.count) if snapshot.signature_contract_starts.count != functions.names.count or snapshot.signature_contract_counts.count != functions.names.count
+            for signature in functions.extern_signatures |snapshot, source_work|:
+                return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(signature.name), source_work)
+                snapshot.extern_names.push(signature.name)
+                snapshot.extern_arities.push(signature.declared_arity)
+                snapshot.extern_callable.push(signature.callable)
+            snapshot.extern_index_hashes.extend(functions.extern_index_hashes)
+            snapshot.extern_index_values.extend(functions.extern_index_values)
+            snapshot.extern_index_ambiguous.extend(functions.extern_index_ambiguous)
+            snapshot.numeric_cast_shadowed.extend(functions.numeric_cast_shadowed)
+            snapshot.custom_cast_hook_present <- functions.custom_cast_hook_present
+            return (false, "fact-call-shape-index", snapshot.numeric_cast_shadowed.count, 14) if snapshot.numeric_cast_shadowed.count != 14
+            snapshot.complete <- source_identity != 0
+            snapshot.initialized <- true
+            return (true, "", 0, 0)
+
+        def proof_fact_call_shape_snapshot_purity(snapshot: mutable ProofFactCallShapeSnapshot&, functions: ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            count: usize = snapshot.function_names.count
+            return (true, "", 0, 0) if not snapshot.complete
+            return (false, "fact-call-shape-purity", functions.pure.count, count) if functions.pure.count != count or functions.deterministic.count != count or snapshot.return_pure.count != count or snapshot.return_deterministic.count != count
+            return (false, "fact-call-shape-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(count * 2, source_work)
+            for index in 0..<count |index, snapshot, functions|:
+                snapshot.return_pure[index] <- functions.pure[index]
+                snapshot.return_deterministic[index] <- functions.deterministic[index]
+            return (true, "", 0, 0)
+
+        def proof_fact_call_shape_update_verification(report: mutable ProofReport&, functions: ProofFunctionTable&, function_index: usize) -> void:
+            snapshot: mutable ProofFactCallShapeSnapshot& = &report.fact_call_shapes
+            return if not snapshot.complete or not snapshot.source_check_active or function_index >= snapshot.return_verified.count or function_index >= snapshot.return_verification_reasons.count
+            return if function_index >= functions.verified.count or function_index >= functions.verification_reasons.count
+            snapshot.return_verified[function_index] <- functions.verified[function_index]
+            snapshot.return_verification_reasons[function_index] <- functions.verification_reasons[function_index]
+
+        def proof_fact_call_shape_function_index(snapshot: mutable ProofFactCallShapeSnapshot&, name: sview) -> usize:
+            count: usize = snapshot.function_names.count
+            return count if snapshot.index_values.count == 0 or snapshot.index_values.count != snapshot.index_hashes.count or snapshot.index_values.count != snapshot.index_ambiguous.count
+            return count if not proof_fact_call_shape_charge(snapshot, sview_len(name))
+            wanted_hash: u32 = proof_name_hash(name)
+            capacity: usize = snapshot.index_values.count
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, snapshot, capacity, count|:
+                return count if not proof_fact_call_shape_charge(snapshot, 1)
+                current: usize = snapshot.index_values[slot]
+                return count if current == count or current > count
+                if snapshot.index_hashes[slot] == wanted_hash:
+                    return count if snapshot.index_ambiguous[slot]
+                    return count if not proof_fact_call_shape_charge(snapshot, sview_len(snapshot.function_names[current]))
+                    return current if snapshot.function_names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return count
+
+        def proof_fact_call_shape_same_module(snapshot: mutable ProofFactCallShapeSnapshot&, row: usize, caller: usize) -> bool:
+            return false if row >= snapshot.module_prefixes.count or caller >= snapshot.module_prefixes.count
+            prefix: usize = snapshot.module_prefixes[row]
+            return false if prefix != snapshot.module_prefixes[caller]
+            return proof_fact_call_shape_path_prefix_equal(snapshot, row, caller, prefix)
+
+        def proof_fact_call_shape_in_enclosing_module(snapshot: mutable ProofFactCallShapeSnapshot&, row: usize, caller: usize) -> bool:
+            return false if row >= snapshot.module_prefixes.count or caller >= snapshot.module_prefixes.count
+            prefix: usize = snapshot.module_prefixes[row]
+            return false if prefix == 0 or prefix >= snapshot.module_prefixes[caller]
+            return proof_fact_call_shape_path_prefix_equal(snapshot, row, caller, prefix)
+
+        def proof_fact_call_shape_path_prefix_equal(snapshot: mutable ProofFactCallShapeSnapshot&, row: usize, caller: usize, prefix: usize) -> bool:
+            return false if row >= snapshot.declaration_path_starts.count or caller >= snapshot.declaration_path_starts.count
+            return false if row >= snapshot.declaration_path_counts.count or caller >= snapshot.declaration_path_counts.count
+            return false if snapshot.declaration_path_counts[row] < prefix or snapshot.declaration_path_counts[caller] < prefix
+            row_start: usize = snapshot.declaration_path_starts[row]
+            caller_start: usize = snapshot.declaration_path_starts[caller]
+            return false if row_start + prefix > snapshot.all_declaration_path.count or caller_start + prefix > snapshot.all_declaration_path.count
+            for offset in 0..<prefix |offset, snapshot, row_start, caller_start|:
+                return false if not proof_fact_call_shape_charge(snapshot, 1)
+                return false if snapshot.all_declaration_path[row_start + offset] != snapshot.all_declaration_path[caller_start + offset]
+            return true
+
+        def proof_fact_call_shape_resolve(snapshot: mutable ProofFactCallShapeSnapshot&, callee: Ast::Expr) -> usize:
+            name: sview = proof_callable_name(callee)
+            count: usize = snapshot.function_names.count
+            return count if name == ""
+            match callee:
+                Ast::Expr.Scope(_, _, _):
+                    caller: usize = snapshot.active_caller
+                    return count if caller >= count or caller >= snapshot.owner_modules.count
+                    resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(snapshot.function_names, snapshot.owner_modules, snapshot.module_aliases, snapshot.owner_modules[caller], callee, &snapshot.lookup_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    if not resolved.complete:
+                        snapshot.lookup_work_exhausted <- true
+                        return count
+                    return resolved.row
+                _:
+                    pass
+            direct: usize = proof_fact_call_shape_function_index(snapshot, name)
+            return direct if direct < count
+            caller: usize = snapshot.active_caller
+            return count if caller >= count
+            found: mutable usize = count
+            for index in 0..<count |index, snapshot, name, caller, found|:
+                return count if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name))
+                continue if snapshot.function_names[index] != name
+                if proof_fact_call_shape_same_module(snapshot, index, caller):
+                    return count if found < count
+                    found <- index
+            return found if found < count
+            for index in 0..<count |index, snapshot, name, caller|:
+                return count if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name))
+                continue if snapshot.function_names[index] != name
+                return count if proof_fact_call_shape_in_enclosing_module(snapshot, index, caller)
+            for index in 0..<count |index, snapshot, name, found|:
+                return count if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name))
+                continue if snapshot.function_names[index] != name or index >= snapshot.module_prefixes.count
+                if snapshot.module_prefixes[index] == 0:
+                    return count if found < count
+                    found <- index
+            return found
+
+        def proof_fact_call_shape_extern_declared(snapshot: mutable ProofFactCallShapeSnapshot&, name: sview) -> bool:
+            count: usize = snapshot.extern_names.count
+            return false if count == 0
+            capacity: usize = snapshot.extern_index_values.count
+            return true if capacity == 0 or capacity != snapshot.extern_index_hashes.count or capacity != snapshot.extern_index_ambiguous.count
+            return true if not proof_fact_call_shape_charge(snapshot, sview_len(name))
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, snapshot, capacity, count|:
+                return true if not proof_fact_call_shape_charge(snapshot, 1)
+                current: usize = snapshot.extern_index_values[slot]
+                return false if current == count
+                return true if current > count
+                if snapshot.extern_index_hashes[slot] == wanted_hash:
+                    return true if current >= count
+                    return true if not proof_fact_call_shape_charge(snapshot, sview_len(snapshot.extern_names[current]))
+                    return true if snapshot.extern_names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return true
+
+        def proof_fact_call_shape_builtin_numeric_cast(snapshot: ProofFactCallShapeSnapshot&, callee: Ast::Expr, argument_count: usize) -> bool:
+            return false if argument_count != 0 or snapshot.custom_cast_hook_present
+            match callee:
+                Ast::Expr.Field(_, target, _):
+                    index: usize = proof_fact_numeric_cast_target_index(target)
+                    return false if index >= snapshot.numeric_cast_shadowed.count or snapshot.numeric_cast_shadowed[index]
+                    return true
+                _:
+                    return false
+
+        def proof_fact_call_shape_active_caller_matches(report: ProofReport&, snapshot: ProofFactCallShapeSnapshot&) -> bool:
+            caller: usize = snapshot.active_caller
+            return false if caller >= snapshot.function_names.count or caller >= snapshot.owner_modules.count or caller >= snapshot.function_lines.count
+            return false if report.finding_function == "" or report.finding_function != snapshot.function_names[caller]
+            return false if report.finding_owner != snapshot.owner_modules[caller] or report.finding_line != snapshot.function_lines[caller]
+            return false if report.finding_caller_index != caller
+            return false if snapshot.active_caller_line != snapshot.function_lines[caller]
+            true

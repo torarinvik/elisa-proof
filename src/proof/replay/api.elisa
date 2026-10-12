@@ -8,8 +8,8 @@ extend ElisaProof:
         # This audit validates one trace entry. Do not leave the all-facts origin cache
         # behind: only the selected trace is validated below, so other rows must not become
         # newly presentable through snapshots the audit just rebuilt.
-        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
-            valid: bool = proof_replay_fact_trace_entry_with_cache(report, trace_index)
+        def proof_replay_fact_trace_entry[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global{Read, Write}]:
+            valid: bool = (proof_replay_fact_trace_entry_with_cache(report, trace_index) can Global{Read,Write})
             report.traces.origin_indices.clear()
             report.traces.origin_snapshots.clear()
             return valid
@@ -18,7 +18,7 @@ extend ElisaProof:
         # Standalone provenance entry point for auditors and adversarial harnesses. Require both
         # independently implemented views so this audit API detects drift between source-level
         # reconstruction and the authoritative source-neutral kernel trace.
-        def proof_replay_fact_trace_entry_with_cache[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global.Read, Global.Write]:
+        def proof_replay_fact_trace_entry_with_cache[@r](report: mutable ProofReport& @r, trace_index: usize) -> bool can[Global{Read, Write}]:
             # This entry has no active certificate context. Ignore caller-retained report
             # context and rebuild every cache it uses from the current mutable report.
             report.replay_owner_line <- 0
@@ -220,6 +220,52 @@ extend ElisaProof:
             true
 
     private:
+        def proof_replay_source_work_charge_or_exhaust(amount: usize, source_work: mutable usize&) -> bool:
+            return true if proof_replay_source_work_charge(amount, source_work)
+            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            false
+
+        def proof_replay_receipt_discharges_return_with_work[@r](report: ProofReport&, receipt: ProofReplayReceipt[r], name: sview, line: u32, source_work: mutable usize&) -> (complete: bool, discharged: bool):
+            return (true, false) if name == "" or line == 0 or not receipt.issued
+            for finding in report.findings |finding, name, line, source_work|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(finding.name), source_work)
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                finding_name_matches: bool = finding.name == name
+                return (true, false) if finding_name_matches or finding.line == line
+            discharged: mutable bool = false
+            for goal_id in 0..<report.goal_attempts.count |goal_id, report, receipt, name, line, discharged, source_work|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(attempt.name), source_work)
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
+                attempt_name_matches: bool = attempt.name == name
+                if attempt_name_matches and attempt.line == line:
+                    return (true, false) if not attempt.proven or not proof_replay_receipt_attempt_status(receipt, goal_id)
+                    discharged <- true
+            (true, discharged)
+
+        def proof_replay_filter_refined_diagnostics_with_work[@r](diagnostics: darray[Semantic::Diagnostic]&, report: ProofReport&, receipt: ProofReplayReceipt[r], refined_functions: darray[sview]&, source_work: mutable usize&) -> (complete: bool, kept: darray[Semantic::Diagnostic]) can[Memory.Allocate]:
+            kept: mutable darray[Semantic::Diagnostic] = []
+            for diagnostic in diagnostics |diagnostic, kept, report, receipt, refined_functions, source_work|:
+                return (false, kept) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                candidate: bool = diagnostic.kind == Semantic::DiagnosticKind.EnsureNotProven and diagnostic.detail != "violated"
+                refined: mutable bool = false
+                if candidate:
+                    for refined_name in refined_functions |diagnostic, refined, source_work|:
+                        return (false, kept) if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                        return (false, kept) if not proof_replay_source_work_charge_or_exhaust(sview_len(refined_name), source_work)
+                        return (false, kept) if not proof_replay_source_work_charge_or_exhaust(sview_len(diagnostic.name), source_work)
+                        refined <- true if refined_name == diagnostic.name
+                        break if refined
+                superseded: mutable bool = false
+                if candidate and refined:
+                    discharge: (complete: bool, discharged: bool) = proof_replay_receipt_discharges_return_with_work(report, receipt, diagnostic.name, diagnostic.line, source_work)
+                    return (false, kept) if not discharge.complete
+                    superseded <- discharge.discharged
+                kept.push(diagnostic) if not superseded
+            (true, kept)
+
         def proof_replay_attempt_statuses_and_complete_with_work(report: ProofReport&, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             return false if not proof_replay_attempt_statuses_with_work(report, replayed, source_work)
             return false if report.replay_gaps != 0 or report.replayed != report.certificates.count
@@ -248,7 +294,7 @@ extend ElisaProof:
                     return false if not proof_replay_attempt_certificate_replayed_with_work(report, attempt, attempt_work)
             return true
 
-        def proof_replay_receipt_from_report(report: ProofReport&, source_validated: bool) -> ProofReplayReceipt can[Memory.Allocate]:
+        def proof_replay_receipt_from_report[@r](report: ProofReport& @r, source_validated: bool) -> ProofReplayReceipt[r] can[Memory.Allocate]:
             attempt_statuses: mutable darray[bool] = []
             source_work: mutable usize = 0
             complete: mutable bool = proof_replay_attempt_statuses_and_complete_with_work(report, &attempt_statuses, &source_work)
@@ -349,54 +395,152 @@ extend ElisaProof:
                 report.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS
 
     public:
+        # Renderers and other modules may share the replay work cap without depending on
+        # ElisaProof's private budget constant.
+        def proof_replay_summary_source_work_limit() -> usize:
+            PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
         # Replay bookkeeping stays private on the mutable report. These accessors expose
         # diagnostics without giving renderer modules authority to change replay state.
         def proof_report_replay_gap_count(report: ProofReport&) -> u32:
             report.replay_gaps
 
-        # A receipt owns the status vectors produced by this replay batch, so later edits to
-        # report counters cannot rewrite those recorded outcomes. It is not a frozen report or
-        # a claim-identity proof: callers must not reuse its positional statuses after mutating
-        # attempts, certificates, or kernel evidence.
-        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt can[Memory.Allocate, Global.Read, Global.Write]:
+        # Standalone compatibility API: the returned receipt is a replay-status snapshot only.
+        # It does not freeze or source-bind the mutable caller report; use the combined checked
+        # view below for any claim that needs source authorization.
+        def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt[r] can[Memory.Allocate, Global.Read, Global.Write]:
             (proof_replay_certificates_mutating(report) can Global{Read,Write})
             return proof_replay_receipt_from_report(report, false)
 
+    public:
 
-        def proof_replay_receipt_is_issued(receipt: ProofReplayReceipt) -> bool:
+        def proof_check_and_replay_with_source[@r](source_arena: mutable Arena& @r, diagnostics: mutable darray[Semantic::Diagnostic]& @r, source: ProofSourceAnalysis[r], focus_function: sview, linear_hints: darray[i64]&) -> ProofCheckedView[r] can[Memory.Allocate, Global.Read, Global.Write]:
+            in source_arena:
+                report: mutable ProofReport& @r = new[r] proof_empty_report()
+                diagnostics.clear()
+                view_source: ProofSourceAnalysis[r] = source
+                empty_receipt: ProofReplayReceipt[r]& @r = new[r] ProofReplayReceipt{}
+                return ProofCheckedView{report: report, receipt: empty_receipt, source_analysis: view_source} if not view_source.issued
+                source_identity: uintptr = view_source.source_identity
+                source_file_identity: uintptr = view_source.file_identity
+                source_bytes: usize = view_source.source_bytes
+                source_fingerprint: u32 = view_source.source_fingerprint
+                source_import_failed: bool = view_source.import_failed
+                source_stray_nul_line: u32 = view_source.stray_nul_line
+                pass_statement_offsets: darray[u32] = view_source.pass_statement_offsets
+                refinement_findings: darray[ProofFinding] = view_source.refinement_findings
+                refined_functions: darray[sview] = view_source.refined_functions
+                literal_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = view_source.literal_ensure_inventory
+                assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = view_source.assert_by_inventory
+                file: Ast::File& = view_source.file
+                parse_failed: bool = file.errors.count > 0 or source_stray_nul_line > 0
+                report.pass_statement_offsets <- pass_statement_offsets
+                for hint in linear_hints |report|:
+                    report.linear_hints.push(hint)
+                if parse_failed:
+                    for parse_error in file.errors |report|:
+                        proof_add_finding(report, "parse-error", parse_error.line, "", "source could not be parsed; verification was not attempted")
+                    proof_add_finding(report, "parse-error", source_stray_nul_line, "", "source has a NUL byte outside a comment; verification was not attempted") if source_stray_nul_line > 0
+                else:
+                    return ProofCheckedView{report: report, receipt: empty_receipt, source_analysis: view_source} if not (proof_check_with_source_analysis(report, diagnostics, view_source, focus_function) can Global{Read,Write})
+                    for finding in refinement_findings |report|:
+                        report.proof_obligation(false)
+                        proof_add_finding(report, finding.kind, finding.line, finding.name, finding.message)
+                    if focus_function == "":
+                        if not proof_source_literal_ensure_binding_coverage(literal_inventory, report):
+                            source_binding_finding: mutable usize = report.findings.count
+                            for finding_index in 0..<report.findings.count |finding_index, source_binding_finding, report|:
+                                finding: ProofFinding = report.findings[finding_index]
+                                source_binding_finding <- finding_index if finding.kind == "source-obligation-inventory" and finding.name == "" and finding.message == "a supported source postcondition has no distinct source-bound proof attempt"
+                            if source_binding_finding == report.findings.count:
+                                proof_add_finding(report, "source-obligation-inventory", 0, "", "a supported source postcondition has no distinct proof attempt")
+                                source_binding_finding <- report.findings.count - 1
+                            if proof_source_literal_ensure_inventory_has_unsupported(literal_inventory):
+                                report.findings[source_binding_finding].status <- "unsupported"
+                    elif report.findings.count == 0 and diagnostics.count == 0 and not proof_source_analysis_focused_obligations_bound(view_source, report):
+                        proof_add_finding(report, "source-obligation-inventory", 0, focus_function, "a focused source obligation is unsupported or has no distinct replayed proof attempt")
+                        report.findings[report.findings.count - 1].status <- "unsupported" if report.findings.count > 0
+                proof_add_finding(report, "import-error", 0, "", "one or more Elisa include files could not be read") if source_import_failed
+                (proof_replay_certificates_mutating(report) can Global{Read,Write})
+                receipt_value: ProofReplayReceipt[r] = proof_replay_receipt_from_report(report, false)
+                receipt: mutable ProofReplayReceipt[r]& @r = new[r] receipt_value
+                return ProofCheckedView{report: report, receipt: empty_receipt, source_analysis: view_source} if not receipt.issued
+                source_work: mutable usize = 0
+                if not parse_failed:
+                    filtered: (complete: bool, kept: darray[Semantic::Diagnostic]) = proof_replay_filter_refined_diagnostics_with_work(diagnostics, report, receipt, refined_functions, &source_work)
+                    filtered_complete: bool = filtered.complete
+                    diagnostics <- filtered.kept if filtered_complete
+                semantic_counts: mutable (visible: u32, errors: u32) = (0, 1)
+                semantic_count_status: (complete: bool, visible: u32, errors: u32) = proof_semantic_diagnostic_counts_with_work(diagnostics, report, &source_work)
+                semantic_counts <- (semantic_count_status.visible, semantic_count_status.errors) if semantic_count_status.complete
+                receipt.semantic_visible <- semantic_counts.visible
+                receipt.semantic_errors <- semantic_counts.errors
+                source_structure_failure: sview = "source-validation-incomplete" if parse_failed else proof_source_analysis_report_structure_bound_failure(true, source_file_identity, report, &source_work)
+                if source_structure_failure == "":
+                    receipt.source_identity <- source_identity
+                    receipt.source_file_identity <- source_file_identity
+                    receipt.source_bytes <- source_bytes
+                    receipt.source_fingerprint <- source_fingerprint
+                    receipt.source_bound <- true
+                    receipt.source_validated <- true
+                    goal_finding_clear: mutable darray[bool] = []
+                    goal_finding_snapshot_ready: mutable bool = false
+                    source_admission_snapshot: (complete: bool, failure: sview, source_checks_complete: bool, source_complete: bool, source_admissible: bool) = proof_source_analysis_report_admission_snapshot(view_source, report, source_import_failed, semantic_counts.errors, receipt.complete, &goal_finding_clear, &goal_finding_snapshot_ready, &source_work)
+                    receipt.source_admission_snapshot_complete <- source_admission_snapshot.complete
+                    receipt.source_admission_failure <- source_admission_snapshot.failure
+                    receipt.source_checks_complete <- source_admission_snapshot.source_checks_complete
+                    receipt.source_report_complete <- source_admission_snapshot.source_complete
+                    receipt.source_report_admissible <- source_admission_snapshot.source_admissible
+                    source_goal_snapshot: (statuses: darray[bool], complete: bool, claims_admissible: bool) = proof_source_analysis_goal_admission_snapshot(view_source, report, source_import_failed, semantic_counts.errors, &goal_finding_clear, goal_finding_snapshot_ready, source_work)
+                    source_goal_statuses_complete: bool = source_goal_snapshot.complete
+                    source_claims_admissible: bool = source_goal_snapshot.claims_admissible
+                    receipt.source_goal_statuses <- source_goal_snapshot.statuses if source_goal_statuses_complete else []
+                    receipt.source_goal_statuses_complete <- source_goal_statuses_complete
+                    receipt.source_claims_admissible <- source_claims_admissible
+                    theorem_source_snapshot: (statuses: darray[(source_admissible: bool, declaration_identity_unambiguous: bool)], complete: bool) = proof_report_theorem_source_status_snapshot(report, receipt.source_goal_statuses, receipt.source_goal_statuses_complete, source_import_failed, semantic_counts.errors, &source_work)
+                    theorem_source_snapshot_complete: bool = theorem_source_snapshot.complete
+                    receipt.theorem_source_admissions <- theorem_source_snapshot.statuses if theorem_source_snapshot_complete else []
+                    receipt.theorem_source_admissions_complete <- theorem_source_snapshot_complete
+                else:
+                    receipt.source_admission_snapshot_complete <- false
+                    receipt.source_admission_failure <- source_structure_failure
+                return proof_checked_view_create(report, receipt, view_source)
+
+
+        def proof_replay_receipt_is_issued[@r](receipt: ProofReplayReceipt[r]) -> bool:
             receipt.issued
 
-        def proof_replay_receipt_is_complete(receipt: ProofReplayReceipt) -> bool:
+        def proof_replay_receipt_is_complete[@r](receipt: ProofReplayReceipt[r]) -> bool:
             receipt.issued and receipt.complete
 
-        def proof_replay_receipt_source_validated(receipt: ProofReplayReceipt) -> bool:
+        def proof_replay_receipt_source_validated[@r](receipt: ProofReplayReceipt[r]) -> bool:
             receipt.issued and receipt.source_validated
 
-        def proof_replay_receipt_attempt_count(receipt: ProofReplayReceipt) -> usize:
+        def proof_replay_receipt_attempt_count[@r](receipt: ProofReplayReceipt[r]) -> usize:
             return 0 if not receipt.issued
             receipt.attempt_statuses.count
 
-        def proof_replay_receipt_certificate_count(receipt: ProofReplayReceipt) -> usize:
+        def proof_replay_receipt_certificate_count[@r](receipt: ProofReplayReceipt[r]) -> usize:
             return 0 if not receipt.issued
             receipt.certificate_statuses.count
 
-        def proof_replay_receipt_gap_count(receipt: ProofReplayReceipt) -> (available: bool, count: u32):
+        def proof_replay_receipt_gap_count[@r](receipt: ProofReplayReceipt[r]) -> (available: bool, count: u32):
             return (false, 0) if not receipt.issued
             (true, receipt.replay_gap_count)
 
-        def proof_replay_receipt_attempt_status(receipt: ProofReplayReceipt, attempt_index: usize) -> bool:
+        def proof_replay_receipt_attempt_status[@r](receipt: ProofReplayReceipt[r], attempt_index: usize) -> bool:
             return false if not receipt.issued or attempt_index >= receipt.attempt_statuses.count
             receipt.attempt_statuses[attempt_index]
 
-        def proof_replay_receipt_attempt_is_proven(receipt: ProofReplayReceipt, attempt_index: usize) -> bool:
+        def proof_replay_receipt_attempt_is_proven[@r](receipt: ProofReplayReceipt[r], attempt_index: usize) -> bool:
             return false if not receipt.issued or not receipt.source_validated or attempt_index >= receipt.attempt_proven_statuses.count
             receipt.attempt_proven_statuses[attempt_index]
 
-        def proof_replay_receipt_certificate_status(receipt: ProofReplayReceipt, certificate_index: usize) -> bool:
+        def proof_replay_receipt_certificate_status[@r](receipt: ProofReplayReceipt[r], certificate_index: usize) -> bool:
             return false if not receipt.issued or certificate_index >= receipt.certificate_statuses.count
             receipt.certificate_statuses[certificate_index]
 
-        def proof_replay_receipt_attempt_statuses_with_work(receipt: ProofReplayReceipt, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+        def proof_replay_receipt_attempt_statuses_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
             return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.attempt_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + receipt.attempt_statuses.count
@@ -404,7 +548,7 @@ extend ElisaProof:
                 replayed.push(status)
             return true
 
-        def proof_replay_receipt_certificate_statuses_with_work(receipt: ProofReplayReceipt, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+        def proof_replay_receipt_certificate_statuses_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
             return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + receipt.certificate_statuses.count
@@ -412,7 +556,7 @@ extend ElisaProof:
                 replayed.push(status)
             return true
 
-        def proof_replay_receipt_certificate_statuses_and_count_with_work(receipt: ProofReplayReceipt, replayed: mutable darray[bool]&, replayed_count: mutable u32&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+        def proof_replay_receipt_certificate_statuses_and_count_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, replayed_count: mutable u32&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
             replayed_count <- 0
             return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work

@@ -1,0 +1,87 @@
+# Source-bound goal admission against a checked report and parser inventories.
+extend ElisaProof:
+    private:
+        # Validate a goal after the caller has checked report-wide structure. Batch callers
+        # pass precomputed finding and literal-source snapshots so report ledgers are scanned once.
+        def proof_report_source_postcondition_ast_goal_attempt_admitted(source_expression: Ast::Expr, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
+            return false if goal_id >= report.goal_attempts.count
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            work_limit: usize = proof_replay_summary_source_work_limit()
+            return false if not proof_replay_summary_expr_charge_with_limit(source_expression, source_work, work_limit)
+            return false if not proof_replay_summary_expr_charge_with_limit(source_expression, source_work, work_limit)
+            return false if not proof_replay_summary_expr_charge_with_limit(source_expression, source_work, work_limit)
+            return false if proof_expr_mentions_name(source_expression, "result") or proof_expr_mentions_name(source_expression, "old") or proof_expr_has_call(source_expression)
+            return false if not proof_replay_summary_expr_equal_with_limit(source_expression, attempt.goal, source_work, work_limit)
+            if attempt.proven:
+                return false if not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
+                return false if not proof_replay_summary_expr_charge_with_limit(certificate.goal, source_work, work_limit)
+                return false if not proof_replay_summary_expr_equal_with_limit(source_expression, certificate.goal, source_work, work_limit)
+            return true
+
+        def proof_report_goal_source_admissible_after_structure_internal(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, has_literal_index: bool, postcondition_ast_index: ProofSourcePostconditionAstIndex, has_postcondition_ast_index: bool, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, has_finding_snapshot: bool, source_work: mutable usize&) -> bool:
+            return false if goal_id >= report.goal_attempts.count
+            attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+            selected_event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, goal_id, source_work)
+            return false if not selected_event.found
+            selected: ProofObligationEntry = selected_event.entry
+            source_kind_bytes: usize = sview_len(selected.source_kind)
+            return false if not proof_report_source_work_charge(source_kind_bytes, source_work)
+            event_admitted: mutable bool = false
+            if selected.source_kind == "postcondition":
+                return false if not proof_report_source_work_charge(sview_len(selected.source_name), source_work)
+                return false if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                return false if selected.source_name != attempt.name
+                # The report line names the function; literal rows key the ensure statement.
+                source_contract_line: mutable u32 = 0
+                if has_postcondition_ast_index:
+                    source_ast: (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr) = proof_source_postcondition_ast_index_find(postcondition_ast_index, selected.source_name, selected.source_line, selected.source_obligation_index, source_work)
+                    return false if not source_ast.complete or not source_ast.found or source_ast.count != 1
+                    source_contract_line <- source_ast.contract_line
+                    event_admitted <- proof_report_source_postcondition_ast_goal_attempt_admitted(source_ast.expression, report, goal_id, source_work)
+                if has_literal_index:
+                    return false if not has_postcondition_ast_index
+                    if not event_admitted:
+                        literal_match: (complete: bool, found: bool, count: usize, expected_index: usize) = proof_source_literal_ensure_admission_index_find(literal_index, selected.source_name, source_contract_line, source_work)
+                        return false if not literal_match.complete or not literal_match.found or literal_match.count != 1 or literal_match.expected_index >= literal_ensure_inventory.count
+                        expected: (name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool) = literal_ensure_inventory[literal_match.expected_index]
+                        return false if not proof_report_source_work_charge(sview_len(expected.returned_parameter), source_work)
+                        event_admitted <- selected.source_obligation_index == 0 and proof_report_source_literal_ensure_goal_attempt_admitted(expected, report, goal_id, source_work)
+            elif selected.source_kind == "changes" or selected.source_kind == "preserves" or selected.source_kind == "allow" or selected.source_kind == "preserve":
+                event_admitted <- false
+            elif selected.source_kind == "":
+                event_admitted <- proof_source_assert_by_goal_attempt_admitted(assert_by_inventory, report, goal_id, source_work)
+            else:
+                return false
+            return false if not event_admitted
+            if has_finding_snapshot:
+                return false if goal_id >= goal_finding_clear.count or not goal_finding_clear[goal_id]
+            else:
+                for finding in report.findings |attempt, selected, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    return false if not proof_report_source_work_charge(sview_len(finding.name), source_work)
+                    return false if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                    associated: mutable bool = finding.has_goal and finding.goal_id == goal_id
+                    associated <- true if finding.name == attempt.name and (finding.line == attempt.line or finding.line == selected.source_line)
+                    if associated:
+                        finding_kind_bytes: usize = sview_len(finding.kind)
+                        return false if not proof_report_source_work_charge(finding_kind_bytes, source_work)
+                        return false if finding.kind == "contract-proposition-type" or finding.kind == "parse-error" or finding.kind == "arithmetic-safety-refuted" or finding.kind == "semantic-permission-ungranted"
+            return true
+
+        def proof_report_goal_source_admissible_after_structure(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, source_work: mutable usize&) -> bool:
+            no_finding_snapshot: darray[bool] = []
+            proof_report_goal_source_admissible_after_structure_internal(report, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, no_finding_snapshot, false, source_work)
+
+        def proof_report_goal_source_admissible_after_structure_with_snapshots(report: ProofReport&, goal_id: usize, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, literal_index: ProofSourceLiteralEnsureAdmissionIndex, postcondition_ast_index: ProofSourcePostconditionAstIndex, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
+            return false if not literal_index.valid or not postcondition_ast_index.valid
+            proof_report_goal_source_admissible_after_structure_internal(report, goal_id, literal_ensure_inventory, literal_index, true, postcondition_ast_index, true, assert_by_inventory, goal_finding_clear, true, source_work)
+
+    private:
+        # This raw helper is used only after the checked-view transaction has supplied its frozen
+        # parser inventories. Public source decisions are issued through ProofCheckedView.
+        def proof_report_goal_source_admissible(report: ProofReport&, goal_id: usize, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
+            return false if goal_id >= report.goal_attempts.count or import_failed or semantic_errors != 0
+            source_work: mutable usize = 0
+            return false if not proof_report_source_structure_consistent(report, &source_work)
+            proof_report_goal_source_admissible_after_structure(report, goal_id, literal_ensure_inventory, assert_by_inventory, &source_work)

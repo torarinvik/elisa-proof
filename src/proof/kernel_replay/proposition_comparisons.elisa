@@ -1,5 +1,22 @@
 extend ElisaProofKernelReplay:
     private:
+        # A tag test names a variant without constructing its value, so payload variants are
+        # valid here even though they have no `enum-member` value binding. Require a unique tag
+        # row owned by the exact named declaration identity.
+        def proof_kernel_replay_enum_tag_belongs_to_type(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, name: sview, expected: ProofKernelInferredSort, work: mutable usize&) -> bool:
+            return false if name == "" or not expected.known or expected.family != "named" or expected.name == "" or expected.type_identity == 0
+            type_rows: mutable usize = 0
+            tag_rows: mutable usize = 0
+            for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, name, expected, type_rows, tag_rows, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                if binding.kind == "type" and binding.type_identity == expected.type_identity:
+                    type_rows <- type_rows + 1
+                    return false if not proof_kernel_replay_type_text_equal(binding.name, expected.name, work) or not proof_kernel_replay_type_text_equal(binding.type_name, expected.name, work) or binding.sort != "named"
+                if binding.kind == "enum-tag" and proof_kernel_replay_type_text_equal(binding.name, name, work) and proof_kernel_replay_type_text_equal(binding.owner, expected.name, work) and binding.type_identity == expected.type_identity and binding.owner_type_identity == expected.type_identity:
+                    tag_rows <- tag_rows + 1
+            type_rows == 1 and tag_rows == 1
+
         # Enum tags have no payload value in the source-neutral term language. They are admitted
         # only as the right operand of `is`, and only when the declaration environment ties that
         # exact variant name to the receiver's declared enum type.
@@ -7,18 +24,14 @@ extend ElisaProofKernelReplay:
             return false if not left.known or left.family != "named" or node.right >= nodes.count
             variant: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
             return false if (variant.kind != "scope" and variant.kind != "field") or variant.name == ""
-            return false if left.name == "" or not proof_kernel_replay_symbol_matches_name(nodes, variant.left, left.name, 0, work)
-            enum_type: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, "type", left.name, "", 0, work)
-            return false if not enum_type.known or enum_type.binding.type_identity == 0 or left.type_identity != enum_type.binding.type_identity
-            binding_count: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            for index in 0..<binding_count |index, environment, variant, left, enum_type, work|:
-                return false if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                return true if binding.kind == "enum-tag" and binding.name == variant.name and binding.owner == left.name and binding.owner_type_identity == enum_type.binding.type_identity
-            return false
+            owner_path: mutable darray[sview] = []
+            return false if not proof_kernel_replay_enum_type_path(nodes, variant.left, &owner_path, 0, work)
+            qualified_owner: ProofKernelInferredSort = proof_kernel_replay_enum_type_sort_for_path(environment, owner_path, work)
+            return false if not qualified_owner.known or not proof_kernel_replay_sort_equal(left, qualified_owner, work)
+            proof_kernel_replay_enum_tag_belongs_to_type(environment, variant.name, qualified_owner, work)
 
         def proof_kernel_replay_named_type_test_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, right: ElisaProofKernelCore::ProofKernelNode, left: ProofKernelInferredSort, work: mutable usize&) -> bool:
-            return false if not left.known or left.family != "named" or right.kind != "ident" or right.name != left.name
+            return false if not left.known or left.family != "named" or right.kind != "ident" or not proof_kernel_replay_type_text_equal(right.name, left.name, work)
             type_binding: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, "type", right.name, "", 0, work)
             return type_binding.known and type_binding.binding.sort == "named" and type_binding.binding.type_identity == left.type_identity
 
@@ -28,6 +41,10 @@ extend ElisaProofKernelReplay:
             if node.operator == "is":
                 right_node: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
                 return proof_kernel_replay_enum_tag_test_valid(nodes, environment, node, left, work) if (right_node.kind == "scope" or right_node.kind == "field")
+                if right_node.kind == "shorthand":
+                    # Tags do not need a value constructor. Resolve shorthand against the exact
+                    # scrutinee enum identity, including variants that carry payloads.
+                    return proof_kernel_replay_enum_tag_belongs_to_type(environment, right_node.name, left, work)
                 return proof_kernel_replay_named_type_test_valid(environment, right_node, left, work)
             left_sort: mutable ProofKernelInferredSort = left
             right_sort: mutable ProofKernelInferredSort = right
@@ -42,7 +59,7 @@ extend ElisaProofKernelReplay:
                     left_sort <- proof_kernel_replay_enum_member_sort_for_type(environment, nodes[node.left].name, right_sort, work)
             return false if not left_sort.known or not right_sort.known
             if node.operator == "in":
-                return (proof_kernel_replay_numeric_sort(left_sort) and (right_sort.element_family == "integer" or right_sort.element_family == "floating" or right_sort.element_family == "character")) or (left_sort.family == right_sort.element_family and left_sort.name == right_sort.element_name) if right_sort.family == "container"
+                return (proof_kernel_replay_numeric_sort(left_sort) and (right_sort.element_family == "integer" or right_sort.element_family == "floating" or right_sort.element_family == "character")) or (proof_kernel_replay_type_text_equal(left_sort.family, right_sort.element_family, work) and proof_kernel_replay_type_text_equal(left_sort.name, right_sort.element_name, work)) if right_sort.family == "container"
                 return false
             ordering: bool = node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">="
             return false if not equality and not ordering
@@ -63,6 +80,6 @@ extend ElisaProofKernelReplay:
             return true if proof_kernel_replay_numeric_sort(left_sort) and proof_kernel_replay_numeric_sort(right_sort)
             return true if equality and left_sort.family == "boolean" and right_sort.family == "boolean"
             return true if equality and left_sort.family == "string" and right_sort.family == "string"
-            return true if equality and left_sort.family == "aggregate" and right_sort.family == "aggregate" and proof_kernel_replay_sort_equal(left_sort, right_sort)
-            return true if equality and left_sort.family == "named" and right_sort.family == "named" and proof_kernel_replay_sort_equal(left_sort, right_sort)
+            return true if equality and left_sort.family == "aggregate" and right_sort.family == "aggregate" and proof_kernel_replay_sort_equal(left_sort, right_sort, work)
+            return true if equality and left_sort.family == "named" and right_sort.family == "named" and proof_kernel_replay_sort_equal(left_sort, right_sort, work)
             return false

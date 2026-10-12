@@ -257,13 +257,15 @@ extend ElisaProof:
             return start <= total and count <= total - start
 
         def proof_declaration_has_enum(index: ProofEnumIndex, wanted: sview) -> bool:
-            return false if not index.complete or index.bucket_heads.count == 0 or wanted == ""
+            return false if not index.complete or index.bucket_heads.count == 0 or index.names.count != index.name_hashes.count or index.names.count != index.next_indices.count or wanted == ""
             hash: u32 = proof_name_hash(wanted)
             slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
             entry: mutable usize = index.bucket_heads[slot]
-            while entry < index.names.count |entry, hash, wanted, index|:
+            steps: mutable usize = 0
+            while entry < index.names.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, hash, wanted, index|:
                 return true if index.name_hashes[entry] == hash and index.names[entry] == wanted
                 entry <- index.next_indices[entry]
+                steps <- steps + 1
             return false
 
         def proof_ranking_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> bool:
@@ -413,6 +415,10 @@ extend ElisaProof:
             # boundary: accepting it here would put an `Invalid`-containing expression in the live
             # source context while the report later filters it from certificate premises. Keep the
             # producer and replay views identical by rejecting unsupported facts before encoding.
+            # The erased proof model also has no identity semantics for fresh runtime values.
+            # This boundary must use the report's source-bound call table because callers can
+            # synthesize or transfer a call term after their initial source guard.
+            return false if proof_fact_expression_has_fresh_runtime_value(report, expression)
             return false if not proof_kernel_expression_supported(expression)
             return false if not proof_kernel_report_append_allowed(report, report.traces.records.count, 1, name)
             encoded: (known: bool, root: usize) = proof_kernel_encode_annotated_checked(expression, report, name)
@@ -431,6 +437,9 @@ extend ElisaProof:
         # axiom. Runtime facts and imported contract summaries continue to use proof_trace_fact;
         # they are explicit semantic assumptions at this boundary.
         def proof_add_derived_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, kind: sview, line: u32, name: sview) -> void:
+            return if proof_fact_expression_has_fresh_runtime_value(report, expression)
+            for premise in facts:
+                return if proof_fact_expression_has_fresh_runtime_value(report, premise)
             return if not proof_kernel_expression_supported(expression)
             return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
             return if not proof_kernel_report_append_allowed(report, report.traces.records.count, 1, name)
@@ -467,8 +476,10 @@ extend ElisaProof:
             # never be validated by replay, so a fact derived from it would certify at the
             # producer and gap at the kernel. Refuse the derivation instead; the fact is simply
             # not available, which is the conservative direction.
+            return if proof_fact_expression_has_fresh_runtime_value(report, expression)
             return if not proof_kernel_expression_supported(expression)
             for premise in premises:
+                return if proof_fact_expression_has_fresh_runtime_value(report, premise)
                 return if not proof_kernel_expression_supported(premise)
             return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
             return if not proof_kernel_report_append_allowed(report, report.traces.records.count, 1, name)
@@ -496,7 +507,22 @@ extend ElisaProof:
             report.kernel.fact_trace_premises.extend(kernel_premises)
             report.traces.records <- report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded_expression.root, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.traces.summary_names.count, summary_bindings_count: 0, summary_requires_start: report.traces.summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
 
-        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize, has_call_old: bool, call_old_value: Ast::Expr, dependency_line: u32) -> void:
+        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize, has_call_old: bool, call_old_value: Ast::Expr, dependency_line: u32) -> void:
+            return if proof_expression_has_fresh_runtime_value(expression, functions, 0) or not proof_contract_calls_are_pure(expression, functions)
+            for argument in argument_values:
+                if proof_expr_has_call(argument):
+                    return if proof_fact_expression_has_fresh_runtime_value(report, argument)
+                else:
+                    return if proof_expression_has_fresh_runtime_value(argument, functions, 0)
+            if proof_expr_has_call(result_value):
+                return if proof_fact_expression_has_fresh_runtime_value(report, result_value)
+            else:
+                return if proof_expression_has_fresh_runtime_value(result_value, functions, 0)
+            if has_call_old:
+                if proof_expr_has_call(call_old_value):
+                    return if proof_fact_expression_has_fresh_runtime_value(report, call_old_value)
+                else:
+                    return if proof_expression_has_fresh_runtime_value(call_old_value, functions, 0)
             return if not proof_kernel_expression_supported(expression)
             return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
             return if parameter_names.count != argument_values.count

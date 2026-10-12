@@ -39,6 +39,9 @@ extend ElisaProof:
             report.obligation_inventory.clear()
             report.assert_hole_positions.clear()
             report.focused_function <- ""
+            report.source_file_identity <- 0
+            report.source_analysis_bound <- false
+            proof_fact_call_shape_snapshot_reset(report.fact_call_shapes)
             report.certificates.clear()
             report.certificate_facts.clear()
             report.kernel.nodes.clear()
@@ -61,6 +64,7 @@ extend ElisaProof:
             report.traces.next_expression_indices.clear()
             report.traces.lookup_work_used <- 0
             proof_goal_cache_reset(report)
+            proof_linear_hint_index_reset(report)
             report.type_bounds.seen.clear()
             report.type_bounds.seen_hashes.clear()
             report.type_bounds.owner <- ""
@@ -69,10 +73,19 @@ extend ElisaProof:
             report.budgets.frame_call_reported <- false
             report.budgets.resource_steps <- 0
             report.budgets.resource_reported <- false
+            report.budgets.resource_pattern_work <- 0
+            report.budgets.resource_pattern_reported <- false
             report.budgets.return_steps <- 0
             report.budgets.return_step_budget <- 0
             report.budgets.return_reported <- false
             report.budgets.return_fact_state_budget <- 0
+            report.budgets.return_source_work <- 0
+            report.budgets.return_source_reported <- false
+            report.budgets.pattern_source_type_work <- 0
+            report.budgets.lemma_purity_source_work <- 0
+            report.budgets.lemma_purity_source_reported <- false
+            report.budgets.assert_by_source_work <- 0
+            report.budgets.assert_by_source_reported <- false
             report.current_return_unsigned_width <- 0
             report.current_return_signed_width <- 0
             report.traces.premises.clear()
@@ -130,6 +143,8 @@ extend ElisaProof:
             report.replay_owner_line <- 0
             report.finding_function <- ""
             report.finding_owner <- ""
+            report.finding_line <- 0
+            report.finding_caller_index <- 0
 
         # The semantic table is deliberately consumed only by this short source-formation
         # phase.  The table owns a large collection of compiler indexes; keeping it alive while
@@ -140,7 +155,15 @@ extend ElisaProof:
             # A report is a complete verification transaction, not an append-only session. Reset
             # every arena and counter before importing a new file; retaining certificates or
             # provenance from a previous file could make a later report observe stale proof state.
+            source_call_identity: uintptr = report.fact_call_shapes.source_identity if report.fact_call_shapes.source_check_active else 0
+            source_call_fingerprint: u32 = report.fact_call_shapes.source_fingerprint if report.fact_call_shapes.source_check_active else 0
+            source_call_active: bool = report.fact_call_shapes.source_check_active
             proof_reset_report(report)
+            if source_call_active and source_call_identity != 0:
+                report.fact_call_shapes.source_identity <- source_call_identity
+                report.fact_call_shapes.source_fingerprint <- source_call_fingerprint
+                report.fact_call_shapes.source_check_active <- true
+                report.source_file_identity <- source_call_identity
             report.source_declarations.extend(file.top_decls)
             report.source_extern_parameters.extend(file.extern_params)
             # Lines of functions with region parameters: a lend to one may outlive the call.
@@ -159,20 +182,30 @@ extend ElisaProof:
                 kernel_global_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
                 kernel_type_entries: mutable darray[ProofSourceKernelTypeEntry] = []
                 root_module_path: darray[sview] = []
-                kernel_type_index_known: bool = proof_source_kernel_collect_type_index(file.top_decls, &kernel_type_entries, root_module_path, 0)
-                kernel_type_index: mutable ProofSourceKernelTypeIndex = proof_source_kernel_build_type_index(kernel_type_entries)
-                tuple_label_index: ProofSourceKernelTupleLabelIndex = proof_source_kernel_build_tuple_label_index(file.enum_annotations)
-                kernel_workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], type_index: kernel_type_index, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), typing_work_used: 0}
+                kernel_type_source_work: mutable usize = 0
+                kernel_owner_path_segments: mutable usize = 0
+                kernel_type_index_known: mutable bool = proof_source_kernel_collect_type_index(file.top_decls, &kernel_type_entries, root_module_path, &kernel_type_source_work, &kernel_owner_path_segments, 0)
+                kernel_type_index: mutable ProofSourceKernelTypeIndex = proof_source_kernel_build_type_index(kernel_type_entries, &kernel_type_source_work)
+                kernel_type_index_known <- false if kernel_type_source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not kernel_type_index.complete
+                tuple_label_index: ProofSourceKernelTupleLabelIndex = proof_source_kernel_build_tuple_label_index(file.enum_annotations, &kernel_type_source_work)
+                kernel_workspace: mutable ProofSourceKernelFormationWorkspace = ProofSourceKernelFormationWorkspace{nodes: [], children: [], visible_name_slots: [], type_index: kernel_type_index, tuple_label_index: tuple_label_index, validation_workspace: ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new(), typing_workspace: ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_new(), typing_work_used: 0, source_work_used: kernel_type_source_work}
                 kernel_bindings_known: mutable bool = false
                 if kernel_type_index_known:
-                    kernel_bindings_known <- proof_source_kernel_global_bindings(file.top_decls, file.enum_annotations, tuple_label_index, kernel_type_index, &kernel_global_bindings)
+                    kernel_bindings_known <- proof_source_kernel_global_bindings(file.top_decls, file.enum_annotations, tuple_label_index, kernel_type_index, &kernel_global_bindings, &kernel_type_source_work)
+                kernel_bindings_known <- false if kernel_type_source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                kernel_workspace.source_work_used <- kernel_type_source_work
                 if kernel_bindings_known:
                     kernel_bindings_known <- ElisaProofKernelReplay::proof_kernel_replay_typing_workspace_prepare_globals(kernel_global_bindings, &kernel_workspace.typing_workspace)
                 if kernel_bindings_known:
                     proof_validate_propositions_in_declarations(file, file.top_decls, kernel_global_bindings, &kernel_workspace, source_types, report)
+                    if kernel_workspace.source_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "kernel proposition source projection exceeded its validated work bound", "kernel-source-projection-work", kernel_workspace.source_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 else:
                     report.proof_obligation(false)
-                    proof_add_finding(report, "contract-proposition-type", 0, "", "kernel typing declaration environment exceeded its bounded representation")
+                    if kernel_type_source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "kernel type index exceeded its validated work bound", "kernel-type-index-work", kernel_type_source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    else:
+                        proof_add_finding(report, "contract-proposition-type", 0, "", "kernel typing declaration environment exceeded its bounded representation")
             return true
 
         # This is the large, source-independent proof phase.  It must not receive or retain the
@@ -180,40 +213,114 @@ extend ElisaProof:
     private:
         def proof_check_core(file: Ast::File&, report: mutable ProofReport&, focus_function: sview) -> void:
             report.focused_function <- focus_function
+            name_index_work: mutable usize = 0
             # Contract quantifier syntax is erased from the AST and recovered through this
             # compiler-owned side table. Preserve the exact source annotations in the report so
             # a source-bound tactic store cannot substitute script-supplied quantifier kinds.
             report.source_annotations.clear()
             for annotation in file.enum_annotations |report|:
+                if not proof_report_source_work_charge(1, name_index_work) or not proof_report_source_work_charge(sview_len(annotation.owner), name_index_work) or not proof_report_source_work_charge(sview_len(annotation.name), name_index_work):
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source annotation snapshot exceeded its validated work bound", "annotation-snapshot-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
                 report.source_annotations.push(annotation)
             report.assert_hole_positions.clear()
             for hole in file.assert_hole_positions |report|:
+                if not proof_report_source_work_charge(1, name_index_work):
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source assertion-hole snapshot exceeded its validated work bound", "assert-hole-snapshot-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
                 report.assert_hole_positions.push(hole)
-            proof_build_operator_impl_index(report)
-            report.source_primitive_operator_mask <- proof_source_primitive_operator_mask(report.source_annotations)
+            operator_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_operator_impl_index(report, &name_index_work)
+            if not operator_index_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "operator-implementation index could not be built within its validated bounds", operator_index_status.reason, operator_index_status.observed, operator_index_status.limit)
+                return
+            source_operator_mask_status: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_from_index(report, &name_index_work)
+            if not source_operator_mask_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "primitive operator admission mask exceeded its validated work bound", "primitive-operator-mask-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            report.source_primitive_operator_mask <- source_operator_mask_status.mask
             lemmas: mutable ProofLemmaTable = proof_empty_lemmas()
             functions: mutable ProofFunctionTable = proof_empty_functions()
-            lemma_markers: ProofLemmaAnnotationIndex = proof_lemma_annotation_index(file)
-            proof_collect_lemmas(file, file.top_decls, lemma_markers, &lemmas)
-            proof_build_lemma_index(&lemmas)
+            lemma_marker_build: (index: ProofLemmaAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_lemma_annotation_index(file, &name_index_work)
+            if not lemma_marker_build.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-annotation index could not be built within its validated bounds", lemma_marker_build.reason, lemma_marker_build.observed, lemma_marker_build.limit)
+                return
+            lemma_markers: ProofLemmaAnnotationIndex = lemma_marker_build.index
+            proof_collect_lemmas(file, file.top_decls, lemma_markers, &lemmas, &name_index_work)
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma metadata collection exceeded its validated work bound", "lemma-metadata-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            lemma_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_lemma_index(&lemmas, &name_index_work)
+            if not lemma_index_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-name index could not be built within its validated bounds", lemma_index_status.reason, lemma_index_status.observed, lemma_index_status.limit)
+                return
             proof_build_lemma_components(&lemmas)
-            functions.type_audit_index <- proof_type_audit_index(file.top_decls)
-            functions.enum_index <- proof_build_enum_index(file.top_decls)
-            functions.frame_annotation_index <- proof_frame_annotation_index(file)
-            proof_collect_local_region_bindings(file, &functions)
-            proof_collect_mutable_local_bindings(file, &functions)
-            proof_collect_loop_accumulators(file, &functions)
+            functions.type_audit_index <- proof_type_audit_index(file.top_decls, &name_index_work)
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "type audit index exceeded its validated work bound", "type-audit-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            functions.enum_index <- proof_build_enum_index(file.top_decls, &name_index_work)
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "enum index exceeded its validated work bound", "enum-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            frame_annotation_build: (index: ProofFrameAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_frame_annotation_index(file, &name_index_work)
+            if not frame_annotation_build.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "frame-annotation index could not be built within its validated bounds", frame_annotation_build.reason, frame_annotation_build.observed, frame_annotation_build.limit)
+                return
+            functions.frame_annotation_index <- frame_annotation_build.index
+            proof_collect_local_region_bindings(file, &functions, &name_index_work)
+            proof_collect_mutable_local_bindings(file, &functions, &name_index_work)
+            proof_collect_loop_accumulators(file, &functions, &name_index_work)
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "local binding metadata collection exceeded its validated work bound", "local-binding-metadata-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             declaration_path: mutable darray[usize] = []
-            proof_collect_functions(file, file.top_decls, lemmas, &functions, &declaration_path, "", 0)
-            proof_build_function_index(&functions)
-            proof_resolve_function_call_targets(&functions)
+            proof_collect_functions(file, file.top_decls, lemmas, &functions, &declaration_path, "", 0, &name_index_work)
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function collection could not classify lemma names within its validated work bound", "lemma-name-lookup-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            function_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_function_index(&functions, &name_index_work)
+            if not function_index_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function-name index could not be built within its validated bounds", function_index_status.reason, function_index_status.observed, function_index_status.limit)
+                return
+            function_alias_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_function_module_aliases(file.enum_annotations, &functions, &name_index_work)
+            if not function_alias_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "module-alias index could not be built within its validated bounds", function_alias_status.reason, function_alias_status.observed, function_alias_status.limit)
+                return
+            fact_call_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_fact_call_shape_indexes(&functions, &name_index_work)
+            if not fact_call_index_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "fact call-shape indexes could not be built within their validated bounds", fact_call_index_status.reason, fact_call_index_status.observed, fact_call_index_status.limit)
+                return
+            fact_call_snapshot_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_fact_call_shape_snapshot(file, report, functions, &name_index_work)
+            if not fact_call_snapshot_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "fact call-shape snapshot could not be built within its validated bounds", fact_call_snapshot_status.reason, fact_call_snapshot_status.observed, fact_call_snapshot_status.limit)
+                return
+            call_target_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_resolve_function_call_targets(report, &functions, &name_index_work)
+            if not call_target_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "call graph targets could not be resolved within their validated bounds", call_target_status.reason, call_target_status.observed, call_target_status.limit)
+                return
+            functions.module_resolution_work_used <- name_index_work
             proof_qualify_repeated_contract_rows(file, &functions)
+            if functions.module_resolution_work_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "qualified contract call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            name_index_work <- functions.module_resolution_work_used
             proof_build_function_components(&functions)
             proof_mark_pure_functions(file, file.top_decls, &functions, report)
+            fact_call_purity_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_fact_call_shape_snapshot_purity(&report.fact_call_shapes, functions, &name_index_work)
+            if not fact_call_purity_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "fact call-shape purity data could not be bound within its validated bounds", fact_call_purity_status.reason, fact_call_purity_status.observed, fact_call_purity_status.limit)
+                return
+            functions.module_resolution_work_used <- name_index_work
             proof_check_structural_termination(file, file.top_decls, functions, report, true)
             (proof_compute_verified_lemmas(file, file.top_decls, &lemmas, functions, report) can Global{Read,Write})
             (proof_compute_verified_functions(file, file.top_decls, lemmas, &functions, report, focus_function) can Global{Read,Write})
-            proof_record_declarations(file, file.top_decls, lemmas, functions, report)
+            name_index_work <- functions.module_resolution_work_used
+            proof_record_declarations(file, file.top_decls, lemmas, functions, report, &name_index_work)
+            if functions.module_resolution_work_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "declaration reporting could not classify lemma names within its validated work bound", "lemma-name-lookup-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
 
         # A direct API caller receives a report only after every supported simple source
         # postcondition has a matching goal attempt and, when proven, a matching certificate
@@ -262,6 +369,30 @@ extend ElisaProof:
                 (proof_check_core(file, report, focus_function) can Global{Read,Write})
                 if not proof_report_focused_source_literal_ensures_bound(report):
                     proof_add_finding(report, "source-obligation-inventory", 0, focus_function, "a supported focused source postcondition has no distinct source-bound proof attempt")
+
+    private:
+        # Source-analysis entry point. It performs the check itself against the same
+        # parser-owned Ast::File captured by the source capability, then records that exact
+        # file identity in private report state. A report built through a compatibility checker
+        # cannot be retroactively stamped as belonging to an unrelated source.
+        def proof_check_with_source_analysis[@r](report: mutable ProofReport& @r, diagnostics: mutable darray[Semantic::Diagnostic]& @r, source: ProofSourceAnalysis[r], focus_function: sview) -> bool can[Memory.Allocate, Global.Read, Global.Write]:
+            return false if not source.issued
+            return false if report.source_analysis_bound or report.source_file_identity != 0
+            return false if report.goal_attempts.count > 0 or report.certificates.count > 0 or report.source_declarations.count > 0
+            source_file_identity: uintptr = source.file_identity
+            file: Ast::File& = source.file
+            proof_fact_call_shape_snapshot_reset(report.fact_call_shapes)
+            report.fact_call_shapes.source_identity <- source_file_identity
+            report.fact_call_shapes.source_fingerprint <- source.source_fingerprint
+            report.fact_call_shapes.source_check_active <- true
+            report.source_file_identity <- source_file_identity
+            if focus_function == "":
+                (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
+            else:
+                (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, focus_function) can Global{Read,Write})
+            report.fact_call_shapes.source_check_active <- false
+            report.source_analysis_bound <- true
+            return true
 
     private:
         def proof_semantic_diagnostic_refutes_obligation(kind: Semantic::DiagnosticKind) -> bool:

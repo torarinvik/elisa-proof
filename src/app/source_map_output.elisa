@@ -22,7 +22,10 @@ def proof_push_json_source_position(buffer: mutable darray[u8]&, source_map: Pro
     proof_push(buffer, ",\"file_line\":")
     proof_push_number(buffer, source_map.line_numbers[line.usize() - 1])
 
-def proof_push_json_source_files(buffer: mutable darray[u8]&, source_map: ProofSourceMap&) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_source_files(buffer: mutable darray[u8]&, source_map: ProofSourceMap&, work_reserved: bool) -> bool can[Memory.Allocate, Abort.Panic]:
+    if not work_reserved:
+        proof_push(buffer, ",\"files\":[],\"files_complete\":false")
+        return false
     proof_push(buffer, ",\"files\":[")
     path: mutable darray[u8] = []
     first: mutable bool = true
@@ -35,50 +38,102 @@ def proof_push_json_source_files(buffer: mutable darray[u8]&, source_map: ProofS
         else:
             path.push(byte)
     proof_push(buffer, "]")
+    proof_push(buffer, ",\"files_complete\":true")
+    return true
 
 # The owning function of a goal or finding name: the text before the first `.`.
-def proof_function_status_owner(name: sview) -> darray[u8] can[Memory.Allocate, Abort.Panic]:
+def proof_function_status_owner(name: sview, work_used: mutable usize&) -> (complete: bool, owner: darray[u8]) can[Memory.Allocate, Abort.Panic]:
+    return (false, []) if not proof_output_reserve_status_snapshot_work(work_used, sview_len(name))
     owner: mutable darray[u8] = []
     for index in 0..<sview_len(name) |name, owner|:
         break if sview_at(name, index) == '.'.u8()
         owner.push(sview_at(name, index))
-    return owner
+    return (true, owner)
 
-def proof_function_status_same(left: darray[u8]&, right: darray[u8]&) -> bool:
-    return false if left.count != right.count
-    for index in 0..<left.count |left, right|:
-        return false if left[index] != right[index]
-    return true
+def proof_function_status_same_with_work(left: darray[u8]&, right: darray[u8]&, work_used: mutable usize&) -> (complete: bool, equal: bool):
+    return (false, false) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+    return (true, false) if left.count != right.count
+    for index in 0..<left.count |left, right, work_used|:
+        return (false, false) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        return (true, false) if left[index] != right[index]
+    return (true, true)
 
-def proof_push_json_function_status(buffer: mutable darray[u8]&, report: ProofReport&) -> void can[Memory.Allocate, Abort.Panic]:
-    replay_work: mutable usize = 0
-    replayed_goals: mutable darray[bool] = []
-    proof_push_json_function_status_with_replayed(buffer, report, replayed_goals, &replay_work)
+def proof_function_status_slot_with_work(names: mutable darray[darray[u8]]&, goals: mutable darray[u32]&, open_goals: mutable darray[u32]&, findings: mutable darray[u32]&, owner: darray[u8], work_used: mutable usize&) -> (complete: bool, index: usize) can[Memory.Allocate, Abort.Panic]:
+    for index in 0..<names.count |index, names, owner, work_used|:
+        comparison: (complete: bool, equal: bool) = proof_function_status_same_with_work(names[index], owner, work_used)
+        return (false, 0) if not comparison.complete
+        return (true, index) if comparison.equal
+    return (false, 0) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+    names.push(move owner)
+    goals.push(0)
+    open_goals.push(0)
+    findings.push(0)
+    return (true, names.count - 1)
 
-def proof_push_json_function_status_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, replayed_goals: darray[bool]&, replay_work: mutable usize&) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_function_status_from_checked_view[@view](buffer: mutable darray[u8]&, checked_view: ProofCheckedView[view]& @view, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
     names: mutable darray[darray[u8]] = []
     goals: mutable darray[u32] = []
     open_goals: mutable darray[u32] = []
     findings: mutable darray[u32] = []
-    for goal_id in 0..<report.goal_attempts.count |goal_id, report, names, goals, open_goals, findings, replayed_goals|:
+    complete: mutable bool = true
+    for goal_id in 0..<report.goal_attempts.count |goal_id, checked_view, report, names, goals, open_goals, findings, work_used, complete|:
+        break if not complete
+        complete <- false if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        break if not complete
         attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-        owner: darray[u8] = proof_function_status_owner(attempt.name)
+        # Report-open goals are already disqualified; spend checked-view replay work only on
+        # report-proven candidates that could otherwise close this function.
+        replay_open: mutable bool = not attempt.proven
+        if attempt.proven:
+            snapshot: (complete: bool, replayed: bool, source_admitted: bool) = proof_output_checked_view_goal_status_with_work(checked_view, goal_id, work_used)
+            complete <- false if not snapshot.complete
+            break if not complete
+            replay_open <- not snapshot.replayed or not snapshot.source_admitted
+        owner_result: (complete: bool, owner: darray[u8]) = proof_function_status_owner(attempt.name, work_used)
+        complete <- false if not owner_result.complete
+        break if not complete
+        owner: darray[u8] = owner_result.owner
         continue if owner.count == 0
-        slot: usize = proof_function_status_slot(&names, &goals, &open_goals, &findings, move owner)
+        slot_result: (complete: bool, index: usize) = proof_function_status_slot_with_work(&names, &goals, &open_goals, &findings, move owner, work_used)
+        complete <- false if not slot_result.complete
+        break if not complete
+        slot: usize = slot_result.index
         goals[slot] <- goals[slot] + 1
-        open_goals[slot] <- open_goals[slot] + 1 if not attempt.proven or not proof_output_cached_replay_status(replayed_goals, goal_id)
-    for finding in report.findings |names, goals, open_goals, findings|:
-        owner: darray[u8] = proof_function_status_owner(finding.name)
+        open_goals[slot] <- open_goals[slot] + 1 if replay_open
+    for finding in report.findings |names, goals, open_goals, findings, work_used, complete|:
+        break if not complete
+        complete <- false if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        break if not complete
+        owner_result: (complete: bool, owner: darray[u8]) = proof_function_status_owner(finding.name, work_used)
+        complete <- false if not owner_result.complete
+        break if not complete
+        owner: darray[u8] = owner_result.owner
         continue if owner.count == 0
-        slot: usize = proof_function_status_slot(&names, &goals, &open_goals, &findings, move owner)
+        slot_result: (complete: bool, index: usize) = proof_function_status_slot_with_work(&names, &goals, &open_goals, &findings, move owner, work_used)
+        complete <- false if not slot_result.complete
+        break if not complete
+        slot: usize = slot_result.index
         findings[slot] <- findings[slot] + 1
+    if complete:
+        complete <- false if not proof_output_reserve_status_snapshot_work(work_used, names.count)
+        for owner in names |owner, work_used, complete|:
+            break if not complete
+            complete <- false if not proof_output_reserve_status_snapshot_work(work_used, owner.count)
+    if not complete:
+        names.clear()
+        goals.clear()
+        open_goals.clear()
+        findings.clear()
+    proof_push(buffer, ",\"functions_complete\":true" if complete else ",\"functions_complete\":false")
     proof_push(buffer, ",\"functions\":[")
+    source_authority_complete: bool = proof_checked_view_source_admissible(checked_view) and proof_checked_view_source_admissions_complete(checked_view) and complete
     for index in 0..<names.count |index, names, goals, open_goals, findings, buffer|:
         proof_push(buffer, ",") if index > 0
         proof_push(buffer, "{\"name\":")
         proof_push_json_bytes(buffer, names[index])
         proof_push(buffer, ",\"proved\":")
-        proof_push(buffer, "true" if open_goals[index] == 0 and findings[index] == 0 else "false")
+        proof_push(buffer, "true" if source_authority_complete and open_goals[index] == 0 and findings[index] == 0 else "false")
         proof_push(buffer, ",\"goals\":")
         proof_push_number(buffer, goals[index])
         proof_push(buffer, ",\"open_goals\":")
@@ -87,12 +142,4 @@ def proof_push_json_function_status_with_replayed(buffer: mutable darray[u8]&, r
         proof_push_number(buffer, findings[index])
         proof_push(buffer, "}")
     proof_push(buffer, "]")
-
-def proof_function_status_slot(names: mutable darray[darray[u8]]&, goals: mutable darray[u32]&, open_goals: mutable darray[u32]&, findings: mutable darray[u32]&, owner: darray[u8]) -> usize can[Memory.Allocate, Abort.Panic]:
-    for index in 0..<names.count |names, owner|:
-        return index if proof_function_status_same(names[index], owner)
-    names.push(move owner)
-    goals.push(0)
-    open_goals.push(0)
-    findings.push(0)
-    return names.count - 1
+    return complete

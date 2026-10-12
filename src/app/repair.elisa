@@ -112,41 +112,60 @@ def proof_push_json_repair_finding(buffer: mutable darray[u8]&, report: ProofRep
         proof_push_json_expr(buffer, report.counterexample_facts[finding.counterexample_start + index])
     proof_push(buffer, "]}")
 
-def proof_repair_finding_index(report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> (known: bool, index: usize, ambiguous: bool):
+def proof_repair_finding_index_with_work(report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize, work_used: mutable usize&) -> (complete: bool, known: bool, index: usize, ambiguous: bool):
     # Stable goal provenance wins unconditionally. Never select a different goal's diagnostic
     # merely because the compiler placed both obligations on the same source line.
     index: mutable usize = 0
-    for finding in report.findings |finding, report, goal_id, index|:
+    for finding in report.findings |finding, report, goal_id, index, work_used|:
+        return (false, false, 0, true) if not proof_output_reserve_status_snapshot_work(work_used, 1)
         if finding.has_goal and finding.goal_id == goal_id:
-            return (true, index, false)
+            return (true, true, index, false)
         index <- index + 1
     # Legacy non-goal diagnostics can be used only when the line/name pair identifies exactly one
     # candidate. Ambiguity is reported as unknown instead of fabricating a causal association.
     candidate_count: mutable usize = 0
     candidate_index: mutable usize = 0
-    for index in 0..<report.findings.count |index, report, attempt, candidate_count, candidate_index|:
+    for index in 0..<report.findings.count |index, report, attempt, candidate_count, candidate_index, work_used|:
+        return (false, false, 0, true) if not proof_output_reserve_status_snapshot_work(work_used, 1)
         finding: ProofFinding = report.findings[index]
-        if not finding.has_goal and finding.line == attempt.line and finding.name == attempt.name:
-            candidate_count <- candidate_count + 1
-            candidate_index <- index
-    return (true, candidate_index, false) if candidate_count == 1
-    return (false, 0, candidate_count > 1)
+        if not finding.has_goal and finding.line == attempt.line:
+            name_match: (complete: bool, equal: bool) = proof_output_text_equal_with_work(finding.name, attempt.name, work_used)
+            return (false, false, 0, true) if not name_match.complete
+            if name_match.equal:
+                candidate_count <- candidate_count + 1
+                candidate_index <- index
+    return (true, true, candidate_index, false) if candidate_count == 1
+    return (true, false, 0, candidate_count > 1)
 
-# A selected CLI proof is successful only when the whole source was admitted and complete and
-# this exact attempt has a certificate replayed by the kernel. Producer claims and a matching
-# rendering alone never establish the selected theorem.
-def proof_goal_verification_state(report: ProofReport&, goal_id: usize, source_complete: bool, source_admissible: bool) -> sview:
-    # This compatibility API has no claim-local source admission or replay receipt.
-    proof_output_goal_state_with_replay(report, goal_id, source_complete, source_admissible, false)
+def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    selected: (complete: bool, known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index_with_work(report, attempt, goal_id, work_used)
+    proof_push_json_repair_failure_from_selection(buffer, report, selected, work_used)
 
-def proof_push_json_repair_failure(buffer: mutable darray[u8]&, report: ProofReport&, attempt: ProofGoalAttempt, goal_id: usize) -> void can[Memory.Allocate, Abort.Panic]:
-    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+def proof_push_json_repair_failure_from_selection(buffer: mutable darray[u8]&, report: ProofReport&, selected: (complete: bool, known: bool, index: usize, ambiguous: bool), work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
     if selected.known:
-        proof_push_json_repair_finding(buffer, report, report.findings[selected.index])
-        return
+        finding_complete: bool = proof_push_json_repair_finding_with_work(buffer, report, report.findings[selected.index], work_used)
+        if finding_complete:
+            return selected.complete
+        proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":\"diagnostic rendering incomplete because the output work limit was reached\",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
+        return false
     proof_push(buffer, "{\"kind\":\"unresolved-goal\",\"status\":\"unknown\",\"message\":")
-    proof_push_json_string(buffer, "multiple unbound diagnostics share this source location" if selected.ambiguous else "no matching diagnostic was recorded")
+    if not selected.complete:
+        proof_push_json_string(buffer, "diagnostic lookup incomplete because the output work limit was reached")
+    elif selected.ambiguous:
+        proof_push_json_string(buffer, "multiple unbound diagnostics share this source location")
+    else:
+        proof_push_json_string(buffer, "no matching diagnostic was recorded")
     proof_push(buffer, ",\"counterexample_found\":false,\"goal_id\":null,\"counterexample\":[]}")
+    return selected.complete
+
+def proof_push_json_repair_finding_with_work(buffer: mutable darray[u8]&, report: ProofReport&, finding: ProofFinding, work_used: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.kind))
+    return false if not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.status))
+    return false if not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.name))
+    return false if not proof_output_reserve_status_snapshot_work(work_used, sview_len(finding.message))
+    return false if not proof_output_reserve_status_snapshot_work(work_used, finding.counterexample_count)
+    proof_push_json_repair_finding(buffer, report, finding)
+    return true
 
 # Render one goal as an Elisa-like proof a person can read and edit. Everything printed comes from
 # the recorded attempt: its hypotheses are the exact certificate facts, its conclusion is the exact
@@ -455,7 +474,14 @@ def proof_repair_search(report: ProofReport&, goal_id: usize) -> (repaired: bool
 
 # One goal's entry in a whole-file repair report: what it is, whether a proposal survived the
 # kernel, and the runnable script when one did.
-def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool)) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_repair_goal[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, found: (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool), source_goal_admissible: bool, source_goal_admissions_complete: bool) -> void can[Memory.Allocate, Abort.Panic]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    if goal_id >= report.goal_attempts.count:
+        proof_push(buffer, "{\"goal_id\":")
+        proof_push_number(buffer, goal_id.u32())
+        proof_push(buffer, ",\"name\":null,\"rule\":null,\"line\":null,\"source_admission\":\"unknown\",\"status\":\"not_found\",\"tried\":0,\"candidates\":0,\"exhaustive\":false,\"script\":null}")
+        return
+    source_admissible: bool = proof_checked_view_source_admissible(checked_view)
     proof_push(buffer, "{\"goal_id\":")
     proof_push_number(buffer, goal_id.u32())
     proof_push(buffer, ",\"name\":")
@@ -464,8 +490,11 @@ def proof_push_repair_goal(buffer: mutable darray[u8]&, report: ProofReport&, go
     proof_push_json_string(buffer, report.goal_attempts[goal_id].rule)
     proof_push(buffer, ",\"line\":")
     proof_push_number(buffer, report.goal_attempts[goal_id].line)
+    proof_push(buffer, ",\"source_admission\":")
+    proof_push_json_string(buffer, "unknown" if not source_goal_admissions_complete else ("admitted" if source_goal_admissible else "source-unbound"))
     proof_push(buffer, ",\"status\":")
-    proof_push(buffer, "\"repaired\"" if found.repaired else "\"unrepaired\"")
+    repair_status: sview = "source-admission-incomplete" if not source_goal_admissions_complete else ("inadmissible" if not source_admissible else ("source-unbound" if not source_goal_admissible else ("repaired" if found.repaired else "unrepaired")))
+    proof_push_json_string(buffer, repair_status)
     proof_push(buffer, ",\"tried\":")
     proof_push_number(buffer, found.searched.u32())
     proof_push(buffer, ",\"candidates\":")

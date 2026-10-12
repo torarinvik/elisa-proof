@@ -1,115 +1,13 @@
-# Call resolution for function names repeated across modules, and the rewrite that spells a
-# resolved bare call to such a name as `Owner::name` so replay sees which row it means.
+# Rewrites repeated bare function names with their resolved owner module.
 extend ElisaProof:
     private:
-        # True when rows `row` and `caller` sit directly in the same module, which is the
-        # top level when both module prefixes are 0.
-        def proof_function_same_module(functions: ProofFunctionTable&, row: usize, caller: usize) -> bool:
-            return false if row >= functions.module_prefixes.count or caller >= functions.module_prefixes.count
-            prefix: usize = functions.module_prefixes[row]
-            return false if prefix != functions.module_prefixes[caller]
-            return proof_function_path_prefix_equal(functions, row, caller, prefix)
-
-        # True when `row` sits directly in a module that strictly encloses the caller's module.
-        def proof_function_in_enclosing_module(functions: ProofFunctionTable&, row: usize, caller: usize) -> bool:
-            return false if row >= functions.module_prefixes.count or caller >= functions.module_prefixes.count
-            prefix: usize = functions.module_prefixes[row]
-            return false if prefix == 0 or prefix >= functions.module_prefixes[caller]
-            return proof_function_path_prefix_equal(functions, row, caller, prefix)
-
-        def proof_function_path_prefix_equal(functions: ProofFunctionTable&, row: usize, caller: usize, prefix: usize) -> bool:
-            return false if row >= functions.declaration_path_starts.count or caller >= functions.declaration_path_starts.count
-            return false if row >= functions.declaration_path_counts.count or caller >= functions.declaration_path_counts.count
-            return false if functions.declaration_path_counts[row] < prefix or functions.declaration_path_counts[caller] < prefix
-            row_start: usize = functions.declaration_path_starts[row]
-            caller_start: usize = functions.declaration_path_starts[caller]
-            return false if row_start + prefix > functions.all_declaration_path.count or caller_start + prefix > functions.all_declaration_path.count
-            for offset in 0..<prefix |offset, functions, row_start, caller_start|:
-                return false if functions.all_declaration_path[row_start + offset] != functions.all_declaration_path[caller_start + offset]
-            return true
-
-        # Resolve a call written as `qualifier::name` (or bare `name` when the qualifier is "")
-        # from the row `caller`. A name declared once resolves to that row, as before. A
-        # repeated name resolves as Elisa scopes it: a qualified call to the unique row whose
-        # innermost owning module is the qualifier, matched by its innermost segment; a bare
-        # call to the unique row in the caller's own module, else -- when no module between
-        # them declares the name -- to the unique top-level row. Anything else stays unresolved
-        # (names.count), which never lends a summary. An unknown caller resolves no bare
-        # repeated name, so a module-local function is never confused with another module's.
-        def proof_function_resolve_call(functions: ProofFunctionTable&, caller: usize, name: sview, qualifier: sview) -> usize:
-            return functions.names.count if name == ""
-            direct: usize = proof_function_index(functions, name)
-            return direct if direct < functions.names.count
-            return functions.names.count if not proof_function_name_may_repeat(functions, name)
-            found: mutable usize = functions.names.count
-            if qualifier != "":
-                for index in 0..<functions.names.count |index, functions, name, qualifier, found|:
-                    continue if index >= functions.owner_modules.count or functions.names[index] != name
-                    if functions.owner_modules[index] != "" and proof_qualified_segment_matches(functions.owner_modules[index], qualifier):
-                        return functions.names.count if found < functions.names.count
-                        found <- index
-                return found
-            return functions.names.count if caller >= functions.names.count
-            for index in 0..<functions.names.count |index, functions, name, caller, found|:
-                continue if functions.names[index] != name
-                if proof_function_same_module(functions, index, caller):
-                    return functions.names.count if found < functions.names.count
-                    found <- index
-            return found if found < functions.names.count
-            for index in 0..<functions.names.count |index, functions, name, caller|:
-                continue if functions.names[index] != name
-                return functions.names.count if proof_function_in_enclosing_module(functions, index, caller)
-            for index in 0..<functions.names.count |index, functions, name, found|:
-                continue if functions.names[index] != name or index >= functions.module_prefixes.count
-                if functions.module_prefixes[index] == 0:
-                    return functions.names.count if found < functions.names.count
-                    found <- index
-            return found
-
-        # Resolve every collected call edge from its own caller once the table is complete.
-        def proof_resolve_function_call_targets(functions: mutable ProofFunctionTable&) -> void:
-            functions.current_caller <- functions.names.count
-            functions.all_call_targets.clear()
-            for _ in 0..<functions.all_calls.count |functions|:
-                functions.all_call_targets.push(functions.names.count)
-            for caller in 0..<functions.names.count |caller, functions|:
-                continue if caller >= functions.call_starts.count or caller >= functions.call_counts.count
-                start: usize = functions.call_starts[caller]
-                count: usize = functions.call_counts[caller]
-                continue if start > functions.all_calls.count or count > functions.all_calls.count - start
-                for offset in 0..<count |offset, start, caller, functions|:
-                    called: sview = functions.all_calls[start + offset]
-                    continue if called == "__opaque_call__"
-                    qualifier: sview = functions.all_call_qualifiers[start + offset] if start + offset < functions.all_call_qualifiers.count else ""
-                    functions.all_call_targets[start + offset] <- proof_function_resolve_call(functions, caller, called, qualifier)
-
-        # The row a collected call edge resolves to, names.count when unresolved or opaque.
-        def proof_function_call_target(functions: ProofFunctionTable&, edge: usize) -> usize:
-            return functions.all_call_targets[edge] if edge < functions.all_call_targets.count
-            return functions.names.count if edge >= functions.all_calls.count
-            return proof_function_index(functions, functions.all_calls[edge])
-
-        # The row of the function whose body is being checked, by its name. A repeated name
-        # resolves to the scheduled caller when it bears that name.
-        def proof_function_index_of_current(functions: ProofFunctionTable&, name: sview) -> usize:
-            direct: usize = proof_function_index(functions, name)
-            return direct if direct < functions.names.count
-            return functions.current_caller if functions.current_caller < functions.names.count and functions.names[functions.current_caller] == name
-            return functions.names.count
-
-        # Resolve a call's callee from the function whose body is being checked.
-        def proof_function_index_for_callee(functions: ProofFunctionTable&, callee: Ast::Expr) -> usize:
-            name: sview = proof_callable_name(callee)
-            return proof_function_resolve_call(functions, functions.current_caller, name, proof_call_qualifier(callee))
-
-
         # Spell a bare call to a repeated name as `Owner::name` when it resolves from `caller`
         # to a row in a named module and that spelling resolves back to the same row. The
         # prover then resolves it without the scheduler's caller, and replay, which admits a
         # summary of a repeated name only through a qualified callee, sees the same row.
         # A local spelled like a module (`shadowed`) would capture the path, so it is skipped.
         # Unlisted shapes are left as written; their calls still resolve, they only lack replay.
-        def proof_qualified_call_rewrite(expression: Ast::Expr, functions: ProofFunctionTable&, caller: usize, shadowed: darray[sview]&, depth: usize) -> Ast::Expr:
+        def proof_qualified_call_rewrite(expression: Ast::Expr, functions: mutable ProofFunctionTable&, caller: usize, shadowed: darray[sview]&, depth: usize) -> Ast::Expr:
             return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Binary(left, operator, right, position):
@@ -132,64 +30,112 @@ extend ElisaProof:
                 _:
                     return expression
 
-        def proof_qualified_callee(callee: Ast::Expr, functions: ProofFunctionTable&, caller: usize, shadowed: darray[sview]&) -> Ast::Expr:
+        def proof_qualified_callee(callee: Ast::Expr, functions: mutable ProofFunctionTable&, caller: usize, shadowed: darray[sview]&) -> Ast::Expr:
             match callee:
                 Ast::Expr.Ident(name, position):
-                    return callee if proof_function_index(functions, name) < functions.names.count or not proof_function_name_may_repeat(functions, name)
-                    target: usize = proof_function_resolve_call(functions, caller, name, "")
+                    return callee if any local in shadowed where local == name
+                    return callee if functions.module_resolution_work_exhausted
+                    bare: (complete: bool, row: usize, repeated: bool) = proof_function_resolve_bare_call_bounded(functions, caller, name, functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    if not bare.complete:
+                        functions.module_resolution_work_exhausted <- true
+                        functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return callee
+                    return callee if not bare.repeated
+                    target: usize = bare.row
                     return callee if target >= functions.names.count or target >= functions.owner_modules.count
                     owner: sview = functions.owner_modules[target]
                     return callee if owner == "" or any local in shadowed where local == owner
-                    return callee if proof_function_resolve_call(functions, caller, name, owner) != target
+                    qualified: (complete: bool, row: usize) = proof_function_resolve_exact_owner_bounded(functions, name, owner, functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    if not qualified.complete:
+                        functions.module_resolution_work_exhausted <- true
+                        functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return callee
+                    return callee if qualified.row != target
                     return Ast::Expr.Scope(Ast::Expr.Ident(owner, position), name, position)
                 _:
                     return callee
 
-        def proof_qualified_call_body_rewrite(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, caller: usize, shadowed: darray[sview]&, depth: usize) -> darray[Ast::Stmt]:
+        def proof_qualified_call_body_rewrite(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, caller: usize, shadowed: darray[sview]&, depth: usize) -> darray[Ast::Stmt]:
             rewritten: mutable darray[Ast::Stmt] = []
-            for statement in body |rewritten, functions, caller, shadowed, depth|:
+            locals: mutable darray[sview] = []
+            locals.extend(shadowed)
+            for statement in body |rewritten, functions, caller, locals, depth|:
                 match statement:
                     Ast::Stmt.Return(returned_value, position):
                         if returned_value is returned:
-                            rewritten.push(Ast::Stmt.Return(proof_qualified_call_rewrite(returned, functions, caller, shadowed, 0), position))
+                            rewritten.push(Ast::Stmt.Return(proof_qualified_call_rewrite(returned, functions, caller, locals, 0), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
-                        rewritten.push(Ast::Stmt.VarDecl(local_name, type_expression, proof_qualified_call_rewrite(initializer, functions, caller, shadowed, 0), position))
+                        rewritten.push(Ast::Stmt.VarDecl(local_name, type_expression, proof_qualified_call_rewrite(initializer, functions, caller, locals, 0), position))
+                        locals.push(local_name) if local_name != ""
                     Ast::Stmt.If(condition, then_body, else_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.If(proof_qualified_call_rewrite(condition, functions, caller, shadowed, 0), proof_qualified_call_body_rewrite(then_body, functions, caller, shadowed, depth + 1), proof_qualified_call_body_rewrite(else_body, functions, caller, shadowed, depth + 1), position))
+                            rewritten.push(Ast::Stmt.If(proof_qualified_call_rewrite(condition, functions, caller, locals, 0), proof_qualified_call_body_rewrite(then_body, functions, caller, locals, depth + 1), proof_qualified_call_body_rewrite(else_body, functions, caller, locals, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.While(condition, while_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.While(proof_qualified_call_rewrite(condition, functions, caller, shadowed, 0), proof_qualified_call_body_rewrite(while_body, functions, caller, shadowed, depth + 1), position))
+                            rewritten.push(Ast::Stmt.While(proof_qualified_call_rewrite(condition, functions, caller, locals, 0), proof_qualified_call_body_rewrite(while_body, functions, caller, locals, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.For(label, variables, iterable, for_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualified_call_rewrite(iterable, functions, caller, shadowed, 0), proof_qualified_call_body_rewrite(for_body, functions, caller, shadowed, depth + 1), position))
+                            loop_locals: mutable darray[sview] = []
+                            loop_locals.extend(locals)
+                            loop_locals.extend(variables)
+                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualified_call_rewrite(iterable, functions, caller, locals, 0), proof_qualified_call_body_rewrite(for_body, functions, caller, loop_locals, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.Assign(target, operator, assigned, position):
-                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualified_call_rewrite(assigned, functions, caller, shadowed, 0), position))
+                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualified_call_rewrite(assigned, functions, caller, locals, 0), position))
+                        target_name: sview = proof_ident_name(target)
+                        locals.push(target_name) if target_name != ""
                     Ast::Stmt.Expr(expression, position):
-                        rewritten.push(Ast::Stmt.Expr(proof_qualified_call_rewrite(expression, functions, caller, shadowed, 0), position))
+                        rewritten.push(Ast::Stmt.Expr(proof_qualified_call_rewrite(expression, functions, caller, locals, 0), position))
                     Ast::Stmt.Contract(kind, expression, position):
-                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualified_call_rewrite(expression, functions, caller, shadowed, 0), position))
+                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualified_call_rewrite(expression, functions, caller, locals, 0), position))
                     _:
                         rewritten.push(statement)
             return rewritten
 
         # Qualify the repeated-name calls of one function's body and contracts from its row.
-        def proof_qualify_repeated_calls(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&) -> void:
+        def proof_qualify_repeated_calls(functions: mutable ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, preconditions: mutable darray[Ast::Expr]&, postconditions: mutable darray[Ast::Expr]&, function_body: mutable darray[Ast::Stmt]&) -> void:
             return if function_index >= functions.names.count
+            return if functions.module_resolution_work_exhausted
+            for precondition in preconditions |functions|:
+                if not proof_replay_summary_expr_charge_with_work(precondition, functions.module_resolution_work_used):
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+            for postcondition in postconditions |functions|:
+                if not proof_replay_summary_expr_charge_with_work(postcondition, functions.module_resolution_work_used):
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+            body_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(function_body, &body_cost, functions.module_resolution_work_used, 0) or functions.module_resolution_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - functions.module_resolution_work_used:
+                functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                functions.module_resolution_work_exhausted <- true
+                return
+            functions.module_resolution_work_used <- functions.module_resolution_work_used + body_cost
             shadowed: mutable darray[sview] = []
             for parameter in parameters |shadowed|:
                 shadowed.push(parameter.name)
-            for index in 0..<functions.owner_modules.count |index, functions, function_body, shadowed|:
+            for index in 0..<functions.owner_modules.count |index, functions, function_body, shadowed, body_cost|:
                 owner: sview = functions.owner_modules[index]
-                shadowed.push(owner) if owner != "" and proof_qualified_body_declares(function_body, owner, 0)
+                if functions.module_resolution_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or 1 + sview_len(owner) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - functions.module_resolution_work_used:
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+                functions.module_resolution_work_used <- functions.module_resolution_work_used + 1 + sview_len(owner)
+                continue if owner == "" or proof_qualified_owner_has_separator(owner)
+                if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - functions.module_resolution_work_used:
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+                functions.module_resolution_work_used <- functions.module_resolution_work_used + body_cost
+                shadowed.push(owner) if proof_qualified_body_declares(function_body, owner, 0)
             for index in 0..<preconditions.count |index, preconditions, functions, function_index, shadowed|:
                 preconditions[index] <- proof_qualified_call_rewrite(preconditions[index], functions, function_index, shadowed, 0)
             for index in 0..<postconditions.count |index, postconditions, functions, function_index, shadowed|:
@@ -249,15 +195,6 @@ extend ElisaProof:
                     _:
                         pass
             return count
-
-        def proof_function_parameter_named(functions: ProofFunctionTable&, row: usize, wanted: sview) -> bool:
-            return false if row >= functions.param_starts.count or row >= functions.param_counts.count
-            start: usize = functions.param_starts[row]
-            count: usize = functions.param_counts[row]
-            return false if start > functions.all_params.count or count > functions.all_params.count - start
-            for offset in 0..<count |offset, functions, start, wanted|:
-                return true if functions.all_params[start + offset] == wanted
-            return false
 
         def proof_qualify_contract_enum_members(expression: Ast::Expr, declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: ProofFunctionTable&, row: usize, depth: usize) -> Ast::Expr:
             return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
@@ -346,11 +283,32 @@ extend ElisaProof:
         # another module that instantiates the contract never re-resolves a bare name from
         # its own module.
         def proof_qualify_repeated_contract_rows(file: Ast::File&, functions: mutable ProofFunctionTable&) -> void:
-            no_shadow: darray[sview] = []
-            for row in 0..<functions.names.count |row, functions, no_shadow|:
+            for row in 0..<functions.names.count |row, functions|:
+                return if functions.module_resolution_work_exhausted
                 bounds: (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize) = proof_qualified_own_rows(functions, row)
+                if bounds.requires_start > functions.all_requires.count or bounds.requires_count > functions.all_requires.count - bounds.requires_start or bounds.ensures_start > functions.all_ensures.count or bounds.ensures_count > functions.all_ensures.count - bounds.ensures_start:
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+                if not proof_replay_deterministic_declaration_scan_charge(file.top_decls, functions.module_resolution_work_used, 0):
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
                 scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
                 module_scope: mutable darray[sview] = []
+                shadowed: mutable darray[sview] = []
+                if row >= functions.param_starts.count or row >= functions.param_counts.count:
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+                param_start: usize = functions.param_starts[row]
+                param_count: usize = functions.param_counts[row]
+                if param_start > functions.all_params.count or param_count > functions.all_params.count - param_start:
+                    functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.module_resolution_work_exhausted <- true
+                    return
+                for parameter_offset in 0..<param_count |parameter_offset, functions, param_start, shadowed|:
+                    shadowed.push(functions.all_params[param_start + parameter_offset])
                 if scope_declarations.known:
                     path_start: usize = functions.declaration_path_starts[row]
                     for depth in 0..<functions.declaration_path_counts[row] - 1 |depth, module_scope, functions, path_start, file|:
@@ -370,9 +328,20 @@ extend ElisaProof:
                                 module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
                             _:
                                 pass
-                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, no_shadow, scope_declarations, module_scope|:
-                    rewritten: Ast::Expr = proof_qualified_call_rewrite(functions.all_requires[bounds.requires_start + offset], functions, row, no_shadow, 0)
+                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
+                    source_expression: Ast::Expr = functions.all_requires[bounds.requires_start + offset]
+                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.module_resolution_work_used):
+                        functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.module_resolution_work_exhausted <- true
+                        return
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
                     functions.all_requires[bounds.requires_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known
-                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, no_shadow, scope_declarations, module_scope|:
-                    rewritten: Ast::Expr = proof_qualified_call_rewrite(functions.all_ensures[bounds.ensures_start + offset], functions, row, no_shadow, 0)
+                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
+                    source_expression: Ast::Expr = functions.all_ensures[bounds.ensures_start + offset]
+                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.module_resolution_work_used):
+                        functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.module_resolution_work_exhausted <- true
+                        return
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
                     functions.all_ensures[bounds.ensures_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known
+include "./qualified_calls_integrated_helpers.elisa"

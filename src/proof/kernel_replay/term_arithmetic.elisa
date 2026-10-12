@@ -61,10 +61,12 @@ module ElisaProofKernelReplay:
             visited_depth: mutable darray[usize]
             work: mutable darray[ProofKernelReplayArenaWork]
             work_used: mutable usize
-            # Shared work ceiling for source-backed replay checks in one certificate batch.
-            # This is separate from arena traversal work so many small trace checks cannot
-            # multiply a per-walk source limit into an unbounded validation pass.
+            # Batch work ceiling for source-backed replay checks. Keep the workspace for one
+            # certificate batch and construct/reset it between independent batches.
             source_scan_work_used: mutable usize
+            # One cumulative logical replay budget across all goal traces in the batch.
+            # This is persistent batch state, not validator scratch capacity.
+            kernel_goal_work_used: mutable usize
             # Fact-trace verdicts within one validation pass, by trace index: the deepest start
             # (plus one) at which the trace validated, 0 for none, and for the kernel validator
             # whether that ran with full arena revalidation. Only traces whose check consulted no
@@ -81,7 +83,7 @@ module ElisaProofKernelReplay:
             allow_replayed_dependency_memo: mutable bool = false
 
         def proof_kernel_replay_validation_workspace_new() -> ProofKernelReplayValidationWorkspace:
-            return ProofKernelReplayValidationWorkspace{visiting: [], visited: [], validity: [], visited_depth: [], work: [], work_used: 0, source_scan_work_used: 0, trace_memo_depth: [], trace_memo_context: [], kernel_trace_memo_depth: [], kernel_trace_memo_context: [], kernel_trace_memo_strict: [], trace_stack_touched: false, allow_replayed_dependency_memo: false}
+            return ProofKernelReplayValidationWorkspace{visiting: [], visited: [], validity: [], visited_depth: [], work: [], work_used: 0, source_scan_work_used: 0, kernel_goal_work_used: 0, trace_memo_depth: [], trace_memo_context: [], kernel_trace_memo_depth: [], kernel_trace_memo_context: [], kernel_trace_memo_strict: [], trace_stack_touched: false, allow_replayed_dependency_memo: false}
 
     private:
 
@@ -231,9 +233,24 @@ module ElisaProofKernelReplay:
             remaining: usize = ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
             return proof_kernel_replay_constant_int_remaining(nodes, root, remaining)
 
+        const PROOF_KERNEL_REPLAY_CONSTANT_INT_WORK_LIMIT: usize = 65536
+
         def proof_kernel_replay_constant_int_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> ProofKernelReplayInt:
+            work_used: mutable usize = 0
+            return proof_kernel_replay_constant_int_remaining_with_work(nodes, root, remaining, &work_used)
+
+        # Shared-child arithmetic DAGs can have exponentially many paths despite a small arena.
+        # Carry one counter through both operands so a constant check has a fixed cost ceiling.
+        def proof_kernel_replay_constant_int_remaining_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, root, remaining, work_used, PROOF_KERNEL_REPLAY_CONSTANT_INT_WORK_LIMIT)
+
+        def proof_kernel_replay_constant_int_remaining_with_work_limit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&, work_limit: usize) -> ProofKernelReplayInt:
             decreases remaining
             empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            if work_used >= work_limit:
+                work_used <- work_limit + 1 if work_used == work_limit
+                return empty
+            work_used <- work_used + 1
             return empty if root >= nodes.count
             # Keep the indexed node as a place rather than copying the whole record into a local:
             # local struct copies eagerly acquire scalar-operator witnesses for every field,
@@ -241,12 +258,12 @@ module ElisaProofKernelReplay:
             match nodes[root].kind:
                 "unary":
                     return empty if remaining < 1
-                    inner: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].left, remaining - 1)
+                    inner: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, nodes[root].left, remaining - 1, work_used, work_limit)
                     return proof_kernel_replay_constant_unary(nodes[root].operator, inner)
                 "binary":
                     return empty if remaining < 1
-                    left: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].left, remaining - 1)
-                    right: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining(nodes, nodes[root].right, remaining - 1)
+                    left: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, nodes[root].left, remaining - 1, work_used, work_limit)
+                    right: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, nodes[root].right, remaining - 1, work_used, work_limit)
                     return proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
                 _:
                     # A tagged literal's payload is not its value; only the typed comparison
@@ -513,24 +530,38 @@ module ElisaProofKernelReplay:
                 proof_kernel_replay_add_term_expression_lower(nodes, children, bounds, right_root, incremented_left.value) if operator == "<" and incremented_left.known
                 proof_kernel_replay_add_term_expression_lower(nodes, children, bounds, right_root, left_constant.value) if operator == "<=" or operator == "=="
 
+        const PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+
         def proof_kernel_replay_collect_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&, depth: usize) -> void:
+            work_used: mutable usize = 0
+            proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, root, bounds, &work_used, depth)
+
+        # A small shared-child conjunction DAG can represent exponentially many tree paths.
+        # Share one visit meter across both branches so each collection has a fixed work ceiling.
+        def proof_kernel_replay_collect_bounds_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&, work_used: mutable usize&, depth: usize) -> void:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            if work_used > PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT:
+                return
+            if work_used == PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT:
+                work_used <- PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT + 1
+                return
+            work_used <- work_used + 1
             return if not ElisaProofKernelCore::depth_valid(depth)
             return if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return if root >= nodes.count
             return if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "unary" and node.operator == "not" and proof_kernel_replay_valid(nodes, node.left):
-                proof_kernel_replay_collect_negated_bounds(nodes, children, facts, node.left, bounds)
+                proof_kernel_replay_collect_negated_bounds_with_work(nodes, children, facts, node.left, bounds, work_used)
                 return
             if node.kind != "binary":
                 return
             if node.operator == "and":
-                proof_kernel_replay_collect_bounds(nodes, children, facts, node.left, bounds, depth + 1)
-                proof_kernel_replay_collect_bounds(nodes, children, facts, node.right, bounds, depth + 1)
+                proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, node.left, bounds, work_used, depth + 1)
+                proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, node.right, bounds, work_used, depth + 1)
                 return
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, node.left, node.operator, node.right, bounds)
+            proof_kernel_replay_collect_bound_comparison_with_goal_work(nodes, children, facts, node.left, node.operator, node.right, bounds, work_used)
 
         # The bounds of `not root`, splitting one disjunction by De Morgan as the producer does.
         def proof_kernel_replay_collect_negated_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:

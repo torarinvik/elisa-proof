@@ -9,15 +9,19 @@ extend ElisaProofKernelReplay:
             decreases remaining
             return false if remaining <= 1 or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             callee: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call.left)
-            return false if not callee.known or callee.node.kind != "resource-safety" or callee.node.name != call.name or callee.node.operator != "resource-v2" or callee.node.secondary_name != call.secondary_name
+            return false if not callee.known or callee.node.kind != "resource-safety"
+            return false if not proof_kernel_replay_resource_charge_text_pair(state, callee.node.name, call.name)
+            return false if not proof_kernel_replay_resource_charge_text_pair(state, callee.node.secondary_name, call.secondary_name)
+            return false if callee.node.name != call.name or callee.node.operator != "resource-v2" or callee.node.secondary_name != call.secondary_name
             return false if not proof_kernel_replay_child_range_valid(callee.node.children_start, callee.node.children_count, children.count)
             formal_names: mutable darray[sview] = []
             formal_references: mutable darray[bool] = []
             formal_mutable_references: mutable darray[bool] = []
             formal_parameter_regions: mutable darray[sview] = []
-            return false if not proof_kernel_replay_resource_parameters(nodes, children, call.left, &formal_names, &formal_references, &formal_mutable_references, &formal_parameter_regions)
+            return false if not proof_kernel_replay_resource_parameters(nodes, children, call.left, state, &formal_names, &formal_references, &formal_mutable_references, &formal_parameter_regions)
             callee_region_params: mutable darray[sview] = []
-            for callee_child_index in 0..<callee.node.children_count |callee_child_index, callee, children, nodes, callee_region_params|:
+            for callee_child_index in 0..<callee.node.children_count |callee_child_index, callee, children, nodes, callee_region_params, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 callee_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, callee.node.children_start + callee_child_index)
                 return false if not callee_child.known
                 callee_child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, callee_child.value)
@@ -31,20 +35,23 @@ extend ElisaProofKernelReplay:
             actual_is_reference: mutable darray[bool] = []
             actual_temporary: mutable darray[bool] = []
             actual_argument_regions: mutable darray[sview] = []
-            for _ in 0..<formal_names.count |seen, actual_places, actual_slots, actual_is_reference, actual_temporary, actual_argument_regions|:
+            has_mutable_borrow: mutable bool = false
+            for _ in 0..<formal_names.count |seen, actual_places, actual_slots, actual_is_reference, actual_temporary, actual_argument_regions, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 seen.push(false)
                 actual_places.push(proof_kernel_replay_resource_empty_place())
                 actual_slots.push(state.binding_names.count)
                 actual_is_reference.push(false)
                 actual_temporary.push(false)
                 actual_argument_regions.push("")
-            for index in 0..<call.auxiliary |index, call, children, nodes, state, formal_names, formal_references, formal_mutable_references, seen, actual_places, actual_slots, actual_is_reference, actual_temporary, actual_argument_regions, arena_admitted|:
+            for index in 0..<call.auxiliary |index, call, children, nodes, state, formal_names, formal_references, formal_mutable_references, seen, actual_places, actual_slots, actual_is_reference, actual_temporary, actual_argument_regions, has_mutable_borrow, arena_admitted|:
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + index)
                 return false if not child.known
                 return false if child.value >= nodes.count
                 return false if nodes[child.value].kind != "resource-call-arg"
                 formal_index: mutable usize = formal_names.count
-                for candidate in 0..<formal_names.count |candidate, formal_names, nodes, child, formal_index|:
+                for candidate in 0..<formal_names.count |candidate, formal_names, nodes, child, formal_index, state|:
+                    return false if not proof_kernel_replay_resource_charge_text_pair(state, formal_names[candidate], nodes[child.value].name)
                     formal_index <- candidate if formal_names[candidate] == nodes[child.value].name
                 return false if formal_index >= formal_names.count or seen[formal_index]
                 seen[formal_index] <- true
@@ -76,6 +83,7 @@ extend ElisaProofKernelReplay:
                         actual_slots[formal_index] <- actual.slot
                         actual_is_reference[formal_index] <- nodes[child.value].operator == "reference"
                         actual_argument_regions[formal_index] <- proof_kernel_replay_resource_binding_region(state, actual.slot) if actual.has_slot and actual.slot < state.binding_region.count
+                        has_mutable_borrow <- true if formal_mutable_references[formal_index]
                 else:
                     return false if nodes[child.value].operator != "value"
                     if formal_parameter_regions[formal_index] != "":
@@ -85,26 +93,33 @@ extend ElisaProofKernelReplay:
             # not evade the caller-side exclusivity rule by putting two overlapping temporaries in
             # separate `resource-call-arg` nodes: `f(&x, &x)` is invalid whenever either formal is
             # mutable. Fresh region allocations have no caller place and cannot overlap here.
-            for left_index in 0..<formal_names.count |left_index, formal_names, formal_references, formal_mutable_references, actual_places, actual_temporary, state, nodes|:
-                continue if not formal_references[left_index] or actual_temporary[left_index] or not proof_kernel_replay_resource_place_root_valid(nodes, actual_places[left_index])
-                for right_index in 0..<formal_names.count |right_index, left_index, formal_names, formal_references, formal_mutable_references, actual_places, actual_temporary, state, nodes|:
-                    continue if right_index <= left_index or not formal_references[right_index] or actual_temporary[right_index] or not proof_kernel_replay_resource_place_root_valid(nodes, actual_places[right_index])
-                    continue if not formal_mutable_references[left_index] and not formal_mutable_references[right_index]
-                    return false if proof_kernel_replay_resource_places_overlap(state, nodes, actual_places[left_index], actual_places[right_index])
-            for index in 0..<seen.count |index, seen|:
+            if has_mutable_borrow:
+                for left_index in 0..<formal_names.count |left_index, formal_names, formal_references, formal_mutable_references, actual_places, actual_temporary, state, nodes|:
+                    return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                    continue if not formal_references[left_index] or not formal_mutable_references[left_index] or actual_temporary[left_index] or not proof_kernel_replay_resource_place_root_valid(nodes, actual_places[left_index])
+                    for right_index in 0..<formal_names.count |right_index, left_index, formal_names, formal_references, formal_mutable_references, actual_places, actual_temporary, state, nodes|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                        continue if right_index == left_index or right_index < left_index and formal_mutable_references[right_index]
+                        continue if not formal_references[right_index] or actual_temporary[right_index] or not proof_kernel_replay_resource_place_root_valid(nodes, actual_places[right_index])
+                        return false if proof_kernel_replay_resource_places_overlap(state, nodes, actual_places[left_index], actual_places[right_index])
+            for index in 0..<seen.count |index, seen, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 return false if not seen[index]
             mapped_regions: mutable darray[sview] = []
             mapped_region_actuals: mutable darray[sview] = []
-            for _ in 0..<callee_region_params.count |mapped_regions, mapped_region_actuals|:
+            for _ in 0..<callee_region_params.count |mapped_regions, mapped_region_actuals, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 mapped_regions.push("")
                 mapped_region_actuals.push("")
             for index in call.auxiliary..<call.children_count |index, call, children, nodes, callee_region_params, mapped_regions, mapped_region_actuals, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + index)
                 return false if not child.known
                 region_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
                 return false if not region_located.known or region_located.node.kind != "resource-call-region" or region_located.node.operator != "param" or region_located.node.name == "" or region_located.node.secondary_name == ""
                 formal_region_index: mutable usize = callee_region_params.count
-                for candidate in 0..<callee_region_params.count |candidate, callee_region_params, region_located, formal_region_index|:
+                for candidate in 0..<callee_region_params.count |candidate, callee_region_params, region_located, formal_region_index, state|:
+                    return false if not proof_kernel_replay_resource_charge_text_pair(state, callee_region_params[candidate], region_located.node.name)
                     formal_region_index <- candidate if callee_region_params[candidate] == region_located.node.name
                 return false if formal_region_index >= callee_region_params.count or mapped_regions[formal_region_index] != ""
                 # The frame mapping names no region, so there is no extent to check active here;
@@ -112,13 +127,16 @@ extend ElisaProofKernelReplay:
                 return false if region_located.node.secondary_name != proof_kernel_replay_frame_region_name() and not proof_kernel_replay_resource_region_active(state, region_located.node.secondary_name)
                 mapped_regions[formal_region_index] <- region_located.node.name
                 mapped_region_actuals[formal_region_index] <- region_located.node.secondary_name
-            for region_index in 0..<mapped_regions.count |region_index, mapped_regions, mapped_region_actuals|:
+            for region_index in 0..<mapped_regions.count |region_index, mapped_regions, mapped_region_actuals, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 return false if mapped_regions[region_index] == "" or mapped_region_actuals[region_index] == ""
-            for parameter_index in 0..<formal_parameter_regions.count |parameter_index, formal_parameter_regions, actual_argument_regions, mapped_region_actuals, callee_region_params|:
+            for parameter_index in 0..<formal_parameter_regions.count |parameter_index, formal_parameter_regions, actual_argument_regions, mapped_region_actuals, callee_region_params, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 formal_region: sview = formal_parameter_regions[parameter_index]
                 continue if formal_region == ""
                 formal_region_index: mutable usize = callee_region_params.count
-                for candidate in 0..<callee_region_params.count |candidate, callee_region_params, formal_region, formal_region_index|:
+                for candidate in 0..<callee_region_params.count |candidate, callee_region_params, formal_region, formal_region_index, state|:
+                    return false if not proof_kernel_replay_resource_charge_text_pair(state, callee_region_params[candidate], formal_region)
                     formal_region_index <- candidate if callee_region_params[candidate] == formal_region
                 return false if formal_region_index >= callee_region_params.count
                 if mapped_region_actuals[formal_region_index] == proof_kernel_replay_frame_region_name():
@@ -129,30 +147,41 @@ extend ElisaProofKernelReplay:
                     return false if actual_temporary[parameter_index] or not proof_kernel_replay_resource_place_root_valid(nodes, actual_places[parameter_index])
                     return false if not actual_is_reference[parameter_index] and actual_slots[parameter_index] >= state.binding_names.count
                     continue
+                return false if not proof_kernel_replay_resource_charge_text_pair(state, actual_argument_regions[parameter_index], mapped_region_actuals[formal_region_index])
                 return false if actual_argument_regions[parameter_index] == "" or actual_argument_regions[parameter_index] != mapped_region_actuals[formal_region_index]
             callee_roots: mutable darray[usize] = []
-            for index in 0..<callee.node.children_count |index, callee, children, callee_roots|:
+            for index in 0..<callee.node.children_count |index, callee, children, callee_roots, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, callee.node.children_start + index)
                 return false if not child.known
                 callee_roots.push(child.value)
             callee_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
             callee_state.formal_names.extend(formal_names)
+            callee_state.resource_work_used <- state.resource_work_used
             callee_effects: mutable darray[ProofKernelReplayResourceEffect] @r = []
             return false if not (proof_kernel_replay_resource_events_remaining(nodes, children, callee_roots, &callee_state, &callee_effects, depth + 1, remaining - 1, arena_admitted) can Global{Read,Write})
+            state.resource_work_used <- callee_state.resource_work_used
             # A caller may intentionally replay a prefix while assembling a report, but a
             # callee summary is a completed function boundary. Only its external region
             # parameters may remain active after the callee trace; a local region left open here
             # would let an invalid lifetime cross into the caller through a result summary.
-            for active_region in callee_state.active_regions |active_region, callee_state|:
+            active_region_count: usize = callee_state.active_regions.count
+            for active_index in 0..<active_region_count |active_index, callee_state|:
+                return false if active_index >= callee_state.active_regions.count
+                active_region: sview = callee_state.active_regions[active_index]
+                return false if not proof_kernel_replay_resource_charge_work(callee_state, 1)
                 return false if not proof_kernel_replay_resource_region_external(callee_state, active_region)
+            state.resource_work_used <- callee_state.resource_work_used
             for effect in callee_effects |effect, formal_names, formal_references, formal_mutable_references, actual_places, actual_slots, actual_is_reference, actual_temporary, state, effects|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 return false if effect.kind != "write"
                 formal_index: mutable usize = formal_names.count
-                for candidate in 0..<formal_names.count |candidate, formal_names, effect, formal_index|:
-                    formal_index <- candidate if proof_kernel_replay_resource_place_root_matches(nodes, effect.place, formal_names[candidate])
+                for candidate in 0..<formal_names.count |candidate, formal_names, effect, formal_index, state|:
+                    return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                    formal_index <- candidate if proof_kernel_replay_resource_place_root_matches(state, nodes, effect.place, formal_names[candidate])
                 return false if formal_index >= formal_names.count or not formal_references[formal_index] or not formal_mutable_references[formal_index]
                 continue if actual_temporary[formal_index]
-                mapped: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(nodes, actual_places[formal_index], effect.place)
+                mapped: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(state, nodes, actual_places[formal_index], effect.place)
                 return false if not mapped.known or not proof_kernel_replay_resource_place_root_valid(nodes, mapped.place)
                 except_slot: mutable usize = state.binding_names.count
                 except_slot <- actual_slots[formal_index] if actual_is_reference[formal_index]
@@ -169,26 +198,32 @@ extend ElisaProofKernelReplay:
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
             return false if not located.known or located.node.kind != "resource-safety" or located.node.operator != "resource-v2"
             return false if not proof_kernel_replay_child_range_valid(located.node.children_start, located.node.children_count, children.count)
+            state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
             formal_names: mutable darray[sview] = []
             formal_references: mutable darray[bool] = []
             formal_mutable_references: mutable darray[bool] = []
             formal_regions: mutable darray[sview] = []
-            return false if not proof_kernel_replay_resource_parameters(nodes, children, goal_root, &formal_names, &formal_references, &formal_mutable_references, &formal_regions)
+            return false if not proof_kernel_replay_resource_parameters(nodes, children, goal_root, state, &formal_names, &formal_references, &formal_mutable_references, &formal_regions)
             roots: mutable darray[usize] = []
-            for index in 0..<located.node.children_count |index, located, children, roots|:
+            for index in 0..<located.node.children_count |index, located, children, roots, state|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + index)
                 return false if not child.known
                 roots.push(child.value)
-            state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
             state.formal_names.extend(formal_names)
             effects: mutable darray[ProofKernelReplayResourceEffect] @r = []
             return false if not (proof_kernel_replay_resource_events(nodes, children, roots, &state, &effects, 0, arena_admitted) can Global{Read,Write})
+            return false if state.resource_work_used > PROOF_KERNEL_REPLAY_RESOURCE_WORK_LIMIT
             return true if not require_balanced
             # The top-level function boundary closes every local region implicitly. A resource
             # certificate that leaves one open is unbalanced even if no binding currently points
             # into it. Region parameters are the only capabilities allowed to remain active after
             # replay; they belong to the caller and are intentionally not closed here.
-            for active_region in state.active_regions |active_region, state|:
+            active_region_count: usize = state.active_regions.count
+            for active_index in 0..<active_region_count |active_index, state|:
+                return false if active_index >= state.active_regions.count
+                active_region: sview = state.active_regions[active_index]
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 return false if not proof_kernel_replay_resource_region_external(state, active_region)
             return false if proof_kernel_replay_resource_has_pending_join(state)
             return true
@@ -242,19 +277,28 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_effect_goal(nodes, children, goal_root)
 
         def proof_kernel_replay_goal_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, arena_admitted: bool) -> bool can[Global.Read, Global.Write]:
+            work_used: mutable usize = 0
+            return (proof_kernel_replay_goal_report_impl_with_work(nodes, children, facts, goal_root, arena_admitted, &work_used) can Global{Read,Write})
+
+        def proof_kernel_replay_goal_report_impl_with_work[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, arena_admitted: bool, work_used: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
             return false if not proof_kernel_replay_proposition_state_valid(nodes, children, facts, goal_root)
-            return (proof_kernel_replay_goal_search(nodes, children, facts, goal_root) can Global{Read,Write})
+            return (proof_kernel_replay_goal_search_with_work(nodes, children, facts, goal_root, work_used) can Global{Read,Write})
 
         # Search returns only a verdict. Its appended terms are temporary and cannot become
         # part of another certificate's arena or consume that certificate's admission budget.
         # Every rewrite appends nodes pointing at existing terms; it never edits an old node.
         def proof_kernel_replay_goal_search[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool can[Global.Read, Global.Write]:
+            work_used: mutable usize = 0
+            return (proof_kernel_replay_goal_search_with_work(nodes, children, facts, goal_root, &work_used) can Global{Read,Write})
+
+        def proof_kernel_replay_goal_search_with_work[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, work_used: mutable usize&) -> bool can[Global.Read, Global.Write]:
             saved_nodes: usize = nodes.count
             saved_children: usize = children.count
-            proven: bool = (proof_kernel_replay_goal_depth(nodes, children, facts, goal_root, 0, 0) can Global{Read,Write})
+            proven: bool = (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, facts, goal_root, 0, 0, work_used, remaining: ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT) can Global{Read,Write})
             nodes.truncate(saved_nodes)
             children.truncate(saved_children)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return proven
 
         def proof_kernel_replay_checked_index_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, arena_admitted: bool) -> bool:
@@ -274,9 +318,13 @@ extend ElisaProofKernelReplay:
             return checked_child.known and checked_child.node.kind == "index" and checked_located.node.right == 0 and checked_located.node.operator == "" and checked_located.node.auxiliary == 0 and checked_located.node.children_start == 0 and checked_located.node.children_count == 0
 
         def proof_kernel_replay_quantifier_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize, arena_admitted: bool) -> bool can[Global.Read, Global.Write]:
+            work_used: mutable usize = 0
+            return (proof_kernel_replay_quantifier_report_impl_with_work(nodes, children, kind, facts, goal_root, arena_admitted, &work_used) can Global{Read,Write})
+
+        def proof_kernel_replay_quantifier_report_impl_with_work[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize, arena_admitted: bool, work_used: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if kind != "forall" and kind != "exists"
             return false if not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
             return false if not proof_kernel_replay_proposition_state_valid(nodes, children, facts, goal_root)
             return false if nodes[goal_root].kind != "quantifier" or nodes[goal_root].operator != kind
             # Normalize independently justified premises before evaluating bounds.
-            return (proof_kernel_replay_goal_search(nodes, children, facts, goal_root) can Global{Read,Write})
+            return (proof_kernel_replay_goal_search_with_work(nodes, children, facts, goal_root, work_used) can Global{Read,Write})

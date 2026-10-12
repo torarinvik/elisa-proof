@@ -1,38 +1,6 @@
 # Factored helpers retained by the branch integration.
 extend ElisaProofKernelReplay:
     private:
-        def proof_kernel_replay_unsigned_nonzero_lower_bound(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
-            return false if not proof_kernel_replay_valid(nodes, root)
-            goal: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return false if goal.kind != "binary" or not proof_kernel_replay_valid(nodes, goal.left) or not proof_kernel_replay_valid(nodes, goal.right)
-            a: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, goal.left, 0)
-            b: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, goal.right, 0)
-            term: mutable usize = goal.right
-            if a.known and ((goal.operator == "<=" and a.value == 1) or (goal.operator == "<" and a.value == 0)):
-                term <- goal.right
-            elif b.known and ((goal.operator == ">=" and b.value == 1) or (goal.operator == ">" and b.value == 0)):
-                term <- goal.left
-            else:
-                return false
-            return false if proof_kernel_replay_unsigned_width_in_expression(nodes, children, term, facts, 0) == 0
-            return false if not proof_kernel_replay_primitive_comparison(nodes, children, facts, goal.left, goal.right)
-            for fact_root in facts |fact_root, nodes, children, facts, term|:
-                continue if not proof_kernel_replay_valid(nodes, fact_root)
-                fact: mutable ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
-                negated: mutable bool = false
-                if fact.kind == "unary" and fact.operator == "not":
-                    continue if not proof_kernel_replay_valid(nodes, fact.left)
-                    fact <- nodes[fact.left]
-                    negated <- true
-                continue if fact.kind != "binary" or (not negated and fact.operator != "!=") or (negated and fact.operator != "==")
-                continue if not proof_kernel_replay_valid(nodes, fact.left) or not proof_kernel_replay_valid(nodes, fact.right)
-                continue if not proof_kernel_replay_primitive_comparison(nodes, children, facts, fact.left, fact.right)
-                x: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, fact.left, 0)
-                y: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, fact.right, 0)
-                return true if x.known and x.value == 0 and proof_kernel_replay_expr_equal(nodes, children, fact.right, term, 0)
-                return true if y.known and y.value == 0 and proof_kernel_replay_expr_equal(nodes, children, fact.left, term, 0)
-            return false
-
         def proof_kernel_replay_congruence_has_seed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
             return false if depth >= PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
             return false if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
@@ -131,11 +99,23 @@ extend ElisaProofKernelReplay:
             return false if not ElisaProofKernelCore::depth_valid(0) or PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0
             markers: darray[ProofKernelReplayWitnessMarker] = proof_kernel_replay_witness_marker_cache(nodes, children, facts)
             budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
-            return proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, left, 0, budget) and proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, right, 0, budget)
+            proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, left, 0, budget) and proof_kernel_replay_scalar_term_witnessed_budget(nodes, children, markers, right, 0, budget)
+
+        def proof_kernel_replay_primitive_comparison_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if not ElisaProofKernelCore::depth_valid(0) or PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0
+            markers: darray[ProofKernelReplayWitnessMarker] = proof_kernel_replay_witness_marker_cache_with_work(nodes, children, facts, work_used, work_limit)
+            return false if work_used > work_limit
+            proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, left, right, work_used, work_limit)
+
+        def proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], left: usize, right: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if not ElisaProofKernelCore::depth_valid(0) or PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH == 0
+            budget: usize = PROOF_KERNEL_REPLAY_CONGRUENCE_SCAN_DEPTH
+            return false if not proof_kernel_replay_scalar_term_witnessed_budget_with_work(nodes, children, markers, left, 0, budget, work_used, work_limit)
+            proof_kernel_replay_scalar_term_witnessed_budget_with_work(nodes, children, markers, right, 0, budget, work_used, work_limit)
 
         # Independently derive a strict-order consequence before transporting
         # a conditional call result. No producer-created premise is trusted.
-        def proof_kernel_replay_strict_order_consequence(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], root: usize, split_depth: usize, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
+        def proof_kernel_replay_strict_order_consequence(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], root: usize, split_depth: usize, depth: usize, work_used: mutable usize&, remaining: usize) -> bool can[Global.Read, Global.Write]:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
             decreases remaining
@@ -143,7 +123,8 @@ extend ElisaProofKernelReplay:
             goal: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if goal.kind != "binary" or goal.operator != "!="
             return false if not proof_kernel_replay_valid(nodes, goal.left) or not proof_kernel_replay_valid(nodes, goal.right)
-            for fact_root in facts |fact_root, nodes, children, facts, root, split_depth, depth, remaining|:
+            for fact_root in facts |fact_root, nodes, children, facts, root, split_depth, depth, remaining, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 continue if not proof_kernel_replay_valid(nodes, fact_root)
                 fact: ElisaProofKernelCore::ProofKernelNode = nodes[fact_root]
                 continue if fact.kind != "binary" or (fact.operator != "<" and fact.operator != ">")
@@ -153,7 +134,8 @@ extend ElisaProofKernelReplay:
                 consequence_left: usize = fact.right if zero_left else fact.left
                 consequence_right: usize = fact.left if zero_left else fact.right
                 present: mutable bool = false
-                for premise_root in facts |premise_root, nodes, children, consequence_left, consequence_right, present|:
+                for premise_root in facts |premise_root, nodes, children, consequence_left, consequence_right, present, work_used|:
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
                     continue if not proof_kernel_replay_valid(nodes, premise_root)
                     premise: ElisaProofKernelCore::ProofKernelNode = nodes[premise_root]
                     continue if premise.kind != "binary" or premise.operator != "!="
@@ -164,7 +146,7 @@ extend ElisaProofKernelReplay:
                 enriched: mutable darray[usize] = []
                 enriched.extend(facts)
                 enriched.push(consequence)
-                return true if (proof_kernel_replay_goal_depth_remaining(nodes, children, enriched, root, split_depth, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                return true if (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, enriched, root, split_depth, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
             return false
 
         # Independently replay primitive `<`/`>` facts as disequality only when

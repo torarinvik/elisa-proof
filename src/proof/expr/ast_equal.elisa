@@ -1,4 +1,8 @@
 extend ElisaProof:
+    private:
+        const PROOF_PATTERN_WALK_DEPTH_LIMIT: usize = 64
+        const PROOF_PATTERN_WALK_WORK_LIMIT: usize = 16384
+
     public:
         def proof_ident_name(expression: Ast::Expr) -> sview:
             match expression:
@@ -7,11 +11,10 @@ extend ElisaProof:
                 _:
                     return ""
 
-        # Callable references may be bare identifiers or qualified scopes. The proof
-        # tables are intentionally keyed by leaf name: their index functions reject
-        # duplicate names, so a qualified call is usable only when that leaf is
-        # unambiguous. Keep `proof_ident_name` bare-only because frame/alias analysis
-        # must not mistake a qualified value expression for a storage root.
+        # Extract a callable leaf for consumers that resolve declaration identity separately.
+        # This is not a declaration lookup: lemma consumers must retain or reject a Scope until
+        # the lemma table carries owner identity. Keep `proof_ident_name` bare-only because
+        # frame/alias analysis must not mistake a qualified value expression for a storage root.
         def proof_callable_name(expression: Ast::Expr) -> sview:
             match expression:
                 Ast::Expr.Ident(name, _):
@@ -24,6 +27,16 @@ extend ElisaProof:
                     return name
                 _:
                     return ""
+
+        # Interim fail-closed guard for lemma lookup. Until ProofLemmaTable carries declaration
+        # owners and call resolution uses the full scope path, a scoped callee must never be
+        # reduced to its leaf and matched against a lemma from another module.
+        def proof_callable_is_scoped(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Scope(_, _, _):
+                    return true
+                _:
+                    return false
 
         # The compiler lowers the built-in consuming typestate retag to an indexed call,
         # which otherwise looks like user-defined index dispatch. Admit only the exact
@@ -116,8 +129,8 @@ extend ElisaProof:
                                         match right_statements[index]:
                                             Ast::Stmt.VarDecl(right_name, right_type, right_initializer, _):
                                                 return false if left_name != right_name
-                                                return false if not proof_expr_equal(left_type, right_type)
-                                                return false if not proof_expr_equal(left_initializer, right_initializer)
+                                                return false if not proof_expr_equal_supported(left_type, right_type)
+                                                return false if not proof_expr_equal_supported(left_initializer, right_initializer)
                                             _:
                                                 return false
                                     _:
@@ -158,6 +171,12 @@ extend ElisaProof:
         # Keep this structural and position-insensitive like `proof_expr_equal`; source spans
         # are provenance, not proposition identity.
         def proof_pattern_equal(left: Ast::Pattern, right: Ast::Pattern) -> bool:
+            work: mutable usize = 0
+            return proof_pattern_equal_depth(left, right, 0, &work)
+
+        def proof_pattern_equal_depth(left: Ast::Pattern, right: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match left:
                 Ast::Pattern.Wildcard:
                     match right:
@@ -168,89 +187,103 @@ extend ElisaProof:
                 Ast::Pattern.Literal(left_text):
                     match right:
                         Ast::Pattern.Literal(right_text):
-                            return left_text == right_text
+                            return proof_pattern_text_equal_with_budget(left_text, right_text, work)
                         _:
                             return false
                 Ast::Pattern.Binding(left_name):
                     match right:
                         Ast::Pattern.Binding(right_name):
-                            return left_name == right_name
+                            return proof_pattern_text_equal_with_budget(left_name, right_name, work)
                         _:
                             return false
                 Ast::Pattern.Pin(left_name):
                     match right:
                         Ast::Pattern.Pin(right_name):
-                            return left_name == right_name
+                            return proof_pattern_text_equal_with_budget(left_name, right_name, work)
                         _:
                             return false
                 Ast::Pattern.Variant(left_path, left_fields):
                     match right:
                         Ast::Pattern.Variant(right_path, right_fields):
-                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                            return proof_pattern_text_equal_with_budget(left_path, right_path, work) and proof_pattern_array_equal_depth(left_fields, right_fields, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.Struct(left_path, left_fields):
                     match right:
                         Ast::Pattern.Struct(right_path, right_fields):
-                            return left_path == right_path and proof_pattern_array_equal(left_fields, right_fields)
+                            return proof_pattern_text_equal_with_budget(left_path, right_path, work) and proof_pattern_array_equal_depth(left_fields, right_fields, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.Field(left_selector, left_inner):
                     match right:
                         Ast::Pattern.Field(right_selector, right_inner):
-                            return left_selector == right_selector and proof_pattern_array_equal(left_inner, right_inner)
+                            return proof_pattern_text_equal_with_budget(left_selector, right_selector, work) and proof_pattern_array_equal_depth(left_inner, right_inner, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.Tuple(left_elements):
                     match right:
                         Ast::Pattern.Tuple(right_elements):
-                            return proof_pattern_array_equal(left_elements, right_elements)
+                            return proof_pattern_array_equal_depth(left_elements, right_elements, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.Rest(left_name):
                     match right:
                         Ast::Pattern.Rest(right_name):
-                            return left_name == right_name
+                            return proof_pattern_text_equal_with_budget(left_name, right_name, work)
                         _:
                             return false
                 Ast::Pattern.Or(left_options):
                     match right:
                         Ast::Pattern.Or(right_options):
-                            return proof_pattern_array_equal(left_options, right_options)
+                            return proof_pattern_array_equal_depth(left_options, right_options, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.TypeBind(left_type, left_binder):
                     match right:
                         Ast::Pattern.TypeBind(right_type, right_binder):
-                            return left_type == right_type and left_binder == right_binder
+                            return proof_pattern_text_equal_with_budget(left_type, right_type, work) and proof_pattern_text_equal_with_budget(left_binder, right_binder, work)
                         _:
                             return false
                 Ast::Pattern.Range(left_lo, left_hi, left_inclusive):
                     match right:
                         Ast::Pattern.Range(right_lo, right_hi, right_inclusive):
-                            return left_lo == right_lo and left_hi == right_hi and left_inclusive == right_inclusive
+                            return proof_pattern_text_equal_with_budget(left_lo, right_lo, work) and proof_pattern_text_equal_with_budget(left_hi, right_hi, work) and left_inclusive == right_inclusive
                         _:
                             return false
                 Ast::Pattern.As(left_name, left_inner):
                     match right:
                         Ast::Pattern.As(right_name, right_inner):
-                            return left_name == right_name and proof_pattern_array_equal(left_inner, right_inner)
+                            return proof_pattern_text_equal_with_budget(left_name, right_name, work) and proof_pattern_array_equal_depth(left_inner, right_inner, depth + 1, work)
                         _:
                             return false
                 Ast::Pattern.Other(left_text):
                     match right:
                         Ast::Pattern.Other(right_text):
-                            return left_text == right_text
+                            return proof_pattern_text_equal_with_budget(left_text, right_text, work)
                         _:
                             return false
             return false
 
-        def proof_pattern_array_equal(left: darray[Ast::Pattern]&, right: darray[Ast::Pattern]&) -> bool:
+        def proof_pattern_array_equal_depth(left: darray[Ast::Pattern]&, right: darray[Ast::Pattern]&, depth: usize, work: mutable usize&) -> bool:
             return false if left.count != right.count
-            for index in 0..<left.count |left, right, index|:
-                return false if not proof_pattern_equal(left[index], right[index])
+            for index in 0..<left.count |left, right, index, depth, work|:
+                return false if not proof_pattern_equal_depth(left[index], right[index], depth, work)
             return true
 
+        def proof_pattern_text_equal_with_budget(left: sview, right: sview, work: mutable usize&) -> bool:
+            return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
+            left_length: usize = sview_len(left)
+            return false if left_length > PROOF_PATTERN_WALK_WORK_LIMIT - work
+            work <- work + left_length
+            right_length: usize = sview_len(right)
+            return false if right_length > PROOF_PATTERN_WALK_WORK_LIMIT - work
+            work <- work + right_length
+            return left == right
+
+        # The enclosing expression admission already validated every statement child. Use the
+        # supported comparator recursively so blocks do not re-run whole-term admission for
+        # every nested expression.
         def proof_stmt_equal(left: Ast::Stmt, right: Ast::Stmt) -> bool:
             match left:
                 Ast::Stmt.Invalid:
@@ -259,7 +292,7 @@ extend ElisaProof:
                 Ast::Stmt.Expr(left_expression, _):
                     match right:
                         Ast::Stmt.Expr(right_expression, _):
-                            return proof_expr_equal(left_expression, right_expression)
+                            return proof_expr_equal_supported(left_expression, right_expression)
                         _:
                             return false
                 Ast::Stmt.Block(left_kind, left_clause, left_binding, left_body, _):
@@ -271,31 +304,31 @@ extend ElisaProof:
                 Ast::Stmt.VarDecl(left_name, left_type, left_value, _):
                     match right:
                         Ast::Stmt.VarDecl(right_name, right_type, right_value, _):
-                            return left_name == right_name and proof_expr_equal(left_type, right_type) and proof_expr_equal(left_value, right_value)
+                            return left_name == right_name and proof_expr_equal_supported(left_type, right_type) and proof_expr_equal_supported(left_value, right_value)
                         _:
                             return false
                 Ast::Stmt.Assign(left_target, left_operator, left_value, _):
                     match right:
                         Ast::Stmt.Assign(right_target, right_operator, right_value, _):
-                            return left_operator == right_operator and proof_expr_equal(left_target, right_target) and proof_expr_equal(left_value, right_value)
+                            return left_operator == right_operator and proof_expr_equal_supported(left_target, right_target) and proof_expr_equal_supported(left_value, right_value)
                         _:
                             return false
                 Ast::Stmt.If(left_condition, left_then, left_else, _):
                     match right:
                         Ast::Stmt.If(right_condition, right_then, right_else, _):
-                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_then, right_then) and proof_stmt_array_equal(left_else, right_else)
+                            return proof_expr_equal_supported(left_condition, right_condition) and proof_stmt_array_equal(left_then, right_then) and proof_stmt_array_equal(left_else, right_else)
                         _:
                             return false
                 Ast::Stmt.While(left_condition, left_body, _):
                     match right:
                         Ast::Stmt.While(right_condition, right_body, _):
-                            return proof_expr_equal(left_condition, right_condition) and proof_stmt_array_equal(left_body, right_body)
+                            return proof_expr_equal_supported(left_condition, right_condition) and proof_stmt_array_equal(left_body, right_body)
                         _:
                             return false
                 Ast::Stmt.For(left_bind, left_variables, left_iterable, left_body, _):
                     match right:
                         Ast::Stmt.For(right_bind, right_variables, right_iterable, right_body, _):
-                            return left_bind == right_bind and proof_sview_array_equal(left_variables, right_variables) and proof_expr_equal(left_iterable, right_iterable) and proof_stmt_array_equal(left_body, right_body)
+                            return left_bind == right_bind and proof_sview_array_equal(left_variables, right_variables) and proof_expr_equal_supported(left_iterable, right_iterable) and proof_stmt_array_equal(left_body, right_body)
                         _:
                             return false
                 Ast::Stmt.Return(left_value, _):
@@ -303,7 +336,7 @@ extend ElisaProof:
                         Ast::Stmt.Return(right_value, _):
                             if left_value is left_expression:
                                 if right_value is right_expression:
-                                    return proof_expr_equal(left_expression, right_expression)
+                                    return proof_expr_equal_supported(left_expression, right_expression)
                                 return false
                             return false if right_value is right_expression
                             return true
@@ -324,13 +357,13 @@ extend ElisaProof:
                 Ast::Stmt.Match(left_scrutinee, left_arms, _):
                     match right:
                         Ast::Stmt.Match(right_scrutinee, right_arms, _):
-                            return proof_expr_equal(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
+                            return proof_expr_equal_supported(left_scrutinee, right_scrutinee) and proof_match_arm_array_equal(left_arms, right_arms)
                         _:
                             return false
                 Ast::Stmt.Contract(left_kind, left_expression, _):
                     match right:
                         Ast::Stmt.Contract(right_kind, right_expression, _):
-                            return left_kind == right_kind and proof_expr_equal(left_expression, right_expression)
+                            return left_kind == right_kind and proof_expr_equal_supported(left_expression, right_expression)
                         _:
                             return false
             return false
@@ -342,7 +375,7 @@ extend ElisaProof:
             return true
 
         def proof_match_arm_equal(left: Ast::MatchArm, right: Ast::MatchArm) -> bool:
-            return proof_pattern_equal(left.pattern, right.pattern) and proof_stmt_array_equal(left.body, right.body) and proof_expr_equal(left.guard, right.guard)
+            return proof_pattern_equal(left.pattern, right.pattern) and proof_stmt_array_equal(left.body, right.body) and proof_expr_equal_supported(left.guard, right.guard)
 
         def proof_match_arm_array_equal(left: darray[Ast::MatchArm]&, right: darray[Ast::MatchArm]&) -> bool:
             return false if left.count != right.count

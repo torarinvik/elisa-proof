@@ -79,13 +79,23 @@ extend ElisaProof:
                     _:
                         pass
 
-        # The recorded result must resolve to the module that declares the chosen summary. A
-        # matching final segment is insufficient: unrelated parents can declare same-leaf modules.
-        def proof_replay_summary_owner_matches_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, callee: Ast::Expr) -> bool:
+        def proof_replay_owner_work_charge(amount: usize, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + amount
+            return true
+
+        # The recorded result must resolve to the module that declares the chosen summary. Use
+        # the same source-derived alias index and exact path resolver as the checker. This keeps
+        # replay independent of the producer's chosen owner string while preserving lexical alias
+        # visibility, ambiguous aliases, relative nested paths, and a shared source-work cap.
+        def proof_replay_summary_owner_matches_call_bounded(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, callee: Ast::Expr, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_owner_work_charge(report.executables.summaries.count, source_work)
             same_name: mutable usize = 0
-            for candidate in report.executables.summaries |candidate, trace, same_name|:
+            for candidate in report.executables.summaries |candidate, trace, same_name, source_work|:
+                return false if not proof_replay_owner_work_charge(sview_len(candidate.name), source_work) or not proof_replay_owner_work_charge(sview_len(trace.dependency), source_work)
                 same_name <- same_name + 1 if candidate.name == trace.dependency
             return false if trace.owner_line == 0 or summary.line != trace.owner_line
+            return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
             owner: mutable sview = ""
             owners: mutable usize = 0
             proof_replay_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner, &owners, 0)
@@ -93,26 +103,35 @@ extend ElisaProof:
             match callee:
                 Ast::Expr.Scope(base, member, _):
                     return false if member != trace.dependency or owner == ""
-                    return true if proof_replay_exact_module_path_matches_owner(owner, base)
-                    match base:
-                        Ast::Expr.Ident(module_name, _):
-                            return false if report.replay_owner_line == 0
-                            caller_owner: mutable sview = ""
-                            callers: mutable usize = 0
-                            proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
-                            return callers == 1 and proof_replay_relative_module_path_matches_owner(owner, module_name, caller_owner)
-                        _:
-                            return false
+                    return false if not proof_replay_summary_expr_charge_with_work(base, source_work)
+                    return false if report.replay_owner_line == 0
+                    return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
+                    caller_owner: mutable sview = ""
+                    callers: mutable usize = 0
+                    proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
+                    return false if callers != 1
+                    aliases: mutable ProofModuleAliasIndex = ProofModuleAliasIndex{names: [], targets: [], scopes: [], lines: [], offsets: [], alias_lookup_hashes: [], alias_lookup_values: [], alias_lookup_ambiguous: [], global_alias_lookup_hashes: [], global_alias_lookup_values: [], function_lookup_hashes: [], function_lookup_values: [], function_lookup_ambiguous: [], function_lookup_complete: false, complete: false}
+                    alias_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(report.source_annotations, &aliases, source_work)
+                    return false if not alias_status.complete or not aliases.complete
+                    callee_names: darray[sview] = [trace.dependency]
+                    callee_owners: darray[sview] = [owner]
+                    resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(callee_names, callee_owners, aliases, caller_owner, callee, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return resolved.complete and resolved.row == 0
                 Ast::Expr.Ident(callee_name, _):
                     return false if callee_name != trace.dependency
                     return true if same_name <= 1
                     # A bare call resolves to the caller's own module first, so it names
                     # this summary only when the certificate is declared in the callee's module.
                     return false if owner == "" or report.replay_owner_line == 0
+                    return false if not proof_replay_deterministic_declaration_scan_charge(report.source_declarations, source_work, 0)
                     caller_owner: mutable sview = ""
                     callers: mutable usize = 0
                     proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &caller_owner, &callers, 0)
                     return callers == 1 and caller_owner == owner
                 _:
                     return false
+
+        def proof_replay_summary_owner_matches_call(report: ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, callee: Ast::Expr) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_summary_owner_matches_call_bounded(report, trace, summary, callee, source_work)
 

@@ -1,0 +1,122 @@
+# Linear-time validation for const-enum backing rows. Identity-keyed aggregation keeps the
+# replay cost proportional to the bounded environment size instead of rescanning it per enum.
+extend ElisaProofKernelReplay:
+    private:
+        struct ProofKernelReplayEnumUnderlyingStats:
+            identity: usize
+            owner: sview
+            type_rows: mutable usize
+            matching_type_rows: mutable usize
+            tag_rows: mutable usize
+            member_rows: mutable usize
+            underlying_rows: mutable usize
+            scope_rows: mutable usize
+            scope_expected_count: mutable usize
+            scope_final_rows: mutable usize
+            conflicting_owner: mutable bool
+
+        def proof_kernel_replay_empty_enum_underlying_stats(identity: usize, owner: sview) -> ProofKernelReplayEnumUnderlyingStats:
+            return ProofKernelReplayEnumUnderlyingStats{identity: identity, owner: owner, type_rows: 0, matching_type_rows: 0, tag_rows: 0, member_rows: 0, underlying_rows: 1, scope_rows: 0, scope_expected_count: 0, scope_final_rows: 0, conflicting_owner: false}
+
+        # Hash slots store dense stats indices plus one, leaving zero as the empty marker.
+        def proof_kernel_replay_enum_underlying_group_insert(identity: usize, owner: sview, groups: mutable darray[ProofKernelReplayEnumUnderlyingStats]&, group_slots: mutable darray[usize]&, group_count: mutable usize&, capacity: usize, work: mutable usize&) -> usize:
+            return groups.count if identity == 0 or capacity == 0 or group_slots.count != capacity
+            slot: mutable usize = (identity % capacity).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, identity, owner, groups, group_slots, group_count, work|:
+                return groups.count if not proof_kernel_replay_type_work_consume(work)
+                stored: usize = group_slots[slot]
+                if stored == 0:
+                    return groups.count if group_count >= groups.count
+                    groups[group_count] <- proof_kernel_replay_empty_enum_underlying_stats(identity, owner)
+                    group_slots[slot] <- group_count + 1
+                    selected: usize = group_count
+                    group_count <- group_count + 1
+                    return selected
+                group_index: usize = stored - 1
+                return groups.count if group_index >= group_count
+                if groups[group_index].identity == identity:
+                    groups[group_index].underlying_rows <- groups[group_index].underlying_rows + 1
+                    groups[group_index].conflicting_owner <- true if not proof_kernel_replay_type_text_equal(groups[group_index].owner, owner, work)
+                    return group_index
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return groups.count
+
+        def proof_kernel_replay_enum_underlying_group_lookup(identity: usize, groups: darray[ProofKernelReplayEnumUnderlyingStats]&, group_slots: darray[usize]&, group_count: usize, capacity: usize, work: mutable usize&) -> (known: bool, group_index: usize):
+            return (false, group_count) if identity == 0 or capacity == 0 or group_slots.count != capacity
+            slot: mutable usize = (identity % capacity).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, capacity, identity, groups, group_slots, group_count, work|:
+                return (false, group_count) if not proof_kernel_replay_type_work_consume(work)
+                stored: usize = group_slots[slot]
+                return (false, group_count) if stored == 0
+                group_index: usize = stored - 1
+                return (false, group_count) if group_index >= group_count
+                return (true, group_index) if groups[group_index].identity == identity
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, group_count)
+
+        # An underlying-type row is meaningful only beside one exact declared const enum.
+        # Aggregate all related rows in one pass so many enums do not trigger repeated full scans.
+        def proof_kernel_replay_enum_underlying_bindings_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> bool:
+            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            underlying_count: mutable usize = 0
+            for index in 0..<total_bindings |index, environment, underlying_count, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                underlying_count <- underlying_count + 1 if row.kind == "enum-underlying"
+            return true if underlying_count == 0
+            capacity: mutable usize = 1
+            while capacity < underlying_count * 2 |capacity, underlying_count|:
+                capacity <- capacity * 2
+            groups: mutable darray[ProofKernelReplayEnumUnderlyingStats] = []
+            group_slots: mutable darray[usize] = []
+            groups.resize(underlying_count)
+            group_slots.resize(capacity)
+            for slot in 0..<capacity |slot, group_slots, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                group_slots[slot] <- 0
+            group_count: mutable usize = 0
+            # Seed only identities that actually have a backing row; ordinary enum and record
+            # identities never occupy the aggregation table.
+            for index in 0..<total_bindings |index, environment, groups, group_slots, group_count, capacity, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if row.kind != "enum-underlying"
+                group_index: usize = proof_kernel_replay_enum_underlying_group_insert(row.owner_type_identity, row.owner, groups, group_slots, &group_count, capacity, work)
+                return false if group_index >= groups.count or not proof_kernel_replay_type_text_equal(row.name, row.owner, work)
+            # Every query below is an expected O(1) identity lookup. Probe work is charged too;
+            # deliberately colliding forged identities still fail closed at the work limit.
+            for index in 0..<total_bindings |index, environment, groups, group_slots, group_count, capacity, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                identity: usize = row.type_identity if row.kind == "type" or row.kind == "enum-tag" or row.kind == "enum-member" or row.kind == "enum-scope-segment" else 0
+                continue if identity == 0
+                group: (known: bool, group_index: usize) = proof_kernel_replay_enum_underlying_group_lookup(identity, groups, group_slots, group_count, capacity, work)
+                return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                continue if not group.known
+                selected: usize = group.group_index
+                if row.kind == "type":
+                    groups[selected].type_rows <- groups[selected].type_rows + 1
+                    groups[selected].matching_type_rows <- groups[selected].matching_type_rows + 1 if proof_kernel_replay_type_text_equal(row.name, groups[selected].owner, work) and proof_kernel_replay_type_text_equal(row.type_name, groups[selected].owner, work) and row.sort == "named"
+                elif row.kind == "enum-tag":
+                    groups[selected].tag_rows <- groups[selected].tag_rows + 1
+                    groups[selected].conflicting_owner <- true if not proof_kernel_replay_type_text_equal(row.owner, groups[selected].owner, work)
+                elif row.kind == "enum-member":
+                    groups[selected].member_rows <- groups[selected].member_rows + 1
+                    groups[selected].conflicting_owner <- true if not proof_kernel_replay_type_text_equal(row.owner, groups[selected].owner, work)
+                elif row.kind == "enum-scope-segment":
+                    groups[selected].scope_rows <- groups[selected].scope_rows + 1
+                    groups[selected].conflicting_owner <- true if not proof_kernel_replay_type_text_equal(row.owner, groups[selected].owner, work)
+                    groups[selected].scope_expected_count <- row.parameter_count if groups[selected].scope_expected_count == 0
+                    groups[selected].conflicting_owner <- true if row.parameter_count != groups[selected].scope_expected_count
+                    groups[selected].scope_final_rows <- groups[selected].scope_final_rows + 1 if row.parameter_index + 1 == row.parameter_count and proof_kernel_replay_type_text_equal(row.name, groups[selected].owner, work)
+                    groups[selected].conflicting_owner <- true if row.parameter_index + 1 == row.parameter_count and not proof_kernel_replay_type_text_equal(row.name, groups[selected].owner, work)
+            for group_index in 0..<group_count |group_index, groups, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                group: ProofKernelReplayEnumUnderlyingStats = groups[group_index]
+                return false if group.type_rows != 1 or group.matching_type_rows != 1 or group.tag_rows == 0 or group.member_rows == 0 or group.underlying_rows != 1 or group.scope_rows == 0 or group.scope_rows != group.scope_expected_count or group.scope_final_rows != 1 or group.conflicting_owner
+            return true

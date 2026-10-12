@@ -130,6 +130,21 @@ def materialize_fixture(destination: Path) -> None:
         raise SystemExit("R-019 fixture main anchor changed; refusing to run a partial regression")
     source = source.replace(main_marker, helpers + "\n" + main_marker, 1)
     anchor = '    return 9 if shadowed_markers.names[0] != shadowed_markers.names[2]\n'
+    overflow_names: list[str] = []
+    overflow_bucket = 0
+    candidate = 0
+    while len(overflow_names) < 65:
+        name = f"overflow_marker_{candidate}"
+        candidate += 1
+        if fnv1a_u32(name) % 256 == overflow_bucket:
+            overflow_names.append(name)
+    if len(set(overflow_names)) != 65:
+        raise SystemExit("scalar-witness overflow fixture names are not unique")
+    while True:
+        overflow_absent = f"overflow_marker_{candidate}"
+        candidate += 1
+        if fnv1a_u32(overflow_absent) % 256 == overflow_bucket and overflow_absent not in overflow_names:
+            break
     mixed_case = r'''
 
     # Interleave equal-full-hash names with multiple marker kinds, widths, duplicates, and
@@ -155,9 +170,32 @@ def materialize_fixture(destination: Path) -> None:
     return 14 if proof_unsigned_marker_width_for_name(mixed_facts, "shadowed") != 8
     return 15 if proof_unsigned_marker_width_for_name(mixed_facts, collision_b) != 8
 '''
+    overflow_rows = ",\n".join(
+        f'        test_make_scalar_marker("{name}", Ast::pos_at_line({100 + index}))'
+        for index, name in enumerate(overflow_names)
+    )
+    overflow_last = overflow_names[-1]
+    overflow_case = f'''
+
+    # 65 distinct names share one of 256 initial slots. The 64-probe hash fast path leaves
+    # the final name for the sorted exact fallback; production lookup must still match the
+    # source-order oracle.
+    overflow_facts: mutable darray[Ast::Expr] = [
+{overflow_rows}
+    ]
+    overflow_witnesses: ProofScalarWitnesses = proof_scalar_witness_markers(overflow_facts)
+    overflow_linear_found: bool = test_linear_first_name_index(overflow_facts, "{overflow_last}") < overflow_witnesses.names.count
+    return 16 if overflow_witnesses.names.count != 65 or overflow_witnesses.sorted_name_indices.count != 65
+    return 17 if not overflow_linear_found
+    return 18 if not proof_scalar_witnesses_name(overflow_witnesses, "{overflow_last}")
+    return 19 if proof_scalar_witnesses_name(overflow_witnesses, "{overflow_last}") != overflow_linear_found
+    overflow_linear_absent_found: bool = test_linear_first_name_index(overflow_facts, "{overflow_absent}") < overflow_witnesses.names.count
+    return 20 if overflow_linear_absent_found or proof_scalar_witnesses_name(overflow_witnesses, "{overflow_absent}")
+    return 21 if proof_scalar_witnesses_name(overflow_witnesses, "{overflow_absent}") != overflow_linear_absent_found
+'''
     if source.count(anchor) != 1:
         raise SystemExit("R-019 fixture shadowing anchor changed; refusing to run a partial regression")
-    source = source.replace(anchor, anchor + mixed_case, 1)
+    source = source.replace(anchor, anchor + mixed_case + overflow_case, 1)
     destination.write_text(source, encoding="utf-8")
 
 

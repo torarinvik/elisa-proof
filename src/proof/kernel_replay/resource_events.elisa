@@ -15,17 +15,19 @@ extend ElisaProofKernelReplay:
             return false if depth >= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
             previous_event: mutable usize = nodes.count
             for root in roots |root, nodes, children, state, depth, remaining, arena_admitted, previous_event|:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
                 prior_event: usize = previous_event
                 previous_event <- root
                 located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
                 return false if not located.known
                 node: ElisaProofKernelCore::ProofKernelNode = located.node
+                return false if not proof_kernel_replay_resource_charge_node_text(state, node)
                 # A scope exit that consumed an inherited binding creates a mandatory parent
                 # transition. Do not let a use, close, call, or another nested scope slip past it.
                 return false if proof_kernel_replay_resource_has_pending_join(state) and node.kind != "resource-join-move"
                 if node.kind == "resource-disjoint":
                     return false if node.operator != "!=" or node.left >= nodes.count or node.right >= nodes.count or node.auxiliary >= nodes.count
-                    return false if not proof_kernel_replay_resource_index_expression_valid(nodes, node.left, 0) or not proof_kernel_replay_resource_index_expression_valid(nodes, node.right, 0)
+                    return false if not proof_kernel_replay_resource_index_expression_valid(state, nodes, node.left, 0) or not proof_kernel_replay_resource_index_expression_valid(state, nodes, node.right, 0)
                     goal_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.auxiliary)
                     return false if not goal_located.known or goal_located.node.kind != "binary" or goal_located.node.operator != "!=" or goal_located.node.left != node.left or goal_located.node.right != node.right
                     return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
@@ -48,15 +50,26 @@ extend ElisaProofKernelReplay:
                         return false if not child.known
                         child_roots.push(child.value)
                     child_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
-                    proof_kernel_replay_resource_copy(state, &child_state)
+                    return false if not proof_kernel_replay_resource_copy(state, &child_state)
                     child_state.scope_depth <- state.scope_depth + 1
                     # Preserve region identity across the child snapshot. A same-named region
                     # opened after an inherited close is a fresh lifetime, not the parent's
                     # region, and must not be allowed to hide that close at the join boundary.
                     for inherited_region in state.active_regions |inherited_region, child_state|:
-                        child_state.protected_regions.push(inherited_region) if not any prior in child_state.protected_regions where prior == inherited_region
+                        return false if not proof_kernel_replay_resource_charge_work(&child_state, 1)
+                        already_protected: mutable bool = false
+                        protected_region_count: usize = child_state.protected_regions.count
+                        for prior_index in 0..<protected_region_count |prior_index, child_state, inherited_region, already_protected|:
+                            return false if prior_index >= child_state.protected_regions.count
+                            prior: sview = child_state.protected_regions[prior_index]
+                            return false if not proof_kernel_replay_resource_charge_text_pair(&child_state, prior, inherited_region)
+                            if prior == inherited_region:
+                                already_protected <- true
+                                break
+                        child_state.protected_regions.push(inherited_region) if not already_protected
                     return false if remaining <= 1
                     return false if not (proof_kernel_replay_resource_events_remaining(nodes, children, child_roots, &child_state, effects, depth + 1, remaining - 1, arena_admitted) can Global{Read,Write})
+                    state.resource_work_used <- child_state.resource_work_used
                     return false if not proof_kernel_replay_resource_scope_preserves_parent(state, child_state)
                     for index in 0..<state.binding_moved.count |index, state, child_state|:
                         return false if index >= child_state.binding_moved.count or index >= state.pending_join_moves.count
@@ -80,7 +93,7 @@ extend ElisaProofKernelReplay:
                     return false if proof_kernel_replay_resource_region_external(state, node.name) or proof_kernel_replay_resource_region_protected(state, node.name)
                     return false if node.auxiliary == PROOF_KERNEL_REPLAY_EXPLICIT_REGION_DESTROY and proof_kernel_replay_resource_region_has_live_borrow(state, node.name)
                     state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
-                    proof_kernel_replay_resource_invalidate_region_bindings(state, node.name)
+                    return false if not proof_kernel_replay_resource_invalidate_region_bindings(state, node.name)
                     continue
                 if node.kind == "resource-region-alloc":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
@@ -207,7 +220,7 @@ extend ElisaProofKernelReplay:
                         sview_type: ElisaProofKernelCore::ProofKernelNode = nodes[node.right]
                         return false if sview_type.kind != "ident" or sview_type.name != "sview" or sview_type.left != 0 or sview_type.right != 0 or sview_type.auxiliary != 0 or sview_type.children_start != 0 or sview_type.children_count != 0 or sview_type.value != 0 or sview_type.secondary_name != ""
                         return false if (node.auxiliary & (PROOF_KERNEL_REPLAY_REFERENCE_FLAG + PROOF_KERNEL_REPLAY_MUTABLE_REFERENCE_FLAG + PROOF_KERNEL_REPLAY_WRITABLE_FLAG)) != 0
-                    source: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
+                    source: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
                     return false if not source.known
                     # The event format stores no path for the new alias. Reject a field/index
                     # source rather than widening it to a whole-root capability.
@@ -266,7 +279,7 @@ extend ElisaProofKernelReplay:
                     continue
                 if node.kind == "resource-region-assign":
                     return false if not proof_kernel_replay_resource_region_active(state, node.secondary_name)
-                    source: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
+                    source: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
                     return false if not source.known
                     source_slot: usize = proof_kernel_replay_resource_lookup_place(state, nodes, source.place)
                     target_slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
@@ -303,8 +316,8 @@ extend ElisaProofKernelReplay:
                         return false if target_slot >= state.binding_moved.count or state.binding_moved[target_slot]
                         source_region: sview = proof_kernel_replay_resource_binding_region(state, target_slot)
                         return false if source_region != "" and (not proof_kernel_replay_resource_binding_region_is_live(state, target_slot) or not proof_kernel_replay_resource_region_active(state, source_region))
-                        decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
-                        return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(nodes, decoded.place, node.secondary_name)
+                        decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
+                        return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded.place, node.secondary_name)
                         source_place <- decoded.place
                         borrow_is_present <- true
                         if node.operator == "mutable":
@@ -314,7 +327,7 @@ extend ElisaProofKernelReplay:
                             return false if proof_kernel_replay_resource_has_mutable_borrow_overlap(nodes, state, source_place, state.binding_names.count)
                         source_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_origin_for(nodes, state, target_slot)
                         if source_origin.known:
-                            composed: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(nodes, source_origin.place, source_place)
+                            composed: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place_append(state, nodes, source_origin.place, source_place)
                             origin_place <- composed.place if composed.known
                     elif node.operator == "external-shared" or node.operator == "external-mutable":
                         origin_place <- ProofKernelReplayResourcePlace{has_root: node.name != "", root_node: root, path_root: 0, depth: 0, whole: true}
@@ -345,8 +358,8 @@ extend ElisaProofKernelReplay:
                     state.binding_origin_places.push(origin_place)
                     continue
                 if node.kind == "resource-use":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
-                    return false if not decoded.known or not decoded.place.whole or not proof_kernel_replay_resource_place_root_matches(nodes, decoded.place, node.name)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
+                    return false if not decoded.known or not decoded.place.whole or not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded.place, node.name)
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
                     region: sview = proof_kernel_replay_resource_binding_region(state, slot)
@@ -355,8 +368,8 @@ extend ElisaProofKernelReplay:
                     state.resource_return_witnesses.push(root)
                     continue
                 if node.kind == "resource-write":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
-                    return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(nodes, decoded.place, node.name)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
+                    return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded.place, node.name)
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
                     region: sview = proof_kernel_replay_resource_binding_region(state, slot)
@@ -372,8 +385,8 @@ extend ElisaProofKernelReplay:
                     effects.push(ProofKernelReplayResourceEffect{kind: "write", place: resolved_origin.place}) if resolved_origin.known
                     continue
                 if node.kind == "resource-move":
-                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(nodes, children, node.left, 0)
-                    return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(nodes, decoded.place, node.name)
+                    decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
+                    return false if not decoded.known or not proof_kernel_replay_resource_place_root_matches(state, nodes, decoded.place, node.name)
                     slot: usize = proof_kernel_replay_resource_lookup(state, node.name)
                     return false if slot >= state.binding_names.count
                     region: sview = proof_kernel_replay_resource_binding_region(state, slot)

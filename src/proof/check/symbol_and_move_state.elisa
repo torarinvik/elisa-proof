@@ -1,7 +1,16 @@
 extend ElisaProof:
     private:
         def proof_clear_facts_after_call(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview) -> void can[Global.Read, Global.Write]:
+            no_extra_aliases: darray[sview] = []
+            proof_clear_facts_after_call_with_aliases(facts, names, parameters, report, owner, no_extra_aliases) can Global{Read,Write}
+
+        def proof_clear_facts_after_call_with_aliases(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, extra_may_alias: darray[sview]&) -> void can[Global.Read, Global.Write]:
+            proof_record_opaque_call_alias_roots(report, owner, extra_may_alias)
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            call_aliases: mutable darray[sview] = []
+            call_aliases.extend(report.aliased_names)
+            for root in extra_may_alias |call_aliases|:
+                proof_push_aliased(&call_aliases, root)
             source: darray[Ast::Expr] = proof_copy_exprs(facts)
             rebind_paths: mutable darray[Ast::Expr] = []
             rebind_values: mutable darray[Ast::Expr] = []
@@ -32,20 +41,20 @@ extend ElisaProof:
                 proof_add_derived_fact_from(facts, report, probe, source, "proof-step", Ast::expr_pos(fact).line, owner)
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             keep: mutable darray[bool] = []
-            for fact in original |keep, original, names, parameters, report, owner, analyzed, rebind_paths, rebind_values|:
+            for fact in original |keep, original, names, parameters, report, owner, analyzed, rebind_paths, rebind_values, call_aliases|:
                 bound_name: sview = proof_type_bound_name(fact)
                 retained: mutable bool = false
                 retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound(report, fact, owner)
                 retained <- true if not retained and proof_unique_builtin_const_enum_member_witness(fact, report) and proof_fact_is_type_bound(report, fact, owner)
                 retained <- true if not retained and proof_fact_is_global_mutable_array_type_fact(report, fact, owner)
                 retained <- true if not retained and proof_fact_is_source_global_constant(report, fact, owner)
-                stable: mutable bool = analyzed and proof_expr_call_stable(fact, original, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                stable: mutable bool = analyzed and proof_expr_call_stable(fact, original, names, parameters, call_aliases, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
                 if not retained and analyzed and not stable and rebind_paths.count > 0:
                     probe: mutable Ast::Expr = fact
                     for path_index in 0..<rebind_paths.count |path_index, probe, rebind_paths, rebind_values|:
                         replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, rebind_paths[path_index], rebind_values[path_index])
                         probe <- replaced.value if replaced.changed
-                    stable <- proof_expr_call_stable(probe, original, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                    stable <- proof_expr_call_stable(probe, original, names, parameters, call_aliases, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
                 retained <- true if not retained and stable
                 keep.push(retained)
             write_index: mutable usize = 0
@@ -244,7 +253,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_bind_unsigned_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, slot: usize, width: i64, value: Ast::Expr, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+        def proof_bind_unsigned_symbol(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, owner: sview, slot: usize, width: i64, value: Ast::Expr, position: Ast::Pos, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
             return if slot >= names.count or slot >= values.count or width <= 0
             declared: sview = names[slot]
             value_known: mutable bool = true
@@ -265,7 +274,7 @@ extend ElisaProof:
             values[slot] <- Ast::Expr.Ident(symbol, position)
             proof_add_unsigned_binding_facts(facts, report, symbol, width, position.line, owner, position)
             return if not value_known or proof_expr_mentions_name(value, symbol)
-            proof_rebind_call_summaries(facts, report, value, symbol, position.line, owner, position)
+            proof_rebind_call_summaries(facts, report, functions, value, symbol, position.line, owner, position)
             return if not proof_unsigned_expression_safe(value, facts) and not proof_unsigned_named_subtraction_value(value, width, facts)
             return if not proof_unsigned_constants_fit(value, width, 0)
             return if proof_contextual_u64_high_bit_literal(value, width, annotations)

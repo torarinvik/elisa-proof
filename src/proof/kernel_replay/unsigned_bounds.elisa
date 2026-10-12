@@ -1,4 +1,5 @@
 include "unsigned_span_descent.elisa"
+const PROOF_KERNEL_REPLAY_FIXED_WIDTH_SAFETY_WORK_LIMIT: usize = 65536
 extend ElisaProofKernelReplay:
     private:
         def proof_kernel_replay_unsigned_span_cursor_bound(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize) -> bool:
@@ -196,6 +197,26 @@ extend ElisaProofKernelReplay:
                 _:
                     return proof_kernel_replay_constant_bool_leaf(nodes[root].kind, nodes[root].value)
 
+        def proof_kernel_replay_constant_bool_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
+            return (false, false) if root >= nodes.count
+            remaining: usize = PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT
+            proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, root, remaining, goal_work)
+
+        def proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
+            decreases remaining
+            return (false, false) if root >= nodes.count
+            return (false, false) if not proof_kernel_replay_goal_search_charge(goal_work) or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, goal_work)
+            return (false, false) if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "binary":
+                return (false, false) if not proof_kernel_replay_arena_shape_valid(node) or node.left >= nodes.count or node.right >= nodes.count
+                return ElisaProofKernelCore::typed_constant_expression_comparison_with_goal_work(nodes, node.left, node.operator, node.right, goal_work, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            if node.kind == "unary":
+                return (false, false) if remaining < 1 or node.operator != "not"
+                inner: (known: bool, value: bool) = proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, node.left, remaining - 1, goal_work)
+                return (inner.known, not inner.value)
+            proof_kernel_replay_constant_bool_leaf(node.kind, node.value)
+
         # A list-comprehension binder does not appear in the resource event trace, so keep this
         # small collector as an explicit loop whose indexed access is checked in the body.
         def proof_kernel_replay_collect_type_marker_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], orders: mutable darray[usize]&) -> void:
@@ -208,9 +229,22 @@ extend ElisaProofKernelReplay:
         # a signed integer. Never let that encoding mismatch create an empty signed interval and
         # thereby a vacuous bounded-model proof for a machine-word unsigned expression.
         def proof_kernel_replay_has_negative_integer_bit_pattern(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize) -> bool:
+            work_used: mutable usize = 0
+            proof_kernel_replay_has_negative_integer_bit_pattern_with_work(nodes, children, root, &work_used, depth)
+
+        def proof_kernel_replay_has_negative_integer_bit_pattern_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&, depth: usize) -> bool:
+            goal_work: mutable usize = 0
+            proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, root, work_used, &goal_work, depth)
+
+        def proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&, goal_work: mutable usize&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            return true if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count
+            return true if not proof_kernel_replay_goal_search_charge(goal_work)
+            return true if root >= nodes.count or not proof_kernel_replay_goal_search_charge_node_text(nodes, root, goal_work)
+            return true if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return true if work_used >= PROOF_KERNEL_REPLAY_FIXED_WIDTH_SAFETY_WORK_LIMIT
+            work_used <- work_used + 1
+            return true if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return true if not proof_kernel_replay_arena_shape_valid(node)
             # Exact typed ordering is handled before this legacy i64 model gate.
@@ -221,140 +255,160 @@ extend ElisaProofKernelReplay:
                 return not literal.known or (literal.unsigned and literal.width == 64 and node.value < 0)
             return node.value < 0 if node.kind == "int"
             if node.kind == "unary" or node.kind == "field" or node.kind == "index" or node.kind == "checked-index" or node.kind == "checked-get" or node.kind == "paren" or node.kind == "call_arg" or node.kind == "field-init":
-                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1)
+                return proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.left, work_used, goal_work, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.right, work_used, goal_work, depth + 1)
             if node.kind == "binary":
-                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1)
+                return proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.left, work_used, goal_work, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.right, work_used, goal_work, depth + 1)
             if node.kind == "if":
-                return proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.right, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.auxiliary, depth + 1)
+                return proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.left, work_used, goal_work, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.right, work_used, goal_work, depth + 1) or proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.auxiliary, work_used, goal_work, depth + 1)
             if node.kind == "call" or node.kind == "index-n" or node.kind == "array" or node.kind == "tuple" or node.kind == "set" or node.kind == "dict" or node.kind == "construct":
                 return true if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-                found: mutable bool = proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, node.left, depth + 1)
+                found: mutable bool = proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, node.left, work_used, goal_work, depth + 1)
                 return true if found
-                for offset in 0..<node.children_count |offset, node, children, nodes, depth|:
+            for offset in 0..<node.children_count |offset, node, children, nodes, depth, work_used, goal_work|:
                     child: (known: bool, value: usize) = proof_kernel_replay_index_at(children, node.children_start + offset)
-                    found <- true if not child.known or proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, child.value, depth + 1)
+                    found <- true if not child.known or proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, child.value, work_used, goal_work, depth + 1)
                     return true if found
                 return false
             return false
 
         def proof_kernel_replay_unsigned_expression_safe(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, depth: usize) -> bool:
+            work_used: mutable usize = 0
+            goal_work: mutable usize = 0
+            proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, root, facts, bounds, &work_used, &goal_work, depth)
+
+        def proof_kernel_replay_unsigned_expression_safe_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, work_used: mutable usize&, depth: usize) -> bool:
+            goal_work: mutable usize = 0
+            proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, root, facts, bounds, work_used, &goal_work, depth)
+
+        def proof_kernel_replay_unsigned_expression_safe_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, goal_work: mutable usize&, depth: usize) -> bool:
+            work_used: mutable usize = 0
+            proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, root, facts, bounds, &work_used, goal_work, depth)
+
+        def proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, work_used: mutable usize&, goal_work: mutable usize&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not proof_kernel_replay_goal_search_charge(goal_work)
+            return false if work_used >= PROOF_KERNEL_REPLAY_FIXED_WIDTH_SAFETY_WORK_LIMIT
+            work_used <- work_used + 1
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth)
             return false if root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
-            return false if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS and proof_kernel_replay_has_negative_integer_bit_pattern(nodes, children, root, depth + 1)
-            return true if node.kind == "if" and proof_kernel_replay_unsigned_conditional_difference_safe(nodes, children, facts, root)
+            width: i64 = proof_kernel_replay_linear_unsigned_width_with_work(nodes, children, root, facts, goal_work, depth + 1)
+            return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS:
+                negative_bit_pattern: bool = proof_kernel_replay_has_negative_integer_bit_pattern_with_replay_work(nodes, children, root, work_used, goal_work, depth + 1)
+                return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or negative_bit_pattern
+            if node.kind == "if":
+                conditional_safe: bool = proof_kernel_replay_unsigned_conditional_difference_safe_with_goal_work(nodes, children, facts, root, goal_work)
+                return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return true if conditional_safe
             if node.kind == "unary":
-                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.left, facts, bounds, work_used, goal_work, depth + 1)
                 if node.operator == "-":
-                    width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, node.left, facts, depth + 1)
+                    width: i64 = proof_kernel_replay_linear_unsigned_width_with_work(nodes, children, node.left, facts, goal_work, depth + 1)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     if width != 0:
-                        interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, children, root, bounds, depth + 1)
+                        interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval_with_goal_work(nodes, children, root, bounds, goal_work, depth + 1)
+                        return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                         return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
                 return true
             if node.kind == "binary":
-                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
+                return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.left, facts, bounds, work_used, goal_work, depth + 1)
                 # `or` and `and` short-circuit, so an operand the left one settles is never
                 # evaluated and its arithmetic never happens.
                 if node.operator == "or" or node.operator == "and":
-                    settled: (known: bool, value: bool) = proof_kernel_replay_constant_bool(nodes, node.left, 0)
+                    settled: (known: bool, value: bool) = proof_kernel_replay_constant_bool_with_goal_work(nodes, node.left, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return true if settled.known and settled.value and node.operator == "or"
                     return true if settled.known and not settled.value and node.operator == "and"
-                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1)
+                return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, facts, bounds, work_used, goal_work, depth + 1)
                 arithmetic: bool = node.operator == "+" or node.operator == "-" or node.operator == "*" or node.operator == "/" or node.operator == "%" or node.operator == "<<" or node.operator == ">>"
-                width: i64 = proof_kernel_replay_unsigned_width_in_expression(nodes, children, root, facts, depth + 1)
+                width: i64 = proof_kernel_replay_linear_unsigned_width_with_work(nodes, children, root, facts, goal_work, depth + 1)
+                return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 return true if not arithmetic or width == 0
                 # A guarded unsigned subtraction is range-safe even when its operands are
                 # wider than the kernel's i64 interval representation.
                 if node.operator == "+":
-                    unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base(nodes, node.left, node.right)
+                    unit: (known: bool, base: usize) = proof_kernel_replay_unsigned_unit_increment_base_with_work(nodes, node.left, node.right, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     if unit.known:
-                        return true if proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, facts)
+                        strict_peer: bool = proof_kernel_replay_unsigned_increment_has_strict_peer_with_work(nodes, children, unit.base, width, facts, goal_work)
+                        return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        return true if strict_peer
                     # A sum of two non-constant terms has no interval here and never can for a
                     # 64-bit unsigned value. What it can have is a bound, and the same search that
                     # discharges `a + b <= C` names the `C`.
-                    sum_witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness(nodes, children, node.left, node.right, facts)
-                    if sum_witness.known and proof_kernel_replay_peer_is_nameable(nodes, sum_witness.bound):
-                        return true if proof_kernel_replay_peer_unsigned_width(nodes, children, sum_witness.bound, facts) == width
+                    sum_witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness_with_goal_work(nodes, children, node.left, node.right, facts, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    if sum_witness.known and proof_kernel_replay_peer_is_nameable_with_goal_work(nodes, sum_witness.bound, goal_work):
+                        return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        peer_width: i64 = proof_kernel_replay_sum_peer_unsigned_width_with_goal_work(nodes, children, sum_witness.bound, facts, goal_work)
+                        return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        return true if peer_width == width
                 if node.operator == "-":
-                    orders: mutable darray[usize] = []
-                    # Mirror: read the facts the way the structural rules do.
-                    readable: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
-                    for fact in readable |nodes, orders|:
-                        proof_kernel_replay_collect_unsigned_orders(nodes, fact, &orders, 0)
-                    # Mirror: the order tier is gated on its operands' primitive type witness,
-                    # which is a type statement rather than an order fact. Carry the markers
-                    # across with the orders; they are inert for every bound collector.
-                    proof_kernel_replay_collect_type_marker_facts(nodes, children, facts, &orders)
-                    # Mirror: a counter's rebind beside a strict peer is an order in disguise.
-                    increments: mutable darray[usize] = []
-                    for fact in readable |nodes, children, orders, increments|:
-                        increments.push(fact) if proof_kernel_replay_unsigned_peer_increment_equality(nodes, children, fact, orders)
-                    orders.extend(increments)
-                    # Mirror: the order may be stated between two places, which the affine
-                    # tiers cannot name. A collected order contains no arithmetic.
-                    return true if proof_kernel_replay_has_order_fact(nodes, children, node.right, node.left, false, orders)
-                    return true if proof_kernel_replay_difference_comparison(nodes, children, node.left, ">=", node.right, orders)
-                    # Mirror: the producer asks its whole linear goal tier, whose interval rule reads
-                    # `x != 0` beside `0 <= x` as `x >= 1`; see proof_tighten_disequality_bounds.
-                    return true if proof_kernel_replay_interval_goal(nodes, children, node.left, ">=", node.right, orders)
+                    has_order: bool = proof_kernel_replay_has_order_fact_with_work(nodes, children, node.right, node.left, false, facts, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return true if has_order
+                    difference_safe: bool = proof_kernel_replay_difference_comparison_with_work(nodes, children, node.left, ">=", node.right, facts, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return true if difference_safe
+                    interval_bounds: mutable darray[ProofKernelReplayBound] = []
+                    return false if not proof_kernel_replay_goal_search_charge_amount(goal_work, bounds.count)
+                    interval_bounds.extend(bounds)
+                    interval_safe: bool = proof_kernel_replay_interval_goal_with_work(nodes, children, node.left, ">=", node.right, facts, &interval_bounds, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return interval_safe
                 # Mirror the producer's unsigned-remainder range: with a positive constant
                 # divisor that fits this witnessed width, the result is between zero and d-1.
                 # The signed interval fallback below cannot express that nonnegative lower bound.
                 if node.operator == "%":
-                    divisor: ProofKernelReplayInt = proof_kernel_replay_constant_int(nodes, node.right, depth + 1)
+                    remaining: usize = ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth - 1
+                    divisor: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, node.right, remaining, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return false if not divisor.known or divisor.value <= 0
                     return false if divisor.value > proof_kernel_replay_unsigned_width_max(width)
                     remainder_upper: ProofKernelReplayInt = proof_kernel_replay_sub_safe(divisor.value, 1)
                     return false if not remainder_upper.known
                     return remainder_upper.value <= proof_kernel_replay_unsigned_width_max(width)
                 if node.operator == "*":
-                    scaled_witness: (known: bool, base: usize, bound: usize, factor: i64) = proof_kernel_replay_unsigned_scaled_product_witness(nodes, children, root, facts, false)
+                    scaled_witness: (known: bool, base: usize, bound: usize, factor: i64) = proof_kernel_replay_unsigned_scaled_product_witness_with_work(nodes, children, root, facts, false, goal_work)
+                    return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return true if scaled_witness.known
-                interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval(nodes, children, root, bounds, depth + 1)
+                interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_kernel_replay_interval_with_goal_work(nodes, children, root, bounds, goal_work, depth + 1)
+                return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_kernel_replay_unsigned_width_max(width)
             if node.kind == "if":
-                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
-                if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, facts, bounds, depth + 1):
+                return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.left, facts, bounds, work_used, goal_work, depth + 1)
+                if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, facts, bounds, work_used, goal_work, depth + 1):
                     # Mirror of `proof_unsigned_arm_safe_under`: the then arm runs only under its
                     # condition, which joins the facts for that arm alone.
                     guarded: mutable darray[usize] = []
                     guarded.extend(facts)
                     guarded.push(node.left)
                     guarded_bounds: mutable darray[ProofKernelReplayBound] = []
-                    proof_kernel_replay_arm_bounds(nodes, children, guarded, nodes.count, &guarded_bounds)
-                    if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, guarded, guarded_bounds, depth + 1):
-                        proof_kernel_replay_close_plain_bounds(nodes, children, guarded, &guarded_bounds)
-                        return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.right, guarded, guarded_bounds, depth + 1)
-                return true if proof_kernel_replay_unsigned_expression_safe(nodes, children, node.auxiliary, facts, bounds, depth + 1)
+                    return false if not proof_kernel_replay_arm_bounds_with_work(nodes, children, guarded, nodes.count, &guarded_bounds, goal_work)
+                    if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, guarded, guarded_bounds, work_used, goal_work, depth + 1):
+                        proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, guarded, &guarded_bounds, goal_work)
+                        return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, guarded, guarded_bounds, work_used, goal_work, depth + 1)
+                return true if proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, bounds, work_used, goal_work, depth + 1)
                 # Mirror of `proof_unsigned_arm_safe_unless`: the complement enters the bounds alone.
                 else_bounds: mutable darray[ProofKernelReplayBound] = []
-                proof_kernel_replay_arm_bounds(nodes, children, facts, node.left, &else_bounds)
-                return true if proof_kernel_replay_unsigned_expression_safe(nodes, children, node.auxiliary, facts, else_bounds, depth + 1)
-                proof_kernel_replay_close_plain_bounds(nodes, children, facts, &else_bounds)
-                return proof_kernel_replay_unsigned_expression_safe(nodes, children, node.auxiliary, facts, else_bounds, depth + 1)
+                return false if not proof_kernel_replay_arm_bounds_with_work(nodes, children, facts, node.left, &else_bounds, goal_work)
+                return true if proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, else_bounds, work_used, goal_work, depth + 1)
+                proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &else_bounds, goal_work)
+                return proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, else_bounds, work_used, goal_work, depth + 1)
             if node.kind == "call":
                 return false if node.children_start > children.count or node.children_count > children.count - node.children_start
                 return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
-                return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, node.left, facts, bounds, depth + 1)
-                for index in 0..<node.children_count |index, node, children, nodes, facts, bounds, depth|:
+                return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.left, facts, bounds, work_used, goal_work, depth + 1)
+            for index in 0..<node.children_count |index, node, children, nodes, facts, bounds, depth, work_used, goal_work|:
                     argument: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                     return false if not argument.known
                     argument_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, argument.value)
                     return false if not argument_node.known or argument_node.node.kind != "call_arg"
-                    return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, argument_node.node.left, facts, bounds, depth + 1)
+                    return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, argument_node.node.left, facts, bounds, work_used, goal_work, depth + 1)
                 return true
             return true
-
-        # The closed bounds an arm of `a if c else b` runs under: the facts, plus the complement
-        # of the condition for the else arm. Mirrors the producer's arm helpers.
-        def proof_kernel_replay_arm_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], negated: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
-            for fact in facts |fact, nodes, children, facts, bounds|:
-                proof_kernel_replay_collect_bounds(nodes, children, facts, fact, bounds, 0)
-            proof_kernel_replay_collect_negated_bounds(nodes, children, facts, negated, bounds) if negated < nodes.count
-            proof_kernel_replay_close_equalities(nodes, children, facts, bounds)
 
         # `proof_kernel_replay_unsigned_goal_safe` of every fact, with the intervals computed
         # once for the list: they depend on the facts alone, not on the term being guarded.
@@ -386,3 +440,37 @@ extend ElisaProofKernelReplay:
             # is a modular equality for an unsigned type and says nothing about the integers, so
             # propagating it would justify this guard with the very assumption it is deciding.
             return proof_kernel_replay_unsigned_safe_closing(nodes, children, root, facts, &bounds) and proof_kernel_replay_signed_expression_safe(nodes, children, root, facts)
+
+        def proof_kernel_replay_unsigned_safety_bounds_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&, work_used: mutable usize&) -> bool:
+            for fact in facts |fact, nodes, children, facts, bounds, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, fact, bounds, work_used, 0)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return false if not proof_kernel_replay_close_equalities_with_work(nodes, children, facts, bounds, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+
+        def proof_kernel_replay_unsigned_report_safe_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, work_used: mutable usize&) -> bool:
+            bounds: mutable darray[ProofKernelReplayBound] = []
+            return false if not proof_kernel_replay_unsigned_safety_bounds_with_goal_work(nodes, children, facts, &bounds, work_used)
+            signed_bounds: darray[ProofKernelReplayBound] = proof_kernel_replay_signed_safety_bounds_with_goal_work(nodes, children, facts, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            closed: mutable darray[ProofKernelReplayBound] = []
+            has_closed: mutable bool = false
+            for fact in facts |fact, nodes, children, facts, bounds, closed, has_closed, signed_bounds, work_used|:
+                unsigned_safe: mutable bool = proof_kernel_replay_unsigned_expression_safe_with_goal_work(nodes, children, fact, facts, bounds, work_used, 0)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if not unsigned_safe:
+                    if not has_closed:
+                        return false if not proof_kernel_replay_goal_search_charge_amount(work_used, bounds.count)
+                        closed.extend(bounds)
+                        proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &closed, work_used)
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        has_closed <- true
+                    unsigned_safe <- proof_kernel_replay_unsigned_expression_safe_with_goal_work(nodes, children, fact, facts, closed, work_used, 0)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                signed_safe: bool = proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, fact, facts, signed_bounds, work_used, 0)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not unsigned_safe or not signed_safe
+            unsigned_safe: bool = proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, root, facts, &bounds, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not unsigned_safe
+            signed_safe: bool = proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, root, facts, signed_bounds, work_used, 0)
+            return work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT and signed_safe

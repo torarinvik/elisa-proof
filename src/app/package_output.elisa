@@ -70,21 +70,40 @@ def proof_push_package_theorem(buffer: mutable darray[u8]&, report: ProofReport&
     proof_push(buffer, "}")
     return true
 
-# Returns the number of theorems written. A replayed goal whose sequent has no identity (an
-# unknown node kind) is left out rather than exported under a partial statement.
-def proof_push_json_package(buffer: mutable darray[u8]&, report: ProofReport&, source_path: darray[u8]&, source_content: sview, source_map: ProofSourceMap&, source_bytes: usize, source_fingerprint: u32, source_admissible: bool) -> usize can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
-    replayed_goals: mutable darray[bool] = []
+def proof_push_json_package_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, source_path: darray[u8]&, source_map: ProofSourceMap&) -> (snapshot_complete: bool, source_admissible: bool) can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    source: darray[u8]& = proof_checked_view_source(checked_view)
+    source_bytes: usize = proof_checked_view_source_bytes(checked_view)
+    source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
+    source_content: sview = ElisaProofJson::bytes_range_ref(source, 0, source_bytes)
     origin_work: mutable usize = report.traces.lookup_work_used
-    return proof_push_json_package_with_replayed(buffer, report, source_path, source_content, source_map, source_bytes, source_fingerprint, source_admissible, replayed_goals, &origin_work)
-
-def proof_push_json_package_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, source_path: darray[u8]&, source_content: sview, source_map: ProofSourceMap&, source_bytes: usize, source_fingerprint: u32, source_admissible: bool, replayed_goals: darray[bool]&, origin_work: mutable usize&) -> usize can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast]:
+    snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, origin_work)
+    source_admissible: mutable bool = proof_checked_view_source_admissible(checked_view) and proof_checked_view_goal_source_admissions_complete(checked_view) and snapshot.complete
+    replayed_goals: darray[bool] = snapshot.replayed_goals
+    source_admitted_goals: darray[bool] = snapshot.source_admitted_goals
+    source_file_scan_complete: bool = proof_output_reserve_status_snapshot_work(origin_work, source_map.files.count)
+    if not source_file_scan_complete:
+        proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"output-work-limit\"}\n")
+        return (false, false)
+    source_file_count: mutable usize = 0
+    for byte in source_map.files |source_file_count|:
+        source_file_count <- source_file_count + 1 if byte == 0
+    source_within_budget: bool = source_bytes <= ProofPackageLimit::SOURCE_BYTES and source_file_count > 0 and source_file_count <= ProofPackageLimit::SOURCE_FILES
+    source_admissible <- source_admissible and source_within_budget
+    if not source_within_budget:
+        proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"source-budget\"}\n")
+        return (snapshot.complete, false)
+    source_files_work_reserved: bool = proof_output_reserve_status_snapshot_work(origin_work, source_map.files.count)
+    if not source_files_work_reserved:
+        proof_push(buffer, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"output-work-limit\"}\n")
+        return (false, false)
     theorems: mutable darray[u8] = []
     written: mutable usize = 0
     node_end: mutable usize = 0
     if source_admissible:
-        for goal_id in 0..<report.goal_attempts.count |goal_id, report, theorems, written, node_end, origin_work, replayed_goals|:
+        for goal_id in 0..<report.goal_attempts.count |goal_id, report, theorems, written, node_end, origin_work, replayed_goals, source_admitted_goals|:
             attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-            continue if not attempt.proven or not proof_output_cached_replay_status(replayed_goals, goal_id)
+            continue if not attempt.proven or not proof_output_cached_replay_status(replayed_goals, goal_id) or not proof_output_cached_source_admission_status(source_admitted_goals, goal_id)
             theorem: mutable darray[u8] = []
             continue if not proof_push_package_theorem(&theorem, report, goal_id, attempt, origin_work)
             proof_push(&theorems, ",") if written > 0
@@ -108,11 +127,13 @@ def proof_push_json_package_with_replayed(buffer: mutable darray[u8]&, report: P
     proof_push_number(buffer, source_bytes.u32())
     proof_push(buffer, ",\"expanded\":")
     proof_push_json_string(buffer, source_content)
-    proof_push_json_source_files(buffer, source_map)
+    source_files_complete: bool = proof_push_json_source_files(buffer, source_map, source_files_work_reserved)
     proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
     proof_push_number(buffer, source_fingerprint)
     proof_push(buffer, "},\"admissible\":")
     proof_push(buffer, "true" if source_admissible else "false")
+    proof_push(buffer, ",\"goal_status_snapshot_complete\":")
+    proof_push(buffer, "true" if snapshot.complete else "false")
     proof_push(buffer, ",\"authenticated\":false},\"trust\":{\"hypotheses\":\"adapter\",\"source_correspondence\":\"adapter\",\"fingerprints\":\"identity-hint\"},\"origin_metadata_complete\":")
     proof_push(buffer, "true" if not proof_replay_fact_origin_work_exhausted(origin_work) else "false")
     proof_push(buffer, ",\"kernel\":{\"nodes\":[")
@@ -124,7 +145,6 @@ def proof_push_json_package_with_replayed(buffer: mutable darray[u8]&, report: P
         proof_push(buffer, ",") if index > 0
         proof_push_number(buffer, report.kernel.children[index].u32())
     proof_push(buffer, "]},\"theorems\":[")
-    for index in 0..<theorems.count |index, theorems, buffer|:
-        buffer.push(theorems[index])
+    buffer.extend(theorems)
     proof_push(buffer, "]}\n")
-    return written
+    return (snapshot.complete and source_files_complete, source_admissible)

@@ -86,6 +86,8 @@ full_functions = {
 }
 assert full_functions["function_focus_unrequested_valid"]["verified"], full_functions
 
+# The fixture also contains a supported postcondition inside an unrelated module. Its bare-name
+# source inventory is intentionally refused, but that must not veto the selected top-level proof.
 scoped_run, scoped = run(SCOPE_SOURCE, "--function-json", "function_focus_scope_valid")
 assert scoped_run.returncode == 0 and scoped["status"] == "proved", scoped
 excluded = scoped["focus"]["unrequested_proposition_findings"]

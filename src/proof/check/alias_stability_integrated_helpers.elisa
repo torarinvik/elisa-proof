@@ -1,7 +1,143 @@
 # Factored helpers retained by the branch integration.
 extend ElisaProof:
     private:
-        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+        def proof_callee_is_shadowed_local(callee: Ast::Expr, caller_names: darray[sview]&, depth: usize) -> bool:
+            # The nesting cap must not turn an unresolved callable into a global summary hit.
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match callee:
+                Ast::Expr.Ident(local_callee, _):
+                    return any local in caller_names where local == local_callee
+                Ast::Expr.Paren(inner, _):
+                    return proof_callee_is_shadowed_local(inner, caller_names, depth + 1)
+                _:
+                    return false
+
+        def proof_expression_has_opaque_callable_call(expression: Ast::Expr, functions: ProofFunctionTable&, caller_names: darray[sview]&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_callee_is_shadowed_local(callee, caller_names, 0)
+                    if proof_callable_name(callee) == "":
+                        return true if not proof_resource_collection_builtin(callee, functions).known and not proof_runtime_numeric_conversion(callee, arguments.count, functions).known
+                    return true if proof_expression_has_opaque_callable_call(callee, functions, caller_names, depth + 1)
+                    for argument in arguments |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(argument, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    return proof_expression_has_opaque_callable_call(lowered.call, functions, caller_names, depth + 1) if lowered.known
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_expression_has_opaque_callable_call(inner, functions, caller_names, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return proof_expression_has_opaque_callable_call(left, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(right, functions, caller_names, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expression_has_opaque_callable_call(object, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(low, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(high, functions, caller_names, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expression_has_opaque_callable_call(object, functions, caller_names, depth + 1)
+                    for argument in arguments |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(argument, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(element, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(entry.key, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(entry.value, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_expression_has_opaque_callable_call(type_expression, functions, caller_names, depth + 1)
+                    for field in fields |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(field.value, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expression_has_opaque_callable_call(base, functions, caller_names, depth + 1)
+                    for field in fields |functions, caller_names, depth|:
+                        return true if proof_expression_has_opaque_callable_call(field.value, functions, caller_names, depth + 1)
+                    return false
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_expression_has_opaque_callable_call(condition, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(then_expression, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(else_expression, functions, caller_names, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expression_has_opaque_callable_call(iterable, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(condition, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(body, functions, caller_names, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expression_has_opaque_callable_call(base, functions, caller_names, depth + 1) or proof_expression_has_opaque_callable_call(predicate, functions, caller_names, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, position):
+                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match(expression)
+                    return proof_expr_has_call(expression) if not lowered.known
+                    return true if proof_expression_has_opaque_callable_call(scrutinee, functions, caller_names, depth + 1)
+                    for arm in arms |arm, functions, caller_names, position, depth|:
+                        arm_names: mutable darray[sview] = []
+                        arm_values: mutable darray[Ast::Expr] = []
+                        return true if not proof_bind_pattern(arm.pattern, position, scrutinee, &arm_names, &arm_values)
+                        scoped_names: mutable darray[sview] = proof_copy_names(caller_names)
+                        scoped_names.extend(arm_names)
+                        return true if proof_expression_has_opaque_callable_call(arm.guard, functions, scoped_names, depth + 1)
+                        return true if arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expression_has_opaque_callable_call(value, functions, scoped_names, depth + 1)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.GetElse(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    # These forms need statement or binder scope to resolve callable identity.
+                    # They are not logical-contract values, so calls inside them stay opaque.
+                    return proof_expr_has_call(expression)
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                _:
+                    return proof_expr_has_call(expression)
+
+        def proof_statement_lend_roots(expression: Ast::Expr, functions: mutable ProofFunctionTable&, caller_names: darray[sview]&) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            roots: mutable darray[sview] = []
+            no_value_roots: darray[sview] = []
+            proof_collect_aliased_in_expression(expression, functions, &roots, false, no_value_roots)
+            # A same-spelled global signature cannot classify arguments passed to a local
+            # function-valued binding, so include every direct argument place.
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    local_callable: bool = proof_callee_is_shadowed_local(callee, caller_names, 0)
+                    unknown_callable: bool = not local_callable and proof_callable_name(callee) == ""
+                    return roots if not local_callable and not unknown_callable
+                    for argument in arguments |roots|:
+                        explicit_lend: (known: bool, operand: Ast::Expr) = proof_explicit_lend_operand(argument)
+                        place: Ast::Expr = explicit_lend.operand if explicit_lend.known else argument
+                        proof_push_aliased(&roots, proof_place_root_name(place, 0))
+                _:
+                    pass
+            return roots
+
+        def proof_opaque_call_extra_alias_roots(expression: Ast::Expr, functions: mutable ProofFunctionTable&, caller_names: darray[sview]&) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    local_callable: bool = proof_callee_is_shadowed_local(callee, caller_names, 0)
+                    unknown_callable: mutable bool = false
+                    if not local_callable and proof_callable_name(callee) == "":
+                        unknown_callable <- not proof_resource_collection_builtin(callee, functions).known and not proof_runtime_numeric_conversion(callee, arguments.count, functions).known
+                    return proof_statement_lend_roots(expression, functions, caller_names) if local_callable or unknown_callable
+                Ast::Expr.GetElse(guarded, _, _) | Ast::Expr.Paren(guarded, _):
+                    return proof_opaque_call_extra_alias_roots(guarded, functions, caller_names)
+                _:
+                    pass
+            return []
+
+        def proof_record_opaque_call_alias_roots(report: mutable ProofReport&, owner: sview, roots: darray[sview]&) -> void:
+            return if report.aliased_owner != owner or owner == "" or roots.count == 0
+            return if any existing in report.aliased_names where existing == "*"
+            # An opaque callable may retain a reference it receives, so later calls and exits
+            # must continue to treat these roots as reachable.
+            for root in roots |report|:
+                proof_push_aliased(&report.aliased_names, root)
+                proof_push_aliased(&report.escaping_names, root)
+
+        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+            return if proof_expression_has_fresh_runtime_value(expression, functions, 0) or not proof_contract_calls_are_pure(expression, functions)
+            for argument in argument_values:
+                if proof_expr_has_call(argument):
+                    return if proof_fact_expression_has_fresh_runtime_value(report, argument)
+                else:
+                    return if proof_expression_has_fresh_runtime_value(argument, functions, 0)
             return if not proof_kernel_expression_supported(expression)
             return if not proof_kernel_report_append_allowed(report, facts.count, 1, name)
             return if parameter_names.count != argument_values.count

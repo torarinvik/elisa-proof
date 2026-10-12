@@ -33,12 +33,18 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_check_opaque_call_frame(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
+        def proof_check_opaque_call_frame(expression: Ast::Expr, source_expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
             return if proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask)
             match expression:
                 Ast::Expr.Call(callee, arguments, _, position):
                     called: sview = proof_callable_name(callee)
-                    known: bool = called != "" and proof_function_index_for_callee(functions, callee) < functions.names.count
+                    source_local_callee: mutable bool = false
+                    match source_expression:
+                        Ast::Expr.Call(Ast::Expr.Ident(local_name, _), _, _, _):
+                            source_local_callee <- any local in names where local == local_name
+                        _:
+                            pass
+                    known: bool = called != "" and not source_local_callee and proof_function_index_for_callee(functions, callee) < functions.names.count
                     return if known
                     match callee:
                         Ast::Expr.Field(receiver, _, _):
@@ -57,7 +63,7 @@ extend ElisaProof:
         # Conditions and other compound expressions can contain calls even when there is no
         # standalone call statement. Track child calls in evaluation order so later subexpressions
         # see only validated post-call facts; callers that need a disposable state pass a copy.
-        def proof_check_frame_calls_in_expression[@r](expression: Ast::Expr, facts: mutable darray[Ast::Expr]& @r, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+        def proof_check_frame_calls_in_expression[@r](expression: Ast::Expr, facts: mutable darray[Ast::Expr]& @r, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     # Only the source-aware classifier may call this a builtin conversion;
@@ -83,7 +89,7 @@ extend ElisaProof:
                     # The callee resolves the arguments itself; see proof_call_source.
                     applied: bool = (proof_apply_function(expression, current_call, &probe_facts, functions, names, values, parameter_names, changes, preserves, report, name, annotations) can Global{Read,Write})
                     return if applied and not proof_frame_analysis_budget_available(expression, probe_facts, report, name)
-                    proof_check_opaque_call_frame(current_call, facts, names, parameter_names, changes, preserves, functions, report, name) if not applied
+                    proof_check_opaque_call_frame(current_call, expression, facts, names, parameter_names, changes, preserves, functions, report, name) if not applied
                     facts.clear()
                     if applied:
                         for fact in probe_facts |facts|:
@@ -91,13 +97,13 @@ extend ElisaProof:
                     proof_restore_type_bound_facts(pre_call_facts, facts, names, report, name) if not proof_expr_has_move(expression)
                     # An opaque nested call reaches an unreferenced by-value scalar local no
                     # more than a call statement does: the facts over such locals come back.
-                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name, proof_statement_lend_roots(expression, functions)) if not applied and not proof_expr_has_move(expression)
+                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name, proof_statement_lend_roots(expression, functions, names)) if not applied and not proof_expr_has_move(expression)
                     # A nested call has no destination binding to preserve. Forget every value
                     # the callee can reach, so a later sibling or the enclosing call sees only
                     # current-state identifiers, never a pre-call alias expression. A value no
                     # callee can reach survives under the rule a call statement applies; that is
                     # what keeps a loop binder's atom across `flags[slot] and done(slot)`.
-                    proof_forget_values_after_call(names, values, facts, parameter_names, report, name, values.count, values.count, Ast::expr_pos(expression))
+                    proof_forget_values_after_call_with_aliases(names, values, facts, parameter_names, report, name, values.count, values.count, Ast::expr_pos(expression), proof_opaque_call_extra_alias_roots(expression, functions, names))
                 Ast::Expr.Paren(inner, _):
                     (proof_check_frame_calls_in_expression(inner, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
                 Ast::Expr.Unary(_, operand, _):
@@ -201,7 +207,7 @@ extend ElisaProof:
         # Check these children against the caller's pre-call facts before applying the outer
         # summary; the outer ensure is a post-call fact and cannot justify an argument's
         # precondition.
-        def proof_check_frame_call_children(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+        def proof_check_frame_call_children(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
                     (proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
@@ -226,69 +232,311 @@ extend ElisaProof:
                 report.findings[report.findings.count - 1].goal_id <- report.goal_attempts.count - 1
                 report.findings[report.findings.count - 1].has_goal <- true
 
-        # Check proof steps in source order. An `assert` is a `have`, not an unchecked axiom:
-        # it becomes a fact only after the current fact set entails it. This is the key trust
-        # boundary that keeps a proof block from proving an arbitrary proposition by repeating
-        # the proposition as its own assertion.
-        def proof_check_block_steps(body: darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
-            for statement in body |facts, names, values, lemmas, report, name|:
+        def proof_block_expression_has_fresh_value(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.RegionNew(_, _, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_block_expression_has_fresh_value(callee, depth + 1)
+                    for argument in arguments:
+                        return true if proof_block_expression_has_fresh_value(argument, depth + 1)
+                    return false
+                Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
+                    return true if proof_block_expression_has_fresh_value(callee, depth + 1)
+                    for argument in arguments:
+                        return true if proof_block_expression_has_fresh_value(argument, depth + 1)
+                    return false
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_block_expression_has_fresh_value(inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return proof_block_expression_has_fresh_value(left, depth + 1) or proof_block_expression_has_fresh_value(right, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_block_expression_has_fresh_value(object, depth + 1) or proof_block_expression_has_fresh_value(low, depth + 1) or proof_block_expression_has_fresh_value(high, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_block_expression_has_fresh_value(object, depth + 1)
+                    for argument in arguments:
+                        return true if proof_block_expression_has_fresh_value(argument, depth + 1)
+                    return false
+                # The proof kernel reasons about aggregate equality structurally. Elisa may
+                # give these source values fresh runtime identity, so a term such as `[x] == [x]`
+                # cannot cross the erased-proof boundary without an explicit identity model.
+                Ast::Expr.Array(_, _) | Ast::Expr.Tuple(_, _) | Ast::Expr.SetLit(_, _) | Ast::Expr.DictLit(_, _) | Ast::Expr.Construct(_, _, _) | Ast::Expr.RecordUpdate(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _):
+                    return true
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return proof_block_expression_has_fresh_value(condition, depth + 1) or proof_block_expression_has_fresh_value(then_expression, depth + 1) or proof_block_expression_has_fresh_value(else_expression, depth + 1)
+                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
+                    return false
+                _:
+                    # New expression forms remain effectful until this gate understands them.
+                    return true
+
+        def proof_block_expression_has_unstable_operator(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, functions: mutable ProofFunctionTable&) -> bool can[Global.Read]:
+            return true if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+            proof_expr_has_unmodeled_operator(expression, facts, report, functions, 0) can Global.Read
+
+        def proof_block_assertion_expression_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&) -> bool can[Global.Read]:
+            return false if not proof_assertion_calls_are_total_pure(expression, functions) or proof_expr_has_move(expression) or proof_expr_has_old(expression) or proof_block_expression_has_fresh_value(expression, 0)
+            return false if proof_expr_has_call(expression) and proof_fact_expr_has_fresh_call_result(report, expression, 0)
+            not (proof_block_expression_has_unstable_operator(expression, facts, report, functions) can Global.Read)
+
+        def proof_block_substitution_budget_finding(report: mutable ProofReport&, name: sview, line: u32, work: mutable ProofBlockPurityWork&, return_context: bool) -> void:
+            if return_context:
+                return if work.reported
+                proof_add_budget_finding(report, "resource-analysis-budget", line, name, "return analysis exceeded its bounded substitution source-work limit", "return-substitution-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT)
+                work.reported <- true
+            else:
+                proof_purity_budget_finding(report, name, line, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+
+        # Cache the binding and value scan costs for this block's fixed environment.
+        def proof_block_substitution_summary(names: darray[sview]&, values: darray[Ast::Expr]&, summary: mutable ProofBlockSubstitutionSummary&, work: mutable ProofBlockPurityWork&, report: mutable ProofReport&, name: sview, line: u32, return_context: bool) -> bool:
+            for binding_name in names |summary, work, report, name, line|:
+                binding_name_bytes: usize = sview_len(binding_name)
+                if not proof_purity_work_charge(1, work) or not proof_purity_work_charge(binding_name_bytes, work) or summary.binding_scan_cost >= PROOF_PURITY_WALK_WORK_LIMIT or binding_name_bytes > PROOF_PURITY_WALK_WORK_LIMIT - summary.binding_scan_cost - 1:
+                    proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                    return false
+                summary.binding_scan_cost <- summary.binding_scan_cost + 1 + binding_name_bytes
+            for value in values |summary, work, report, name, line|:
+                if not proof_purity_work_charge(1, work):
+                    proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                    return false
+                value_cost: mutable usize = 1
+                match value:
+                    Ast::Expr.Invalid:
+                        pass
+                    _:
+                        remaining_scan: usize = PROOF_PURITY_WALK_WORK_LIMIT - work.used
+                        scan_limit: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        scan_limit <- remaining_scan if remaining_scan < scan_limit
+                        if not proof_replay_summary_expr_cost_with_limit(value, &value_cost, 0, scan_limit):
+                            proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                            return false
+                if not proof_purity_work_charge(value_cost, work) or summary.value_scan_cost > PROOF_PURITY_WALK_WORK_LIMIT - value_cost:
+                    proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                    return false
+                summary.value_scan_cost <- summary.value_scan_cost + value_cost
+            summary.ready <- true
+            return true
+
+        # `proof_substitute` may copy a binding value at every identifier occurrence. Reserve
+        # for the source walk, worst-case reverse name lookup, and the copied value trees before
+        # allowing that allocation; later purity visitors meter the substituted term itself.
+        def proof_block_substitution_reserve(expression: Ast::Expr, summary: ProofBlockSubstitutionSummary&, work: mutable ProofBlockPurityWork&, report: mutable ProofReport&, name: sview, line: u32, return_context: bool) -> bool:
+            match expression:
+                Ast::Expr.Invalid:
+                    return true if proof_purity_work_charge(1, work)
+                    proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                    return false
+                _:
+                    pass
+            factor: mutable usize = 4
+            if summary.binding_scan_cost > PROOF_PURITY_WALK_WORK_LIMIT - factor or summary.value_scan_cost > PROOF_PURITY_WALK_WORK_LIMIT - factor - summary.binding_scan_cost:
+                proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                return false
+            factor <- factor + summary.binding_scan_cost + summary.value_scan_cost
+            if work.used >= PROOF_PURITY_WALK_WORK_LIMIT:
+                proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                return false
+            remaining: usize = PROOF_PURITY_WALK_WORK_LIMIT - work.used
+            scan_limit: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            per_copy_remaining: usize = remaining / factor
+            scan_limit <- per_copy_remaining if per_copy_remaining < scan_limit
+            source_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &source_cost, 0, scan_limit) or source_cost > remaining / factor:
+                proof_block_substitution_budget_finding(report, name, line, work, return_context)
+                return false
+            work.used <- work.used + source_cost * factor
+            return true
+
+        # A proof assertion becomes a fact only after earlier facts entail it.
+        def proof_check_block_steps(body: darray[Ast::Stmt]&, first_statement: usize, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, substitution: mutable ProofBlockSubstitutionSummary&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, work: mutable ProofBlockPurityWork&) -> bool can[Global.Read, Global.Write]:
+            all_steps_valid: mutable bool = true
+            if first_statement > body.count:
+                proof_purity_budget_finding(report, name, 0, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                return false
+            if not proof_purity_work_charge(body.count - first_statement, work):
+                proof_purity_budget_finding(report, name, 0, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                return false
+            for index in first_statement..<body.count |index, body, facts, names, values, parameters, substitution, functions, lemmas, report, name, all_steps_valid, work|:
+                if not proof_purity_work_charge(1, work):
+                    proof_purity_budget_finding(report, name, 0, "proof-purity-source-work", PROOF_PURITY_WALK_WORK_LIMIT + 1, PROOF_PURITY_WALK_WORK_LIMIT, work)
+                    all_steps_valid <- false
+                    break
+                statement: Ast::Stmt = body[index]
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
                         if kind == "assert":
+                            if not proof_block_substitution_reserve(expression, substitution, work, report, name, position.line, false):
+                                all_steps_valid <- false
+                                break
                             assertion: Ast::Expr = proof_substitute(expression, names, values)
-                            proven: bool = (proof_certify_goal(facts, assertion, report, position.line, name, annotations) can Global{Read,Write})
-                            report.proof_obligation(proven)
-                            proof_add_derived_fact(facts, report, assertion, "proof-step", position.line, name) if proven
-                            proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, assertion) if not proven
+                            if not proof_purity_expression_charge(assertion, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, position.line):
+                                all_steps_valid <- false
+                                break
+                            assertion_stable: bool = (proof_block_assertion_expression_stable(assertion, facts, report, functions) can Global.Read)
+                            if not assertion_stable:
+                                proof_add_goal_attempt(report, facts, assertion, position.line, name, "goal", false)
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may use only stable primitive expressions")
+                                all_steps_valid <- false
+                                break
+                            else:
+                                proven: bool = (proof_certify_goal(facts, assertion, report, position.line, name, annotations) can Global{Read,Write})
+                                report.proof_obligation(proven)
+                                proof_add_derived_fact(facts, report, assertion, "proof-step", position.line, name) if proven
+                                proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, assertion) if not proven
+                                if not proven:
+                                    all_steps_valid <- false
+                                    break
                     Ast::Stmt.Expr(expression, position):
                         match expression:
                             Ast::Expr.Call(callee, arguments, _, _):
                                 if proof_callable_name(callee) == "assert" and arguments.count == 1:
+                                    if not proof_block_substitution_reserve(arguments[0], substitution, work, report, name, position.line, false):
+                                        all_steps_valid <- false
+                                        break
                                     step: Ast::Expr = proof_substitute(arguments[0], names, values)
-                                    proven_step: bool = (proof_certify_goal(facts, step, report, position.line, name, annotations) can Global{Read,Write})
-                                    report.proof_obligation(proven_step)
-                                    proof_add_derived_fact(facts, report, step, "proof-step", position.line, name) if proven_step
-                                    proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, step) if not proven_step
-                                (proof_apply_lemma(proof_substitute(expression, names, values), facts, lemmas, names, values, report, name, annotations) can Global{Read,Write}) if proof_callable_name(callee) != "assert"
+                                    if not proof_purity_expression_charge(step, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, position.line):
+                                        all_steps_valid <- false
+                                        break
+                                    step_stable: bool = (proof_block_assertion_expression_stable(step, facts, report, functions) can Global.Read)
+                                    if not step_stable:
+                                        proof_add_goal_attempt(report, facts, step, position.line, name, "goal", false)
+                                        report.proof_obligation(false)
+                                        proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may use only stable primitive expressions")
+                                        all_steps_valid <- false
+                                        break
+                                    else:
+                                        proven_step: bool = (proof_certify_goal(facts, step, report, position.line, name, annotations) can Global{Read,Write})
+                                        report.proof_obligation(proven_step)
+                                        proof_add_derived_fact(facts, report, step, "proof-step", position.line, name) if proven_step
+                                        proof_add_goal_failure(report, "proof-step-unproven", position.line, name, "asserted proof step is not entailed by earlier facts", facts, step) if not proven_step
+                                        if not proven_step:
+                                            all_steps_valid <- false
+                                            break
+                                if proof_callable_name(callee) != "assert":
+                                    if not proof_block_substitution_reserve(expression, substitution, work, report, name, position.line, false):
+                                        all_steps_valid <- false
+                                        break
+                                    substituted_call: Ast::Expr = proof_substitute(expression, names, values)
+                                    if not proof_purity_expression_charge(substituted_call, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, position.line):
+                                        all_steps_valid <- false
+                                        break
+                                    if not proof_block_lemma_application_reserve(substituted_call, substitution.binding_scan_cost, substitution.value_scan_cost, facts, lemmas, functions, work, report, name, position.line):
+                                        all_steps_valid <- false
+                                        break
+                                    applied: bool = (proof_apply_lemma(substituted_call, facts, lemmas, functions, names, values, report, name, annotations) can Global{Read,Write})
+                                    if not applied:
+                                        all_steps_valid <- false
+                                        break
                             _:
                                 # An `assert ?` hole is an open obligation. Purity already refused
                                 # every other invalid statement except `pass`.
                                 if proof_inert_statement_kind(statement, report) == PROOF_INERT_HOLE:
                                     report.proof_obligation(false)
                                     proof_add_finding(report, "proof-hole", position.line, name, "explicit `assert ?` proof hole is an open obligation")
-                    Ast::Stmt.Block(block_kind, _, _, nested, _):
-                        (proof_check_block_steps(nested, facts, names, values, lemmas, report, name, annotations) can Global{Read,Write}) if block_kind == "assert_by"
+                                    all_steps_valid <- false
+                                    break
+                    Ast::Stmt.Block(block_kind, _, nested_tactic, nested, _):
+                        if block_kind == "assert_by":
+                            nested_result: (proven: bool, goal: Ast::Expr, line: u32, premises: darray[Ast::Expr]) = (proof_check_block_with_work(nested, nested_tactic, facts, names, values, parameters, functions, lemmas, report, name, annotations, work, substitution, true) can Global{Read,Write})
+                            if not nested_result.proven:
+                                all_steps_valid <- false
+                                break
+                            if not proof_block_publish_nested_goal(facts, nested_result.premises, report, nested_result.goal, nested_result.line, name):
+                                all_steps_valid <- false
+                                break
                     _:
                         pass
+            all_steps_valid
 
-        def proof_check_block(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
-            return false if block_body.count == 0
-            goal: mutable Ast::Expr = Ast::Expr.Absent
+        def proof_check_block_with_work(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, work: mutable ProofBlockPurityWork&, substitution: mutable ProofBlockSubstitutionSummary&, body_purity_checked: bool) -> (proven: bool, goal: Ast::Expr, line: u32, premises: darray[Ast::Expr]) can[Global.Read, Global.Write]:
+            return (false, Ast::Expr.Absent, 0, []) if block_body.count == 0
+            goal_source: mutable Ast::Expr = Ast::Expr.Absent
             goal_line: mutable u32 = 0
             match block_body[0]:
                 Ast::Stmt.Contract(_, expression, position):
-                    goal <- proof_substitute(expression, names, values)
+                    goal_source <- expression
                     goal_line <- position.line
                 _:
                     proof_add_finding(report, "proof-malformed", 0, name, "proof block has no goal")
-                    return false
-            proof_body: mutable darray[Ast::Stmt] = []
-            index: mutable usize = 1
-            while index < block_body.count |index, block_body, proof_body|:
-                proof_body.push(block_body[index])
-                index <- index + 1
-            proof_check_purity(proof_body, lemmas, report, name)
+                    return (false, Ast::Expr.Absent, 0, [])
             facts: mutable darray[Ast::Expr] = []
+            if not proof_block_seed_facts_reserve(seed_facts, tactic == "scoped", names, parameters, report, work, name, goal_line):
+                proof_add_goal_attempt(report, seed_facts, goal_source, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by runtime guard exceeded the purity analysis work budget", seed_facts, goal_source)
+                return (false, goal_source, goal_line, [])
             facts.extend(seed_facts)
             # A scoped block walls off path assumptions, not the language: the compiler type
             # of every live binding still holds inside it. Keeping those facts is what lets the
             # unsigned range guard see a fixed-width symbol instead of an untyped integer.
             proof_clear_facts_keep_type_bounds(&facts, names, parameters, report, name) if tactic == "scoped"
-            (proof_check_block_steps(proof_body, &facts, names, values, lemmas, report, name, annotations) can Global{Read,Write})
+            if work.reported:
+                proof_add_goal_attempt(report, facts, goal_source, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by analysis exceeded its purity source-work budget", facts, goal_source)
+                return (false, goal_source, goal_line, [])
+            if not substitution.ready and not proof_block_substitution_summary(names, values, substitution, work, report, name, goal_line, false):
+                proof_add_goal_attempt(report, facts, goal_source, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by runtime guard exceeded the purity analysis work budget", facts, goal_source)
+                return (false, goal_source, goal_line, [])
+            if not proof_block_substitution_reserve(goal_source, substitution, work, report, name, goal_line, false):
+                proof_add_goal_attempt(report, facts, goal_source, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by runtime guard exceeded the purity analysis work budget", facts, goal_source)
+                return (false, goal_source, goal_line, [])
+            goal: mutable Ast::Expr = proof_substitute(goal_source, names, values)
+            # The block's goal is also its runtime guard. An effectful or unverified call may
+            # produce a different value when that guard executes after the erased proof block;
+            # do not prove it from a stale call fact before the guard handler clears state.
+            if not proof_purity_expression_charge(goal, PROOF_PURITY_EXPRESSION_VISITOR_MULTIPLIER, work, report, name, goal_line):
+                proof_add_goal_attempt(report, facts, goal, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by runtime guard exceeded the purity analysis work budget", facts, goal)
+                return (false, goal, goal_line, [])
+            goal_has_unstable_call: bool = proof_expr_has_call(goal) and (proof_fact_expr_has_fresh_call_result(report, goal, 0) or not proof_contract_calls_are_pure(goal, functions))
+            goal_has_move: bool = proof_expr_has_move(goal)
+            goal_has_old: bool = proof_expr_has_old(goal)
+            goal_has_fresh_value: bool = proof_block_expression_has_fresh_value(goal, 0)
+            goal_has_unstable_operator: bool = proof_block_expression_has_unstable_operator(goal, facts, report, functions) can Global.Read
+            if goal_has_unstable_call or goal_has_move or goal_has_old or goal_has_fresh_value or goal_has_unstable_operator:
+                proof_add_goal_attempt(report, facts, goal, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_finding(report, "proof-impure", goal_line, name, "assert-by runtime guards may use only verified pure calls and source-witnessed stable expressions")
+                return (false, goal, goal_line, [])
+            if not body_purity_checked:
+                purity_finding_mark: usize = report.findings.count
+                proof_check_purity(block_body, functions, lemmas, report, name, work, 0, 1)
+                if report.findings.count != purity_finding_mark:
+                    proof_add_goal_attempt(report, facts, goal, goal_line, name, "goal", false)
+                    report.proof_obligation(false)
+                    proof_add_goal_failure(report, "proof-unproven", goal_line, name, "proof block contains an impure or refused step", facts, goal)
+                    return (false, goal, goal_line, [])
+            steps_valid: bool = (proof_check_block_steps(block_body, 1, &facts, names, values, parameters, substitution, functions, lemmas, report, name, annotations, work) can Global{Read,Write})
+            if not steps_valid:
+                proof_add_goal_attempt(report, facts, goal, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "proof block contains an unproven or refused step", facts, goal)
+                return (false, goal, goal_line, [])
+            if not proof_block_premise_snapshot_reserve(facts, work, report, name, goal_line):
+                proof_add_goal_attempt(report, facts, goal, goal_line, name, "goal", false)
+                report.proof_obligation(false)
+                proof_add_goal_failure(report, "proof-unproven", goal_line, name, "assert-by runtime guard exceeded the purity analysis work budget", facts, goal)
+                return (false, goal, goal_line, [])
             proven: bool = (proof_certify_goal(facts, goal, report, goal_line, name, annotations) can Global{Read,Write})
             report.proof_obligation(proven)
             proof_add_goal_failure(report, "proof-unproven", goal_line, name, "goal is not entailed by the proof facts", facts, goal) if not proven
-            return proven
+            return (proven, goal, goal_line, proof_copy_exprs(facts))
+
+        def proof_check_block(block_body: darray[Ast::Stmt]&, tactic: sview, seed_facts: darray[Ast::Expr]&, names: darray[sview]&, values: darray[Ast::Expr]&, parameters: darray[sview]&, functions: mutable ProofFunctionTable&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            work: mutable ProofBlockPurityWork = ProofBlockPurityWork{used: report.budgets.assert_by_source_work, reported: report.budgets.assert_by_source_reported}
+            substitution: mutable ProofBlockSubstitutionSummary = ProofBlockSubstitutionSummary{}
+            checked: (proven: bool, goal: Ast::Expr, line: u32, premises: darray[Ast::Expr]) = (proof_check_block_with_work(block_body, tactic, seed_facts, names, values, parameters, functions, lemmas, report, name, annotations, work, substitution, false) can Global{Read,Write})
+            report.budgets.assert_by_source_work <- work.used
+            report.budgets.assert_by_source_reported <- work.reported
+            checked.proven
 
 
         # A positional payload binder has no nameable source place, so binding records it as

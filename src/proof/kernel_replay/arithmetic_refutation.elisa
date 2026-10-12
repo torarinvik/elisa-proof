@@ -6,17 +6,42 @@ extend ElisaProofKernelReplay:
         # and only comparisons over witnessed primitive scalars are complemented, the same
         # guard `proof_kernel_replay_negative_fact` relies on.
         def proof_kernel_replay_facts_arithmetically_inconsistent(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> bool:
-            for index in 0..<facts.count |index, nodes, children, facts|:
+            work_used: mutable usize = 0
+            proof_kernel_replay_facts_arithmetically_inconsistent_with_work(nodes, children, facts, &work_used)
+
+        # Candidate filtering, bound collection, closure, and both arithmetic solvers share the
+        # report meter. Exhaustion returns unknown so the report boundary can reject the trace.
+        def proof_kernel_replay_facts_arithmetically_inconsistent_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], work_used: mutable usize&) -> bool:
+            others: mutable darray[usize] = []
+            for index in 0..<facts.count |index, nodes, children, facts, others, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 root: usize = facts[index]
                 if root < nodes.count and nodes[root].kind == "binary" and proof_kernel_replay_negation_supported(nodes[root].operator):
                     fact: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-                    others: mutable darray[usize] = []
-                    for other in 0..<facts.count |other, index, facts, others|:
+                    others.truncate(0)
+                    for other in 0..<facts.count |other, index, facts, others, work_used|:
+                        return false if not proof_kernel_replay_goal_search_charge(work_used)
                         others.push(facts[other]) if other != index
                     complement: sview = proof_kernel_replay_negation(fact.operator)
-                    if proof_kernel_replay_primitive_comparison(nodes, children, others, fact.left, fact.right):
-                        return true if proof_kernel_replay_interval_goal(nodes, children, fact.left, complement, fact.right, others)
-                        return true if proof_kernel_replay_difference_comparison(nodes, children, fact.left, complement, fact.right, others)
+                    if proof_kernel_replay_primitive_comparison_with_work(nodes, children, others, fact.left, fact.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT):
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        bounds: mutable darray[ProofKernelReplayBound] = []
+                        for other_fact in others |other_fact, nodes, children, others, bounds, work_used|:
+                            proof_kernel_replay_collect_bounds_with_work(nodes, children, others, other_fact, &bounds, work_used, 0)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        return false if not proof_kernel_replay_close_equalities_with_work(nodes, children, others, &bounds, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                        return false if not proof_kernel_replay_add_signed_type_bounds_with_goal_work(nodes, children, others, &bounds, work_used)
+                        return false if not proof_kernel_replay_close_term_equalities_with_goal_work(nodes, children, others, &bounds, work_used)
+                        constraints: mutable darray[ProofKernelReplayDifference] = []
+                        for other_fact in others |other_fact, nodes, children, others, bounds, constraints, work_used|:
+                            proof_kernel_replay_collect_differences_with_goal_work(nodes, other_fact, bounds, children, others, &constraints, work_used, 0)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        return false if not proof_kernel_replay_difference_bound_closure_with_work(constraints, &bounds, work_used)
+                        interval_proven: bool = proof_kernel_replay_interval_goal_with_work(nodes, children, fact.left, complement, fact.right, others, &bounds, work_used)
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        return true if interval_proven
+                        return true if proof_kernel_replay_difference_comparison_from_prepared_with_work(nodes, children, fact.left, complement, fact.right, others, &bounds, &constraints, work_used)
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return false
 
         # Mirror of `proof_facts_order_complementary`: two readable primitive orders over the same
@@ -25,19 +50,82 @@ extend ElisaProofKernelReplay:
         # scalar witness on both operands, so a user `__cmp__`, which need not be total, never
         # reaches the complement. It reads no arithmetic, so no wrapping premise is consulted.
         def proof_kernel_replay_facts_order_complementary(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize]) -> bool:
-            conjuncts: darray[usize] = proof_kernel_replay_conjunct_facts(nodes, children, facts)
-            for first in conjuncts |first, nodes, children, conjuncts, facts|:
-                a: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, first)
+            work_used: mutable usize = 0
+            proof_kernel_replay_facts_order_complementary_with_work(nodes, children, facts, &work_used)
+
+        def proof_kernel_replay_facts_order_complementary_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], work_used: mutable usize&) -> bool:
+            conjuncts: mutable darray[usize] = []
+            proof_kernel_replay_conjunct_facts_with_goal_work(nodes, facts, &conjuncts, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            order_left: mutable darray[usize] = []
+            order_operator: mutable darray[sview] = []
+            order_right: mutable darray[usize] = []
+            for first in conjuncts |first, nodes, children, conjuncts, facts, order_left, order_operator, order_right, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                a: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order_with_work(nodes, children, facts, first, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 continue if not a.known
+                order_left.push(a.left)
+                order_operator.push(a.operator)
+                order_right.push(a.right)
+            for first_index in 0..<order_left.count |first_index, nodes, children, order_left, order_operator, order_right, work_used|:
+                a: (known: bool, left: usize, operator: sview, right: usize) = (true, order_left[first_index], order_operator[first_index], order_right[first_index])
                 complement: sview = proof_kernel_replay_negation(a.operator)
-                for second in conjuncts |second, nodes, children, a, complement, facts|:
-                    b: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order(nodes, children, facts, second)
-                    continue if not b.known
-                    same: bool = proof_kernel_replay_expr_equal(nodes, children, b.left, a.left, 0) and proof_kernel_replay_expr_equal(nodes, children, b.right, a.right, 0)
-                    swapped: bool = proof_kernel_replay_expr_equal(nodes, children, b.left, a.right, 0) and proof_kernel_replay_expr_equal(nodes, children, b.right, a.left, 0)
+                second_start: usize = first_index + 1
+                for second_index in second_start..<order_left.count |second_index, first_index, second_start, nodes, children, order_left, order_operator, order_right, a, complement, work_used|:
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                    b: (known: bool, left: usize, operator: sview, right: usize) = (true, order_left[second_index], order_operator[second_index], order_right[second_index])
+                    same: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, b.left, a.left, work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, b.right, a.right, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return true if same and b.operator == complement
+                    swapped: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, b.left, a.right, work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, b.right, a.left, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return true if swapped and b.operator == proof_kernel_replay_order_mirror(complement)
             return false
+
+        def proof_kernel_replay_readable_order_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact: usize, work_used: mutable usize&) -> (known: bool, left: usize, operator: sview, right: usize):
+            return (false, 0, "", 0) if not proof_kernel_replay_goal_search_charge(work_used)
+            return (false, 0, "", 0) if not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, fact)
+            return (false, 0, "", 0) if not located.known
+            node: ElisaProofKernelCore::ProofKernelNode = located.node
+            binary: bool = proof_kernel_replay_goal_search_text_equal(node.kind, "binary", work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if binary:
+                is_less: bool = proof_kernel_replay_goal_search_text_equal(node.operator, "<", work_used)
+                is_less_equal: bool = proof_kernel_replay_goal_search_text_equal(node.operator, "<=", work_used)
+                is_greater: bool = proof_kernel_replay_goal_search_text_equal(node.operator, ">", work_used)
+                is_greater_equal: bool = proof_kernel_replay_goal_search_text_equal(node.operator, ">=", work_used)
+                return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not is_less and not is_less_equal and not is_greater and not is_greater_equal
+                return (false, 0, "", 0) if not proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, node.left, node.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return (true, node.left, node.operator, node.right)
+            unary: bool = proof_kernel_replay_goal_search_text_equal(node.kind, "unary", work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not unary
+            is_not: bool = proof_kernel_replay_goal_search_text_equal(node.operator, "not", work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not is_not
+            return (false, 0, "", 0) if not proof_kernel_replay_goal_search_charge(work_used)
+            return (false, 0, "", 0) if not proof_kernel_replay_goal_search_charge_node_text(nodes, node.left, work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            inner: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
+            return (false, 0, "", 0) if not inner.known
+            inner_binary: bool = proof_kernel_replay_goal_search_text_equal(inner.node.kind, "binary", work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not inner_binary
+            inner_less: bool = proof_kernel_replay_goal_search_text_equal(inner.node.operator, "<", work_used)
+            inner_less_equal: bool = proof_kernel_replay_goal_search_text_equal(inner.node.operator, "<=", work_used)
+            inner_greater: bool = proof_kernel_replay_goal_search_text_equal(inner.node.operator, ">", work_used)
+            inner_greater_equal: bool = proof_kernel_replay_goal_search_text_equal(inner.node.operator, ">=", work_used)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not inner_less and not inner_less_equal and not inner_greater and not inner_greater_equal
+            return (false, 0, "", 0) if not proof_kernel_replay_scalar_term_pair_witnessed_with_work(nodes, children, facts, inner.node.left, inner.node.right, 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return (false, 0, "", 0) if not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.node.left, facts, work_used, 0)
+            return (false, 0, "", 0) if not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.node.right, facts, work_used, 0)
+            return (false, 0, "", 0) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return (true, inner.node.left, ">=", inner.node.right) if inner_less
+            return (true, inner.node.left, ">", inner.node.right) if inner_less_equal
+            return (true, inner.node.left, "<=", inner.node.right) if inner_greater
+            return (true, inner.node.left, "<", inner.node.right) if inner_greater_equal
+            (false, 0, "", 0)
 
         def proof_kernel_replay_order_mirror(operator: sview) -> sview:
             return ">" if operator == "<"

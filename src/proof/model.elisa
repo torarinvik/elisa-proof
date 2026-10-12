@@ -1,11 +1,15 @@
 # Stable public model for proof findings. The AST itself remains Ast::Expr/Stmt/Decl from
 # elisa-compiler; this module only owns the proof report and the small symbolic state.
 include "./model/extern_signatures.elisa"
+include "./model/analysis_budgets.elisa"
+include "./model/frame_annotation_index.elisa"
+include "./model/function_index_types.elisa"
 include "./model/function_table_constructor.elisa"
 include "./model/fact_origin_snapshot.elisa"
+include "./model/fact_call_shape_snapshot.elisa"
+include "./model/linear_hint_index.elisa"
 include "./model/obligation_entry.elisa"
 include "./model/type_bound_scratch.elisa"
-include "./model/replay_receipt.elisa"
 module ElisaProof:
     public:
         # A flat proof certificate records the exact logical context accepted by the
@@ -35,6 +39,15 @@ module ElisaProof:
             facts: mutable darray[Ast::Expr] = []
             slots: mutable darray[usize] = []
             annotations: mutable darray[Ast::EnumAnnotation] = []
+            # Exact annotation comparisons are required for cache correctness. Keep their
+            # cumulative cost bounded; once spent, the optimization is disabled for this run.
+            annotation_work: mutable usize = 0
+            annotation_bytes: mutable usize = 0
+            annotations_disabled: mutable bool = false
+            # Hashing, exact key comparison, and table probes share one run-wide allowance.
+            # Exhausting it disables only the optimization; the built-in solver still runs.
+            query_work_used: mutable usize = 0
+            cache_disabled: mutable bool = false
             # Measurement only, never read by a decision.
             hits: mutable usize = 0
             misses: mutable usize = 0
@@ -170,24 +183,6 @@ module ElisaProof:
             # Measurement only: fresh nodes replaced by an identical existing term.
             interned_nodes: mutable usize = 0
 
-        # Per-function work budgets of the recursive analyses. Exceeding a bound only loses
-        # completeness: exhaustion marks the path unsupported, never trusted.
-        struct ProofAnalysisBudgets:
-            # Recursive frame/call analysis.
-            frame_call_steps: mutable usize = 0
-            frame_call_reported: mutable bool = false
-            resource_steps: mutable usize = 0
-            resource_reported: mutable bool = false
-            # Recursive control-flow state exploration.
-            return_steps: mutable usize = 0
-            return_step_budget: mutable usize = 0
-            return_reported: mutable bool = false
-            return_fact_state_budget: mutable usize = 0
-            # Measurement only, never read by a decision: control-flow statements and branch
-            # arms admitted by the step budget, and the largest fact state seen at one of them.
-            measured_control_flow_steps: mutable usize = 0
-            measured_live_facts_peak: mutable usize = 0
-
         # Fact provenance for independent replay: the authoritative trace records plus the
         # flat pools their premise/summary ranges index, and a lookup index over owners.
         struct ProofFactTraceStore:
@@ -306,84 +301,91 @@ module ElisaProof:
             current_source_postcondition_name: mutable sview = ""
             focused_function: mutable sview = ""
             linear_hints: mutable darray[i64] = []
-            certificates: mutable darray[ProofGoalCertificate] = []
-            certificate_facts: mutable darray[Ast::Expr] = []
-            kernel: mutable ProofKernelArena = ProofKernelArena{}
-            traces: mutable ProofFactTraceStore = ProofFactTraceStore{}
-            type_bounds: mutable ProofTypeBoundScratch = ProofTypeBoundScratch{}
-            budgets: mutable ProofAnalysisBudgets = ProofAnalysisBudgets{}
-            # Width of the function's declared unsigned return type for the return-contract
-            # boundary. This is scratch context, never a logical fact; zero means signed or
-            # otherwise untyped. Return checking uses it only to prevent folding a wrapping
-            # literal expression as signed `i64` arithmetic.
-            current_return_unsigned_width: mutable i64 = 0
-            current_return_signed_width: mutable i64 = 0
-            declaration_details: mutable darray[ProofDeclarationSummary] = []
-            declaration_parameters: mutable darray[sview] = []
-            theorems: mutable ProofTheoremTable = ProofTheoremTable{}
-            executables: mutable ProofExecutableTable = ProofExecutableTable{}
-            structural: mutable ProofStructuralTable = ProofStructuralTable{}
-            declaration_effects: mutable darray[sview] = []
-            # Per-function scratch for call havoc: the locals of `aliased_owner` that may be
-            # referenced somewhere in its body. A fact over other by-value scalar locals survives
-            # an opaque call. Any other owner sees no stable names.
-            aliased_names: mutable darray[sview] = []
-            # The subset of `aliased_names` whose lend can outlive the call it was passed to. A
-            # lend that cannot is still a write *during* its own call -- which is what
-            # `aliased_names` answers -- but it leaves nothing behind that a later call could
-            # reach, so a loop entered afterwards need not forget the binding.
-            escaping_names: mutable darray[sview] = []
-            # Per-function scratch for call havoc: the parameters of `aliased_owner` bound by a
-            # shared borrow. Nothing may write through one for the parameter's lifetime, so its
-            # element count is fixed for the whole frame and a fact mentioning it survives a call.
-            # A mutable borrow, an owned binding and a local are all absent from this list.
-            shared_extent_names: mutable darray[sview] = []
-            # The subset of `shared_extent_names` whose pointee holds no reference or borrowed
-            # view: every field place under one is fixed for the frame (`proof_record_shared_borrows`).
-            shared_fixed_names: mutable darray[sview] = []
-            # Per-function scratch for call havoc: the locals of `aliased_owner` that hold a
-            # collection by value. A callee reaches caller state through arguments, a method
-            # receiver, and globals; `aliased_names` already names every binding that is
-            # referenced, received or passed to an unknown callee, so a local outside it that owns
-            # its collection cannot be resized by any call. Reference-typed locals are excluded,
-            # because the object behind one may be reachable by another path.
-            local_extent_names: mutable darray[sview] = []
-            # The subset of `local_extent_names` whose type is a plain value
-            # (`proof_plain_value_type`): scalars, const enums, payload enums and structs built
-            # only from those. Such a binding's text denotes one immutable value, so it may stand
-            # as an argument of a witnessed pure call term.
-            value_binding_names: mutable darray[sview] = []
-            # Locals declared with a reference type. Assigning through one writes its referent,
-            # which the substitution state cannot name, so such a write havocs all values.
-            reference_local_names: mutable darray[sview] = []
-            aliased_owner: mutable sview = ""
-            # Per-function scratch: locals of `aliased_owner` whose every declaration is a value
-            # collection, one whose type holds no reference. A builtin call on one (`push`,
-            # `extend`, ...) copies its arguments in, so it lends none of them.
-            value_collection_names: mutable darray[sview] = []
-            # Counts the fresh symbols a rebind has taken in the function being checked. Reset at
-            # each function so the small literal pool is per frame, not per program.
-            rebind_symbols: mutable usize = 0
-            # Scratch from the last applied call that threaded exclusive `&` arguments: each
-            # caller local and the fresh symbol now naming its post-call value (value_threading).
-            threaded_names: mutable darray[sview] = []
-            threaded_values: mutable darray[Ast::Expr] = []
-            # Exit symbols of threaded calls in the function being checked: constants naming one
-            # call's post value, so they survive later calls like any other logical constant.
-            threaded_symbols: mutable darray[sview] = []
-            # Exit symbols appended to the function summaries being recorded for a threaded call.
-            summary_threaded_symbols: mutable darray[sview] = []
-            # Set only around the statement and assignment calls whose callers apply threading.
-            value_thread_site: mutable bool = false
-            # True while a goal is being decided case by case over a conditional (G75).
-            conditional_split_active: mutable bool = false
-            # Number of optional primitive-type witnesses emitted for the current function.
-            # This is a completeness budget: when it is spent, congruence declines rather than
-            # allowing an unbounded fact frame to consume the checker.
-            scalar_witness_facts: mutable usize = 0
-            # Run-local result cache of the built-in decision procedure (ProofGoalCache).
-            goal_cache: mutable ProofGoalCache = ProofGoalCache{}
             private:
+                linear_hint_index: mutable ProofLinearHintIndex = ProofLinearHintIndex{}
+            public:
+                certificates: mutable darray[ProofGoalCertificate] = []
+                certificate_facts: mutable darray[Ast::Expr] = []
+                kernel: mutable ProofKernelArena = ProofKernelArena{}
+                traces: mutable ProofFactTraceStore = ProofFactTraceStore{}
+                type_bounds: mutable ProofTypeBoundScratch = ProofTypeBoundScratch{}
+                budgets: mutable ProofAnalysisBudgets = ProofAnalysisBudgets{}
+                # Width of the function's declared unsigned return type for the return-contract
+                # boundary. This is scratch context, never a logical fact; zero means signed or
+                # otherwise untyped. Return checking uses it only to prevent folding a wrapping
+                # literal expression as signed `i64` arithmetic.
+                current_return_unsigned_width: mutable i64 = 0
+                current_return_signed_width: mutable i64 = 0
+                declaration_details: mutable darray[ProofDeclarationSummary] = []
+                declaration_parameters: mutable darray[sview] = []
+                theorems: mutable ProofTheoremTable = ProofTheoremTable{}
+                executables: mutable ProofExecutableTable = ProofExecutableTable{}
+                structural: mutable ProofStructuralTable = ProofStructuralTable{}
+                declaration_effects: mutable darray[sview] = []
+                # Per-function scratch for call havoc: the locals of `aliased_owner` that may be
+                # referenced somewhere in its body. A fact over other by-value scalar locals survives
+                # an opaque call. Any other owner sees no stable names.
+                aliased_names: mutable darray[sview] = []
+                # The subset of `aliased_names` whose lend can outlive the call it was passed to. A
+                # lend that cannot is still a write *during* its own call -- which is what
+                # `aliased_names` answers -- but it leaves nothing behind that a later call could
+                # reach, so a loop entered afterwards need not forget the binding.
+                escaping_names: mutable darray[sview] = []
+                # Per-function scratch for call havoc: the parameters of `aliased_owner` bound by a
+                # shared borrow. Nothing may write through one for the parameter's lifetime, so its
+                # element count is fixed for the whole frame and a fact mentioning it survives a call.
+                # A mutable borrow, an owned binding and a local are all absent from this list.
+                shared_extent_names: mutable darray[sview] = []
+                # The subset of `shared_extent_names` whose pointee holds no reference or borrowed
+                # view: every field place under one is fixed for the frame (`proof_record_shared_borrows`).
+                shared_fixed_names: mutable darray[sview] = []
+                # Per-function scratch for call havoc: the locals of `aliased_owner` that hold a
+                # collection by value. A callee reaches caller state through arguments, a method
+                # receiver, and globals; `aliased_names` already names every binding that is
+                # referenced, received or passed to an unknown callee, so a local outside it that owns
+                # its collection cannot be resized by any call. Reference-typed locals are excluded,
+                # because the object behind one may be reachable by another path.
+                local_extent_names: mutable darray[sview] = []
+                # The subset of `local_extent_names` whose type is a plain value
+                # (`proof_plain_value_type`): scalars, const enums, payload enums and structs built
+                # only from those. Such a binding's text denotes one immutable value, so it may stand
+                # as an argument of a witnessed pure call term.
+                value_binding_names: mutable darray[sview] = []
+                # Locals declared with a reference type. Assigning through one writes its referent,
+                # which the substitution state cannot name, so such a write havocs all values.
+                reference_local_names: mutable darray[sview] = []
+                aliased_owner: mutable sview = ""
+                # Per-function scratch: locals of `aliased_owner` whose every declaration is a value
+                # collection, one whose type holds no reference. A builtin call on one (`push`,
+                # `extend`, ...) copies its arguments in, so it lends none of them.
+                value_collection_names: mutable darray[sview] = []
+                # Counts the fresh symbols a rebind has taken in the function being checked. Reset at
+                # each function so the small literal pool is per frame, not per program.
+                rebind_symbols: mutable usize = 0
+                # Scratch from the last applied call that threaded exclusive `&` arguments: each
+                # caller local and the fresh symbol now naming its post-call value (value_threading).
+                threaded_names: mutable darray[sview] = []
+                threaded_values: mutable darray[Ast::Expr] = []
+                # Exit symbols of threaded calls in the function being checked: constants naming one
+                # call's post value, so they survive later calls like any other logical constant.
+                threaded_symbols: mutable darray[sview] = []
+                # Exit symbols appended to the function summaries being recorded for a threaded call.
+                summary_threaded_symbols: mutable darray[sview] = []
+                # Set only around the statement and assignment calls whose callers apply threading.
+                value_thread_site: mutable bool = false
+                # True while a goal is being decided case by case over a conditional (G75).
+                conditional_split_active: mutable bool = false
+                # Number of optional primitive-type witnesses emitted for the current function.
+                # This is a completeness budget: when it is spent, congruence declines rather than
+                # allowing an unbounded fact frame to consume the checker.
+                scalar_witness_facts: mutable usize = 0
+                # Run-local result cache of the built-in decision procedure (ProofGoalCache).
+                goal_cache: mutable ProofGoalCache = ProofGoalCache{}
+            private:
+                # Set only by the source-aware checking entry point after it confirms that the
+                # captured parser file is the exact Ast::File checked by the proof engine.
+                source_file_identity: mutable uintptr = 0
+                source_analysis_bound: mutable bool = false
                 replayed: mutable u32 = 0
                 replay_gaps: mutable u32 = 0
                 # Declaration line stamped on global-constant traces while importing them.
@@ -397,12 +399,18 @@ module ElisaProof:
                 # Indices of the "global-constant" traces, so the per-statement constant check scans
                 # these few rather than every trace of the function.
                 global_constant_trace_ids: mutable darray[usize] = []
+                # Source-derived call resolution used by the generic fact publishers. This is
+                # private scratch bound to the exact checked source; clients cannot forge a
+                # leaf-name-to-return-shape map.
+                fact_call_shapes: mutable ProofFactCallShapeSnapshot = ProofFactCallShapeSnapshot{}
                 # Declaration line of the function whose certificate replay is validating facts.
                 replay_owner_line: mutable u32 = 0
                 # The function being checked and its innermost module, stamped on findings that
                 # name it so same-named functions of different modules keep separate verdicts.
                 finding_function: mutable sview = ""
                 finding_owner: mutable sview = ""
+                finding_line: mutable u32 = 0
+                finding_caller_index: mutable usize = 0
 
         # A frame place is either a whole reference root (`changes box`) or a bounded field
         # path (`changes box.inner.value`). The fixed path slots keep frame summaries flat and
@@ -417,29 +425,6 @@ module ElisaProof:
             depth: usize
             whole: bool
 
-        # A per-import hash index over alias and struct declarations. Float-type auditing uses
-        # it to inspect only declarations reachable from each signature.
-        struct ProofTypeAuditDeclaration:
-            declaration: Ast::Decl
-            name_hash: u32
-
-        struct ProofTypeAuditIndex:
-            entries: mutable darray[ProofTypeAuditDeclaration]
-            bucket_heads: mutable darray[usize]
-            next_indices: mutable darray[usize]
-            complete: mutable bool
-
-        # Frame contract annotations are grouped by owner once per import. Head/tail links keep
-        # each owner's source order while avoiding a whole annotation-table scan per function.
-        struct ProofFrameAnnotationIndex:
-            owner_names: mutable darray[sview]
-            owner_hashes: mutable darray[u32]
-            slot_values: mutable darray[usize]
-            head_indices: mutable darray[usize]
-            tail_indices: mutable darray[usize]
-            annotation_indices: mutable darray[usize]
-            next_indices: mutable darray[usize]
-
         # Function summaries are deliberately separate from lemma summaries. A lemma call is
         # proof-only and preserves the caller's facts; an executable call may invalidate every
         # caller fact unless a frame-condition tier proves preservation. Recursive SCCs are
@@ -448,6 +433,16 @@ module ElisaProof:
         struct ProofFunctionTable:
             # Separate source signatures: never included in body/purity/SCC slots.
             extern_signatures: mutable darray[ProofExternSignature]
+            # Exact-name index for extern declarations. Duplicate extern rows remain marked
+            # ambiguous; consumers use this only to fail closed on source-name collisions.
+            extern_index_hashes: mutable darray[u32]
+            extern_index_values: mutable darray[usize]
+            extern_index_ambiguous: mutable darray[bool]
+            # Cached selector/hook shadows remove repeated linear scans from numeric-cast
+            # classification. `numeric_cast_shadowed` is aligned with the reserved selector
+            # order in proof_numeric_cast_target_at.
+            numeric_cast_shadowed: mutable darray[bool]
+            custom_cast_hook_present: mutable bool
             type_audit_index: mutable ProofTypeAuditIndex
             enum_index: mutable ProofEnumIndex
             frame_annotation_index: mutable ProofFrameAnnotationIndex
@@ -456,6 +451,8 @@ module ElisaProof:
             # qualified call `Module::name` whose bare name repeats resolves through them.
             lines: mutable darray[u32]
             owner_modules: mutable darray[sview]
+            # Exact parser-owned aliases shared by call checking and fact publication.
+            module_aliases: mutable ProofModuleAliasIndex
             # The length of each row's declaration-path prefix that ends at its innermost module,
             # 0 for a top-level function. Two rows share a module exactly when these prefixes
             # are equal; a module name alone cannot tell apart two nested modules spelled alike.
@@ -468,6 +465,10 @@ module ElisaProof:
             name_hashes: mutable darray[u32]
             index_hashes: mutable darray[u32]
             index_values: mutable darray[usize]
+            # A slot is ambiguous only when this exact name appears more than once. Keeping
+            # this bit beside the retained first row avoids conflating hash collisions with
+            # duplicate declarations.
+            index_ambiguous: mutable darray[bool]
             param_starts: mutable darray[usize]
             param_counts: mutable darray[usize]
             all_params: mutable darray[sview]
@@ -560,7 +561,12 @@ module ElisaProof:
             # bare call) and the row the call resolves to from its caller (names.count when
             # unresolved). Bare names repeat across modules, so the graph reads the targets.
             all_call_qualifiers: mutable darray[sview]
+            # Source callee AST aligned with all_calls, preserving exact scope paths for graph resolution.
+            all_call_callee_sources: mutable darray[Ast::Expr]
             all_call_targets: mutable darray[usize]
+            # Shared checked-call resolver meter across graph, contract, and body lookup phases.
+            module_resolution_work_used: mutable usize
+            module_resolution_work_exhausted: mutable bool
             # The row whose body is being checked, or names.count outside a scheduled function
             # body. Unqualified calls resolve from this caller's module.
             current_caller: mutable usize
@@ -587,3 +593,4 @@ module ElisaProof:
 
 include "./model/frame_producer.elisa"
 include "./model/report_recording.elisa"
+include "./model/replay_receipt.elisa"

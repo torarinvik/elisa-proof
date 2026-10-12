@@ -1,0 +1,193 @@
+extend ElisaProof:
+    private:
+        def proof_return_counterexample_is_parameter(functions: ProofFunctionTable&, owner: sview, symbol: sview) -> bool:
+            function_index: usize = proof_function_index_of_current(functions, owner)
+            return false if function_index >= functions.names.count or function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
+            parameter_start: usize = functions.param_starts[function_index]
+            parameter_count: usize = functions.param_counts[function_index]
+            return false if parameter_start > functions.all_params.count or parameter_count > functions.all_params.count - parameter_start
+            for parameter_index in parameter_start..<parameter_start + parameter_count |parameter_index, functions, symbol|:
+                return true if functions.all_params[parameter_index] == symbol
+            return false
+
+        # Return-contract model search abstracts the body to its checked facts. A satisfying
+        # assignment to a free local omitted from that state is only an abstract countermodel,
+        # not a concrete function input. Keep `disproved` for return failures only when every
+        # assigned symbol is an actual formal parameter (constant, closed counterexamples need
+        # no assignments and remain concrete).
+        def proof_return_counterexample_parameters_only(report: ProofReport&, functions: ProofFunctionTable&, owner: sview) -> bool:
+            return false if report.findings.count == 0
+            finding: ProofFinding = report.findings[report.findings.count - 1]
+            return false if not finding.counterexample_found
+            return true if finding.counterexample_count == 0
+            return false if finding.counterexample_start > report.counterexample_facts.count or finding.counterexample_count > report.counterexample_facts.count - finding.counterexample_start
+            for offset in 0..<finding.counterexample_count |offset, finding, report, functions, owner|:
+                match report.counterexample_facts[finding.counterexample_start + offset]:
+                    Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, Ast::Expr.IntLit(_, _), _):
+                        return false if not proof_return_counterexample_is_parameter(functions, owner, symbol)
+                    Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, Ast::Expr.BoolLit(_, _), _):
+                        return false if not proof_return_counterexample_is_parameter(functions, owner, symbol)
+                    _:
+                        return false
+            return true
+
+        # `return <block>` -- how a tail loop with a header accumulator (`|acc: T = init| -> acc`)
+        # arrives -- runs the block's statements in the function's own frame and then returns the
+        # block's value. That is exactly the body `statements ++ [return value]`. A block with no
+        # value is not this shape and stays with the ordinary admission gate.
+        # `result.f` over a returned tuple literal is the literal's element labelled `f` in the
+        # declared return type. The literal stands in as a construction under a reserved type name,
+        # which `proof_substitute` projects field by field. If that name survives, some use of
+        # `result` was not a labelled field, and the caller keeps the plain substitution.
+        def proof_project_tuple_result(goal: Ast::Expr, return_value: Ast::Expr, functions: ProofFunctionTable&, name: sview) -> (known: bool, value: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            function_index: usize = proof_function_index_of_current(functions, name)
+            return (false, goal) if function_index >= functions.return_label_counts.count
+            match return_value:
+                Ast::Expr.Tuple(elements, position):
+                    return (false, goal) if elements.count == 0 or functions.return_label_counts[function_index] != elements.count
+                    start: usize = functions.return_label_starts[function_index]
+                    fields: mutable darray[Ast::FieldInit] = []
+                    for index in 0..<elements.count |fields, elements, functions, start|:
+                        fields.push(Ast::FieldInit{name: functions.all_return_labels[start + index], value: elements[index]})
+                    result_name: darray[sview] = ["result"]
+                    result_value: darray[Ast::Expr] = [Ast::Expr.Construct(Ast::Expr.Ident("__elisa_tuple_result", position), fields, position)]
+                    projected: Ast::Expr = proof_substitute(goal, result_name, result_value)
+                    return (not proof_expr_mentions_name(projected, "__elisa_tuple_result"), projected)
+                _:
+                    return (false, goal)
+
+        # A closed integer constant returned from a function of signed width w denotes exactly
+        # its value at w when every step of it fits there. Substituting the bare constant for
+        # `result` loses that width: the goal becomes a comparison of two untyped constants, and
+        # the ambiguity guard rightly refuses a negative or wide one (`0 >= -5` could be a wrapped
+        # unsigned reading). The returned value is instead bound to a fresh reserved symbol that
+        # carries the declared return type, so the typed-constant guard reads every constant the
+        # ensure compares against `result` at w. Only goals the untyped guard refuses take this path.
+        def proof_typed_return_constant_needed(current_goal: Ast::Expr, goal: Ast::Expr, return_value: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&) -> bool:
+            width: i64 = report.current_return_signed_width
+            return false if width <= 0 or report.current_return_unsigned_width != 0
+            return false if not proof_expr_mentions_name(current_goal, "result") or proof_expr_has_call(current_goal)
+            return false if not proof_closed_integer_arithmetic(return_value, 0)
+            return false if not proof_signed_constant_at_width(return_value, width, 0).known
+            return proof_has_ambiguous_integer_constant_in(goal, facts, 0)
+
+        # The symbol's type facts are the declared return type's, recorded exactly as a signed
+        # parameter's are; its value is a local binding of the returned constant.
+        def proof_add_typed_return_constant(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, symbol: sview, return_value: Ast::Expr, owner: sview, position: Ast::Pos) -> void:
+            width: i64 = report.current_return_signed_width
+            symbol_term: Ast::Expr = Ast::Expr.Ident(symbol, position)
+            proof_add_type_bound_fact(facts, report, proof_signed_type_marker(symbol_term, width, position), position.line, owner)
+            proof_add_signed_upper_bound_fact(facts, report, symbol, width, position.line, owner, position)
+            proof_add_type_bound_fact(facts, report, proof_scalar_type_marker(symbol, position), position.line, owner)
+            binding: Ast::Expr = Ast::Expr.Binary(symbol_term, TokenKind.EqEq, return_value, position)
+            proof_add_traced_fact(facts, report, binding, "local-binding", position.line, owner)
+
+        def proof_return_value_block(statement: Ast::Stmt) -> (known: bool, body: darray[Ast::Stmt], position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            empty: mutable darray[Ast::Stmt] = []
+            match statement:
+                Ast::Stmt.Return(value, position):
+                    if value is returned:
+                        match returned:
+                            Ast::Expr.Block(statements, block_value, _, _):
+                                match block_value:
+                                    Ast::Expr.Absent:
+                                        pass
+                                    Ast::Expr.Invalid:
+                                        pass
+                                    _:
+                                        body: mutable darray[Ast::Stmt] = []
+                                        body.extend(statements)
+                                        body.push(Ast::Stmt.Return(block_value, position))
+                                        return (true, body, position)
+                            _:
+                                pass
+                _:
+                    pass
+            return (false, empty, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
+        # `x: T = <block>` -- how a loop with a header accumulator arrives as a local's value --
+        # runs the block's statements in the function's own frame and then binds its value. When
+        # no name the block declares is visible there, flattening it to `statements ++ [x: T =
+        # value]` keeps every later read meaning the same: the compiler rejects reads of the
+        # block's names after it, and a later declaration of one rebinds it as usual. A block
+        # that would shadow a visible name is left alone.
+        def proof_flatten_value_block_declaration(body: darray[Ast::Stmt]&, names: darray[sview]&) -> (known: bool, body: darray[Ast::Stmt]) can[Memory.Allocate, Abort.Panic]:
+            flattened: mutable darray[Ast::Stmt] = []
+            visible: mutable darray[sview] = []
+            visible.extend(names)
+            found: mutable bool = false
+            for statement in body |flattened, visible, found|:
+                if found:
+                    flattened.push(statement)
+                    continue
+                block: (known: bool, statements: darray[Ast::Stmt], local_name: sview, type_expression: Ast::Expr, value: Ast::Expr, position: Ast::Pos) = proof_declared_value_block(statement)
+                if block.known and not proof_block_shadows(block.statements, visible):
+                    flattened.extend(block.statements)
+                    # `x: T = x` over the block's own `x: T` binds the value it already holds, so
+                    # it is dropped rather than read as a shadowing that forgets every fact.
+                    flattened.push(Ast::Stmt.VarDecl(block.local_name, block.type_expression, block.value, block.position)) if not proof_block_identity_rebind(block.statements, block.local_name, block.type_expression, block.value)
+                    found <- true
+                    continue
+                flattened.push(statement)
+                declared: sview = proof_statement_declared_name(statement)
+                visible.push(declared) if declared != ""
+            return (found, flattened)
+
+        def proof_declared_value_block(statement: Ast::Stmt) -> (known: bool, statements: darray[Ast::Stmt], local_name: sview, type_expression: Ast::Expr, value: Ast::Expr, position: Ast::Pos) can[Memory.Allocate, Abort.Panic]:
+            empty: mutable darray[Ast::Stmt] = []
+            match statement:
+                Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
+                    match initializer:
+                        Ast::Expr.Block(statements, block_value, _, _):
+                            match block_value:
+                                Ast::Expr.Absent:
+                                    pass
+                                Ast::Expr.Invalid:
+                                    pass
+                                _:
+                                    return (true, statements, local_name, type_expression, block_value, position)
+                        _:
+                            pass
+                _:
+                    pass
+            return (false, empty, "", Ast::Expr.Absent, Ast::Expr.Absent, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+
+        def proof_block_identity_rebind(statements: darray[Ast::Stmt]&, local_name: sview, type_expression: Ast::Expr, value: Ast::Expr) -> bool:
+            match value:
+                Ast::Expr.Ident(value_name, _):
+                    return false if value_name != local_name
+                _:
+                    return false
+            same: mutable bool = false
+            for statement in statements |local_name, type_expression, same|:
+                match statement:
+                    Ast::Stmt.VarDecl(declared, declared_type, _, _):
+                        same <- proof_expr_equal(declared_type, type_expression) if declared == local_name
+                    _:
+                        pass
+            same
+
+        def proof_block_shadows(statements: darray[Ast::Stmt]&, visible: darray[sview]&) -> bool:
+            for statement in statements |visible|:
+                declared: sview = proof_statement_declared_name(statement)
+                return true if declared != "" and (any candidate in visible where candidate == declared)
+            false
+
+        # Check a return value block in a private copy of the state. The block's declarations
+        # are scoped to it and every path through it ends at the appended return, so only its
+        # validity and any loop edge that escapes it reach the enclosing flow.
+        def proof_check_value_block_return(body: darray[Ast::Stmt]&, position: Ast::Pos, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, ensures: darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, frame_parameters: darray[sview]&, old_values: darray[Ast::Expr]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, lemma_steps: bool, annotations: darray[Ast::EnumAnnotation]&, loop_depth: usize, loop_label: sview, loop_invariants: darray[Ast::Expr]&, loop_scope_count: usize, flow: mutable ProofFlow&) -> void can[Global.Read, Global.Write]:
+            flow.normal <- false
+            if not proof_return_analysis_budget_available(facts, names, values, report, name, position.line):
+                report.proof_obligation(false)
+                flow.valid <- false
+                return
+            block_names: mutable darray[sview] = proof_copy_names(names)
+            block_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
+            block_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
+            block_flow: mutable ProofFlow = proof_empty_flow()
+            (proof_check_returns(body, &block_names, &block_values, &block_facts, ensures, lemmas, functions, frame_parameters, old_values, changes, preserves, fixed_names, fixed_extents, report, name, lemma_steps, annotations, loop_depth, loop_label, loop_invariants, loop_scope_count, &block_flow) can Global{Read,Write})
+            flow.valid <- false if not block_flow.valid or report.budgets.return_reported
+            flow.breaks <- flow.breaks or block_flow.breaks
+            flow.continues <- flow.continues or block_flow.continues
+            proof_append_continue_states(flow, block_flow)

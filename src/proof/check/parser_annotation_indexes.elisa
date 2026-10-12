@@ -1,0 +1,145 @@
+extend ElisaProof:
+    private:
+        # Parser annotation side tables are source-controlled. Keep their indexes collision-safe
+        # and subject construction to the same shared work budget as declaration-name indexes.
+        struct ProofLemmaAnnotationIndex:
+            names: mutable darray[sview]
+            name_hashes: mutable darray[u32]
+            slot_values: mutable darray[usize]
+
+        def proof_frame_annotation_marker(line: u32) -> bool:
+            return line == PROOF_FRAME_WHOLE_CHANGE_ROW or line == PROOF_FRAME_CHANGE_ROOT_ROW or line == PROOF_FRAME_CHANGE_FIELD_ROW or line == PROOF_FRAME_PRESERVE_ROOT_ROW or line == PROOF_FRAME_PRESERVE_FIELD_ROW or line == PROOF_FRAME_CHANGED_FIELD_FALLBACK_ROW
+
+        def proof_frame_annotation_index(file: Ast::File&, source_work: mutable usize&) -> (index: ProofFrameAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofFrameAnnotationIndex = ProofFrameAnnotationIndex{owner_names: [], owner_hashes: [], slot_values: [], head_indices: [], tail_indices: [], annotation_indices: [], next_indices: []}
+            marker_count: mutable usize = 0
+            for annotation in file.enum_annotations |marker_count, source_work|:
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                marker_count <- marker_count + 1 if annotation.owner != "" and proof_frame_annotation_marker(annotation.line)
+            return (index, true, "", 0, 0) if marker_count == 0
+            capacity: usize = proof_name_index_capacity(marker_count)
+            return (index, false, "annotation-index-entries", marker_count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if capacity == 0
+            return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity, source_work)
+            return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(marker_count * 3, source_work)
+            index.slot_values.resize(capacity)
+            index.annotation_indices.resize(marker_count)
+            index.next_indices.resize(marker_count)
+            for slot in 0..<capacity |slot, marker_count, index|:
+                index.slot_values[slot] <- marker_count
+            row: mutable usize = 0
+            for source_index in 0..<file.enum_annotations.count |source_index, file, row, index, capacity, marker_count, source_work|:
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                annotation: Ast::EnumAnnotation = file.enum_annotations[source_index]
+                continue if annotation.owner == "" or not proof_frame_annotation_marker(annotation.line)
+                index.annotation_indices[row] <- source_index
+                index.next_indices[row] <- marker_count
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                hash: u32 = proof_name_hash(annotation.owner)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, annotation, row, index, capacity, marker_count, source_work|:
+                    return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.slot_values[slot]
+                    if current == marker_count:
+                        owner_index: usize = index.owner_names.count
+                        index.owner_names <- index.owner_names.push(annotation.owner)
+                        index.owner_hashes <- index.owner_hashes.push(hash)
+                        index.head_indices <- index.head_indices.push(row)
+                        index.tail_indices <- index.tail_indices.push(row)
+                        index.slot_values[slot] <- owner_index
+                        placed <- true
+                        break
+                    if index.owner_hashes[current] == hash:
+                        return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                        if index.owner_names[current] == annotation.owner:
+                            last_row: usize = index.tail_indices[current]
+                            index.next_indices[last_row] <- row
+                            index.tail_indices[current] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (index, false, "annotation-index-insertion", probes, capacity) if not placed
+                row <- row + 1
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.slot_values, marker_count, source_work)
+            return (index, false, "annotation-index-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (index, false, "annotation-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            return (index, true, "", 0, 0)
+
+        def proof_frame_annotation_owner(index: ProofFrameAnnotationIndex, owner: sview) -> usize:
+            capacity: usize = index.slot_values.count
+            return index.owner_names.count if capacity == 0
+            wanted_hash: u32 = proof_name_hash(owner)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, owner, index, capacity|:
+                current: usize = index.slot_values[slot]
+                return index.owner_names.count if current >= index.owner_names.count
+                return current if index.owner_hashes[current] == wanted_hash and index.owner_names[current] == owner
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return index.owner_names.count
+
+        def proof_lemma_annotation_index(file: Ast::File&, source_work: mutable usize&) -> (index: ProofLemmaAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) can[Memory.Allocate, Abort.Panic]:
+            index: mutable ProofLemmaAnnotationIndex = ProofLemmaAnnotationIndex{names: [], name_hashes: [], slot_values: []}
+            marker_count: mutable usize = 0
+            for annotation in file.enum_annotations |marker_count, source_work|:
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                marker_count <- marker_count + 1 if annotation.owner == "__lemma"
+            return (index, true, "", 0, 0) if marker_count == 0
+            capacity: usize = proof_name_index_capacity(marker_count)
+            return (index, false, "annotation-index-entries", marker_count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if capacity == 0
+            return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity, source_work)
+            return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(marker_count * 2, source_work)
+            index.slot_values.resize(capacity)
+            for slot in 0..<capacity |slot, marker_count, index|:
+                index.slot_values[slot] <- marker_count
+            for annotation in file.enum_annotations |index, capacity, marker_count, source_work|:
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                continue if annotation.owner != "__lemma"
+                return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                hash: u32 = proof_name_hash(annotation.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, annotation, index, capacity, marker_count, source_work|:
+                    return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.slot_values[slot]
+                    if current == marker_count:
+                        name_index: usize = index.names.count
+                        index.names <- index.names.push(annotation.name)
+                        index.name_hashes <- index.name_hashes.push(hash)
+                        index.slot_values[slot] <- name_index
+                        placed <- true
+                        break
+                    if index.name_hashes[current] == hash:
+                        return (index, false, "annotation-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                        if index.names[current] == annotation.name:
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (index, false, "annotation-index-insertion", probes, capacity) if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.slot_values, marker_count, source_work)
+            return (index, false, "annotation-index-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (index, false, "annotation-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            return (index, true, "", 0, 0)
+
+        def proof_function_is_lemma(index: ProofLemmaAnnotationIndex, name: sview) -> bool:
+            capacity: usize = index.slot_values.count
+            return false if capacity == 0
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, index, capacity|:
+                current: usize = index.slot_values[slot]
+                # Empty slots hold the marker count, which exceeds `names.count` when a lemma
+                # name is marked more than once (one name per distinct marker is stored).
+                return false if current >= index.names.count
+                return true if index.name_hashes[current] == wanted_hash and index.names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false

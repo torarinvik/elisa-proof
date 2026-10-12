@@ -1,0 +1,127 @@
+# Scoped alias expansion for source kernel type projection.
+extend ElisaProof:
+    private:
+        # The alias entry of `name`: its index in `index.entries` when the count is one. Callers
+        # read the target only then, so no placeholder term is built for the other answers --
+        # each would be a new, never reclaimed AST record, and this runs per type audit.
+        def proof_source_kernel_alias_entry(index: ProofSourceKernelTypeIndex, name: sview, source_work: mutable usize&) -> (count: usize, entry: usize):
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not index.complete
+            count: mutable usize = 0
+            found: mutable usize = 0
+            best_depth: mutable usize = 0
+            capacity: usize = index.bucket_heads.count
+            return (0, 0) if capacity == 0 and index.entries.count == 0
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if capacity == 0 or index.next_indices.count != index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not proof_source_kernel_charge_work(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry_index: mutable usize = index.bucket_heads[slot]
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
+            steps: mutable usize = 0
+            while entry_index < index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry_index, steps, index, hash, name, count, found, best_depth, source_work|:
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not proof_source_kernel_charge_work(1, source_work)
+                entry: ProofSourceKernelTypeEntry = index.entries[entry_index]
+                if entry.name_hash == hash and entry.is_alias:
+                    return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not proof_source_kernel_charge_text_comparison(name, entry.name, source_work)
+                if entry.name_hash == hash and entry.is_alias and entry.name == name and entry.owner_path.count <= index.scope_path.count:
+                    prefix_match: mutable bool = true
+                    for segment in 0..<entry.owner_path.count |segment, entry, index, prefix_match, source_work|:
+                        return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if not proof_source_kernel_charge_text_comparison(entry.owner_path[segment], index.scope_path[segment], source_work)
+                        prefix_match <- false if entry.owner_path[segment] != index.scope_path[segment]
+                    if prefix_match:
+                        if entry.owner_path.count > best_depth:
+                            best_depth <- entry.owner_path.count
+                            count <- 1
+                            found <- entry_index
+                        elif entry.owner_path.count == best_depth:
+                            count <- count + 1
+                            found <- entry_index
+                entry_index <- index.next_indices[entry_index]
+                steps <- steps + 1
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index > index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if entry_index < index.entries.count
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, 0) if count > 1
+            return (count, found)
+        def proof_source_kernel_type_head_name(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, source_work: mutable usize&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, name, source_work)
+                    if alias.count == 1:
+                        return "" if not proof_source_kernel_charge_work(index.scope_path.count, source_work)
+                        return "" if not proof_source_kernel_charge_work(index.entries[alias.entry].owner_path.count, source_work)
+                        return "" if not proof_source_kernel_charge_work(index.scope_path.count, source_work)
+                        caller_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path, index.entries)
+                        index.scope_path.clear()
+                        index.scope_path.extend(index.entries[alias.entry].owner_path)
+                        target_name: sview = proof_source_kernel_type_head_name(index.entries[alias.entry].target, index, source_work, depth + 1)
+                        index.scope_path.clear()
+                        index.scope_path.extend(caller_scope)
+                        return target_name
+                    return "" if alias.count > 1
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    return "" if proof_scalar_primitive_type_name(name)
+                    # Preserve the qualified leaf for exact-path lookup. A leaf alias visible in
+                    # the caller's lexical scope cannot capture `Other::Name`.
+                    return name
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_type_head_name(inner, index, source_work, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_kernel_type_head_name(base, index, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_kernel_type_head_name(inner, index, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""
+        def proof_source_kernel_container_element_type(expression: Ast::Expr, index: ProofSourceKernelTypeIndex, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_kernel_container_element_type(inner, index, declarations, source_work, depth + 1)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_source_kernel_container_element_type(base, index, declarations, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_source_kernel_container_element_type(inner, index, declarations, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, entry: usize) = proof_source_kernel_alias_entry(index, name, source_work)
+                    if alias.count == 1:
+                        return (false, Ast::Expr.Invalid) if not proof_source_kernel_charge_work(index.scope_path.count, source_work)
+                        return (false, Ast::Expr.Invalid) if not proof_source_kernel_charge_work(index.entries[alias.entry].owner_path.count, source_work)
+                        return (false, Ast::Expr.Invalid) if not proof_source_kernel_charge_work(index.scope_path.count, source_work)
+                        caller_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path, index.entries)
+                        index.scope_path.clear()
+                        index.scope_path.extend(index.entries[alias.entry].owner_path)
+                        element: (known: bool, element: Ast::Expr) = proof_source_kernel_container_element_type(index.entries[alias.entry].target, index, declarations, source_work, depth + 1)
+                        index.scope_path.clear()
+                        index.scope_path.extend(caller_scope)
+                        return element
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return (true, argument) if head_name == "darray" or head_name == "view"
+                    fixed_array_length: bool = match argument:
+                        Ast::Expr.IntLit(_, _): true
+                        _: false
+                    return (true, head) if fixed_array_length
+                    # `bool[M::N]` is a fixed array only over a scalar head and a uniquely
+                    # declared constant, as in the bounds checker; otherwise it may be generic.
+                    return (false, Ast::Expr.Invalid) if not proof_source_kernel_charge_work(declarations.count, source_work)
+                    return (true, head) if proof_fixed_array_source_head_with_work(head, declarations, source_work) and proof_fixed_extent_constant_with_work(argument, declarations, source_work, 0).known
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.IndexN(head, arguments, _):
+                    head_name: sview = proof_ident_name(head)
+                    if head_name == "darray" or head_name == "view":
+                        return (false, Ast::Expr.Invalid) if arguments.count != 1
+                        return (true, arguments[0])
+                    return (false, Ast::Expr.Invalid) if head_name != "array" or arguments.count != 2
+                    fixed_array_length: bool = match arguments[1]:
+                        Ast::Expr.IntLit(_, _): true
+                        _: false
+                    return (false, Ast::Expr.Invalid) if not proof_source_kernel_charge_work(declarations.count, source_work)
+                    return (true, arguments[0]) if fixed_array_length or proof_fixed_extent_constant_with_work(arguments[1], declarations, source_work, 0).known
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)

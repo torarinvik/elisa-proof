@@ -2,7 +2,7 @@
 # resource checker recorded no binding for `name`, so a later use or call argument named an
 # unbound local and the resource certificate could not replay. Recover the declared type only
 # where the source states it outright, and otherwise leave the statement on the assignment path:
-#   - a direct call of a uniquely declared function takes that function's declared return type;
+#   - a direct call resolved from the current function row takes that function's declared return type;
 #   - an element read `p[i]` of a parameter `p` of the current function, declared once, takes the
 #     element type of `p`'s `darray[T]` or `view[T]` type (through `&`, `mutable` and `lmut`).
 extend ElisaProof:
@@ -24,38 +24,29 @@ extend ElisaProof:
                 _:
                     return Ast::Expr.Absent
 
-        def proof_resource_parameter_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, matches: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_RESOURCE_INFERRED_TYPE_DEPTH_LIMIT
-            for declaration in declarations |function_name, parameter, found, matches, depth|:
-                match declaration:
-                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
-                        if name == function_name:
-                            matches <- matches + 1
-                            found <- Ast::Expr.Absent
-                            for candidate in parameters |parameter, found|:
-                                found <- candidate.type_expression if candidate.name == parameter
-                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_resource_parameter_type_find(body, function_name, parameter, found, matches, depth + 1)
-                    _:
-                        pass
-
-        def proof_resource_inferred_binding_type(initializer: Ast::Expr, state: ProofResourceState&, report: ProofReport&, function_name: sview) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+        def proof_resource_inferred_binding_type(initializer: Ast::Expr, state: ProofResourceState&, functions: mutable ProofFunctionTable&) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
             match initializer:
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_inferred_binding_type(inner, state, report, function_name)
-                Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
-                    # A local callable shadows a same-spelled declaration.
-                    return Ast::Expr.Absent if proof_resource_lookup(state, callee) < state.binding_names.count
-                    declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee, 0)
-                    return Ast::Expr.Absent if declared.count != 1 or proof_ident_name(declared.type_expression) == "void"
-                    return declared.type_expression
+                    return proof_resource_inferred_binding_type(inner, state, functions)
+                Ast::Expr.Call(callee, _, _, _):
+                    match callee:
+                        Ast::Expr.Ident(name, _):
+                            # A local callable shadows the same-spelled function. Resolve the
+                            # surviving bare call from its scheduled caller row, not by a global
+                            # leaf scan that loses module identity.
+                            return Ast::Expr.Absent if proof_resource_lookup(state, name) < state.binding_names.count
+                            return Ast::Expr.Absent if proof_callable_name(callee) == ""
+                            called: usize = proof_function_index_for_callee(functions, callee)
+                            return Ast::Expr.Absent if called >= functions.return_types.count
+                            return_type: Ast::Expr = functions.return_types[called]
+                            return Ast::Expr.Absent if return_type is Ast::Expr.Invalid or return_type is Ast::Expr.Absent or proof_ident_name(return_type) == "void"
+                            return return_type
+                        _:
+                            return Ast::Expr.Absent
                 Ast::Expr.Index(Ast::Expr.Ident(root, _), _, _):
                     # The root must still resolve to the formal itself, not to a later local.
-                    return Ast::Expr.Absent if proof_resource_lookup(state, root) >= state.formal_count
-                    parameter_type: mutable Ast::Expr = Ast::Expr.Absent
-                    matches: mutable usize = 0
-                    proof_resource_parameter_type_find(report.source_declarations, function_name, root, &parameter_type, &matches, 0)
-                    return Ast::Expr.Absent if matches != 1
-                    return proof_resource_collection_element_type(parameter_type, 0)
+                    parameter_slot: usize = proof_resource_lookup(state, root)
+                    return Ast::Expr.Absent if parameter_slot >= state.formal_count or parameter_slot >= state.formal_parameter_types.count
+                    return proof_resource_collection_element_type(state.formal_parameter_types[parameter_slot], 0)
                 _:
                     return Ast::Expr.Absent

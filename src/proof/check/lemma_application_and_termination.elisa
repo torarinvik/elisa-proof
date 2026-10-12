@@ -67,12 +67,25 @@ extend ElisaProof:
                     used[parameter_index] <- true
             return true
 
-        def proof_apply_lemma(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, lemmas: ProofLemmaTable&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        # A lemma leaf is usable only when it identifies one function declaration row; the
+        # current summary table has no owner path, so ambiguous names fail closed.
+        def proof_lemma_unqualified_usable(lemmas: ProofLemmaTable&, name: sview) -> bool:
+            index: usize = proof_lemma_index(lemmas, name)
+            return false if index >= lemmas.names.count or index >= lemmas.unqualified_usable.count
+            lemmas.unqualified_usable[index]
+
+        def proof_apply_lemma(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
+                    return false if proof_callable_is_scoped(callee)
                     lemma_name: sview = proof_callable_name(callee)
                     lemma_index: usize = proof_lemma_index(lemmas, lemma_name)
                     return false if lemma_name == "" or lemma_index >= lemmas.names.count
+                    # A parameter or local callable shadows the global leaf exactly as it does
+                    # in source resolution. Never reinterpret that local call as a ghost lemma.
+                    for bound_name in caller_names |lemma_name|:
+                        return false if bound_name == lemma_name
+                    return false if lemma_index >= lemmas.unqualified_usable.count or not lemmas.unqualified_usable[lemma_index]
                     if lemma_index >= lemmas.verified.count or not lemmas.verified[lemma_index]:
                         report.proof_obligation(false)
                         proof_add_finding(report, "lemma-summary-unverified", position.line, name, "lemma body has not established a verified proof summary")
@@ -91,6 +104,15 @@ extend ElisaProof:
                         default_flags.push(lemmas.all_has_defaults[default_start + parameter_index])
                         default_values.push(lemmas.all_defaults[default_start + parameter_index])
                     return false if not proof_map_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments)
+                    # Actual and defaulted arguments become logical terms when lemma summaries
+                    # are substituted. Admit them only through the same state-stability boundary
+                    # used by assert-by propositions, before checking requires or adding facts.
+                    for argument in mapped_arguments |facts, report, functions, position, name|:
+                        argument_stable: bool = (proof_block_assertion_expression_stable(argument, facts, report, functions) can Global.Read)
+                        if not argument_stable:
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "proof-impure", position.line, name, "lemma arguments may use only verified total pure calls and source-witnessed stable expressions")
+                            return false
                     argument_values.extend(mapped_arguments)
                     requires_ok: mutable bool = true
                     require_goal_ids: mutable darray[usize] = []
@@ -166,7 +188,7 @@ extend ElisaProof:
                             report.proof_obligation(false)
                             proof_add_finding(report, "lemma-result-unbound", position.line, name, "returning lemma ensure cannot be used without a result binding")
                             return false
-                        proof_add_lemma_summary_fact(facts, report, proof_substitute(ensure_expression, parameter_names, argument_values), position.line, name, lemma_name, parameter_names, argument_values, require_goal_ids, ensure_index)
+                        proof_add_lemma_summary_fact(facts, report, functions, proof_substitute(ensure_expression, parameter_names, argument_values), position.line, name, lemma_name, parameter_names, argument_values, require_goal_ids, ensure_index)
                     return true
                 _:
                     return false
@@ -185,7 +207,7 @@ extend ElisaProof:
             return found
 
         def proof_function_index(functions: ProofFunctionTable&, name: sview) -> usize:
-            if functions.index_values.count > 0:
+            if functions.index_values.count > 0 and functions.index_values.count == functions.index_hashes.count and functions.index_values.count == functions.index_ambiguous.count:
                 wanted_hash: u32 = proof_name_hash(name)
                 capacity: usize = functions.index_values.count
                 slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
@@ -193,11 +215,9 @@ extend ElisaProof:
                 while probes < capacity |probes, slot, wanted_hash, name, functions, capacity|:
                     current: usize = functions.index_values[slot]
                     return functions.names.count if current == functions.names.count
-                    # A sentinel marks a repeated name. It ends the search only for a name with
-                    # its hash; any other name probes past it, as the insertion did.
-                    if current > functions.names.count:
-                        return functions.names.count if functions.index_hashes[slot] == wanted_hash
-                    elif functions.index_hashes[slot] == wanted_hash and functions.names[current] == name:
+                    return functions.names.count if current >= functions.names.count
+                    if functions.index_hashes[slot] == wanted_hash and functions.names[current] == name:
+                        return functions.names.count if functions.index_ambiguous[slot]
                         return current
                     slot <- (slot + 1) % capacity
                     probes <- probes + 1
@@ -258,65 +278,6 @@ extend ElisaProof:
             for candidate in left |result, right|:
                 result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject and other.identity == candidate.identity and other.subject_identity == candidate.subject_identity
             return result
-
-        # Pattern bindings that are in scope after a match. This list is used only to decide
-        # which values can themselves be destructured later; it is intentionally broader than
-        # the strict-subterm list below.
-        def proof_structural_pattern_bindings(pattern: Ast::Pattern, bindings: mutable darray[sview]&) -> void:
-            match pattern:
-                Ast::Pattern.Binding(name):
-                    bindings.push(name) if name != ""
-                Ast::Pattern.As(name, inner):
-                    bindings.push(name) if name != ""
-                    for subpattern in inner |bindings|:
-                        proof_structural_pattern_bindings(subpattern, bindings)
-                Ast::Pattern.TypeBind(_, binder):
-                    bindings.push(binder) if binder != ""
-                Ast::Pattern.Variant(_, fields):
-                    for subpattern in fields |bindings|:
-                        proof_structural_pattern_bindings(subpattern, bindings)
-                Ast::Pattern.Struct(_, fields):
-                    for subpattern in fields |bindings|:
-                        proof_structural_pattern_bindings(subpattern, bindings)
-                Ast::Pattern.Field(_, inner):
-                    for subpattern in inner |bindings|:
-                        proof_structural_pattern_bindings(subpattern, bindings)
-                Ast::Pattern.Tuple(elements):
-                    for subpattern in elements |bindings|:
-                        proof_structural_pattern_bindings(subpattern, bindings)
-                Ast::Pattern.Rest(name):
-                    bindings.push(name) if name != ""
-                Ast::Pattern.Or(options):
-                    for option in options |bindings|:
-                        proof_structural_pattern_bindings(option, bindings)
-                _:
-                    pass
-
-        # Only payload/field binders are strict subterms. A bare binding, `as whole`, or
-        # category binder names the complete matched value and is therefore never accepted as a
-        # structural decrease. Or-patterns are left opaque because a binder may exist in only one
-        # alternative; rejecting them is safer than guessing which names are common.
-        def proof_structural_pattern_subterms(pattern: Ast::Pattern, subject: sview, subject_identity: usize, subterms: mutable darray[ProofStructuralSmaller]&, report: mutable ProofReport&) -> void:
-            match pattern:
-                Ast::Pattern.Variant(_, fields):
-                    for subpattern in fields |subterms, report|:
-                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
-                Ast::Pattern.Struct(_, fields):
-                    for subpattern in fields |subterms, report|:
-                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
-                Ast::Pattern.Field(_, inner):
-                    for subpattern in inner |subterms, report|:
-                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
-                Ast::Pattern.Tuple(elements):
-                    for subpattern in elements |subterms, report|:
-                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
-                Ast::Pattern.Binding(name):
-                    subterms.push(ProofStructuralSmaller{name: name, subject: subject, identity: proof_structural_fresh_identity(report), subject_identity: subject_identity}) if name != ""
-                Ast::Pattern.As(_, inner):
-                    for subpattern in inner |subterms, report|:
-                        proof_structural_pattern_subterms(subpattern, subject, subject_identity, subterms, report)
-                _:
-                    pass
 
         # A recursive AST walker often reaches a child through a compiler-owned side table:
         # `for argument in arguments: visit(argument)`. The loop variable is a strict subterm of
@@ -545,13 +506,15 @@ extend ElisaProof:
                     proof_structural_check_expression(scrutinee, own_name, subject_position, parameters, destructurable, smaller, report, name)
                     for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
                         arm_bindings: mutable darray[sview] = []
-                        proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                        arm_pattern_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                        report.proof_obligation(false) if not arm_pattern_complete
                         arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings)
                         arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings)
                         scrutinee_name: sview = proof_ident_name(scrutinee)
                         if proof_structural_name_in(destructurable, scrutinee_name):
-                            proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
-                            proof_structural_pattern_subterms(arm.pattern, scrutinee_name, proof_structural_binding_identity(scrutinee, smaller, parameters), &arm_smaller, report)
+                            arm_destructurable_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_destructurable)
+                            arm_subterms_complete: bool = proof_structural_pattern_subterms(arm.pattern, scrutinee_name, proof_structural_binding_identity(scrutinee, smaller, parameters), &arm_smaller, report)
+                            report.proof_obligation(false) if not arm_destructurable_complete or not arm_subterms_complete
                         proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                         proof_structural_check_body(arm.body, own_name, subject_position, parameters, arm_destructurable, arm_smaller, report, name)
                 Ast::Expr.Catch(guarded, arms, _):

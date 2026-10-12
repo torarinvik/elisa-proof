@@ -1,0 +1,86 @@
+extend ElisaProof:
+    private:
+        struct ProofTheoremLineIndex:
+            slot_values: mutable darray[usize] = []
+            names: mutable darray[sview] = []
+            lines: mutable darray[u32] = []
+            hashes: mutable darray[u32] = []
+            valid: bool = false
+
+        def proof_report_theorem_line_hash(name: sview, line: u32, work: mutable usize&) -> (complete: bool, hash: u32):
+            name_hash: (complete: bool, hash: u32) = proof_report_declaration_name_hash(name, work)
+            return (false, 0) if not name_hash.complete
+            (true, name_hash.hash ^ line)
+
+        # Build one collision-safe lookup for lemma source identities. Report declaration
+        # validation visits declarations in source order, so a scan of every theorem row for
+        # every function would multiply two otherwise linear inventories.
+        def proof_report_theorem_line_index(report: ProofReport&, work: mutable usize&) -> (index: ProofTheoremLineIndex, complete: bool) can[Memory.Allocate]:
+            index: mutable ProofTheoremLineIndex = ProofTheoremLineIndex{valid: true}
+            return (ProofTheoremLineIndex{}, false) if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            theorem_count: usize = report.theorems.summaries.count
+            return (index, true) if theorem_count == 0
+            if theorem_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (ProofTheoremLineIndex{}, false)
+            target_capacity: usize = theorem_count * 2
+            capacity: mutable usize = 1
+            while capacity < target_capacity |capacity, target_capacity|:
+                if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (ProofTheoremLineIndex{}, false)
+                capacity <- capacity * 2
+            return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(capacity, work)
+            index.slot_values.resize(capacity)
+            for slot in 0..<capacity |slot, index, capacity|:
+                index.slot_values[slot] <- capacity
+            for theorem in report.theorems.summaries |theorem, index, capacity, work|:
+                return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(1, work)
+                key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(theorem.name, theorem.line, work)
+                return (ProofTheoremLineIndex{}, false) if not key.complete
+                slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, key, theorem, index, capacity, work, placed|:
+                    return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(1, work)
+                    current: usize = index.slot_values[slot]
+                    if current == capacity:
+                        entry: usize = index.names.count
+                        index.names.push(theorem.name)
+                        index.lines.push(theorem.line)
+                        index.hashes.push(key.hash)
+                        index.slot_values[slot] <- entry
+                        placed <- true
+                        break
+                    if current >= index.names.count or current >= index.lines.count or current >= index.hashes.count:
+                        return (ProofTheoremLineIndex{}, false)
+                    if index.hashes[current] == key.hash and index.lines[current] == theorem.line:
+                        return (ProofTheoremLineIndex{}, false) if not proof_report_source_work_charge(sview_len(theorem.name), work)
+                        if index.names[current] == theorem.name:
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (ProofTheoremLineIndex{}, false) if not placed
+            (index, true)
+
+        def proof_report_theorem_line_index_contains(index: ProofTheoremLineIndex&, name: sview, line: u32, work: mutable usize&) -> (complete: bool, contains: bool):
+            capacity: usize = index.slot_values.count
+            return (false, false) if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (false, false) if not index.valid or index.names.count != index.lines.count or index.names.count != index.hashes.count
+            return (true, false) if capacity == 0
+            key: (complete: bool, hash: u32) = proof_report_theorem_line_hash(name, line, work)
+            return (false, false) if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, key, line, name, index, capacity, work|:
+                return (false, false) if not proof_report_source_work_charge(1, work)
+                current: usize = index.slot_values[slot]
+                return (true, false) if current == capacity
+                return (false, false) if current >= index.names.count
+                if index.hashes[current] == key.hash and index.lines[current] == line:
+                    return (false, false) if not proof_report_source_work_charge(sview_len(name), work)
+                    return (true, true) if index.names[current] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, false)

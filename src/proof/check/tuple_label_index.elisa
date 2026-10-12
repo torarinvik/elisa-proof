@@ -1,6 +1,8 @@
 # Source-annotation index for the proof kernel's named-tuple field projection.
 extend ElisaProof:
     private:
+        const PROOF_SOURCE_KERNEL_TUPLE_LABEL_LIMIT: usize = 2048
+
         struct ProofSourceKernelTupleLabelIndex:
             lines: mutable darray[u32]
             label_starts: mutable darray[usize]
@@ -12,34 +14,49 @@ extend ElisaProof:
             complete: mutable bool
 
         def proof_source_kernel_tuple_label_line(index: ProofSourceKernelTupleLabelIndex, line: u32) -> usize:
-            return index.lines.count if index.capacity == 0
+            return index.lines.count if index.capacity == 0 or index.bucket_heads.count != index.capacity or index.next_indices.count != index.lines.count
             slot: usize = (line.i64() % index.capacity.i64()).usize()
             entry: mutable usize = index.bucket_heads[slot]
-            while entry < index.lines.count |entry, line, index|:
+            steps: mutable usize = 0
+            while entry < index.lines.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, line, index|:
                 return entry if index.lines[entry] == line
                 entry <- index.next_indices[entry]
+                steps <- steps + 1
             return index.lines.count
 
-        def proof_source_kernel_build_tuple_label_index(annotations: darray[Ast::EnumAnnotation]&) -> ProofSourceKernelTupleLabelIndex can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_build_tuple_label_index(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> ProofSourceKernelTupleLabelIndex can[Memory.Allocate, Abort.Panic]:
+            empty: ProofSourceKernelTupleLabelIndex = ProofSourceKernelTupleLabelIndex{lines: [], label_starts: [], label_counts: [], bucket_heads: [], next_indices: [], labels: [], capacity: 0, complete: false}
+            return empty if not proof_source_kernel_charge_work(annotations.count, source_work)
             label_count: mutable usize = 0
             for annotation in annotations:
-                label_count <- label_count + 1 if annotation.owner == "__tuple_label"
+                if annotation.owner == "__tuple_label":
+                    return empty if label_count >= PROOF_SOURCE_KERNEL_TUPLE_LABEL_LIMIT
+                    label_count <- label_count + 1
             capacity: usize = proof_index_capacity(label_count)
             index: mutable ProofSourceKernelTupleLabelIndex = ProofSourceKernelTupleLabelIndex{lines: [], label_starts: [], label_counts: [], bucket_heads: [], next_indices: [], labels: [], capacity: capacity, complete: false}
             if capacity == 0:
                 index.complete <- true
                 return index
+            return index if not proof_source_kernel_charge_work(annotations.count, source_work)
             index.bucket_heads.resize(capacity)
-            for slot in 0..<capacity |slot, label_count|:
+            bucket_sizes: mutable darray[usize] = []
+            bucket_sizes.resize(capacity)
+            for slot in 0..<capacity |slot, label_count, bucket_sizes|:
                 index.bucket_heads[slot] <- label_count
+                bucket_sizes[slot] <- 0
             for annotation in annotations |index, label_count|:
                 continue if annotation.owner != "__tuple_label"
                 slot: usize = (annotation.line.i64() % capacity.i64()).usize()
                 entry: mutable usize = index.bucket_heads[slot]
+                steps: mutable usize = 0
                 while entry < index.lines.count |entry, annotation, index|:
                     break if index.lines[entry] == annotation.line
                     entry <- index.next_indices[entry]
+                    steps <- steps + 1
+                    return index if steps > PROOF_INDEX_MAX_CHAIN
                 if entry >= index.lines.count:
+                    bucket_sizes[slot] <- bucket_sizes[slot] + 1
+                    return index if bucket_sizes[slot] > PROOF_INDEX_MAX_CHAIN
                     entry <- index.lines.count
                     index.lines.push(annotation.line)
                     index.label_starts.push(0)
@@ -56,13 +73,17 @@ extend ElisaProof:
             cursors.resize(index.lines.count)
             for entry in 0..<index.lines.count |entry, index, cursors|:
                 cursors[entry] <- index.label_starts[entry]
+            return index if not proof_source_kernel_charge_work(annotations.count, source_work)
             for annotation in annotations |annotation, index, capacity, cursors|:
                 continue if annotation.owner != "__tuple_label"
                 slot: usize = (annotation.line.i64() % capacity.i64()).usize()
                 entry: mutable usize = index.bucket_heads[slot]
+                steps: mutable usize = 0
                 while entry < index.lines.count |entry, annotation, index|:
                     break if index.lines[entry] == annotation.line
                     entry <- index.next_indices[entry]
+                    steps <- steps + 1
+                    return index if steps > PROOF_INDEX_MAX_CHAIN
                 return index if entry >= index.lines.count
                 label_index: usize = cursors[entry]
                 index.labels[label_index] <- annotation.name
@@ -71,16 +92,18 @@ extend ElisaProof:
             return index
 
         def proof_source_kernel_tuple_label_count(index: ProofSourceKernelTupleLabelIndex, line: u32) -> usize:
-            return 0 if not index.complete
+            return 0 if not index.complete or index.label_starts.count != index.lines.count or index.label_counts.count != index.lines.count
             entry: usize = proof_source_kernel_tuple_label_line(index, line)
             return 0 if entry >= index.lines.count
             return index.label_counts[entry]
 
         def proof_source_kernel_tuple_label_at(index: ProofSourceKernelTupleLabelIndex, line: u32, requested: usize) -> sview:
-            return "" if not index.complete
+            return "" if not index.complete or index.label_starts.count != index.lines.count or index.label_counts.count != index.lines.count
             entry: usize = proof_source_kernel_tuple_label_line(index, line)
             return "" if entry >= index.lines.count or requested >= index.label_counts[entry]
-            return index.labels[index.label_starts[entry] + requested]
+            start: usize = index.label_starts[entry]
+            return "" if start > index.labels.count or requested >= index.labels.count - start
+            return index.labels[start + requested]
 
         # The field labels of a named-tuple type in element order, or none. An element's label is
         # the one `__tuple_label` annotation between the previous element's start (the tuple's own
@@ -115,7 +138,7 @@ extend ElisaProof:
         # callee's field at every tuple position. Tuple assignment is positional, so matching
         # labels as a set (or just finding the same label somewhere) is not enough: a reordered
         # local would make `found.count` refer to a different value from `call.count`.
-        def proof_tuple_call_labels_match_local(call_value: Ast::Expr, local_type: Ast::Expr, report: ProofReport&, functions: ProofFunctionTable&) -> bool:
+        def proof_tuple_call_labels_match_local(call_value: Ast::Expr, local_type: Ast::Expr, report: ProofReport&, functions: mutable ProofFunctionTable&) -> bool:
             match local_type:
                 Ast::Expr.Tuple(_, _):
                     pass
@@ -151,42 +174,37 @@ extend ElisaProof:
         # `f(args).label`, for a verified total-pure `f` whose declared return is a named tuple, is
         # one value just as a scalar call is (see `proof_add_pure_call_witnesses`), under the same
         # argument conditions. Each primitive scalar element's witness carries its declared width.
-        def proof_add_tuple_field_call_witnesses(object: Ast::Expr, field: sview, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
+        def proof_add_tuple_field_call_witnesses(object: Ast::Expr, field: sview, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
             match object:
                 Ast::Expr.Call(callee, arguments, _, _):
                     return if not proof_contract_calls_are_pure(object, functions)
-                    callee_name: sview = proof_ident_name(callee)
-                    return if callee_name == ""
                     called: usize = proof_function_index_for_callee(functions, callee)
                     return if called >= functions.return_label_counts.count
                     for argument in arguments |facts, report|:
                         continue if proof_value_binding_argument(argument, report, 0)
                         return if not proof_scalar_term_witnessed(argument, facts, 0)
-                    proof_add_tuple_label_witnesses(object, callee_name, called, field, true, facts, functions, report, line, owner, position)
+                    proof_add_tuple_label_witnesses(object, called, field, true, facts, functions, report, line, owner, position)
                 _:
                     pass
 
         # A named-tuple call result bound to a local has the callee's declared field types at the
         # same positions. `object` is normally the local; a call-preserving tuple binding uses
         # the original call so witness terms follow the summary into the field projection.
-        def proof_add_bound_tuple_label_witnesses(call_value: Ast::Expr, object: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
+        def proof_add_bound_tuple_label_witnesses(call_value: Ast::Expr, object: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
             match call_value:
                 Ast::Expr.Call(callee, _, _, _):
-                    callee_name: sview = proof_ident_name(callee)
-                    return if callee_name == ""
                     called: usize = proof_function_index_for_callee(functions, callee)
-                    proof_add_tuple_label_witnesses(object, callee_name, called, "", true, facts, functions, report, line, owner, position)
+                    proof_add_tuple_label_witnesses(object, called, "", true, facts, functions, report, line, owner, position)
                 _:
                     pass
 
-        # Type witnesses for every scalar label of `object`, a value of `callee_name`'s declared
-        # named-tuple return type, when `field` is one of those labels (any label if empty). With
+        # Type witnesses for every scalar label of `object`, a value of the resolved callee's
+        # declared named-tuple return type, when `field` is one of those labels (any label if empty). With
         # `ranges`, signed labels and narrow unsigned labels receive the type bounds used for parameters.
-        def proof_add_tuple_label_witnesses(object: Ast::Expr, callee_name: sview, called: usize, field: sview, ranges: bool, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
+        def proof_add_tuple_label_witnesses(object: Ast::Expr, called: usize, field: sview, ranges: bool, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void can[Memory.Allocate, Abort.Panic]:
             return if called >= functions.return_label_counts.count or called >= functions.return_label_starts.count
-            declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee_name, 0)
-            return if declared.count != 1
-            match declared.type_expression:
+            return if called >= functions.return_types.count
+            match functions.return_types[called]:
                 Ast::Expr.Tuple(elements, _):
                     return if elements.count != functions.return_label_counts[called]
                     start: usize = functions.return_label_starts[called]

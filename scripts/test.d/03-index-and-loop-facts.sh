@@ -406,7 +406,7 @@ if [[ "$boolean_proposition_probe_status" -ne 0 ]]; then
     exit 1
 fi
 for typed_proposition_fixture in kernel_named_container_call enum_variant_proposition; do
-    run_json_report "$ROOT_DIR/examples/$typed_proposition_fixture.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); expected={"kernel_named_container_call":"valid_call", "enum_variant_proposition":"variant_tag_is_proposition"}[sys.argv[1]]; assert r["status"] == "proved" and r["summary"]["failed"] == 0; assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]; assert not r["findings"]; assert any(d["kind"] == "function" and d["name"] == expected and d["verified"] for d in r["declaration_details"])' "$typed_proposition_fixture"
+    run_json_report "$ROOT_DIR/examples/$typed_proposition_fixture.elisa" | python3 -c 'import json,sys; r=json.load(sys.stdin); expected={"kernel_named_container_call":["valid_call"], "enum_variant_proposition":["variant_tag_is_proposition", "shorthand_payload_tag_is_proposition"]}[sys.argv[1]]; assert r["status"] == "proved" and r["summary"]["failed"] == 0; assert r["replay"]["gaps"] == 0 and r["replay"]["certificates"] == r["replay"]["replayed"]; assert not r["findings"]; assert all(any(d["kind"] == "function" and d["name"] == name and d["verified"] for d in r["declaration_details"]) for name in expected)' "$typed_proposition_fixture"
     typed_proposition_status=${PIPESTATUS[1]}
     if [[ "$typed_proposition_status" -ne 0 ]]; then
         printf 'proof test matrix failed: typed positive proposition fixture %s\n' "$typed_proposition_fixture" >&2

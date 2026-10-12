@@ -96,6 +96,34 @@ def main() -> None:
     assert any(goal["name"] == "digit_value" for goal in open_goals(wrong_condition)), wrong_condition["goals"]
     check_replay_is_gap_free("wrong-helper-condition", wrong_condition)
 
+    # A call returning an aggregate is not a stable logical value at the erased-proof boundary.
+    # Keep its contract refusal visible and, independently, ensure the unsupported requirement
+    # never enters the caller's proof context as a precondition fact.
+    aggregate_precondition = report(
+        "def make_pair(x: i64) -> (left: i64, right: i64):\n"
+        "    return (x, x)\n\n"
+        "def aggregate_precondition(x: i64) -> i64:\n"
+        "    requires make_pair(x) == (x, x)\n"
+        "    ensures result == x\n"
+        "    return x\n"
+    )
+    assert any(
+        finding["kind"] == "contract-call-unsupported"
+        and finding["name"] == "aggregate_precondition"
+        for finding in aggregate_precondition["findings"]
+    ), aggregate_precondition["findings"]
+    aggregate_goals = [
+        goal for goal in aggregate_precondition["goals"]
+        if goal["name"] == "aggregate_precondition"
+    ]
+    assert aggregate_goals, aggregate_precondition["goals"]
+    assert not any(
+        origin["kind"] == "precondition"
+        for goal in aggregate_goals
+        for origin in goal["fact_origins"]
+    ), aggregate_goals
+    check_replay_is_gap_free("aggregate-precondition-refusal", aggregate_precondition)
+
     # Effectful helpers and wrappers around them are not logical call summaries. The
     # unsupported source contract must remain visible and cannot manufacture a fact. Global
     # mutable access in the helper is also rejected unless the source grants its effects.
@@ -119,6 +147,11 @@ def main() -> None:
         finding["kind"] == "semantic-permission-ungranted"
         for finding in impure["findings"]
     ), impure["findings"]
+    assert not any(
+        origin["kind"] == "precondition"
+        for goal in impure["goals"]
+        for origin in goal["fact_origins"]
+    ), impure["goals"]
     leaked = [
         (goal["name"], fact["dependency"])
         for goal in impure["goals"]
@@ -128,6 +161,34 @@ def main() -> None:
     ]
     assert not leaked, f"impure helper summary escaped into facts: {leaked}"
     check_replay_is_gap_free("impure-call-refusal", impure)
+
+    # A verified scalar identity may not substitute an impure call expression for its argument:
+    # the actual is evaluated once at the call, while the substituted AST could be evaluated
+    # again at a later occurrence.
+    impure_actual = report(
+        "global mutable ticks: i64 = 0\n\n"
+        "def next_value() -> i64 can[Global.Read, Global.Write]:\n"
+        "    can Global{Read,Write}:\n"
+        "        ticks <- ticks + 1\n"
+        "        return ticks\n\n"
+        "def identity(x: i64) -> i64:\n"
+        "    ensures result == x\n"
+        "    return x\n\n"
+        "def caller() -> bool can[Global.Read, Global.Write]:\n"
+        "    ensures result == true\n"
+        "    can Global{Read,Write}:\n"
+        "        first: i64 = identity(next_value())\n"
+        "        second: i64 = next_value()\n"
+        "        return first == second\n"
+    )
+    caller_goals = [goal for goal in impure_actual["goals"] if goal["name"] == "caller"]
+    assert caller_goals and any(not goal["proven"] for goal in caller_goals), caller_goals
+    assert not any(
+        origin["kind"] == "function-summary" and origin["dependency"] == "identity"
+        for goal in caller_goals
+        for origin in goal["fact_origins"]
+    ), caller_goals
+    check_replay_is_gap_free("impure-summary-actual", impure_actual)
     print("pure precondition-call summaries replay exactly; false and effectful controls refuse")
 
 

@@ -36,20 +36,28 @@ extend ElisaProofKernelReplay:
             return (false, "", "") if high == "" or low == "" or high == low
             width: i64 = proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, high)
             return (false, "", "") if width == 0 or proof_kernel_replay_unsigned_marker_width_for_name(nodes, children, facts, low) != width
+            order_work: mutable usize = 0
             for fact in facts |fact, nodes, high, low|:
-                return (true, high, low) if proof_kernel_replay_fact_orders_names(nodes, fact, low, high, 0)
+                return (false, "", "") if not proof_kernel_replay_difference_scan_charge(&order_work)
+                return (true, high, low) if proof_kernel_replay_fact_orders_names(nodes, fact, low, high, &order_work, 0)
             return (false, "", "")
 
         # The fact, or one of its conjuncts, says `low <= high` or `low < high`.
-        def proof_kernel_replay_fact_orders_names(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, low: sview, high: sview, depth: usize) -> bool:
+        def proof_kernel_replay_difference_scan_charge(work_used: mutable usize&) -> bool:
+            return false if work_used >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT
+            work_used <- work_used + 1
+            true
+
+        def proof_kernel_replay_fact_orders_names(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, low: sview, high: sview, work_used: mutable usize&, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not proof_kernel_replay_difference_scan_charge(work_used)
             return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if node.kind != "binary"
             if node.operator == "and":
-                return proof_kernel_replay_fact_orders_names(nodes, node.left, low, high, depth + 1) or proof_kernel_replay_fact_orders_names(nodes, node.right, low, high, depth + 1)
+                return proof_kernel_replay_fact_orders_names(nodes, node.left, low, high, work_used, depth + 1) or proof_kernel_replay_fact_orders_names(nodes, node.right, low, high, work_used, depth + 1)
             left_name: sview = proof_kernel_replay_ident_name(nodes, node.left)
             right_name: sview = proof_kernel_replay_ident_name(nodes, node.right)
             return true if (node.operator == "<=" or node.operator == "<") and left_name == low and right_name == high
@@ -66,22 +74,34 @@ extend ElisaProofKernelReplay:
         # Mirror of `proof_close_bounds_from_facts`.
         def proof_kernel_replay_close_bounds_from_facts(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
             constraints: mutable darray[ProofKernelReplayDifference] = []
-            for fact in facts |fact, nodes, children, facts, bounds, constraints|:
-                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, 0)
+            collection_work: mutable usize = 0
+            for fact in facts |fact, nodes, children, facts, bounds, constraints, collection_work|:
+                break if collection_work >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT or constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, &collection_work, 0)
             return if constraints.count > PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
             proof_kernel_replay_close_bounds_through_differences(constraints, bounds)
 
         # Mirror of `proof_close_plain_bounds`.
         def proof_kernel_replay_close_plain_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            goal_work: mutable usize = 0
+            proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, bounds, &goal_work)
+
+        def proof_kernel_replay_close_plain_bounds_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&, goal_work: mutable usize&) -> void:
             constraints: mutable darray[ProofKernelReplayDifference] = []
-            for fact in facts |fact, nodes, children, facts, bounds, constraints|:
-                proof_kernel_replay_collect_plain_differences(nodes, children, fact, bounds, facts, &constraints, 0)
+            collection_work: mutable usize = 0
+            for fact in facts |fact, nodes, children, facts, bounds, constraints, collection_work, goal_work|:
+                return if not proof_kernel_replay_goal_search_charge(goal_work)
+                break if collection_work >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT or constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+                proof_kernel_replay_collect_plain_differences(nodes, children, fact, bounds, facts, &constraints, &collection_work, goal_work, 0)
             return if constraints.count == 0 or constraints.count > PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
             proof_kernel_replay_close_bounds_through_differences(constraints, bounds)
 
-        def proof_kernel_replay_collect_plain_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, bounds: darray[ProofKernelReplayBound]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, depth: usize) -> void:
+        def proof_kernel_replay_collect_plain_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, bounds: darray[ProofKernelReplayBound]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, work_used: mutable usize&, goal_work: mutable usize&, depth: usize) -> void:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return if not proof_kernel_replay_goal_search_charge(goal_work)
+            return if work_used >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT or constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+            work_used <- work_used + 1
             return if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return if not proof_kernel_replay_valid(nodes, root)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
@@ -91,20 +111,20 @@ extend ElisaProofKernelReplay:
                 inner: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
                 return if inner.kind != "binary" or (inner.operator != "<" and inner.operator != "<=" and inner.operator != ">" and inner.operator != ">=")
                 return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, inner.left, inner.right)
-                return if not proof_kernel_replay_denial_integer_term(nodes, children, inner.left, facts, 0) or not proof_kernel_replay_denial_integer_term(nodes, children, inner.right, facts, 0)
+                return if not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.left, facts, goal_work, 0) or not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.right, facts, goal_work, 0)
                 return if not proof_kernel_replay_plain_order_side(nodes, inner.left) or not proof_kernel_replay_plain_order_side(nodes, inner.right)
-                proof_kernel_replay_collect_differences(nodes, root, bounds, children, facts, constraints, depth + 1)
+                proof_kernel_replay_collect_differences(nodes, root, bounds, children, facts, constraints, work_used, depth + 1)
                 return
             return if node.kind != "binary"
             if node.operator == "and":
-                proof_kernel_replay_collect_plain_differences(nodes, children, node.left, bounds, facts, constraints, depth + 1)
-                proof_kernel_replay_collect_plain_differences(nodes, children, node.right, bounds, facts, constraints, depth + 1)
+                proof_kernel_replay_collect_plain_differences(nodes, children, node.left, bounds, facts, constraints, work_used, goal_work, depth + 1)
+                proof_kernel_replay_collect_plain_differences(nodes, children, node.right, bounds, facts, constraints, work_used, goal_work, depth + 1)
                 return
             return if node.operator != "==" and node.operator != "<" and node.operator != "<=" and node.operator != ">" and node.operator != ">="
             return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
             return if proof_kernel_replay_guarded_difference_import(nodes, children, node.left, node.operator, node.right, facts, constraints)
             return if not proof_kernel_replay_plain_order_side(nodes, node.left) or not proof_kernel_replay_plain_order_side(nodes, node.right)
-            proof_kernel_replay_collect_differences(nodes, root, bounds, children, facts, constraints, depth + 1)
+            proof_kernel_replay_collect_differences(nodes, root, bounds, children, facts, constraints, work_used, depth + 1)
 
         def proof_kernel_replay_plain_order_side(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
             return false if not proof_kernel_replay_valid(nodes, root)
@@ -114,9 +134,14 @@ extend ElisaProofKernelReplay:
         # Mirror of the producer's lazy closure: the plain-order closure only narrows intervals,
         # so it runs only when the collected bounds leave a root undecided.
         def proof_kernel_replay_unsigned_safe_closing(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> bool:
-            return true if proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
-            proof_kernel_replay_close_plain_bounds(nodes, children, facts, bounds)
-            proof_kernel_replay_unsigned_expression_safe(nodes, children, root, facts, bounds, 0)
+            goal_work: mutable usize = 0
+            proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, root, facts, bounds, &goal_work)
+
+        def proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&, goal_work: mutable usize&) -> bool:
+            safety_work: mutable usize = 0
+            return true if proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, root, facts, bounds, &safety_work, goal_work, 0)
+            proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, bounds, goal_work)
+            proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, root, facts, bounds, &safety_work, goal_work, 0)
 
         # Mirror of `proof_close_defining_equalities`: two passes passing the interval of `expr`
         # to `name` over each `name == expr` fact or conjunct, in the goal tier only.

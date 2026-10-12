@@ -10,7 +10,8 @@ extend ElisaProof:
         const PROOF_ASCII_DECIMAL_POINT: u8 = 46
         const PROOF_PATTERN_DELIMITER_WIDTH: usize = 1
         const PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT: usize = 64
-        const PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT: usize = 16384
+        const PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+        const PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT: usize = 16384
 
         # Rebuild a variant path as the same AST shape the compiler parser uses for an `is`
         # test. Preserve `::` as Scope and `.` as Field; flattening a qualified scope into an
@@ -19,6 +20,7 @@ extend ElisaProof:
         def proof_pattern_path_expression(path: sview, position: Ast::Pos) -> Ast::Expr:
             return Ast::Expr.Invalid if sview_len(path) == 0
             length: usize = sview_len(path)
+            return Ast::Expr.Invalid if length > PROOF_PATTERN_WALK_WORK_LIMIT
             first_delimiter: mutable usize = length
             first_is_scope: mutable bool = false
             for index in 0..<length |index, path, first_delimiter, first_is_scope|:
@@ -57,7 +59,9 @@ extend ElisaProof:
                 _ -> false
             return false if reserved_literal_spelling
             length: usize = sview_len(text)
-            return false if length == 0
+            # Keep each attacker-controlled literal scan small. Oversized payloads simply lose
+            # this proof fact, independently of the cumulative source-type lookup budget.
+            return false if length == 0 or length > PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT
             for index in 0..<length |index, text|:
                 character: u8 = sview_at(text, index)
                 letter: bool = (character >= PROOF_ASCII_UPPER_A and character <= PROOF_ASCII_UPPER_Z) or (character >= PROOF_ASCII_LOWER_A and character <= PROOF_ASCII_LOWER_Z)
@@ -69,9 +73,15 @@ extend ElisaProof:
         # token was a string or scalar, so no literal equality is admissible here. Ranges also
         # require authenticated width and signedness semantics.
         def proof_pattern_condition(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos) -> Ast::Expr?:
+            work: mutable usize = 0
+            return proof_pattern_condition_depth(pattern, scrutinee, position, 0, &work)
+
+        def proof_pattern_condition_depth(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, depth: usize, work: mutable usize&) -> Ast::Expr?:
+            return null if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match pattern:
                 Ast::Pattern.As(_, inner):
-                    return proof_pattern_condition(inner[0], scrutinee, position) if inner.count == 1
+                    return proof_pattern_condition_depth(inner[0], scrutinee, position, depth + 1, work) if inner.count == 1
                 Ast::Pattern.Variant(path, _):
                     target: Ast::Expr = proof_pattern_path_expression(path, position)
                     null return if target is Ast::Expr.Invalid
@@ -86,8 +96,8 @@ extend ElisaProof:
                 Ast::Pattern.Or(options):
                     return null if options.count == 0
                     conditions: mutable darray[Ast::Expr] = []
-                    for option in options |conditions, scrutinee, position|:
-                        condition: Ast::Expr? = proof_pattern_condition(option, scrutinee, position)
+                    for option in options |conditions, scrutinee, position, depth, work|:
+                        condition: Ast::Expr? = proof_pattern_condition_depth(option, scrutinee, position, depth + 1, work)
                         if condition is known_condition:
                             conditions.push(known_condition)
                         else:
@@ -154,7 +164,8 @@ extend ElisaProof:
                             return
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         proof_pattern_source_string_type_shadowed(nested, wanted, work, shadowed, complete, depth + 1)
-                        return if shadowed or not complete
+                        complete_now: bool = proof_replay_summary_bool_ref_value(complete)
+                        return if proof_replay_summary_bool_ref_value(shadowed) or not complete_now
                     Ast::Decl.Import(_, _):
                         complete <- false
                         return
@@ -180,6 +191,34 @@ extend ElisaProof:
             return (false, false) if right_length > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
             work <- work + right_length
             return (true, left == right)
+
+        # Type imports are represented in parser annotations rather than Ast::Decl nodes.
+        # Check exact aliases and imported members, and reject wildcard imports whose visible
+        # names cannot be established from the frozen source tree.
+        def proof_pattern_source_string_type_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&) -> void:
+            for annotation in annotations |wanted, work, shadowed, complete|:
+                if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
+                    complete <- false
+                    return
+                work <- work + 1
+                shadowed_now: bool = proof_replay_summary_bool_ref_value(shadowed)
+                complete_now: bool = proof_replay_summary_bool_ref_value(complete)
+                return if shadowed_now or not complete_now
+                if annotation.name == "__binding_wildcard_import":
+                    complete <- false
+                    return
+                imported_name: mutable sview = ""
+                imported_name <- annotation.name if annotation.owner == "__from_member"
+                imported_name <- annotation.module if annotation.name == "__using_member"
+                imported_name <- annotation.owner if annotation.name == "__using_alias"
+                if imported_name != "":
+                    same_name: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(imported_name, wanted, work)
+                    if not same_name.complete:
+                        complete <- false
+                        return
+                    if same_name.equal:
+                        shadowed <- true
+                        return
 
         def proof_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
             if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
@@ -218,7 +257,7 @@ extend ElisaProof:
                         pass
 
         def proof_pattern_source_formal_type(report: ProofReport&, function_name: sview, scrutinee: Ast::Expr, work: mutable usize&) -> Ast::Expr:
-            parameter: sview = ""
+            parameter: mutable sview = ""
             match proof_strip_parens(scrutinee):
                 Ast::Expr.Ident(name, _):
                     parameter <- name
@@ -235,12 +274,12 @@ extend ElisaProof:
                 type_name: sview = proof_pattern_type_name(found)
                 shadowed: mutable bool = false
                 proof_pattern_source_string_type_shadowed(report.source_declarations, type_name, work, &shadowed, &complete, 0)
+                proof_pattern_source_string_type_import_shadowed(report.source_annotations, type_name, work, &shadowed, &complete) if not shadowed and complete
                 return Ast::Expr.Absent if shadowed or not complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
             return found
 
-        def proof_pattern_active_formal_type(report: ProofReport&, function_name: sview, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, names: darray[sview]&) -> Ast::Expr:
-            parameter: sview = ""
-            work: mutable usize = 0
+        def proof_pattern_active_formal_type_with_work(report: ProofReport&, function_name: sview, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, names: darray[sview]&, work: mutable usize&) -> Ast::Expr:
+            parameter: mutable sview = ""
             match proof_strip_parens(source_scrutinee):
                 Ast::Expr.Ident(name, _):
                     parameter <- name
@@ -258,7 +297,15 @@ extend ElisaProof:
                 return Ast::Expr.Absent if not same_binding.complete
                 active_bindings <- active_bindings + 1 if same_binding.equal
             return Ast::Expr.Absent if active_bindings != 1
-            return proof_pattern_source_formal_type(report, function_name, source_scrutinee, &work)
+            return proof_pattern_source_formal_type(report, function_name, source_scrutinee, work)
+
+        # Reuse one source-type scan budget across the whole check. Exhaustion
+        # only drops type-directed facts; it cannot turn an incomplete lookup into evidence.
+        def proof_pattern_active_formal_type(report: mutable ProofReport&, function_name: sview, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, names: darray[sview]&) -> Ast::Expr:
+            work: mutable usize = report.budgets.pattern_source_type_work
+            type_expression: Ast::Expr = proof_pattern_active_formal_type_with_work(report, function_name, source_scrutinee, symbolic_scrutinee, names, &work)
+            report.budgets.pattern_source_type_work <- work
+            type_expression
 
         def proof_pattern_is_string_type(type_expression: Ast::Expr) -> bool:
             type_name: sview = proof_pattern_type_name(type_expression)
@@ -274,9 +321,15 @@ extend ElisaProof:
             return null
 
         def proof_pattern_condition_typed(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
+            work: mutable usize = 0
+            return proof_pattern_condition_typed_depth(pattern, scrutinee, position, type_expression, 0, &work)
+
+        def proof_pattern_condition_typed_depth(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, depth: usize, work: mutable usize&) -> Ast::Expr?:
+            return null if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match pattern:
                 Ast::Pattern.As(_, inner):
-                    return proof_pattern_condition_typed(inner[0], scrutinee, position, type_expression) if inner.count == 1
+                    return proof_pattern_condition_typed_depth(inner[0], scrutinee, position, type_expression, depth + 1, work) if inner.count == 1
                 Ast::Pattern.Literal(text):
                     literal: Ast::Expr? = proof_pattern_typed_literal_expression(text, position, type_expression)
                     if literal is value:
@@ -288,8 +341,8 @@ extend ElisaProof:
                 Ast::Pattern.Or(options):
                     return null if options.count == 0
                     conditions: mutable darray[Ast::Expr] = []
-                    for option in options |conditions, scrutinee, position, type_expression|:
-                        condition: Ast::Expr? = proof_pattern_condition_typed(option, scrutinee, position, type_expression)
+                    for option in options |conditions, scrutinee, position, type_expression, depth, work|:
+                        condition: Ast::Expr? = proof_pattern_condition_typed_depth(option, scrutinee, position, type_expression, depth + 1, work)
                         if condition is known_condition:
                             conditions.push(known_condition)
                         else:
@@ -299,7 +352,7 @@ extend ElisaProof:
                         result <- Ast::Expr.Binary(result, TokenKind.Or, conditions[index], position)
                     return result
                 _:
-                    return proof_pattern_condition(pattern, scrutinee, position)
+                    return proof_pattern_condition_depth(pattern, scrutinee, position, depth, work)
             return null
 
         def proof_pattern_condition_using_type(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
@@ -310,25 +363,33 @@ extend ElisaProof:
             return proof_pattern_condition_exact(pattern) if type_expression is Ast::Expr.Absent
             return proof_pattern_condition_exact_typed(pattern, type_expression)
 
-        def proof_pattern_condition_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, position: Ast::Pos, report: ProofReport&, function_name: sview, names: darray[sview]&) -> Ast::Expr?:
+        def proof_pattern_condition_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, position: Ast::Pos, report: mutable ProofReport&, function_name: sview, names: darray[sview]&) -> Ast::Expr?:
             type_expression: Ast::Expr = proof_pattern_active_formal_type(report, function_name, source_scrutinee, symbolic_scrutinee, names)
             if not (type_expression is Ast::Expr.Absent):
                 return proof_pattern_condition_typed(pattern, symbolic_scrutinee, position, type_expression)
             return proof_pattern_condition(pattern, symbolic_scrutinee, position)
 
-        def proof_pattern_condition_exact_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, report: ProofReport&, function_name: sview, names: darray[sview]&) -> bool:
+        def proof_pattern_condition_exact_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, report: mutable ProofReport&, function_name: sview, names: darray[sview]&) -> bool:
             type_expression: Ast::Expr = proof_pattern_active_formal_type(report, function_name, source_scrutinee, symbolic_scrutinee, names)
             if not (type_expression is Ast::Expr.Absent):
                 return proof_pattern_condition_exact_typed(pattern, type_expression)
             return proof_pattern_condition_exact(pattern)
 
         def proof_pattern_condition_exact_typed(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
+            work: mutable usize = 0
+            return proof_pattern_condition_exact_typed_depth(pattern, type_expression, 0, &work)
+
+        def proof_pattern_condition_exact_typed_depth(pattern: Ast::Pattern, type_expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match pattern:
                 Ast::Pattern.As(_, inner):
-                    return inner.count == 1 and proof_pattern_condition_exact_typed(inner[0], type_expression)
+                    return inner.count == 1 and proof_pattern_condition_exact_typed_depth(inner[0], type_expression, depth + 1, work)
                 Ast::Pattern.Variant(_, fields):
-                    for field in fields |fields|:
-                        return false if not proof_pattern_irrefutable(field)
+                    for field in fields |fields, depth, work|:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+                        work <- work + 1
+                        return false if not proof_pattern_irrefutable_depth(field, depth + 1, work)
                     return true
                 Ast::Pattern.Literal(text):
                     return proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text)
@@ -336,8 +397,8 @@ extend ElisaProof:
                     return false
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
-                    for option in options |options|:
-                        return false if not proof_pattern_condition_exact_typed(option, type_expression)
+                    for option in options |options, depth, work|:
+                        return false if not proof_pattern_condition_exact_typed_depth(option, type_expression, depth + 1, work)
                     return true
                 _:
                     return false
@@ -346,6 +407,12 @@ extend ElisaProof:
         # precise disjunctive match fact while avoiding the unsound choice of a payload binding
         # that exists in only one alternative or has different projections in each alternative.
         def proof_pattern_or_closed(pattern: Ast::Pattern) -> bool:
+            work: mutable usize = 0
+            return proof_pattern_or_closed_depth(pattern, 0, &work)
+
+        def proof_pattern_or_closed_depth(pattern: Ast::Pattern, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match pattern:
                 Ast::Pattern.Literal(_):
                     return true
@@ -355,8 +422,8 @@ extend ElisaProof:
                     return fields.count == 0
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
-                    for option in options |pattern|:
-                        return false if not proof_pattern_or_closed(option)
+                    for option in options |pattern, depth, work|:
+                        return false if not proof_pattern_or_closed_depth(option, depth + 1, work)
                     return true
                 _:
                     return false
@@ -368,6 +435,18 @@ extend ElisaProof:
         # the compiler's pattern itself selected. Positional enum payloads remain conservative
         # because the lowered AST does not expose their stable field names here.
         def proof_bind_pattern(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&) -> bool:
+            name_mark: usize = names.count
+            value_mark: usize = values.count
+            work: mutable usize = 0
+            supported: bool = proof_bind_pattern_depth(pattern, position, source, names, values, 0, &work)
+            if not supported:
+                names <- names.truncate(name_mark)
+                values <- values.truncate(value_mark)
+            return supported
+
+        def proof_bind_pattern_depth(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
             match pattern:
                 Ast::Pattern.Wildcard:
                     return true
@@ -397,14 +476,16 @@ extend ElisaProof:
                     names.push(binding)
                     values.push(source)
                     return false if inner.count != 1
-                    return proof_bind_pattern(inner[0], position, source, names, values)
+                    return proof_bind_pattern_depth(inner[0], position, source, names, values, depth + 1, work)
                 Ast::Pattern.Variant(_, fields):
-                    for field in fields |names, values, position, source|:
+                    for field in fields |names, values, position, source, depth, work|:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+                        work <- work + 1
                         match field:
                             Ast::Pattern.Field(selector, inner):
                                 return false if selector == "" or inner.count != 1
                                 field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
-                                return false if not proof_bind_pattern(inner[0], position, field_source, names, values)
+                                return false if not proof_bind_pattern_depth(inner[0], position, field_source, names, values, depth + 1, work)
                             Ast::Pattern.Wildcard:
                                 pass
                             Ast::Pattern.Binding(binding):
@@ -421,12 +502,14 @@ extend ElisaProof:
                                 return false
                     return true
                 Ast::Pattern.Struct(_, fields):
-                    for field in fields |names, values, position, source|:
+                    for field in fields |names, values, position, source, depth, work|:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+                        work <- work + 1
                         match field:
                             Ast::Pattern.Field(selector, inner):
                                 return false if selector == "" or inner.count != 1
                                 field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
-                                return false if not proof_bind_pattern(inner[0], position, field_source, names, values)
+                                return false if not proof_bind_pattern_depth(inner[0], position, field_source, names, values, depth + 1, work)
                             Ast::Pattern.Binding(binding):
                                 return false if binding == ""
                                 names.push(binding)
@@ -438,16 +521,16 @@ extend ElisaProof:
                     return true
                 Ast::Pattern.Field(_, inner):
                     return false if inner.count != 1
-                    return proof_bind_pattern(inner[0], position, source, names, values)
+                    return proof_bind_pattern_depth(inner[0], position, source, names, values, depth + 1, work)
                 Ast::Pattern.Tuple(elements):
-                    for index in 0..<elements.count |index, elements, names, values, position, source|:
+                    for index in 0..<elements.count |index, elements, names, values, position, source, depth, work|:
                         element_source: Ast::Expr = Ast::Expr.Index(source, Ast::Expr.IntLit(index.i64(), position), position)
-                        return false if not proof_bind_pattern(elements[index], position, element_source, names, values)
+                        return false if not proof_bind_pattern_depth(elements[index], position, element_source, names, values, depth + 1, work)
                     return true
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
-                    for option in options |position|:
-                        return false if not proof_pattern_or_closed(option)
+                    for option in options |position, depth, work|:
+                        return false if not proof_pattern_or_closed_depth(option, depth + 1, work)
                     return true
                 Ast::Pattern.Other(_):
                     return false

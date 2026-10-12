@@ -1,0 +1,120 @@
+# Parser-origin direct-body postcondition ASTs used for exact source binding.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_POSTCONDITION_AST_INDEX_DEPTH_LIMIT: usize = 64
+
+        struct ProofSourcePostconditionAstIndex:
+            slot_values: mutable darray[usize] = []
+            hashes: mutable darray[u32] = []
+            names: mutable darray[sview] = []
+            # `lines` bind report events to a function; literal-shape rows use the contract line.
+            lines: mutable darray[u32] = []
+            source_indices: mutable darray[usize] = []
+            contract_lines: mutable darray[u32] = []
+            counts: mutable darray[usize] = []
+            expressions: mutable darray[Ast::Expr] = []
+            valid: bool = false
+
+        def proof_source_postcondition_ast_inventory_collect(declarations: darray[Ast::Decl]&, inventory: mutable darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate]:
+            return false if depth >= PROOF_SOURCE_POSTCONDITION_AST_INDEX_DEPTH_LIMIT
+            for declaration in declarations |inventory, source_work, depth|:
+                return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, position):
+                        source_index: mutable usize = 0
+                        for statement in body |name, position, source_index, inventory, source_work|:
+                            return false if not proof_report_source_postcondition_work_charge(1, source_work)
+                            match statement:
+                                Ast::Stmt.Contract(kind, expression, contract_position):
+                                    if kind == "ensure" or kind == "ensures":
+                                        return false if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
+                                        inventory.push((name, position.line, source_index, contract_position.line, expression))
+                                        source_index <- source_index + 1
+                                _:
+                                    pass
+                    Ast::Decl.Module(_, nested, _):
+                        return false if not proof_source_postcondition_ast_inventory_collect(nested, inventory, source_work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_postcondition_ast_inventory_collect(nested, inventory, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_postcondition_ast_inventory_with_status(declarations: darray[Ast::Decl]&) -> (inventory: darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)], complete: bool, work_limited: bool) can[Memory.Allocate]:
+            inventory: mutable darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)] = []
+            source_work: mutable usize = 0
+            complete: mutable bool = proof_source_postcondition_ast_inventory_collect(declarations, inventory, source_work, 0)
+            complete <- false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work_limited: bool = source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if not complete:
+                inventory.clear()
+            (inventory, complete, work_limited)
+
+        def proof_source_postcondition_ast_index_create(inventory: darray[(name: sview, line: u32, source_index: usize, contract_line: u32, expression: Ast::Expr)]&, source_work: mutable usize&) -> ProofSourcePostconditionAstIndex can[Memory.Allocate]:
+            index: mutable ProofSourcePostconditionAstIndex = ProofSourcePostconditionAstIndex{valid: true}
+            return index if inventory.count == 0
+            return ProofSourcePostconditionAstIndex{} if inventory.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            target_capacity: usize = inventory.count * 2
+            capacity: mutable usize = 1
+            while capacity < target_capacity |capacity, target_capacity|:
+                return ProofSourcePostconditionAstIndex{} if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+                capacity <- capacity * 2
+            return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(capacity, source_work)
+            index.slot_values.resize(capacity)
+            index.hashes.resize(capacity)
+            for slot in 0..<capacity |slot, index, capacity|:
+                index.slot_values[slot] <- capacity
+            for row in inventory |row, index, capacity, source_work|:
+                return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(1, source_work)
+                key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: row.name, line: row.line, source_index: row.source_index}
+                hashed: (complete: bool, hash: u32) = proof_report_source_postcondition_hash(key, source_work)
+                return ProofSourcePostconditionAstIndex{} if not hashed.complete
+                slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, hashed, row, index, capacity, source_work|:
+                    return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(1, source_work)
+                    current: usize = index.slot_values[slot]
+                    if current == capacity:
+                        row_index: usize = index.names.count
+                        index.names.push(row.name)
+                        index.lines.push(row.line)
+                        index.source_indices.push(row.source_index)
+                        index.contract_lines.push(row.contract_line)
+                        index.counts.push(1)
+                        index.expressions.push(row.expression)
+                        index.hashes[slot] <- hashed.hash
+                        index.slot_values[slot] <- row_index
+                        break
+                    if index.hashes[slot] == hashed.hash:
+                        return ProofSourcePostconditionAstIndex{} if not proof_report_source_postcondition_work_charge(sview_len(row.name), source_work)
+                        if index.names[current] == row.name and index.lines[current] == row.line and index.source_indices[current] == row.source_index:
+                            index.counts[current] <- index.counts[current] + 1
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return ProofSourcePostconditionAstIndex{} if probes >= capacity
+            return index
+
+        def proof_source_postcondition_ast_index_find(index: ProofSourcePostconditionAstIndex, name: sview, line: u32, source_index: usize, source_work: mutable usize&) -> (complete: bool, found: bool, count: usize, contract_line: u32, expression: Ast::Expr):
+            empty: Ast::Expr = Ast::Expr.Invalid
+            capacity: usize = index.slot_values.count
+            return (false, false, 0, 0, empty) if not index.valid
+            return (false, false, 0, 0, empty) if index.hashes.count != capacity
+            return (true, false, 0, 0, empty) if capacity == 0
+            key: ProofSourcePostconditionKey = ProofSourcePostconditionKey{name: name, line: line, source_index: source_index}
+            hashed: (complete: bool, hash: u32) = proof_report_source_postcondition_hash(key, source_work)
+            return (false, false, 0, 0, empty) if not hashed.complete
+            slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hashed, name, line, source_index, index, capacity, source_work|:
+                return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(1, source_work)
+                current: usize = index.slot_values[slot]
+                return (true, false, 0, 0, empty) if current == capacity
+                return (false, false, 0, 0, empty) if current >= index.names.count or current >= index.lines.count or current >= index.source_indices.count or current >= index.contract_lines.count or current >= index.counts.count or current >= index.expressions.count
+                if index.hashes[slot] == hashed.hash:
+                    return (false, false, 0, 0, empty) if not proof_report_source_postcondition_work_charge(sview_len(name), source_work)
+                    if index.names[current] == name and index.lines[current] == line and index.source_indices[current] == source_index:
+                        return (true, true, index.counts[current], index.contract_lines[current], index.expressions[current])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, false, 0, 0, empty)

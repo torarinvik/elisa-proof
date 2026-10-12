@@ -83,6 +83,9 @@ def check_refused(variant, name, process):
         assert source["admissible"] is False, (variant, name, source)
     if name in ("json", "summary-json", "function-json", "linear-hints"):
         assert payload["status"] == "failed" and payload["verification_state"] != "proved", (variant, payload["status"])
+    if name == "function-json":
+        function_rows = [row for row in payload.get("functions", []) if row.get("name") == FUNCTION]
+        assert len(function_rows) == 1 and function_rows[0]["proved"] is False, (variant, function_rows)
     if name == "theorems":
         assert payload["theorems"] == [], (variant, payload["theorems"])
     if name == "suggest":
@@ -309,6 +312,34 @@ def main():
         explanation_text = explanation.stdout.decode("utf-8", errors="replace")
         assert explanation.returncode != 0, explanation_text
         assert "proven, replayed certificate" not in explanation_text, explanation_text
+
+        # A different source claim can make the whole file inadmissible while an earlier
+        # goal remains locally matched and replayed. Per-goal renderings may report that local
+        # evidence, but no CLI route may return success for the globally inadmissible source.
+        mixed_admission = directory / "local_goal_global_source_failure.elisa"
+        mixed_admission.write_bytes(
+            BASE + b"\ndef mixed_source_unbound(x: i64) -> i64:\n"
+            b"    requires x >= 0\n    ensure result == x\n    return x\n"
+        )
+        mixed_goal = run("--goal", GOAL, mixed_admission)
+        mixed_goal_report = json.loads(mixed_goal.stdout)
+        assert mixed_goal.returncode == 1 and mixed_goal_report["source"]["admissible"] is False, mixed_goal_report
+        assert mixed_goal_report["goal_admissible"] is True, mixed_goal_report
+        assert mixed_goal_report["goal"]["proven"] is True and mixed_goal_report["goal"]["replay_status"] == "replayed", mixed_goal_report
+
+        mixed_proof = run("--proof", GOAL, mixed_admission)
+        mixed_proof_text = mixed_proof.stdout.decode("utf-8", errors="replace")
+        assert mixed_proof.returncode == 1 and "admissible=false" in mixed_proof_text, mixed_proof_text
+        assert "goal_admissible=true" in mixed_proof_text, mixed_proof_text
+        mixed_proof_path = directory / "mixed_source.proof"
+        mixed_proof_path.write_bytes(mixed_proof.stdout)
+        mixed_check = run("--check-proof", mixed_proof_path, mixed_admission)
+        mixed_check_report = json.loads(mixed_check.stdout)
+        assert mixed_check.returncode == 1 and mixed_check_report["status"] == "matches", mixed_check_report
+        assert mixed_check_report["admissible"] is False and mixed_check_report["goal_admissible"] is True, mixed_check_report
+
+        mixed_explanation = run("--explain", GOAL, mixed_admission)
+        assert mixed_explanation.returncode == 1, mixed_explanation.stdout.decode("utf-8", errors="replace")
 
         for variant, defect in MALFORMED.items():
             source = directory / (variant + ".elisa")

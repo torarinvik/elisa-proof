@@ -1,11 +1,5 @@
 extend ElisaProof:
     private:
-        def proof_statement_lend_roots(expression: Ast::Expr, functions: ProofFunctionTable&) -> darray[sview] can[Memory.Allocate, Abort.Panic]:
-            roots: mutable darray[sview] = []
-            no_value_roots: darray[sview] = []
-            proof_collect_aliased_in_expression(expression, functions, &roots, false, no_value_roots)
-            return roots
-
         def proof_local_rebind_binding(report: ProofReport&, expression: Ast::Expr, owner: sview, names: darray[sview]&) -> (known: bool, path: Ast::Expr, value: Ast::Expr):
             for trace in report.traces.records:
                 continue if trace.name != owner or trace.kind != "local-binding"
@@ -125,14 +119,19 @@ extend ElisaProof:
         # (a declaration's own new binding), and `keep` exempts the slot that receives the
         # call's result. Without a usable alias set for this frame nothing is kept, which is the
         # whole-state forget this replaces.
-        def proof_forget_values_after_call(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: darray[Ast::Expr]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, limit: usize, keep: usize, position: Ast::Pos) -> void:
+        def proof_forget_values_after_call_with_aliases(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, limit: usize, keep: usize, position: Ast::Pos, extra_may_alias: darray[sview]&) -> void:
+            proof_record_opaque_call_alias_roots(report, owner, extra_may_alias)
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            call_aliases: mutable darray[sview] = []
+            call_aliases.extend(report.aliased_names)
+            for root in extra_may_alias |call_aliases|:
+                proof_push_aliased(&call_aliases, root)
             capped_limit: usize = limit if limit < values.count else values.count
-            for index in 0..<capped_limit |index, names, values, facts, parameters, report, analyzed, keep, position|:
+            for index in 0..<capped_limit |index, names, values, facts, parameters, report, analyzed, keep, position, call_aliases|:
                 continue if index == keep
                 values[index] <- Ast::Expr.Invalid if index >= names.count
                 continue if index >= names.count
-                retained: bool = analyzed and not (any existing in report.aliased_names where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                retained: bool = analyzed and not (any existing in call_aliases where existing == names[index]) and proof_expr_call_stable(values[index], facts, names, parameters, call_aliases, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
                 if not retained:
                     match values[index]:
                         Ast::Expr.Invalid:
@@ -148,6 +147,9 @@ extend ElisaProof:
                         _:
                             values[index] <- Ast::Expr.Ident(names[index], position)
 
+        def proof_forget_values_after_call(names: darray[sview]&, values: mutable darray[Ast::Expr]&, facts: darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, limit: usize, keep: usize, position: Ast::Pos) -> void:
+            no_extra_aliases: darray[sview] = []
+            proof_forget_values_after_call_with_aliases(names, values, facts, parameters, report, owner, limit, keep, position, no_extra_aliases)
         # Source-overloaded operators execute user code, but this proof state has no operator
         # effect summary. Refuse the enclosing function and havoc all mutable symbolic state
         # before any later obligation can consume facts from before the operator.
@@ -162,7 +164,7 @@ extend ElisaProof:
         # The body is checked against a separate one-iteration state, so its changed roots do
         # not appear as RecordUpdates in the outer post-loop state. Invalidate every mutable
         # reference parameter the body can reach before reusing that state after the loop.
-        def proof_forget_loop_mutated_reference_parameters(names: darray[sview]&, values: mutable darray[Ast::Expr]&, body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, parameters: darray[sview]&, owner: sview, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&) -> void:
+        def proof_forget_loop_mutated_reference_parameters(names: darray[sview]&, values: mutable darray[Ast::Expr]&, body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, parameters: darray[sview]&, owner: sview, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&) -> void:
             written: mutable darray[sview] = []
             proof_collect_aliased_names(body, functions, &written, false, names)
             proof_collect_assignment_roots(body, &written)
@@ -388,7 +390,7 @@ extend ElisaProof:
         # path, `not c or F` and `c or G`: each holds on both paths, and each replays from its
         # arm's own traced fact, so no trust is added. `c` may read only scalars neither arm
         # rebinds, through plain operators, so it means the same at the join as at the fork.
-        def proof_join_conditional_values(condition: Ast::Expr, then_body: darray[Ast::Stmt]&, else_body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, prior_values: darray[Ast::Expr]&, values: mutable darray[Ast::Expr]&, names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_facts: darray[Ast::Expr]&, else_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+        def proof_join_conditional_values(condition: Ast::Expr, then_body: darray[Ast::Stmt]&, else_body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, prior_values: darray[Ast::Expr]&, values: mutable darray[Ast::Expr]&, names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_facts: darray[Ast::Expr]&, else_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
             return if not proof_join_condition_plain(condition, 0) or not proof_kernel_expression_supported(condition)

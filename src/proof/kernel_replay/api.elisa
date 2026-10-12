@@ -57,9 +57,9 @@ extend ElisaProofKernelReplay:
                 return false if not (proof_kernel_replay_checked_arena_inputs_valid(nodes, children, facts, goal_root) can Global{Read,Write})
                 return (proof_kernel_replay_goal_report_impl(nodes, children, facts, goal_root, true) can Global{Read,Write})
 
-            # Reusable-workspace variants revalidate every supplied root on every call. The
-            # workspace retains scratch capacity only; arbitrary caller contents are reset by
-            # the validator and never stand in for a previous admission result.
+            # Reusable-workspace variants revalidate every supplied root on every call. Arena
+            # arrays retain scratch capacity; source-scan and logical-goal counters accumulate
+            # for one certificate batch. Construct a fresh workspace for each independent batch.
             def proof_kernel_replay_arena_report_with_workspace[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
                 return proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, workspace)
 
@@ -77,7 +77,7 @@ extend ElisaProofKernelReplay:
 
             def proof_kernel_replay_goal_report_with_workspace[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool can[Global.Read, Global.Write]:
                 return false if not proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, workspace)
-                return (proof_kernel_replay_goal_report_impl(nodes, children, facts, goal_root, true) can Global{Read,Write})
+                return (proof_kernel_replay_goal_report_impl_with_work(nodes, children, facts, goal_root, true, &workspace.kernel_goal_work_used) can Global{Read,Write})
 
             def proof_kernel_replay_checked_index_report_with_workspace[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
                 return false if not proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, workspace)
@@ -89,7 +89,7 @@ extend ElisaProofKernelReplay:
 
             def proof_kernel_replay_quantifier_report_with_workspace[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, kind: sview, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool can[Global.Read, Global.Write]:
                 return false if not proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, workspace)
-                return (proof_kernel_replay_quantifier_report_impl(nodes, children, kind, facts, goal_root, true) can Global{Read,Write})
+                return (proof_kernel_replay_quantifier_report_impl_with_work(nodes, children, kind, facts, goal_root, true, &workspace.kernel_goal_work_used) can Global{Read,Write})
 
             # This is the source-neutral logical API for callers that possess a checked type
             # environment. Formation is checked independently of hypotheses before logical
@@ -162,18 +162,21 @@ extend ElisaProofKernelReplay:
             # This is the only structural comparison operation exposed to the report adapter.
             # Keeping the implementation private makes the module boundary explicit: callers
             # can ask the kernel to compare terms, but cannot depend on its internal state types.
-            # Equality is itself a serialization boundary: the recursive helper intentionally
-            # validates every visited node while walking, so malformed payloads, child slices,
-            # and cycles fail closed without repeatedly allocating a complete-arena worklist.
+            # Equality is itself a serialization boundary: it validates each visited node,
+            # reserves text bytes before comparison, and fails closed after 4,000,000 work
+            # units or 65,536 pending node pairs. Malformed payloads, child slices, and cycles
+            # fail closed without allocating a worklist proportional to the complete arena.
             def proof_kernel_replay_expr_equal_public(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
                 requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
                 return proof_kernel_replay_expr_equal(nodes, children, left_root, right_root, depth)
 
             # Metered form for report adapters that compare the same owner chain against many
-            # premises. The individual comparison still has the kernel's hard worklist cap.
-            def proof_kernel_replay_expr_equal_public_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize, work_used: mutable usize&) -> bool:
+            # premises. `work_limit` lets the adapter reserve its remaining report budget before
+            # the comparison starts; the kernel still caps each call at 4,000,000 units and
+            # 65,536 pending pairs.
+            def proof_kernel_replay_expr_equal_public_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize, work_limit: usize, work_used: mutable usize&) -> bool:
                 requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-                return proof_kernel_replay_expr_equal_with_work(nodes, children, left_root, right_root, depth, work_used)
+                return proof_kernel_replay_expr_equal_with_work(nodes, children, left_root, right_root, depth, work_limit, work_used)
 
             # Ground congruence closure over the source-neutral term language, exposed on its
             # own. The AST-level producer consults exactly the rule replay will re-derive rather
@@ -183,9 +186,10 @@ extend ElisaProofKernelReplay:
                 exhausted: mutable bool = false
                 return proof_kernel_replay_congruence_report_status(nodes, children, facts, goal_root, &exhausted)
 
-            # The same rule with its budget status. `exhausted` is advisory: it is set when the
-            # term or round budget cut the closure short, so a refusal may be "undecided" rather
-            # than "no rule applies". It never changes the verdict.
+            # The same one-goal query with its budget status. `exhausted` is an advisory accumulator:
+            # initialize it once per proof search; this entry sets it when the report work budget
+            # or closure term/round budget cuts this tier short, but preserves earlier exhaustion.
+            # A refusal may be undecided rather than "no rule applies"; this flag never changes the verdict.
             def proof_kernel_replay_congruence_report_status[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, exhausted: mutable bool&) -> bool:
                 return false if not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
                 return false if not proof_kernel_replay_proposition_state_valid(nodes, children, facts, goal_root)
@@ -195,16 +199,37 @@ extend ElisaProofKernelReplay:
                 # repeatedly rebuilding safety contexts for every premise;
                 # the final congruence rule would reject them identically.
                 return false if not goal.known or goal.node.kind != "binary" or goal.node.operator != "=="
+                # A status call checks one goal; its premises and goal share this report budget.
+                goal_work: mutable usize = 0
                 if goal.known and goal.node.kind == "binary" and goal.node.operator == "==":
-                    unsigned_free: mutable bool = proof_kernel_replay_unsigned_width_in_expression(nodes, children, goal_root, facts, 0) == 0
-                    for fact in facts |fact, nodes, children, unsigned_free|:
-                        unsigned_free <- false if proof_kernel_replay_unsigned_width_in_expression(nodes, children, fact, facts, 0) != 0
+                    goal_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, goal_root, facts, goal_work, 0)
+                    if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                        exhausted <- true
+                        return false
+                    unsigned_free: mutable bool = goal_width == 0
+                    for fact in facts |fact, nodes, children, unsigned_free, goal_work|:
+                        if not proof_kernel_replay_goal_search_charge(goal_work):
+                            exhausted <- true
+                            return false
+                        fact_width: i64 = proof_kernel_replay_unsigned_width_in_expression_with_goal_work(nodes, children, fact, facts, goal_work, 0)
+                        if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                            exhausted <- true
+                            return false
+                        unsigned_free <- false if fact_width != 0
                     if unsigned_free:
-                        return true if proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, exhausted)
-                return false if not proof_kernel_replay_arithmetic_state_safe(nodes, children, facts, goal_root)
-                return false if not proof_kernel_replay_unsigned_facts_safe(nodes, children, facts)
-                return false if not proof_kernel_replay_unsigned_goal_safe(nodes, children, facts, goal_root)
-                return proof_kernel_replay_congruence_goal(nodes, children, facts, goal_root, exhausted)
+                        # Safety bounds cannot change a congruence closure. Return its result
+                        # directly instead of rebuilding them and running the same closure again.
+                        return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, goal_work, exhausted)
+                # The following fact and goal checks build unsigned and signed safety contexts,
+                # then validate every premise and the goal against them. Running the older
+                # arithmetic_state_safe precheck here repeated those graph walks with fresh local
+                # meters and left this report boundary's work unbounded across the precheck.
+                unsigned_safe: bool = proof_kernel_replay_unsigned_report_safe_with_goal_work(nodes, children, facts, goal_root, goal_work)
+                if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                    exhausted <- true
+                    return false
+                return false if not unsigned_safe
+                return proof_kernel_replay_congruence_goal_with_goal_work(nodes, children, facts, goal_root, goal_work, exhausted)
 
             # Declared effect containment. The claim is about declared rows: every resolved
             # callee's `can[...]` row is contained in the caller's. It says nothing about effects
@@ -244,7 +269,7 @@ extend ElisaProofKernelReplay:
                     return false if not secondary_sort.known
                     if action == "rewrite":
                         argument_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument, 0, &typing_work_used)
-                        return false if not proof_kernel_replay_sort_equal(argument_sort, secondary_sort)
+                        return false if not proof_kernel_replay_sort_equal(argument_sort, secondary_sort, &typing_work_used)
                         # Rewriting is a Leibniz rule. Named/aggregate values may use Elisa
                         # protocol equality, which has no substitutivity law, so the typed kernel
                         # admits only language-owned primitive equality sorts here.

@@ -1,0 +1,131 @@
+extend ElisaProof:
+    private:
+        const PROOF_NAME_INDEX_MAX_CLUSTER: usize = 64
+        const PROOF_INDEX_MAX_CHAIN: usize = 64
+
+        # Build an open-addressed name index after collection is complete. Exact name equality
+        # remains the authority; stored hashes only choose a probe path. Keep the first row for
+        # duplicate names and store ambiguity separately, so collisions remain distinguishable.
+        def proof_index_capacity(count: usize) -> usize:
+            return 0 if count == 0
+            capacity: mutable usize = 1
+            while capacity < count |capacity, count|:
+                capacity <- capacity * 2
+            return capacity
+
+        # Name indexes reserve at least one empty slot per entry. This keeps ordinary negative
+        # lookups short while the explicit work budget below bounds deliberate collision chains.
+        def proof_name_index_capacity(count: usize) -> usize:
+            return 0 if count == 0 or count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            proof_index_capacity(count * 2)
+
+        # These indexes feed older consumers that do not carry a work counter. Refuse a table
+        # whose final occupied run would let one lookup inspect an input-sized collision cluster.
+        def proof_name_index_cluster_status(index_values: darray[usize]&, missing: usize, source_work: mutable usize&) -> (complete: bool, bounded: bool, observed: usize):
+            capacity: usize = index_values.count
+            return (true, true, 0) if capacity == 0
+            empty_slot: mutable usize = capacity
+            for slot in 0..<capacity |slot, index_values, source_work, empty_slot, missing|:
+                return (false, false, source_work) if not proof_report_source_work_charge(1, source_work)
+                if index_values[slot] == missing:
+                    empty_slot <- slot
+                    break
+            return (true, false, capacity) if empty_slot == capacity
+            cluster: mutable usize = 0
+            for offset in 0..<capacity |offset, index_values, source_work, empty_slot, cluster, missing, capacity|:
+                return (false, false, source_work) if not proof_report_source_work_charge(1, source_work)
+                slot: usize = (empty_slot + 1 + offset) % capacity
+                if index_values[slot] == missing:
+                    cluster <- 0
+                else:
+                    cluster <- cluster + 1
+                    return (true, false, cluster) if cluster > PROOF_NAME_INDEX_MAX_CLUSTER
+            return (true, true, cluster)
+
+        def proof_build_lemma_index(lemmas: mutable ProofLemmaTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            lemmas.index_hashes.clear()
+            lemmas.index_values.clear()
+            lemmas.index_ambiguous.clear()
+            return (false, "lemma-index-shape", lemmas.name_hashes.count, lemmas.names.count) if lemmas.name_hashes.count != lemmas.names.count
+            return (true, "", 0, 0) if lemmas.names.count == 0
+            capacity: usize = proof_name_index_capacity(lemmas.names.count)
+            return (false, "name-index-entries", lemmas.names.count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if capacity == 0
+            return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity, source_work)
+            return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(lemmas.names.count, source_work)
+            lemmas.index_hashes.resize(capacity)
+            lemmas.index_values.resize(capacity)
+            lemmas.index_ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, lemmas|:
+                lemmas.index_values[slot] <- lemmas.names.count
+                lemmas.index_ambiguous[slot] <- false
+            for name_index in 0..<lemmas.names.count |name_index, lemmas, capacity|:
+                return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(lemmas.names[name_index]), source_work)
+                hash: u32 = lemmas.name_hashes[name_index]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, name_index, lemmas, capacity|:
+                    return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = lemmas.index_values[slot]
+                    if current == lemmas.names.count:
+                        lemmas.index_hashes[slot] <- hash
+                        lemmas.index_values[slot] <- name_index
+                        placed <- true
+                        break
+                    if current < lemmas.names.count and lemmas.index_hashes[slot] == hash:
+                        return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(lemmas.names[current]), source_work)
+                        if lemmas.names[current] == lemmas.names[name_index]:
+                            lemmas.index_ambiguous[slot] <- true
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, "name-index-insertion", probes, capacity) if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(lemmas.index_values, lemmas.names.count, source_work)
+            return (false, "name-index-build-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (false, "name-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            return (true, "", 0, 0)
+
+        def proof_build_function_index(functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            functions.index_hashes.clear()
+            functions.index_values.clear()
+            functions.index_ambiguous.clear()
+            return (false, "function-index-shape", functions.name_hashes.count, functions.names.count) if functions.name_hashes.count != functions.names.count
+            return (true, "", 0, 0) if functions.names.count == 0
+            capacity: usize = proof_name_index_capacity(functions.names.count)
+            return (false, "name-index-entries", functions.names.count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if capacity == 0
+            return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity, source_work)
+            return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(functions.names.count, source_work)
+            functions.index_hashes.resize(capacity)
+            functions.index_values.resize(capacity)
+            functions.index_ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, functions|:
+                functions.index_values[slot] <- functions.names.count
+                functions.index_ambiguous[slot] <- false
+            for name_index in 0..<functions.names.count |name_index, functions, capacity|:
+                return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.names[name_index]), source_work)
+                hash: u32 = functions.name_hashes[name_index]
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, name_index, functions, capacity|:
+                    return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = functions.index_values[slot]
+                    if current == functions.names.count:
+                        functions.index_hashes[slot] <- hash
+                        functions.index_values[slot] <- name_index
+                        placed <- true
+                        break
+                    if current < functions.names.count and functions.index_hashes[slot] == hash:
+                        return (false, "name-index-build-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(functions.names[current]), source_work)
+                        if functions.names[current] == functions.names[name_index]:
+                            functions.index_ambiguous[slot] <- true
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, "name-index-insertion", probes, capacity) if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(functions.index_values, functions.names.count, source_work)
+            return (false, "name-index-build-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (false, "name-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            return (true, "", 0, 0)

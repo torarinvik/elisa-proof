@@ -5,9 +5,13 @@ extend ElisaProof:
             names: mutable darray[sview] = []
             hashes: mutable darray[u32] = []
             counts: mutable darray[usize] = []
+            valid: bool = false
 
         def proof_report_source_work_charge(amount: usize, work: mutable usize&) -> bool:
-            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
             work <- work + amount
             true
 
@@ -23,14 +27,15 @@ extend ElisaProof:
             for declaration in report.declaration_details |declarations, work|:
                 return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(1, work)
                 declarations <- declarations + 1 if declaration.kind == "function" or declaration.kind == "lemma"
-            return ProofDeclarationNameMultiplicityIndex{} if declarations == 0 or declarations > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
+            return ProofDeclarationNameMultiplicityIndex{} if declarations == 0
+            return ProofDeclarationNameMultiplicityIndex{} if declarations > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
             capacity: mutable usize = 1
             target_capacity: usize = declarations * 2
             while capacity < target_capacity |capacity, target_capacity, declarations|:
                 return ProofDeclarationNameMultiplicityIndex{} if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4
                 capacity <- capacity * 2
             return ProofDeclarationNameMultiplicityIndex{} if not proof_report_source_work_charge(capacity, work)
-            index: mutable ProofDeclarationNameMultiplicityIndex = ProofDeclarationNameMultiplicityIndex{}
+            index: mutable ProofDeclarationNameMultiplicityIndex = ProofDeclarationNameMultiplicityIndex{valid: true}
             index.slot_values.resize(capacity)
             index.hashes.resize(capacity)
             for slot in 0..<capacity |slot, index, capacity|:
@@ -65,7 +70,7 @@ extend ElisaProof:
 
         def proof_report_declaration_name_is_unique(index: ProofDeclarationNameMultiplicityIndex, name: sview, work: mutable usize&) -> bool:
             capacity: usize = index.slot_values.count
-            return false if capacity == 0
+            return false if not index.valid or capacity == 0
             name_hash: (complete: bool, hash: u32) = proof_report_declaration_name_hash(name, work)
             return false if not name_hash.complete
             hash: u32 = name_hash.hash
@@ -82,58 +87,112 @@ extend ElisaProof:
                 probes <- probes + 1
             return false
 
-        # This core runs only after report-wide source structure has been checked.
-        def proof_report_theorem_source_admissible_after_structure(report: ProofReport&, theorem: ProofTheoremSummary, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
+        # This core runs only after report-wide source structure has been checked. It shares
+        # the caller's source-work budget across every selected goal and finding scan.
+        def proof_report_theorem_source_admissible_after_structure(report: ProofReport&, theorem: ProofTheoremSummary, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal_finding_clear: darray[bool]&, source_work: mutable usize&) -> bool:
             return false if theorem.proof_goals_count == 0
             return false if theorem.proof_goals_start > report.theorems.proof_goal_ids.count or theorem.proof_goals_count > report.theorems.proof_goal_ids.count - theorem.proof_goals_start
             previous_goal_id: mutable usize = 0
             has_previous_goal: mutable bool = false
-            for offset in 0..<theorem.proof_goals_count |offset, report, theorem, literal_ensure_inventory, assert_by_inventory, previous_goal_id, has_previous_goal|:
+            for offset in 0..<theorem.proof_goals_count |offset, report, theorem, literal_ensure_inventory, assert_by_inventory, previous_goal_id, has_previous_goal, goal_finding_clear, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
                 goal_id: usize = report.theorems.proof_goal_ids[theorem.proof_goals_start + offset]
-                return false if goal_id >= report.goal_attempts.count or report.goal_attempts[goal_id].name != theorem.name
+                return false if goal_id >= report.goal_attempts.count
+                return false if not proof_report_source_work_charge(sview_len(report.goal_attempts[goal_id].name), source_work)
+                return false if not proof_report_source_work_charge(sview_len(theorem.name), source_work)
+                return false if report.goal_attempts[goal_id].name != theorem.name
                 # The recorder appends IDs in increasing attempt order. Requiring that order
                 # makes the theorem-to-source mapping one-to-one and rejects duplicate IDs.
                 return false if has_previous_goal and goal_id <= previous_goal_id
                 previous_goal_id <- goal_id
                 has_previous_goal <- true
-                return false if not proof_report_goal_source_admissible_after_structure(report, goal_id, literal_ensure_inventory, assert_by_inventory)
+                admitted: bool = proof_report_goal_source_admissible_after_structure_internal(report, goal_id, literal_ensure_inventory, ProofSourceLiteralEnsureAdmissionIndex{}, false, ProofSourcePostconditionAstIndex{}, false, assert_by_inventory, goal_finding_clear, true, source_work)
+                return false if not admitted
             return true
 
-    public:
-        # This public single-row entrypoint is useful to callers outside the catalog batch.
+    private:
+        # The catalog's source claims are computed once from the checked view's already
+        # admitted per-goal snapshot. This helper is private so callers cannot supply their own
+        # report booleans or source inventories and manufacture a positive theorem status.
+        def proof_report_theorem_source_status_snapshot(report: ProofReport&, goal_source_statuses: darray[bool]&, goal_statuses_complete: bool, import_failed: bool, semantic_errors: u32, source_work: mutable usize&) -> (statuses: darray[(source_admissible: bool, declaration_identity_unambiguous: bool)], complete: bool) can[Memory.Allocate]:
+            statuses: mutable darray[(source_admissible: bool, declaration_identity_unambiguous: bool)] = []
+            return (statuses, false) if not goal_statuses_complete or goal_source_statuses.count != report.goal_attempts.count
+            return (statuses, true) if report.theorems.summaries.count == 0
+            index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, source_work)
+            return (statuses, false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (statuses, false) if report.theorems.summaries.count > 0 and (not index.valid or index.slot_values.count == 0)
+            source_input_clean: bool = not import_failed and semantic_errors == 0
+            for theorem in report.theorems.summaries |report, statuses, index, source_work, goal_source_statuses, source_input_clean|:
+                return (statuses, false) if not proof_report_source_work_charge(1, source_work)
+                declaration_identity_unambiguous: bool = proof_report_declaration_name_is_unique(index, theorem.name, source_work)
+                return (statuses, false) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                valid_goal_range: bool = theorem.proof_goals_start <= report.theorems.proof_goal_ids.count and theorem.proof_goals_count <= report.theorems.proof_goal_ids.count - theorem.proof_goals_start
+                return (statuses, false) if not valid_goal_range
+                source_admissible: mutable bool = source_input_clean and declaration_identity_unambiguous and theorem.proof_goals_count > 0 and valid_goal_range
+                previous_goal_id: mutable usize = 0
+                has_previous_goal: mutable bool = false
+                if valid_goal_range:
+                    for offset in 0..<theorem.proof_goals_count |offset, theorem, report, statuses, source_work, goal_source_statuses, source_admissible, previous_goal_id, has_previous_goal|:
+                        return (statuses, false) if not proof_report_source_work_charge(1, source_work)
+                        goal_id: usize = report.theorems.proof_goal_ids[theorem.proof_goals_start + offset]
+                        return (statuses, false) if goal_id >= report.goal_attempts.count
+                        attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                        return (statuses, false) if not proof_report_source_work_charge(sview_len(theorem.name), source_work)
+                        return (statuses, false) if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                        source_admissible <- false if attempt.name != theorem.name or goal_id >= goal_source_statuses.count or not goal_source_statuses[goal_id]
+                        source_admissible <- false if has_previous_goal and goal_id <= previous_goal_id
+                        previous_goal_id <- goal_id
+                        has_previous_goal <- true
+                statuses.push((source_admissible, declaration_identity_unambiguous))
+            (statuses, source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+    private:
+        # Raw source-admission entrypoints remain internal. Positive public decisions are issued
+        # only by ProofCheckedView, whose inventories and per-goal statuses are parser-bound.
         def proof_report_theorem_source_admissible(report: ProofReport&, theorem: ProofTheoremSummary, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
             return false if import_failed or semantic_errors != 0
-            return false if not proof_report_source_structure_consistent(report)
             source_work: mutable usize = 0
+            return false if not proof_report_source_structure_consistent(report, &source_work)
             index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, &source_work)
             return false if not proof_report_declaration_name_is_unique(index, theorem.name, &source_work)
-            proof_report_theorem_source_admissible_after_structure(report, theorem, literal_ensure_inventory, assert_by_inventory)
+            finding_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot(report, &source_work)
+            return false if not finding_snapshot.complete
+            proof_report_theorem_source_admissible_after_structure(report, theorem, literal_ensure_inventory, assert_by_inventory, finding_snapshot.goal_finding_clear, &source_work)
 
         # Catalog rendering validates structure once for the complete batch, then maps each
         # theorem's recorded goals. This avoids an O(theorems * report-size) structural scan.
         def proof_report_theorem_source_admissibilities(report: ProofReport&, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> darray[(source_admissible: bool, declaration_identity_unambiguous: bool)] can[Memory.Allocate]:
             admissible: mutable darray[(source_admissible: bool, declaration_identity_unambiguous: bool)] = []
-            report_structure_consistent: bool = proof_report_source_structure_consistent(report)
-            source_check_enabled: bool = not import_failed and semantic_errors == 0 and report_structure_consistent
             source_work: mutable usize = 0
+            report_structure_consistent: bool = proof_report_source_structure_consistent(report, &source_work)
+            source_check_enabled: mutable bool = not import_failed and semantic_errors == 0 and report_structure_consistent
             index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, &source_work) if report_structure_consistent else ProofDeclarationNameMultiplicityIndex{}
-            for theorem in report.theorems.summaries |report, admissible, source_check_enabled, index, source_work, literal_ensure_inventory, assert_by_inventory|:
+            finding_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot(report, &source_work) if source_check_enabled else ([], true)
+            source_check_enabled <- false if not finding_snapshot.complete
+            for theorem in report.theorems.summaries |report, admissible, source_check_enabled, index, source_work, literal_ensure_inventory, assert_by_inventory, finding_snapshot|:
                 identity_unambiguous: bool = report_structure_consistent and proof_report_declaration_name_is_unique(index, theorem.name, &source_work)
-                source_admissible: bool = source_check_enabled and identity_unambiguous and proof_report_theorem_source_admissible_after_structure(report, theorem, literal_ensure_inventory, assert_by_inventory)
+                source_admissible: bool = source_check_enabled and identity_unambiguous and proof_report_theorem_source_admissible_after_structure(report, theorem, literal_ensure_inventory, assert_by_inventory, finding_snapshot.goal_finding_clear, &source_work)
                 admissible.push((source_admissible, identity_unambiguous))
             return admissible
 
+    public:
         # Precompute declaration attribution once for full report rendering. Per-row scans
-        # would turn duplicate-name checks into O(declarations^2) work.
-        def proof_report_declaration_identity_statuses(report: ProofReport&) -> darray[bool] can[Memory.Allocate]:
+        # would turn duplicate-name checks into O(declarations^2) work. This is structural
+        # attribution only; source-admission decisions remain behind ProofCheckedView.
+        def proof_report_declaration_identity_statuses(report: ProofReport&, work_used: mutable usize&) -> (complete: bool, statuses: darray[bool]) can[Memory.Allocate]:
+            return (false, []) if work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             statuses: mutable darray[bool] = []
-            source_work: mutable usize = 0
-            index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, &source_work)
-            for declaration in report.declaration_details |report, statuses, index, source_work|:
-                return statuses if not proof_report_source_work_charge(1, &source_work)
-                identity_unambiguous: bool = true
+            index: ProofDeclarationNameMultiplicityIndex = proof_report_declaration_name_multiplicity_index(report, work_used)
+            return (false, []) if work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in report.declaration_details |report, statuses, index, work_used|:
+                return (false, statuses) if not proof_report_source_work_charge(1, work_used)
+                identity_unambiguous: mutable bool = true
                 if declaration.kind == "function" or declaration.kind == "lemma":
-                    identity_unambiguous <- proof_report_declaration_name_is_unique(index, declaration.name, &source_work)
+                    return (false, statuses) if not index.valid
+                    identity_unambiguous <- proof_report_declaration_name_is_unique(index, declaration.name, work_used)
+                    return (false, statuses) if work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 statuses.push(identity_unambiguous)
-            return statuses
+            return (true, statuses)
+
+    private:
 

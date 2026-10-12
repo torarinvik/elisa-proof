@@ -7,7 +7,18 @@ def proof_source_file_count(files: darray[u8]&) -> usize:
         count <- count + 1 if byte == 0
     return count
 
+def proof_cli_semantic_diagnostics_in_arena[@r](arena: mutable Arena& @r) -> mutable darray[Semantic::Diagnostic]& @r:
+    in arena:
+        empty: mutable darray[Semantic::Diagnostic] = []
+        return new[r] empty
+
 def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console, Global.Read, Global.Write]:
+    source_arena: mutable Arena = zeroed
+    status: i64 = (proof_main_with_source_arena(argc, argv, &source_arena) can Global{Read,Write})
+    (arena_free(&source_arena) can Global{Read,Write})
+    status
+
+def proof_main_with_source_arena[@r](argc: i64, argv: mutable void&, source_arena: mutable Arena& @r) -> i64 can[Memory.Allocate, Memory.Release, Abort.Panic, Unsafe.PointerCast, Console, Global.Read, Global.Write]:
     if argc < 2:
         proof_print_usage()
         return 2
@@ -225,150 +236,48 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     while path[path_index] != 0 |path_index, root_path, path|:
         root_path.push(path[path_index])
         path_index <- path_index + 1
-    root_read: (ok: bool, contents: darray[u8]) = (proof_read_file_checked(path) can Global{Read,Write})
-    source: mutable darray[u8] = root_read.contents
-    if not root_read.ok:
+    source_map: mutable ProofSourceMap& @r = ProofSourceMap{files: [], line_files: [], line_numbers: []}
+    capture_source_map: bool = correspondence_output or package_output or json_output
+    root_read_failed: mutable bool = false
+    source_analysis: ProofSourceAnalysis[r] = (proof_source_analysis_import_parse(source_arena, root_path, &root_read_failed, &source_map.files, &source_map.line_files, &source_map.line_numbers, capture_source_map) can Global{Read,Write})
+    if root_read_failed:
         message: mutable darray[u8] = []
         proof_push(&message, "elisa-proof: could not read source\n")
         proof_write(message)
         return 2
-    import_failed: mutable bool = false
-    source_map: mutable ProofSourceMap& @r = ProofSourceMap{files: [], line_files: [], line_numbers: []}
-    # An include graph can validly expand to zero bytes (for example a root that includes an
-    # empty file). Testing non-empty bytes would feed the original include directive back to the
-    # parser and make successful empty expansions fail spuriously.
-    # Move the importer's result straight into `source`. Binding it to a named local first makes
-    # stage1 treat that local as a view of the importer's reference arguments, so the NUL push
-    # below would invalidate every later use of `source`.
-    source <- (proof_import_source_mapped(root_path, &import_failed, &source_map.files, &source_map.line_files, &source_map.line_numbers) can Global{Read,Write})
-    source_bytes: usize = source.count
-    source_fingerprint: u32 = proof_source_fingerprint(source)
-    source.push(0)
-    # The source came from length-aware file reads and may contain arbitrary bytes. Preserve
-    # that exact extent through lexing: frontend_parse uses C-string length and would silently
-    # truncate at an embedded NUL, unlike the compiler's length-aware driver path.
-    # Tokens are temporary parser input; the AST owns its own nodes and borrows text only from
-    # `source`. Match the compiler's one-shot frontend lifetime while retaining length-aware
-    # tokenization so embedded NUL bytes cannot truncate the imported source.
-    token_arena: mutable Arena = zeroed
-    tokens: mutable darray[Token] = []
-    in token_arena:
-        tokens <- frontend_tokenize_with_length(&source[0], &source[0], source_bytes)
-    file: mutable Ast::File = (frontend_parser_parse_file(&source[0], tokens) can Global{Read,Write})
-    # Freeze the source obligation inventories before typed-source augmentation or
-    # refinement-contract rewriting can mutate the parser-owned AST.
-    source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
-    source_assert_by_goals: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
-    if goal_json_output or proof_text_output or proof_check_output or theorem_json_output:
-        source_assert_by_goals <- proof_source_assert_by_inventory(file.top_decls)
-    proof_push_source_int_types(&file, tokens, source, source_bytes)
-    # `pass` reaches the AST as the same invalid statement that error recovery leaves for a
-    # dropped construct. Keep the lexer's `pass` offsets so the checker can tell them apart.
-    pass_offsets: mutable darray[u32] = []
-    for token in tokens |pass_offsets|:
-        pass_offsets.push(token.start) if token.kind == TokenKind.Pass
-    stray_nul_line: u32 = proof_source_stray_nul_line(tokens, source, source_bytes)
-    (arena_free(&token_arena) can Global{Read,Write})
-    report: mutable ProofReport = proof_empty_report()
     (ElisaProof::proof_disjunction_reset_work_measurements() can Global.Write)
-    report.pass_statement_offsets <- pass_offsets
+    linear_hints: mutable darray[i64] = []
     if json_output and script_slot > 0:
         hints: (ok: bool, values: darray[i64]) = (proof_read_linear_hints(slots[script_slot].cast[cstr]) can Global{Read,Write})
         return proof_usage_exit("elisa-proof: linear hints could not be read or are malformed\n") if not hints.ok
-        report.linear_hints <- hints.values
-    semantic_diagnostics: mutable darray[Semantic::Diagnostic] = []
-    parse_failed: bool = file.errors.count > 0 or stray_nul_line > 0
+        linear_hints <- hints.values
+    semantic_diagnostics: mutable darray[Semantic::Diagnostic]& @r = proof_cli_semantic_diagnostics_in_arena(source_arena)
     replay_work: mutable usize = 0
-    replayed_goals: mutable darray[bool] = []
-    replayed_certificates: mutable darray[bool] = []
-    replayed_certificate_count: mutable u32 = 0
-    certificate_status_snapshot_complete: mutable bool = false
     replay_gap_snapshot_available: mutable bool = false
     replay_gap_count: mutable u32 = 0
-    replay_complete: mutable bool = false
-    if parse_failed:
-        for parse_error in file.errors |report|:
-            proof_add_finding(&report, "parse-error", parse_error.line, "", "source could not be parsed; verification was not attempted")
-        proof_add_finding(&report, "parse-error", stray_nul_line, "", "source has a NUL byte outside a comment; verification was not attempted") if stray_nul_line > 0
-    else:
-        # Refinement refusals are recorded apart and re-added after checking, which starts
-        # from a fresh report.
-        refinement_refusals: mutable ProofReport = proof_empty_report()
-        refined_functions: mutable darray[sview] = []
-        proof_add_refinement_signature_contracts(&file, &refinement_refusals, &refined_functions)
-        if function_json_output:
-            (proof_check_focused_with_semantic_diagnostics(file, &report, &semantic_diagnostics, focused_function_name) can Global{Read,Write})
-        else:
-            (proof_check_with_semantic_diagnostics(file, &report, &semantic_diagnostics) can Global{Read,Write})
-        for refusal in refinement_refusals.findings |report|:
-            report.proof_obligation(false)
-            proof_add_finding(&report, refusal.kind, refusal.line, refusal.name, refusal.message)
-        replay_receipt: ProofReplayReceipt = (proof_replay_certificates(&report) can Global{Read,Write})
-        replay_complete <- proof_replay_receipt_is_complete(replay_receipt)
-        replay_gap: (available: bool, count: u32) = proof_replay_receipt_gap_count(replay_receipt)
-        replay_gap_snapshot_available <- replay_gap.available
-        replay_gap_count <- replay_gap.count
-        replay_complete <- false if not proof_replay_receipt_attempt_statuses_with_work(replay_receipt, &replayed_goals, &replay_work)
-        certificate_status_snapshot_complete <- proof_replay_receipt_certificate_statuses_and_count_with_work(replay_receipt, &replayed_certificates, &replayed_certificate_count, &replay_work)
-        replay_complete <- false if not certificate_status_snapshot_complete
-        # R-004 bounded source-derived admission. This reads the parser-owned AST directly;
-        # unlike source_declarations/declaration_details/obligation_inventory, it cannot be
-        # co-edited by the proof scheduler. Focused runs have an explicitly narrower scope.
-        if not function_json_output and not proof_source_literal_ensure_coverage(source_literal_ensures, report):
-            source_binding_finding: mutable usize = report.findings.count
-            for finding_index in 0..<report.findings.count |finding_index, source_binding_finding, report|:
-                finding: ProofFinding = report.findings[finding_index]
-                source_binding_finding <- finding_index if finding.kind == "source-obligation-inventory" and finding.name == "" and finding.message == "a supported source postcondition has no distinct source-bound proof attempt"
-            if source_binding_finding == report.findings.count:
-                proof_add_finding(&report, "source-obligation-inventory", 0, "", "a supported source postcondition has no distinct proof attempt")
-                source_binding_finding <- report.findings.count - 1
-            if proof_source_literal_ensure_inventory_has_unsupported(source_literal_ensures):
-                report.findings[source_binding_finding].status <- "unsupported"
-        if function_json_output and report.findings.count == 0 and semantic_diagnostics.count == 0 and not proof_report_focused_source_obligations_covered(report):
-            proof_add_finding(&report, "source-obligation-inventory", 0, focused_function_name, "a focused source obligation is unsupported or has no distinct replayed proof attempt")
-            if report.findings.count > 0:
-                report.findings[report.findings.count - 1].status <- "unsupported"
-        # The compiler's ensure check does not read signature contracts, so a refinement-typed
-        # parameter's predicate is invisible to it. In a function that has one, an "unproven"
-        # (never "violated") ensure at a return the engine discharged with kernel-replayed goals
-        # and no finding is superseded. Every other function keeps the diagnostic.
-        kept: mutable darray[Semantic::Diagnostic] = []
-        for diagnostic in semantic_diagnostics |kept, refined_functions, report|:
-            superseded: bool = diagnostic.kind == Semantic::DiagnosticKind.EnsureNotProven and diagnostic.detail != "violated" and (any refined_name in refined_functions where refined_name == diagnostic.name) and proof_report_discharges_return_with_replayed(report, diagnostic.name, diagnostic.line, replayed_goals, &replay_work)
-            kept.push(diagnostic) if not superseded
-        semantic_diagnostics <- kept
-    proof_add_finding(&report, "import-error", 0, "", "one or more Elisa include files could not be read") if import_failed
-    # The compiler's strongest built-in semantic mode is shared with proof checking above. The
-    # custom proof kernel remains the verdict for proof obligations; this flag only enables
-    # additional compiler-side refinement/invariant diagnostics.
-    semantic_errors: mutable u32 = 0
-    semantic_visible: mutable u32 = 0
-    # `assert … by:` is the compiler's legacy proof-block hook. The custom kernel below
-    # owns this obligation now, including bounded arithmetic and recursive rules that the
-    # compiler's general semantic pass does not know about. Keep every other compiler
-    # diagnostic as an independent defense layer, but do not apply the weaker legacy
-    # proof result a second time after the kernel has accepted the same AST.
-    # The compiler's mutual-decreases pass predates structural SCC certificates and cannot
-    # recognize a mutual call that receives a matched strict subterm. Suppress only that one
-    # diagnostic when the custom kernel recorded a verified same-type structural SCC member;
-    # all unrelated compiler diagnostics remain visible and fatal as before.
-    for diagnostic in semantic_diagnostics |semantic_visible, report|:
-        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
-        semantic_visible <- semantic_visible + 1
-    for diagnostic in semantic_diagnostics |semantic_errors, report|:
-        continue if not proof_semantic_diagnostic_visible(diagnostic, report)
-        semantic_errors <- semantic_errors + 1 if Semantic::diagnostic_severity(diagnostic) == 1
-    source_complete: bool = proof_report_source_complete_with_replay(report, import_failed, semantic_errors, replay_complete)
-    source_admissible: bool = proof_report_source_admissible_with_replay(report, import_failed, semantic_errors, replay_complete)
-    goal_source_admissible: mutable bool = false
-    if goal_json_output or proof_text_output:
-        goal_source_admissible <- proof_report_goal_source_admissible(report, focused_goal_id, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals)
+    checked_view: ProofCheckedView[r] = (proof_check_and_replay_with_source(source_arena, semantic_diagnostics, source_analysis, focused_function_name, linear_hints) can Global{Read,Write})
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    source: darray[u8]& = proof_checked_view_source(checked_view)
+    file: Ast::File& = proof_checked_view_file(checked_view)
+    source_bytes: usize = proof_checked_view_source_bytes(checked_view)
+    source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
+    import_failed: bool = proof_checked_view_import_failed(checked_view)
+    source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]& = proof_checked_view_literal_inventory(checked_view)
+    source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]& = proof_checked_view_assert_by_inventory(checked_view)
+    replay_gap: (available: bool, count: u32) = proof_checked_view_replay_gap_count(checked_view)
+    replay_gap_snapshot_available <- replay_gap.available
+    replay_gap_count <- replay_gap.count
+    semantic_errors: u32 = proof_checked_view_semantic_errors(checked_view)
+    semantic_visible: u32 = proof_checked_view_semantic_visible(checked_view)
+    source_complete: bool = proof_checked_view_source_complete(checked_view)
+    source_admissible: bool = proof_checked_view_source_admissible(checked_view)
+    source_goal_admissions_complete: mutable bool = proof_checked_view_goal_source_admissions_complete(checked_view)
+    source_admission_failure: sview = proof_checked_view_source_admission_failure(checked_view)
     if goal_json_output:
-        goal_replayed: bool = proof_output_cached_replay_status(replayed_goals, focused_goal_id)
         focused: mutable darray[u8] = []
-        proof_push_json_focused_goal_with_replayed(&focused, report, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible, goal_source_admissible, goal_replayed)
+        goal_output: (complete: bool, state: sview) = proof_push_json_focused_goal_with_replayed(&focused, checked_view, focused_goal_id, replay_work)
         proof_write(focused)
-        return proof_goal_route_exit(report, focused_goal_id, goal_source_admissible, goal_replayed)
+        return proof_goal_route_exit_with_state(checked_view, focused_goal_id, goal_output)
     if proof_check_output:
         script_read: (ok: bool, contents: darray[u8]) = (proof_read_file_checked(slots[script_slot].cast[cstr]) can Global{Read,Write})
         if not script_read.ok:
@@ -377,7 +286,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_write(message)
             return 2
         checked: mutable darray[u8] = []
-        check_status: i64 = proof_push_proof_check_with_replayed(&checked, report, script_read.contents, source_fingerprint, source_complete, source_admissible, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals, replayed_goals)
+        check_status: i64 = proof_push_proof_check_with_replayed(&checked, checked_view, script_read.contents, replay_work)
         proof_write(checked)
         return check_status
     if correspondence_output:
@@ -391,45 +300,39 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         correspondence_admissible: bool = source_admissible
         correspondence: mutable darray[u8] = []
         source_snapshot: sview = ElisaProofJson::bytes_range_ref(source, 0, source_bytes)
-        correspondence_status: i64 = (corr_replay_and_check(&package_bytes, &file, source_snapshot, root_path, source_map, source_fingerprint, correspondence_admissible, &correspondence) can Global{Read,Write})
+        correspondence_status: i64 = (corr_replay_and_check(&package_bytes, file, source_snapshot, root_path, source_map, source_fingerprint, correspondence_admissible, &correspondence) can Global{Read,Write})
         proof_write(correspondence)
         return correspondence_status
     if explain_output:
         explanation: mutable darray[u8] = []
-        found: bool = proof_push_goal_explanation_with_replayed(&explanation, report, focused_goal_id, proof_output_cached_replay_status(replayed_goals, focused_goal_id))
+        explanation_result: (complete: bool, found: bool, state: sview) = proof_push_goal_explanation_with_replayed(&explanation, checked_view, focused_goal_id, replay_work)
         proof_write(explanation)
-        return proof_route_exit(found, source_admissible)
+        return proof_goal_route_exit_with_state(checked_view, focused_goal_id, (explanation_result.complete, explanation_result.state)) if explanation_result.found
+        return 1
     if proof_text_output:
-        goal_replayed: bool = proof_output_cached_replay_status(replayed_goals, focused_goal_id)
         rendered: mutable darray[u8] = []
-        proof_push_elisa_proof_with_replayed(&rendered, report, focused_goal_id, source_fingerprint, source_complete, source_admissible, goal_source_admissible, goal_replayed)
+        goal_output: (complete: bool, state: sview, replayed: bool, source_admitted: bool) = proof_push_elisa_proof_with_replayed(&rendered, checked_view, focused_goal_id, replay_work)
         proof_write(rendered)
-        return proof_goal_route_exit(report, focused_goal_id, goal_source_admissible, goal_replayed)
+        return proof_goal_route_exit_with_state(checked_view, focused_goal_id, (goal_output.complete, goal_output.state))
     if theorem_json_output:
         catalog: mutable darray[u8] = []
-        proof_push_json_theorem_catalog_with_replayed(&catalog, report, source_bytes, source_fingerprint, source_complete, source_admissible, import_failed, semantic_errors, source_literal_ensures, source_assert_by_goals, replayed_goals, &replay_work)
+        catalog_complete: bool = ElisaProofTheoremOutput::proof_push_json_theorem_catalog_with_replayed(&catalog, checked_view, &replay_work)
         proof_write(catalog)
-        return proof_route_exit(true, source_admissible)
+        return proof_route_exit(true, source_admissible and proof_checked_view_theorem_source_admissions_complete(checked_view) and catalog_complete)
     if package_output:
         package: mutable darray[u8] = []
-        source_snapshot: sview = ElisaProofJson::bytes_range_ref(source, 0, source_bytes)
-        source_file_count: usize = proof_source_file_count(source_map.files)
-        package_source_within_budget: bool = source_bytes <= ProofPackageLimit::SOURCE_BYTES and source_file_count > 0 and source_file_count <= ProofPackageLimit::SOURCE_FILES
-        package_source_admissible: bool = source_admissible and package_source_within_budget
-        if package_source_within_budget:
-            origin_work: mutable usize = report.traces.lookup_work_used
-            _ = proof_push_json_package_with_replayed(&package, report, root_path, source_snapshot, source_map, source_bytes, source_fingerprint, package_source_admissible, replayed_goals, &origin_work)
-        else:
-            proof_push(&package, "{\"format\":\"elisa-proof-package-refusal-v1\",\"reason\":\"source-budget\"}\n")
+        package_result: (snapshot_complete: bool, source_admissible: bool) = proof_push_json_package_with_replayed(&package, checked_view, root_path, source_map)
         proof_write(package)
-        return proof_route_exit(true, package_source_admissible) if package_source_within_budget
-        return 1
+        return proof_route_exit(true, package_result.snapshot_complete and package_result.source_admissible and source_goal_admissions_complete)
     if suggestion_json_output:
         suggestions: mutable darray[u8] = []
-        (proof_push_json_suggestions_with_replayed(&suggestions, report, file.enum_annotations, focused_goal_id, source_bytes, source_fingerprint, source_complete, source_admissible, replayed_goals, &replay_work) can Global{Read,Write})
+        suggestions_complete: bool = (ElisaProofTheoremOutput::proof_push_json_suggestions_with_replayed(&suggestions, checked_view, focused_goal_id, &replay_work) can Global{Read,Write})
         proof_write(suggestions)
-        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible)
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible and suggestions_complete)
     if repair_output or repair_all_output:
+        repair_snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
+        source_admitted_goals: darray[bool] = repair_snapshot.source_admitted_goals
+        source_goal_admissions_complete <- source_goal_admissions_complete and repair_snapshot.complete
         response: mutable darray[u8] = []
         if repair_all_output:
             # The whole unresolved queue in one pass, in goal order. A goal the checker already
@@ -438,19 +341,22 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             unresolved_count: mutable usize = 0
             candidate_count_total: mutable usize = 0
             entries: mutable darray[u8] = []
-            for goal_index in 0..<report.goal_attempts.count |goal_index, report, entries, repaired_count, unresolved_count, candidate_count_total|:
+            for goal_index in 0..<report.goal_attempts.count |goal_index, report, entries, repaired_count, unresolved_count, candidate_count_total, source_admitted_goals, source_admissible, source_goal_admissions_complete|:
                 continue if report.goal_attempts[goal_index].proven
                 unresolved_count <- unresolved_count + 1
+                goal_source_admissible: bool = proof_output_cached_source_admission_status(source_admitted_goals, goal_index)
                 # A script found against an inadmissible source would be refused by --script, so
                 # the search is not run and the goal is listed as unrepaired with nothing tried.
                 batch_found: mutable (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) = (false, 0, 0, false, "", 0, false, false, false)
-                batch_found <- (proof_repair_search(report, goal_index) can Global{Read,Write}) if source_admissible
+                batch_found <- (proof_repair_search(report, goal_index) can Global{Read,Write}) if source_admissible and source_goal_admissions_complete and goal_source_admissible
                 repaired_count <- repaired_count + 1 if batch_found.repaired
                 candidate_count_total <- candidate_count_total + batch_found.candidates
                 proof_push(&entries, ",") if unresolved_count > 1
-                proof_push_repair_goal(&entries, report, goal_index, batch_found)
+                proof_push_repair_goal(&entries, checked_view, goal_index, batch_found, goal_source_admissible, source_goal_admissions_complete)
             proof_push(&response, "{\"format\":\"elisa-proof-repair-batch-v1\",\"status\":")
-            if not source_admissible:
+            if not source_goal_admissions_complete:
+                proof_push(&response, "\"source-admission-incomplete\"")
+            elif not source_admissible:
                 proof_push(&response, "\"inadmissible\"")
             elif unresolved_count == 0:
                 proof_push(&response, "\"nothing_to_repair\"")
@@ -471,12 +377,18 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
                 response.push(entries[entry_index])
             proof_push(&response, "]}\n")
             proof_write(response)
-            return proof_route_exit(true, source_admissible and repaired_count == unresolved_count)
+            return proof_route_exit(true, source_admissible and source_goal_admissions_complete and repaired_count == unresolved_count)
         found: mutable (repaired: bool, searched: usize, candidates: usize, exhaustive: bool, actions: sview, rewrite_fact_index: usize, rewrite_reverse: bool, has_rewrite: bool, has_apply: bool) = (false, 0, 0, false, "", 0, false, false, false)
-        found <- (proof_repair_search(report, focused_goal_id) can Global{Read,Write}) if source_admissible
+        focused_goal_source_admissible: bool = proof_output_cached_source_admission_status(source_admitted_goals, focused_goal_id)
+        focused_repair_admissible: bool = source_admissible and source_goal_admissions_complete and focused_goal_source_admissible
+        found <- (proof_repair_search(report, focused_goal_id) can Global{Read,Write}) if focused_repair_admissible
         proof_push(&response, "{\"format\":\"elisa-proof-repair-v1\",\"status\":")
         if focused_goal_id >= report.goal_attempts.count:
             proof_push(&response, "\"not_found\"")
+        elif not source_goal_admissions_complete:
+            proof_push(&response, "\"source-admission-incomplete\"")
+        elif not focused_goal_source_admissible:
+            proof_push(&response, "\"source-unbound\"")
         elif not source_admissible:
             proof_push(&response, "\"inadmissible\"")
         else:
@@ -492,7 +404,7 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         proof_push(&response, ",\"tried\":")
         proof_push_number(&response, found.searched.u32())
         proof_push(&response, ",\"exhaustive\":")
-        proof_push(&response, "true" if found.exhaustive and source_admissible else "false")
+        proof_push(&response, "true" if found.exhaustive and focused_repair_admissible else "false")
         proof_push(&response, "},\"script\":")
         if found.repaired:
             script_body: mutable darray[u8] = []
@@ -502,26 +414,32 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
             proof_push(&response, "null")
         proof_push(&response, "}\n")
         proof_write(response)
-        return proof_route_exit(focused_goal_id < report.goal_attempts.count, source_admissible and found.repaired)
+        return proof_route_exit(focused_goal_id < report.goal_attempts.count, focused_repair_admissible and found.repaired)
     if tactic_json_output:
-        return (ElisaProofCliTactics::run(slots, script_slot, script_is_text, report, source_bytes, source_fingerprint, source_complete, source_admissible) can Global{Read,Write})
+        return (ElisaProofCliTactics::run(slots, script_slot, script_is_text, checked_view) can Global{Read,Write})
     if summary_json_output:
         summary: mutable darray[u8] = []
-        proof_push_json_report_summary_with_replay(&summary, report, import_failed, semantic_errors, semantic_visible, source_bytes, source_fingerprint, replayed_goals, replayed_certificates, replayed_certificate_count, certificate_status_snapshot_complete, replay_complete, &replay_work)
+        summary_complete: bool = proof_push_json_report_summary_with_replay(&summary, checked_view, &replay_work)
         proof_write(summary)
-        return 1 if not source_complete else 0
+        return 1 if not source_complete or not source_admissible or not source_goal_admissions_complete or not summary_complete else 0
     if json_output:
         json: mutable darray[u8] = []
-        (proof_push_json_report_with_replay(&json, report, semantic_diagnostics, semantic_visible, import_failed, semantic_errors, source_bytes, source_fingerprint, source_map, focused_function_name, replayed_goals, replayed_certificates, replayed_certificate_count, certificate_status_snapshot_complete, replay_complete, replay_gap_count, replay_gap_snapshot_available, &replay_work) can Global.Read)
+        json_complete: bool = (proof_push_json_report_with_replay(&json, checked_view, semantic_diagnostics, source_map, &replay_work) can Global.Read)
         proof_write(json)
-        return 1 if not source_complete else 0
-    confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = proof_output_confirmation_counts(report, replayed_goals)
+        return 1 if not source_complete or not source_admissible or not source_goal_admissions_complete or not json_complete else 0
+    text_goal_snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
+    text_certificate_snapshot: (complete: bool, count: u32) = proof_output_checked_view_replayed_certificate_count_with_work(checked_view, replay_work)
+    confirmation: (known: bool, replay_confirmed: u32, frame_checks: u32) = ElisaProofOutputReplayStatus::proof_output_checked_view_confirmation_counts_with_work(checked_view, replay_work)
+    text_finding_counts: (complete: bool, disproved: u32, unsupported: u32, unknown: u32, verification_state: sview) = ElisaProofOutputReplayStatus::proof_output_checked_view_finding_summary_with_work(checked_view, replay_work)
+    text_findings_work_reserved: bool = proof_output_reserve_status_snapshot_work(replay_work, report.findings.count)
+    text_status_snapshot_complete: bool = text_goal_snapshot.complete and text_certificate_snapshot.complete and confirmation.known and text_finding_counts.complete and text_findings_work_reserved
+    certificate_status_snapshot_complete: bool = proof_checked_view_source_validated(checked_view) and text_certificate_snapshot.complete
     output: mutable darray[u8] = []
     proof_push(&output, "Elisa Proof\n")
     proof_push(&output, "  verification state: ")
-    proof_push(&output, proof_report_verification_state_with_replay(report, import_failed, semantic_errors, replay_complete))
+    proof_push(&output, "unknown" if not source_complete or not source_admissible or not source_goal_admissions_complete or not text_status_snapshot_complete else text_finding_counts.verification_state)
     proof_push(&output, "\n")
-    if (semantic_errors > 0 or import_failed) and proof_report_engine_state_with_replay(report, replay_complete) == "proved":
+    if (semantic_errors > 0 or import_failed) and ElisaProofOutputReplayStatus::proof_report_engine_state(checked_view) == "proved":
         proof_push(&output, "  front end diagnostic, engine: proved\n")
     proof_push(&output, "  declarations: ")
     proof_push_number(&output, report.declarations)
@@ -545,23 +463,26 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
     proof_push(&output, "\n  findings: ")
     proof_push_number(&output, report.failed)
     proof_push(&output, "\n")
-    for finding in report.findings |output|:
-        proof_push(&output, "  ")
-        proof_push(&output, finding.kind)
-        proof_push(&output, " [")
-        proof_push(&output, finding.status)
-        proof_push(&output, "]")
-        proof_push(&output, " line ")
-        proof_push_number(&output, finding.line)
-        proof_push(&output, ": ")
-        proof_push(&output, finding.message)
-        proof_push(&output, "\n")
+    if text_findings_work_reserved:
+        for finding in report.findings |output|:
+            proof_push(&output, "  ")
+            proof_push(&output, finding.kind)
+            proof_push(&output, " [")
+            proof_push(&output, finding.status)
+            proof_push(&output, "]")
+            proof_push(&output, " line ")
+            proof_push_number(&output, finding.line)
+            proof_push(&output, ": ")
+            proof_push(&output, finding.message)
+            proof_push(&output, "\n")
+    else:
+        proof_push(&output, "  finding details: omitted (output work limit)\n")
     proof_push(&output, "  semantic diagnostics: ")
     proof_push_number(&output, semantic_visible)
     proof_push(&output, "\n")
     proof_push(&output, "  certificate replay: ")
     if certificate_status_snapshot_complete and replay_gap_snapshot_available:
-        proof_push_number(&output, replayed_certificate_count)
+        proof_push_number(&output, text_certificate_snapshot.count)
         proof_push(&output, " replayed, ")
         proof_push_number(&output, replay_gap_count)
         proof_push(&output, " gaps\n")
@@ -579,4 +500,4 @@ def proof_main(argc: i64, argv: mutable void&) -> i64 can[Memory.Allocate, Memor
         output.extend(message)
         proof_push(&output, "\n")
     proof_write(output)
-    return 1 if not source_complete else 0
+    return 1 if not source_complete or not source_admissible or not source_goal_admissions_complete or not text_status_snapshot_complete else 0

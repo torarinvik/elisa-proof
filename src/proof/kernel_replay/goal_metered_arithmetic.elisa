@@ -1,0 +1,78 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Evaluate affine forms under the report-wide meter. Constants and recursive operands
+        # share one counter, including repeated visits through shared-child arithmetic DAGs.
+        def proof_kernel_replay_affine_expression_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work_used: mutable usize&) -> ProofKernelReplayAffine:
+            empty: ProofKernelReplayAffine = ProofKernelReplayAffine{known: false, base: "", offset: 0, negative: false}
+            return empty if not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or root >= nodes.count
+            return empty if not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth - 1, work_used)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return ProofKernelReplayAffine{known: true, base: "", offset: constant.value, negative: false} if constant.known
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return ProofKernelReplayAffine{known: true, base: node.name, offset: 0, negative: false} if node.kind == "ident" and node.name != ""
+            return proof_kernel_replay_affine_expression_with_work(nodes, node.left, depth + 1, work_used) if node.kind == "unary" and node.operator == "+"
+            if node.kind == "binary":
+                left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, node.left, depth + 1, work_used)
+                right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, node.right, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth - 1, work_used)
+                return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if left.known and left.base != "" and right_constant.known:
+                    if node.operator == "+":
+                        combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left.offset, right_constant.value)
+                        return ProofKernelReplayAffine{known: true, base: left.base, offset: combined.value, negative: left.negative} if combined.known
+                    if node.operator == "-":
+                        negated: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, right_constant.value)
+                        return empty if not negated.known
+                        combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left.offset, negated.value)
+                        return ProofKernelReplayAffine{known: true, base: left.base, offset: combined.value, negative: left.negative} if combined.known
+                left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, node.left, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth - 1, work_used)
+                return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                right_affine: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, node.right, depth + 1, work_used)
+                if left_constant.known and right_affine.known and right_affine.base != "" and node.operator == "+":
+                    combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(left_constant.value, right_affine.offset)
+                    return ProofKernelReplayAffine{known: true, base: right_affine.base, offset: combined.value, negative: right_affine.negative} if combined.known
+                if left_constant.known and right_affine.known and right_affine.base != "" and node.operator == "-":
+                    combined: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left_constant.value, right_affine.offset)
+                    return ProofKernelReplayAffine{known: true, base: right_affine.base, offset: combined.value, negative: not right_affine.negative} if combined.known
+            empty
+
+        def proof_kernel_replay_affine_safe_with_work(affine: ProofKernelReplayAffine, bounds: darray[ProofKernelReplayBound]&, work_used: mutable usize&) -> bool:
+            return false if not affine.known
+            return true if affine.base == ""
+            return true if not affine.negative and affine.offset == 0
+            bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, affine.base, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if affine.negative:
+                return false if not bound.has_lower or not bound.has_upper
+                negated_upper: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, bound.upper)
+                negated_lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, bound.lower)
+                return false if not negated_upper.known or not negated_lower.known
+                lower: ProofKernelReplayInt = proof_kernel_replay_add_safe(negated_upper.value, affine.offset)
+                upper: ProofKernelReplayInt = proof_kernel_replay_add_safe(negated_lower.value, affine.offset)
+                return lower.known and upper.known
+            if affine.offset > 0:
+                limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(proof_kernel_replay_i64_max(), affine.offset)
+                return limit.known and bound.has_upper and bound.upper <= limit.value
+            limit: ProofKernelReplayInt = proof_kernel_replay_sub_safe(proof_kernel_replay_i64_min(), affine.offset)
+            return limit.known and bound.has_lower and bound.lower >= limit.value
+
+        def proof_kernel_replay_affine_comparison_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, operator: sview, right_root: usize, facts: darray[usize], bounds: darray[ProofKernelReplayBound]&, work_used: mutable usize&) -> bool:
+            left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, left_root, 0, work_used)
+            right: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, right_root, 0, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not left.known or not right.known
+            return false if left.base == "" or right.base == ""
+            if left.base != right.base:
+                return false if not proof_kernel_replay_names_equal_with_work(nodes, children, left.base, right.base, facts, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if left.negative != right.negative
+            return false if not proof_kernel_replay_affine_safe_with_work(left, bounds, work_used) or not proof_kernel_replay_affine_safe_with_work(right, bounds, work_used)
+            difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left.offset, right.offset)
+            return false if not difference.known
+            return difference.value > 0 if operator == ">"
+            return difference.value >= 0 if operator == ">="
+            return difference.value < 0 if operator == "<"
+            return difference.value <= 0 if operator == "<="
+            return difference.value != 0 if operator == "!="
+            return difference.value == 0 if operator == "=="
+            return false

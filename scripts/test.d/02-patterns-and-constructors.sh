@@ -5,6 +5,12 @@ if [[ "$pattern_scalar_literals_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: scalar literal pattern facts\n' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/value_match_contract.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved" and report["verification_state"] == "proved"; assert report["summary"]["proven"] == report["summary"]["obligations"] and report["summary"]["failed"] == 0; assert report["findings"] == [] and report["trust"]["trusted_assumptions"] == []; assert report["replay"]["certificates"] == report["replay"]["replayed"] and report["replay"]["gaps"] == 0; assert any(node["kind"] == "if" for node in report["kernel"]["nodes"])'
+value_match_contract_probe_status=${PIPESTATUS[1]}
+if [[ "$value_match_contract_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: value match in a kernel postcondition\n' >&2
+    exit 1
+fi
 run_json_report "$ROOT_DIR/examples/pinned_pattern.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert report["summary"]["failed"] == 0; assert report["replay"]["gaps"] == 0; assert any(goal["proven"] and goal["rule"] == "goal" for goal in report["goals"])'
 pinned_pattern_probe_status=${PIPESTATUS[1]}
 if [[ "$pinned_pattern_probe_status" -ne 0 ]]; then

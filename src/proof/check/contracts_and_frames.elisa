@@ -11,19 +11,27 @@ extend ElisaProof:
         # `status.usize()`. The compiler reserves these primitive selectors, so unlike an
         # ordinary method call they are total value conversions, not user-dispatched effects.
         # Keep this list aligned with the frontend's numeric-cast selector set.
-        def proof_runtime_fact_is_stable(expression: Ast::Expr, functions: ProofFunctionTable&, operator_mask: usize) -> bool:
+        def proof_runtime_fact_is_stable(expression: Ast::Expr, source_expression: Ast::Expr, operator_mask: usize, report: mutable ProofReport&) -> bool:
             return false if proof_expr_has_old(expression)
             # Ownership transfer changes the place an assertion reads. The move checker
             # invalidates facts after evaluating it, so never publish the moved expression as
             # a reusable runtime boundary fact.
             return false if proof_expr_has_move(expression)
+            # The erased kernel treats aggregate equality structurally, while source aggregate
+            # construction may produce fresh runtime identity. Keep such terms out of facts
+            # that survive the runtime assertion or guard that evaluated them.
+            return false if proof_block_expression_has_fresh_value(expression, 0)
             # Runtime assertions become reusable proof facts. Do not publish a proposition whose
             # source operator may dispatch to an Elisa protocol implementation: the independent
             # kernel only knows primitive operator semantics, and a false source assertion could
             # otherwise manufacture an inconsistent fact before the ordinary goal guard runs.
             return false if proof_source_expression_has_overloaded_operator(expression, operator_mask, 0)
-            return true if not proof_expr_has_call(expression)
-            return proof_contract_calls_are_pure(expression, functions)
+            return false if proof_expr_has_call(source_expression) and proof_fact_expression_has_fresh_runtime_value(report, source_expression)
+            # Substitution can introduce calls from earlier local values. Validate those with
+            # the same source-bound resolver: it checks result shape, effect and verification
+            # status, module identity, and local callable shadowing without table fallback scans.
+            return false if proof_expr_has_call(expression) and proof_fact_expression_has_fresh_runtime_value(report, expression)
+            return true
 
         # Rewrite only exact equalities already published by a verified call summary. This is
         # intentionally separate from ordinary identifier substitution: call results are effect-
@@ -148,8 +156,8 @@ extend ElisaProof:
                 _:
                     return proof_expr_supported(expression)
 
-        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void:
-            for statement in body |functions, report, name|:
+        def proof_check_logical_contract_calls(body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, caller_names: darray[sview]&) -> void:
+            for statement in body |functions, report, name, annotations, caller_names|:
                 match statement:
                     Ast::Stmt.Contract(kind, expression, position):
                         logical: bool = kind == "requires" or proof_is_ensure_kind(kind) or kind == "invariant" or kind == "decreases" or kind == "decreases*"
@@ -160,26 +168,29 @@ extend ElisaProof:
                             elif not proof_logical_contract_supported(expression, annotations, functions):
                                 report.proof_obligation(false)
                                 proof_add_finding(report, "contract-expression-unsupported", position.line, name, "logical contract uses an unsupported expression form")
+                            elif proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0):
+                                report.proof_obligation(false)
+                                proof_add_finding(report, "contract-expression-unsupported", position.line, name, "logical contracts may use only operators with kernel-modeled primitive semantics")
                             else:
-                                if proof_expr_has_executable_call(expression) and not proof_contract_calls_are_pure(expression, functions):
+                                if proof_expr_has_executable_call(expression) and (proof_expression_has_opaque_callable_call(expression, functions, caller_names, 0) or proof_fact_expression_has_fresh_runtime_value(report, expression) or not proof_contract_calls_are_pure(expression, functions)):
                                     report.proof_obligation(false)
                                     proof_add_finding(report, "contract-call-unsupported", position.line, name, "logical contracts may use old(...) or calls to verified total pure functions")
                     Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_check_logical_contract_calls(then_body, functions, report, name, annotations)
-                        proof_check_logical_contract_calls(else_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(then_body, functions, report, name, annotations, caller_names)
+                        proof_check_logical_contract_calls(else_body, functions, report, name, annotations, caller_names)
                     Ast::Stmt.While(_, while_body, _):
-                        proof_check_logical_contract_calls(while_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(while_body, functions, report, name, annotations, caller_names)
                     Ast::Stmt.For(_, _, _, for_body, _):
-                        proof_check_logical_contract_calls(for_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(for_body, functions, report, name, annotations, caller_names)
                     Ast::Stmt.Match(_, arms, _):
                         for arm in arms |functions, report, name|:
-                            proof_check_logical_contract_calls(arm.body, functions, report, name, annotations)
+                            proof_check_logical_contract_calls(arm.body, functions, report, name, annotations, caller_names)
                     Ast::Stmt.Block(_, _, _, block_body, _):
-                        proof_check_logical_contract_calls(block_body, functions, report, name, annotations)
+                        proof_check_logical_contract_calls(block_body, functions, report, name, annotations, caller_names)
                     Ast::Stmt.Expr(_, _):
                         # A loop with a capture list reaches here wrapped in a captured block.
                         captured: (known: bool, body: darray[Ast::Stmt], captures: darray[sview], position: Ast::Pos) = proof_captured_block_statement(statement)
-                        proof_check_logical_contract_calls(captured.body, functions, report, name, annotations) if captured.known
+                        proof_check_logical_contract_calls(captured.body, functions, report, name, annotations, caller_names) if captured.known
                     _:
                         pass
 
@@ -231,14 +242,22 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_signature_contracts(file: Ast::File&, line: u32, kind: sview) -> darray[Ast::Expr]:
-            result: mutable darray[Ast::Expr] = []
-            index: mutable usize = 0
-            while index < file.signature_contract_lines.count |index, file, line, kind, result|:
-                if file.signature_contract_lines[index] == line and file.signature_contract_kinds[index] == kind:
-                    result.push(file.signature_contract_exprs[index])
-                index <- index + 1
-            return result
+        # Function and lemma table construction visits signature rows once per declaration.
+        # Keep the paired lookup in one pass and charge every row inspected to the shared
+        # source-analysis budget; malformed parallel arrays fail closed.
+        def proof_signature_contracts_for_line_with_work(file: Ast::File&, line: u32, source_work: mutable usize&) -> (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]):
+            requirements: mutable darray[Ast::Expr] = []
+            postconditions: mutable darray[Ast::Expr] = []
+            row_count: usize = file.signature_contract_lines.count
+            return (false, requirements, postconditions) if row_count != file.signature_contract_kinds.count or row_count != file.signature_contract_exprs.count
+            for index in 0..<row_count |index, file, line, requirements, postconditions, source_work|:
+                return (false, requirements, postconditions) if not proof_report_source_work_charge(1, source_work)
+                kind: sview = file.signature_contract_kinds[index]
+                return (false, requirements, postconditions) if not proof_report_source_work_charge(sview_len(kind), source_work)
+                continue if file.signature_contract_lines[index] != line
+                requirements.push(file.signature_contract_exprs[index]) if kind == "requires"
+                postconditions.push(file.signature_contract_exprs[index]) if kind == "ensure"
+            return (true, requirements, postconditions)
 
         # The mutable name stack is append-only while checking one lexical path. Therefore the
         # last binding for a name tells us whether it is still one of the original parameters;

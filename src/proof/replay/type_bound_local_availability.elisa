@@ -197,23 +197,31 @@ extend ElisaProof:
 
         def proof_replay_type_bound_local_scalar_consumer_available(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&) -> bool:
             work: mutable usize = 0
-            return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, body, &work)
+            empty_parameters: darray[Ast::ParamDecl] = []
+            return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, empty_parameters, body, false, &work)
 
-        def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_local_scalar_consumer_available_with_work(report: ProofReport&, trace: ProofFactTrace, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, allow_implicit_result_substitution: bool, work: mutable usize&) -> bool:
             return true if report.trace_consumer_certificate_index == 0
             return false if report.trace_consumer_certificate_index > report.certificates.count or report.trace_owner_line == 0
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace.name, work)
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             return false if not proof_replay_summary_expr_charge_with_work(certificate.goal, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(body, trace.expression, true, certificate.goal, true, work)
             source_matches: mutable usize = 0
+            implicit_result_consumer: mutable bool = false
             proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, work, 0)
+            if source_matches == 0 and allow_implicit_result_substitution:
+                return false if not proof_replay_type_bound_body_charge_with_work(body, work)
+                if proof_replay_type_bound_implicit_result_consumer_matches(report, trace, certificate, parameters, body, work):
+                    source_matches <- 1
+                    implicit_result_consumer <- true
             return false if source_matches != 1
             return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
             work <- work + report.goal_attempts.count
             attempt_matches: mutable usize = 0
-            for attempt in report.goal_attempts |report, certificate, attempt_matches|:
+            for attempt in report.goal_attempts |report, certificate, attempt_matches, work|:
                 continue if not attempt.has_certificate or attempt.certificate_index != report.trace_consumer_certificate_index - 1
                 return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, report.trace_consumer_certificate_index - 1, work)
                 return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
@@ -222,7 +230,7 @@ extend ElisaProof:
             return false if not proof_replay_type_bound_body_charge_with_work(body, work)
             declarations: mutable usize = 0
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
-            for statement in body |trace, declarations, declaration_extent|:
+            for statement in body |trace, declarations, declaration_extent, work|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, local_type, initializer, position):
                         continue if local_name == "" or position.line != trace.line
@@ -235,10 +243,226 @@ extend ElisaProof:
                     _:
                         pass
             return false if declarations != 1
+            # The contract appears before the body that computes `result`; the exact tail
+            # substitution above supplies the source-order link for this narrow case.
+            return true if implicit_result_consumer
             goal_position: Ast::Pos = Ast::expr_pos(certificate.goal)
             if declaration_extent.offsets_complete and goal_position.offset != 0:
                 return goal_position.offset > declaration_extent.end_offset
             return goal_position.line > declaration_extent.end_line
+
+        # A postcondition over `result` can consume a local scalar bound through the exact
+        # function tail expression. Reconstruct only the straight-line implicit-return case:
+        # the source ensure, after replay-side result substitution, must be the certificate goal.
+        # Branches, explicit returns, result shadowing, unsupported expressions, and ambiguous
+        # ensures remain outside this source witness.
+        def proof_replay_type_bound_implicit_result_consumer_matches(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
+            return false if body.count < 2 or body.count > 4096 or trace.kind != "type-bound"
+            return false if not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace.name, work)
+            return false if certificate.rule != "goal" or certificate.name != trace.name or certificate.line != report.trace_owner_line
+            for parameter in parameters |parameter, work|:
+                return false if not proof_replay_type_bound_local_text_compare_charge(parameter.name, "result", work)
+                return false if parameter.name == "result"
+
+            returned: mutable Ast::Expr = Ast::Expr.Absent
+            return_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            match body[body.count - 1]:
+                Ast::Stmt.Expr(expression, position):
+                    returned <- expression
+                    return_position <- position
+                _:
+                    return false
+            return false if return_position.line == 0 or not proof_replay_source_position_equal(Ast::expr_pos(returned), return_position)
+            returned_search_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(returned, &returned_search_cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+            if returned_search_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 5:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            # Pay for the sizing walk and for the four recursive tail checks before running
+            # them, including on paths that find no matching local.
+            work <- work + returned_search_cost * 5
+            return false if proof_source_expression_has_overloaded_operator(returned, report.source_primitive_operator_mask, 0)
+            return false if proof_expr_has_call(returned) or proof_expr_has_move(returned)
+            return false if proof_replay_type_bound_expression_has_runtime_index(returned, 0)
+
+            # `proof_expr_mentions_name` can scan an entire expression for each local. Measure
+            # both expressions once, then charge a conservative per-candidate bound before the
+            # repeated scans below.
+            trace_search_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(trace.expression, &trace_search_cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+            return false if not proof_replay_type_bound_local_work_charge(trace_search_cost, work)
+
+            local_matches: mutable usize = 0
+            ensure_matches: mutable usize = 0
+            candidate_seen: mutable bool = false
+            candidate_name: mutable sview = ""
+            for index in 0..<body.count - 1 |index, body, trace, returned, report, certificate, trace_search_cost, returned_search_cost, local_matches, ensure_matches, candidate_seen, candidate_name, work|:
+                match body[index]:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        return false if kind != "requires" and kind != "ensure" and kind != "ensures"
+                        continue if kind == "requires"
+                        result_mention: mutable (complete: bool, mentions: bool) = proof_replay_type_bound_local_expr_mentions_name_with_work(expression, "result", work)
+                        return false if not result_mention.complete
+                        continue if not result_mention.mentions
+                        return false if not proof_replay_type_bound_result_substitution_reserve(expression, returned, work)
+                        return false if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
+                        return false if proof_expr_has_call(expression) or proof_expr_has_move(expression)
+                        return false if proof_replay_type_bound_expression_has_runtime_index(expression, 0)
+                        expected: Ast::Expr = proof_replay_substitute(expression, "result", returned)
+                        continue if proof_replay_expr_is_invalid(expected)
+                        residual_result: mutable (complete: bool, mentions: bool) = proof_replay_type_bound_local_expr_mentions_name_with_work(expected, "result", work)
+                        return false if not residual_result.complete
+                        continue if residual_result.mentions
+                        same_goal: bool = proof_replay_summary_expr_equal_with_work(expected, certificate.goal, work)
+                        if same_goal and proof_replay_source_position_equal(Ast::expr_pos(expected), Ast::expr_pos(certificate.goal)):
+                            ensure_matches <- ensure_matches + 1
+                    Ast::Stmt.VarDecl(local_name, _, initializer, position):
+                        return false if local_name == "result"
+                        if candidate_seen:
+                            return false if not proof_replay_type_bound_local_text_compare_charge(local_name, candidate_name, work)
+                            return false if local_name == candidate_name or not proof_replay_type_bound_local_initializer_effect_free(initializer, report.source_primitive_operator_mask, work)
+                            continue
+                        if position.line == trace.line and local_name != "":
+                            return false if not proof_replay_type_bound_local_mention_pair_charge(local_name, trace_search_cost, returned_search_cost, work)
+                            if proof_expr_mentions_name(trace.expression, local_name) and proof_expr_mentions_name(returned, local_name):
+                                local_matches <- local_matches + 1
+                                candidate_seen <- true
+                                candidate_name <- local_name
+                    _:
+                        return false
+            return local_matches == 1 and candidate_seen and ensure_matches == 1
+
+        # Later straight-line locals are harmless only when their initializers cannot call,
+        # move, perform a runtime index read, or dispatch to an overloaded operator. Reserve
+        # every visitor before running it;
+        # this keeps `let other = ...; result + digit` available without allowing a hidden write
+        # to invalidate the witnessed scalar range.
+        def proof_replay_type_bound_local_initializer_effect_free(initializer: Ast::Expr, operator_mask: usize, work: mutable usize&) -> bool:
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(initializer, &cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT):
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            if cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 5:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + cost * 5
+            return not proof_source_expression_has_overloaded_operator(initializer, operator_mask, 0) and not proof_expr_has_call(initializer) and not proof_expr_has_move(initializer) and not proof_replay_type_bound_expression_has_runtime_index(initializer, 0)
+
+        # Index reads can dispatch to an effectful user `__index__` implementation without
+        # appearing as a Call AST. Runtime index reads are outside this witness; type casts are
+        # compile-time indexing syntax and contain no runtime lookup.
+        def proof_replay_type_bound_expression_has_runtime_index(expression: Ast::Expr, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_TYPE_BOUND_AVAILABILITY_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Invalid:
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Index(object, _, _) | Ast::Expr.IndexN(object, _, _):
+                    return true if not proof_is_type_cast_index(object)
+                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
+                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return proof_replay_type_bound_expression_has_runtime_index(left, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(right, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
+                    return true if proof_replay_type_bound_expression_has_runtime_index(callee, depth + 1)
+                    for argument in arguments:
+                        return true if proof_replay_type_bound_expression_has_runtime_index(argument, depth + 1)
+                    return false
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_replay_type_bound_expression_has_runtime_index(object, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(low, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(high, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if proof_replay_type_bound_expression_has_runtime_index(element, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if proof_replay_type_bound_expression_has_runtime_index(entry.key, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(entry.value, depth + 1)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_replay_type_bound_expression_has_runtime_index(type_expression, depth + 1)
+                    for field in fields:
+                        return true if proof_replay_type_bound_expression_has_runtime_index(field.value, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_replay_type_bound_expression_has_runtime_index(base, depth + 1)
+                    for field in fields:
+                        return true if proof_replay_type_bound_expression_has_runtime_index(field.value, depth + 1)
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_replay_type_bound_expression_has_runtime_index(iterable, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(condition, depth + 1) or proof_replay_type_bound_expression_has_runtime_index(body, depth + 1)
+                # These scoped/recovery forms are outside the implicit-return witness tier.
+                Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return true
+                _:
+                    return true
+
+        # The name predicate compares each identifier with the candidate binding. Its AST
+        # traversal cost is bounded by the expression cost, with one extra factor for the
+        # target-name comparison at every visited node.
+        def proof_replay_type_bound_local_mention_pair_charge(local_name: sview, trace_cost: usize, returned_cost: usize, work: mutable usize&) -> bool:
+            return proof_replay_type_bound_local_work_exhaust(work) if work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return proof_replay_type_bound_local_work_exhaust(work) if returned_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            return proof_replay_type_bound_local_work_exhaust(work) if trace_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - returned_cost
+            target_length: usize = sview_len(local_name)
+            return proof_replay_type_bound_local_work_exhaust(work) if target_length >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            remaining: usize = PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            pair_cost: usize = trace_cost + returned_cost
+            multiplier: usize = target_length + 1
+            return proof_replay_type_bound_local_work_exhaust(work) if multiplier == 0 or pair_cost > remaining / multiplier
+            work <- work + pair_cost * multiplier
+            return true
+
+        # Meter both the size walk and `proof_expr_mentions_name`; the target-name comparison
+        # can inspect up to target_length bytes at every visited identifier.
+        def proof_replay_type_bound_local_expr_mentions_name_with_work(expression: Ast::Expr, target: sview, work: mutable usize&) -> (complete: bool, mentions: bool):
+            return (false, false) if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT):
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return (false, false)
+            target_length: usize = sview_len(target)
+            return (false, false) if target_length > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - 2
+            multiplier: usize = target_length + 2
+            remaining: usize = PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            if cost > remaining / multiplier:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return (false, false)
+            work <- work + cost * multiplier
+            return (true, proof_expr_mentions_name(expression, target))
+
+        # Substitution can duplicate the return expression at every `result` occurrence.
+        # Reserve a conservative structural upper bound before the replay-side AST copier runs.
+        def proof_replay_type_bound_result_substitution_reserve(ensure: Ast::Expr, returned: Ast::Expr, work: mutable usize&) -> bool:
+            ensure_cost: mutable usize = 0
+            returned_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(ensure, &ensure_cost, work, 0) or not proof_replay_summary_expr_cost(returned, &returned_cost, work, 0):
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            if work > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT or ensure_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + ensure_cost
+            if returned_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + returned_cost
+            # The caller performs recursive overloaded-operator, call, move, and index scans on the ensure.
+            if ensure_cost > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + ensure_cost
+            if ensure_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / 3:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + ensure_cost * 3
+            copies_per_result: usize = returned_cost + 1
+            if copies_per_result == 0 or ensure_cost > (PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work) / copies_per_result:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false
+            work <- work + ensure_cost * copies_per_result
+            return true
 
         # Local arrays can supply a bound fact at a later index use, so locate the exact
         # declaration by name and source position instead of assuming it shares the fact line.
@@ -255,6 +479,7 @@ extend ElisaProof:
             consumer_goal: mutable Ast::Expr = Ast::Expr.Invalid
             if has_consumer:
                 certificate: ProofGoalCertificate = report.certificates[certificate_index]
+                return false if not proof_replay_type_bound_local_text_compare_charge(certificate.name, trace_name, work)
                 return false if certificate.name != trace_name or certificate.line != report.trace_owner_line
                 return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
                 consumer_goal <- certificate.goal
@@ -266,7 +491,7 @@ extend ElisaProof:
                 return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
                 work <- work + report.goal_attempts.count
                 attempt_matches: mutable usize = 0
-                for attempt in report.goal_attempts |report, certificate, certificate_index, attempt_matches|:
+                for attempt in report.goal_attempts |report, certificate, certificate_index, attempt_matches, work|:
                     continue if not attempt.has_certificate or attempt.certificate_index != certificate_index
                     return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, certificate_index, work)
                     return false if attempt.source_phase != certificate.source_phase
@@ -280,9 +505,10 @@ extend ElisaProof:
             return false if not proof_replay_source_single_declaration(report.source_declarations, body, local_name)
             declarations: mutable usize = 0
             declaration_extent: mutable ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_extent_empty()
-            for statement in body |local_name, local_position, declarations, declaration_extent|:
+            for statement in body |local_name, local_position, declarations, declaration_extent, work|:
                 match statement:
                     Ast::Stmt.VarDecl(name, local_type, initializer, position):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(name, local_name, work)
                         continue if name != local_name or not proof_replay_source_position_equal(position, local_position)
                         declarations <- declarations + 1
                         declaration_extent <- proof_replay_type_bound_extent_from_position(position)

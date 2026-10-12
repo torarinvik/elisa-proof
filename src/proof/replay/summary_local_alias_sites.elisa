@@ -70,13 +70,15 @@ extend ElisaProof:
         # One source-call slot lookup scans declaration headers and may inspect the selected
         # parameter type. Keep a byte-aware upper bound so local-write visitors can reserve the
         # declaration work for every call argument they may encounter in a body.
-        def proof_replay_local_alias_call_slot_declaration_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, work: usize, depth: usize) -> bool:
+        def proof_replay_local_alias_call_slot_declaration_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, comparison_slots: mutable usize&, work: usize, depth: usize) -> bool:
             return false if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
             cost <- cost + declarations.count
-            for declaration in declarations |cost, work, depth|:
+            for declaration in declarations |cost, comparison_slots, work, depth|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        return false if comparison_slots >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - comparison_slots - 1
+                        comparison_slots <- comparison_slots + 1 + parameters.count
                         return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
                         return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
                         cost <- cost + parameters.count
@@ -84,9 +86,14 @@ extend ElisaProof:
                             return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(parameter.name))
                             return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, work, depth + 1)
                     Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if comparison_slots >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        comparison_slots <- comparison_slots + 1
                         return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, cost, work, depth + 1)
+                    Ast::Decl.Module(name, nested, _):
+                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, cost, comparison_slots, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, cost, comparison_slots, work, depth + 1)
                     _:
                         pass
             return true
@@ -108,7 +115,19 @@ extend ElisaProof:
                         for arm in arms |arm, maximum, depth|:
                             arm_depth: usize = proof_replay_local_alias_body_touch_depth(arm.body, depth + 1)
                             maximum <- arm_depth if arm_depth > maximum
-                    Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(nested, _, _, _), _) | Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
+                    Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(nested, yielded, _, _), _):
+                        nested_depth: usize = proof_replay_local_alias_body_touch_depth(nested, depth + 1)
+                        maximum <- nested_depth if nested_depth > maximum
+                        # A declaration's block result is revisited as a synthetic statement.
+                        # If that result is another block, alias-site traversal enters its body
+                        # at one more lexical level; reserve that directly yielded continuation.
+                        match yielded:
+                            Ast::Expr.Block(yielded_body, _, _, _):
+                                yielded_depth: usize = proof_replay_local_alias_body_touch_depth(yielded_body, depth + 2)
+                                maximum <- yielded_depth if yielded_depth > maximum
+                            _:
+                                pass
+                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _):
                         nested_depth: usize = proof_replay_local_alias_body_touch_depth(nested, depth + 1)
                         maximum <- nested_depth if nested_depth > maximum
                     _:
@@ -127,25 +146,32 @@ extend ElisaProof:
             work <- work + body_cost
             return true if body_cost == 0
             candidate_count: mutable usize = 0
+            query_bytes: mutable usize = 0
             root_walk_cost: mutable usize = 0
             root_extra_cost: mutable usize = 0
-            return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_source_touch_candidate_count_body_with_root_work(body, local_name, true, 0, &candidate_count, &root_walk_cost, &root_extra_cost, work)
+            return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_source_touch_candidate_count_body_with_root_work(body, local_name, true, 0, &candidate_count, &query_bytes, &root_walk_cost, &root_extra_cost, work)
+            return proof_replay_mutable_local_work_exhaust(work) if candidate_count > body_cost
             declaration_cost: mutable usize = 0
+            lookup_comparison_slots: mutable usize = 0
             if candidate_count > 0:
-                return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_local_alias_call_slot_declaration_cost(report.source_declarations, &declaration_cost, work, 0)
+                return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_local_alias_call_slot_declaration_cost(report.source_declarations, &declaration_cost, &lookup_comparison_slots, work, 0)
                 return proof_replay_mutable_local_work_exhaust(work) if declaration_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                 work <- work + declaration_cost
-            # `body_touch_depth` is a separate source-tree traversal from the AST sizing walk.
+            # Site/control matching and the nested body-bound query are separate from the
+            # expression/statement touch wrappers, so charge one bounded body pass for them.
             return proof_replay_mutable_local_work_exhaust(work) if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + body_cost
-            touch_depth: usize = proof_replay_local_alias_body_touch_depth(body, 0) + 1
-            touch_passes: usize = touch_depth * 4 + 4
+            # The depth census is a separate unmetered source-tree walk from the AST sizing pass.
+            return proof_replay_mutable_local_work_exhaust(work) if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + body_cost
+            # The touch wrappers charge AST nodes for each actual visitor pass. Reserve only
+            # their repeated auxiliary place-root, name, and declaration scans below.
+            touch_depth: usize = proof_replay_local_alias_body_touch_depth(body, 0)
+            # A flat body visits each candidate through one alias or liveness wrapper. Each
+            # nested control level can add at most four whole-subtree/continuation visits.
+            touch_passes: usize = touch_depth * 4 + 1
             return proof_replay_mutable_local_work_exhaust(work) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            return proof_replay_mutable_local_work_exhaust(work) if touch_passes == 0 or body_cost > remaining / touch_passes
-            body_touch_work: usize = body_cost * touch_passes
-            remaining <- remaining - body_touch_work
-            work <- work + body_touch_work
+            remaining: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             # Each visitor pass can revisit nested place-root prefixes (for example, each
             # unary lend in a chain scans the remaining tail). Reserve the measured root walks
             # for every alias touch pass, including the name comparison at each probe.
@@ -164,8 +190,19 @@ extend ElisaProof:
                 work <- work + repeated_root_extra_work
             if candidate_count > 0:
                 declaration_cost <- 1 if declaration_cost == 0
+                if lookup_comparison_slots > 0:
+                    return proof_replay_mutable_local_work_exhaust(work) if touch_passes > remaining / lookup_comparison_slots
+                    query_comparison_scale: usize = lookup_comparison_slots * touch_passes
+                    return proof_replay_mutable_local_work_exhaust(work) if query_bytes > remaining / query_comparison_scale
+                    # The candidate census counts the callee name once per rooted argument,
+                    # since each argument lookup repeats that comparison against the declarations.
+                    query_comparison_work: usize = query_bytes * query_comparison_scale
+                    remaining <- remaining - query_comparison_work
+                    work <- work + query_comparison_work
                 return proof_replay_mutable_local_work_exhaust(work) if touch_passes > remaining / candidate_count or declaration_cost > remaining / candidate_count / touch_passes
-                work <- work + candidate_count * touch_passes * declaration_cost
+                candidate_lookup_work: usize = candidate_count * touch_passes * declaration_cost
+                remaining <- remaining - candidate_lookup_work
+                work <- work + candidate_lookup_work
             return true
 
         def proof_replay_local_alias_expr_touches_with_work(report: ProofReport&, expression: Ast::Expr, name: sview, writes: bool, source_work: mutable usize&) -> bool:

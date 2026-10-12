@@ -97,39 +97,56 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_type_audit_collect_declarations(declarations: darray[Ast::Decl]&, index: mutable ProofTypeAuditIndex&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_type_audit_charge_work(amount: usize, source_work: mutable usize&) -> bool:
+            if not proof_replay_source_work_charge(amount, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            true
+
+        def proof_type_audit_collect_declarations(declarations: darray[Ast::Decl]&, index: mutable ProofTypeAuditIndex&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |index, depth|:
+            for declaration in declarations |index, source_work, depth|:
+                return false if not proof_type_audit_charge_work(1, source_work)
                 match declaration:
                     Ast::Decl.Alias(name, _, _):
                         return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        return false if not proof_type_audit_charge_work(sview_len(name), source_work)
                         index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
                     Ast::Decl.Struct(name, _, _, _, _, _, _):
                         return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+                        return false if not proof_type_audit_charge_work(sview_len(name), source_work)
                         index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
                     Ast::Decl.Module(_, body, _):
-                        return false if not proof_type_audit_collect_declarations(&body, index, depth + 1)
+                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_type_audit_collect_declarations(&body, index, depth + 1)
+                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1)
                     _:
                         pass
             return true
 
-        def proof_type_audit_index(declarations: darray[Ast::Decl]&) -> ProofTypeAuditIndex can[Memory.Allocate, Abort.Panic]:
+        def proof_type_audit_index(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> ProofTypeAuditIndex can[Memory.Allocate, Abort.Panic]:
             index: mutable ProofTypeAuditIndex = ProofTypeAuditIndex{entries: [], bucket_heads: [], next_indices: [], complete: false}
-            return index if not proof_type_audit_collect_declarations(declarations, &index, 0)
+            return index if not proof_type_audit_collect_declarations(declarations, &index, source_work, 0)
             count: usize = index.entries.count
             capacity: usize = proof_index_capacity(count)
             if capacity == 0:
                 index.complete <- true
                 return index
+            return index if not proof_type_audit_charge_work(capacity, source_work)
+            return index if not proof_type_audit_charge_work(count, source_work)
             index.bucket_heads.resize(capacity)
+            bucket_sizes: mutable darray[usize] = []
+            bucket_sizes.resize(capacity)
             index.next_indices.resize(count)
-            for slot in 0..<capacity |slot, count|:
+            for slot in 0..<capacity |slot, count, bucket_sizes|:
                 index.bucket_heads[slot] <- count
-            for entry in 0..<count |entry, index, capacity, count|:
+                bucket_sizes[slot] <- 0
+            for entry in 0..<count |entry, index, capacity, count, source_work|:
+                return index if not proof_type_audit_charge_work(1, source_work)
                 hash: u32 = index.entries[entry].name_hash
                 slot: usize = (hash.i64() % capacity.i64()).usize()
+                bucket_sizes[slot] <- bucket_sizes[slot] + 1
+                return index if bucket_sizes[slot] > PROOF_INDEX_MAX_CHAIN
                 index.next_indices[entry] <- index.bucket_heads[slot]
                 index.bucket_heads[slot] <- entry
             index.complete <- true
@@ -201,7 +218,7 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void can[Global.Read, Global.Write]:
+        def proof_check_function(file: Ast::File&, function_name: sview, parameters: darray[Ast::ParamDecl]&, return_type: Ast::Expr?, body: darray[Ast::Stmt]&, position: Ast::Pos, is_lemma: bool, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void can[Global.Read, Global.Write]:
             # The logical kernel currently models ordinary equality and integer arithmetic,
             # not IEEE NaN or rounding. Erasing a floating parameter to an untyped identifier
             # would make even x == x an unsound theorem. Stop before publishing obligations
@@ -237,16 +254,21 @@ extend ElisaProof:
                         proof_float_mode <- true
                 parameter_slot <- parameter_slot + 1
             preconditions: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
-            signature_requires: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "requires")
+            signature_contracts: (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]) = proof_signature_contracts_for_line_with_work(file, position.line, functions.module_resolution_work_used)
+            functions.module_resolution_work_exhausted <- true if not signature_contracts.complete
+            signature_requires: darray[Ast::Expr] = signature_contracts.preconditions
             preconditions.extend(signature_requires)
             postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
             body_postcondition_count: usize = postconditions.count
-            signature_ensures: darray[Ast::Expr] = proof_signature_contracts(file, position.line, "ensure")
+            signature_ensures: darray[Ast::Expr] = signature_contracts.postconditions
             postconditions.extend(signature_ensures)
             for index in 0..<postconditions.count |index, postconditions, file, functions, function_index|:
                 postconditions[index] <- proof_qualify_function_enum_contract(file, functions, function_index, postconditions[index])
             postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls)) if postconditions.count == 0
-            proof_check_logical_contract_calls(body, functions, report, function_name, file.enum_annotations)
+            contract_caller_names: mutable darray[sview] = []
+            for parameter in parameters |contract_caller_names|:
+                contract_caller_names.push(parameter.name)
+            proof_check_logical_contract_calls(body, functions, report, function_name, file.enum_annotations, contract_caller_names)
             proof_check_contract_placement(body, PROOF_CONTRACT_PLACE_FUNCTION, report, function_name)
             for signature_requirement in signature_requires |report, function_name, position|:
                 if proof_expr_has_move(signature_requirement):
@@ -255,7 +277,10 @@ extend ElisaProof:
                 elif not proof_logical_contract_supported(signature_requirement, file.enum_annotations, functions):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
-                elif proof_expr_has_executable_call(signature_requirement) and not proof_contract_calls_are_pure(signature_requirement, functions):
+                elif proof_source_expression_has_overloaded_operator(signature_requirement, report.source_primitive_operator_mask, 0):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contracts may use only operators with kernel-modeled primitive semantics")
+                elif proof_expr_has_executable_call(signature_requirement) and (proof_expression_has_opaque_callable_call(signature_requirement, functions, contract_caller_names, 0) or proof_fact_expression_has_fresh_runtime_value(report, signature_requirement) or not proof_contract_calls_are_pure(signature_requirement, functions)):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-call-unsupported", position.line, function_name, "logical contracts may use old(...) or calls to verified total pure functions")
             for signature_ensure in signature_ensures |report, function_name, position|:
@@ -265,7 +290,10 @@ extend ElisaProof:
                 elif not proof_logical_contract_supported(signature_ensure, file.enum_annotations, functions):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contract uses an unsupported expression form")
-                elif proof_expr_has_executable_call(signature_ensure) and not proof_contract_calls_are_pure(signature_ensure, functions):
+                elif proof_source_expression_has_overloaded_operator(signature_ensure, report.source_primitive_operator_mask, 0):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "logical contracts may use only operators with kernel-modeled primitive semantics")
+                elif proof_expr_has_executable_call(signature_ensure) and (proof_expression_has_opaque_callable_call(signature_ensure, functions, contract_caller_names, 0) or proof_fact_expression_has_fresh_runtime_value(report, signature_ensure) or not proof_contract_calls_are_pure(signature_ensure, functions)):
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-call-unsupported", position.line, function_name, "logical contracts may use old(...) or calls to verified total pure functions")
             names: mutable darray[sview] = []
@@ -318,9 +346,15 @@ extend ElisaProof:
             report.budgets.frame_call_reported <- false
             report.budgets.resource_steps <- 0
             report.budgets.resource_reported <- false
+            report.budgets.resource_pattern_work <- 0
+            report.budgets.resource_pattern_reported <- false
             report.budgets.return_steps <- 0
             report.budgets.return_step_budget <- proof_return_analysis_step_budget(function_name, body.count)
             report.budgets.return_reported <- false
+            report.budgets.return_source_work <- 0
+            report.budgets.return_source_reported <- false
+            report.budgets.assert_by_source_work <- 0
+            report.budgets.assert_by_source_reported <- false
             # Share bounded headroom with medium functions that reuse a small set of call summaries.
             call_target_count: usize = proof_return_analysis_call_target_count(functions, function_index)
             report.budgets.return_fact_state_budget <- proof_return_analysis_fact_state_budget(
@@ -390,15 +424,21 @@ extend ElisaProof:
             proof_resolve_global_constants_in_contracts(&preconditions, &postconditions, names, values, functions, function_index)
             # Counted before the preconditions, which are body facts and not constants.
             constant_facts: usize = facts.count - facts_before_constants if facts.count >= facts_before_constants else 0
-            for requirement in preconditions |facts, names, values, report, function_name, position, functions|:
-                proof_add_precondition_fact(facts, report, requirement, position.line, function_name, functions)
+            for requirement in preconditions |facts, names, values, report, function_name, position, functions, contract_caller_names|:
+                proof_add_precondition_fact(facts, report, requirement, position.line, function_name, functions, contract_caller_names)
             # Resources are checked after entry facts so symbolic-index separation can be justified;
             # the state clears across mutations and calls, and replay checks each certificate.
             proof_seed_entry_counts(parameters, postconditions, &old_values, &facts, report, function_name, position)
             (proof_check_resource_safety(file, parameters, body, facts, report, function_name, position.line, functions) can Global{Read,Write})
             proof_check_effect_containment(functions, report, function_name, position.line)
-            lemma_steps: bool = proof_lemma_name_declared(lemmas, function_name)
-            proof_check_lemma_purity(body, lemmas, report, function_name) if lemma_steps
+            lemma_steps: bool = is_lemma
+            if lemma_steps:
+                report.budgets.lemma_purity_source_work <- 0
+                report.budgets.lemma_purity_source_reported <- false
+                lemma_purity_work: mutable ProofBlockPurityWork = ProofBlockPurityWork{}
+                proof_check_lemma_purity(body, functions, lemmas, report, function_name, lemma_purity_work, 0)
+                report.budgets.lemma_purity_source_work <- lemma_purity_work.used
+                report.budgets.lemma_purity_source_reported <- lemma_purity_work.reported
             empty_loop_invariants: mutable darray[Ast::Expr] = []
             # Each module constant buys four facts of headroom (its fact plus the comparisons it
             # feeds), up to the entry cap; the whole cap for every such body was ~3x slower.

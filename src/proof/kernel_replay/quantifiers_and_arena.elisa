@@ -3,14 +3,59 @@ const PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER: sview = "__elisa_kernel_quant
 
 extend ElisaProofKernelReplay:
     private:
+        const PROOF_KERNEL_REPLAY_REPLACE_EXACT_WORK_LIMIT: usize = 65536
+
+        def proof_kernel_replay_quantifier_charge_work(work_used: mutable usize&, amount: usize) -> bool:
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if amount > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            work_used <- work_used + amount
+            return true
+
         def proof_kernel_quantifier_small_signed_bound(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> bool:
             return false if root >= nodes.count or nodes[root].kind != "unary" or nodes[root].operator != "-"
             operand: usize = nodes[root].left
             return false if operand >= nodes.count or nodes[operand].kind != "int" or proof_kernel_replay_int_tagged(nodes[operand])
             return nodes[operand].value >= 0 and nodes[operand].value <= 127
 
+        def proof_kernel_quantifier_small_signed_bound_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            proof_kernel_quantifier_small_signed_bound(nodes, root)
+
+        def proof_kernel_replay_quantifier_constant_int_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            if not constant.known and work_used >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return empty
+            return constant
+
+        def proof_kernel_replay_quantifier_safe_comparison_constant_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            if root < nodes.count and nodes[root].kind == "int" and nodes[root].value >= 0:
+                return empty if not proof_kernel_replay_quantifier_charge_work(work_used, 1)
+                return ProofKernelReplayInt{known: true, value: nodes[root].value}
+            proof_kernel_replay_small_constant_with_goal_work(nodes, root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT, work_used)
+
+        def proof_kernel_replay_quantifier_exact_int_from_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, constant: ProofKernelReplayInt, bounds: darray[ProofKernelReplayBound]&, work_used: mutable usize&) -> ProofKernelReplayInt:
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            return constant if constant.known
+            return empty if not proof_kernel_replay_goal_search_charge(work_used)
+            return empty if root >= nodes.count or not proof_kernel_replay_valid(nodes, root) or nodes[root].kind != "ident" or nodes[root].name == ""
+            bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, nodes[root].name, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return empty if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return ProofKernelReplayInt{known: true, value: bound.lower} if bound.has_lower and bound.has_upper and bound.lower == bound.upper
+            return empty
+
         def proof_kernel_replay_quantifier_marker_available(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, marker: sview) -> bool:
-            for node in nodes:
+            work_used: mutable usize = 0
+            proof_kernel_replay_quantifier_marker_available_with_work(nodes, marker, &work_used)
+
+        def proof_kernel_replay_quantifier_marker_available_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, marker: sview, work_used: mutable usize&) -> bool:
+            for node in nodes |node, nodes, marker, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 return false if node.name == marker or node.secondary_name == marker
             return true
 
@@ -18,35 +63,75 @@ extend ElisaProofKernelReplay:
         # both markers with their range expressions. This implements simultaneous substitution:
         # an occurrence inserted for one binder cannot be rewritten as the other binder.
         def proof_kernel_replay_substitute_dictionary_pair(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, body: usize, key_binder: sview, value_binder: sview, key_value: usize, value_value: usize, key_marker: usize, value_marker: usize) -> usize:
+            work_used: mutable usize = 0
+            proof_kernel_replay_substitute_dictionary_pair_with_work_limit(nodes, children, body, key_binder, value_binder, key_value, value_value, key_marker, value_marker, &work_used, PROOF_KERNEL_REPLAY_RESOURCE_WORK_LIMIT)
+
+        def proof_kernel_replay_substitute_dictionary_pair_with_work_limit(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, body: usize, key_binder: sview, value_binder: sview, key_value: usize, value_value: usize, key_marker: usize, value_marker: usize, work_used: mutable usize&, work_limit: usize) -> usize:
             return ElisaProofKernelCore::add_node(nodes, "unsupported", "dictionary-binder-alias", 0, 0, 0, 0, 0, 0, "", "") if key_binder == value_binder
-            key_marked: usize = proof_kernel_replay_substitute(nodes, children, body, key_binder, key_marker, 0)
-            both_marked: usize = proof_kernel_replay_substitute(nodes, children, key_marked, value_binder, value_marker, 0)
-            key_replaced: usize = proof_kernel_replay_substitute(nodes, children, both_marked, PROOF_KERNEL_REPLAY_QUANTIFIER_KEY_MARKER, key_value, 0)
-            return proof_kernel_replay_substitute(nodes, children, key_replaced, PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER, value_value, 0)
+            key_marked: usize = proof_kernel_replay_substitute_with_work_limit(nodes, children, body, key_binder, key_marker, 0, work_used, work_limit)
+            return nodes.count if key_marked >= nodes.count or work_used > work_limit
+            both_marked: usize = proof_kernel_replay_substitute_with_work_limit(nodes, children, key_marked, value_binder, value_marker, 0, work_used, work_limit)
+            return nodes.count if both_marked >= nodes.count or work_used > work_limit
+            key_replaced: usize = proof_kernel_replay_substitute_with_work_limit(nodes, children, both_marked, PROOF_KERNEL_REPLAY_QUANTIFIER_KEY_MARKER, key_value, 0, work_used, work_limit)
+            return nodes.count if key_replaced >= nodes.count or work_used > work_limit
+            proof_kernel_replay_substitute_with_work_limit(nodes, children, key_replaced, PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER, value_value, 0, work_used, work_limit)
 
         def proof_kernel_replay_replace_exact(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, root: usize, from_root: usize, replacement_root: usize, depth: usize) -> (changed: bool, value: usize):
+            work_used: mutable usize = 0
+            exhausted: mutable bool = false
+            proof_kernel_replay_replace_exact_with_work(nodes, children, root, from_root, replacement_root, &work_used, &exhausted, PROOF_KERNEL_REPLAY_REPLACE_EXACT_WORK_LIMIT, depth)
+
+        def proof_kernel_replay_replace_exact_with_work(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, root: usize, from_root: usize, replacement_root: usize, work_used: mutable usize&, exhausted: mutable bool&, work_limit: usize, depth: usize) -> (changed: bool, value: usize):
+            return (true, nodes.count) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+            result: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, root, from_root, replacement_root, work_used, exhausted, work_limit, depth)
+            return (true, ElisaProofKernelCore::add_node(nodes, "unsupported", "replacement-work", 0, 0, 0, 0, 0, "", "")) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+            return result
+
+        def proof_kernel_replay_replace_exact_recursive_with_work(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, root: usize, from_root: usize, replacement_root: usize, work_used: mutable usize&, exhausted: mutable bool&, work_limit: usize, depth: usize) -> (changed: bool, value: usize):
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+            effective_limit: usize = work_limit if work_limit < PROOF_KERNEL_REPLAY_RESOURCE_WORK_LIMIT else PROOF_KERNEL_REPLAY_RESOURCE_WORK_LIMIT
+            if work_used >= effective_limit:
+                work_used <- effective_limit + 1 if work_used == effective_limit
+                exhausted <- true
+                return (false, root)
+            work_used <- work_used + 1
             return (false, root) if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
-            return (true, replacement_root) if proof_kernel_replay_expr_equal(nodes, children, root, from_root, 0)
+            equality_work: mutable usize = 0
+            equality_remaining: usize = effective_limit - work_used
+            equality_limit: usize = equality_remaining if equality_remaining < PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK else PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+            equal: bool = proof_kernel_replay_expr_equal_with_work(nodes, children, root, from_root, 0, equality_limit, &equality_work)
+            work_used <- work_used + equality_work
+            if not equal and equality_work >= equality_limit:
+                work_used <- effective_limit + 1 if work_used == effective_limit
+                exhausted <- true
+                return (false, root)
+            return (true, replacement_root) if equal
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return (false, root) if node.kind == "typed-int"
             return (false, root) if node.kind == "int" or node.kind == "bool" or node.kind == "float" or node.kind == "opaque-float-literal" or node.kind == "string" or node.kind == "char" or node.kind == "ident" or node.kind == "shorthand" or node.kind == "absent" or node.kind == "unsupported"
             if node.kind == "unary" or node.kind == "move" or node.kind == "field" or node.kind == "scope" or node.kind == "call_arg" or node.kind == "field-init" or node.kind == "checked-get":
-                child: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.left, from_root, replacement_root, depth + 1)
+                child: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.left, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                 return (false, root) if not child.changed
                 rewritten: usize = ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, child.value, node.right, node.auxiliary, node.children_start, node.children_count, node.value, node.name, node.secondary_name)
                 return (true, rewritten)
             if node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry" or node.kind == "checked-index":
-                left: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.left, from_root, replacement_root, depth + 1)
-                right: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.right, from_root, replacement_root, depth + 1)
+                left: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.left, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+                right: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.right, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                 return (false, root) if not left.changed and not right.changed
                 rewritten: usize = ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, left.value if left.changed else node.left, right.value if right.changed else node.right, node.auxiliary, node.children_start, node.children_count, node.value, node.name, node.secondary_name)
                 return (true, rewritten)
             if node.kind == "slice" or node.kind == "if":
-                left: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.left, from_root, replacement_root, depth + 1)
-                right: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.right, from_root, replacement_root, depth + 1)
-                auxiliary: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.auxiliary, from_root, replacement_root, depth + 1)
+                left: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.left, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+                right: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.right, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+                auxiliary: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.auxiliary, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                 return (false, root) if not left.changed and not right.changed and not auxiliary.changed
                 rewritten: usize = ElisaProofKernelCore::add_node(nodes, node.kind, node.operator, left.value if left.changed else node.left, right.value if right.changed else node.right, auxiliary.value if auxiliary.changed else node.auxiliary, node.children_start, node.children_count, node.value, node.name, node.secondary_name)
                 return (true, rewritten)
@@ -57,7 +142,8 @@ extend ElisaProofKernelReplay:
                 # `y` to `x` under `forall x`). Rewriting the range is safe because the current
                 # binder is not in scope there; leave the body opaque until the arena grows an
                 # explicit capture-avoiding representation.
-                range: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.left, from_root, replacement_root, depth + 1)
+                range: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.left, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                 return (false, root) if not range.changed
                 rewritten: usize = ElisaProofKernelCore::add_node(nodes, "quantifier", node.operator, range.value, node.right, node.auxiliary, node.children_start, node.children_count, node.value, node.name, node.secondary_name)
                 return (true, rewritten)
@@ -67,13 +153,16 @@ extend ElisaProofKernelReplay:
                 base_value: mutable usize = node.left
                 base_changed: mutable bool = false
                 if node.kind == "index-n" or node.kind == "construct" or node.kind == "record-update" or node.kind == "call":
-                    rewritten_base: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, node.left, from_root, replacement_root, depth + 1)
+                    rewritten_base: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, node.left, from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                     base_value <- rewritten_base.value
                     base_changed <- rewritten_base.changed
                 rewritten_children: mutable darray[usize] = []
                 any_changed: mutable bool = base_changed
-                for index in 0..<node.children_count |index, node, children, nodes, from_root, replacement_root, depth, rewritten_children, any_changed|:
-                    child: (changed: bool, value: usize) = proof_kernel_replay_replace_exact(nodes, children, children[node.children_start + index], from_root, replacement_root, depth + 1)
+                for index in 0..<node.children_count |index, node, children, nodes, from_root, replacement_root, depth, rewritten_children, any_changed, work_used, exhausted, work_limit|:
+                    return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
+                    child: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_recursive_with_work(nodes, children, children[node.children_start + index], from_root, replacement_root, work_used, exhausted, work_limit, depth + 1)
+                    return (false, root) if proof_kernel_replay_goal_bool_ref_value(exhausted)
                     rewritten_children.push(child.value)
                     any_changed <- true if child.changed
                 return (false, root) if not any_changed
@@ -83,7 +172,7 @@ extend ElisaProofKernelReplay:
                 return (true, rewritten)
             return (false, root)
 
-        def proof_kernel_replay_quantifier_values_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], body: usize, binder: sview, values_start: usize, values_count: usize, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
+        def proof_kernel_replay_quantifier_values_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], body: usize, binder: sview, values_start: usize, values_count: usize, work_used: mutable usize&, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
             decreases remaining
@@ -91,15 +180,18 @@ extend ElisaProofKernelReplay:
             return false if values_count == 0 and kind == "exists"
             return false if values_count > PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_VALUES or values_start > children.count or values_count > children.count - values_start
             return false if not proof_kernel_replay_child_range_valid(values_start, values_count, children.count)
-            for index in 0..<values_count |index, children, nodes, facts, body, binder, kind, values_start, depth, remaining|:
+            for index in 0..<values_count |index, children, nodes, facts, body, binder, kind, values_start, depth, remaining, work_used|:
                 return false if remaining <= 1
-                instance: usize = proof_kernel_replay_substitute(nodes, children, body, binder, children[values_start + index], 0)
-                proven: bool = (proof_kernel_replay_goal_depth_remaining(nodes, children, facts, instance, 0, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                return false if work_used >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                instance: usize = proof_kernel_replay_substitute_with_work_limit(nodes, children, body, binder, children[values_start + index], 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if instance >= nodes.count or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                proven: bool = (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, facts, instance, 0, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
                 return false if kind == "forall" and not proven
                 return true if kind == "exists" and proven
             return kind == "forall"
 
-        def proof_kernel_replay_quantifier_entries_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], body: usize, key_binder: sview, value_binder: sview, range: ElisaProofKernelCore::ProofKernelNode, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
+        def proof_kernel_replay_quantifier_entries_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], body: usize, key_binder: sview, value_binder: sview, range: ElisaProofKernelCore::ProofKernelNode, work_used: mutable usize&, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
             decreases remaining
@@ -107,25 +199,35 @@ extend ElisaProofKernelReplay:
             return false if range.children_count == 0 and kind == "exists"
             return false if range.children_count > PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_ENTRIES or range.children_start > children.count or range.children_count > children.count - range.children_start
             return false if not proof_kernel_replay_child_range_valid(range.children_start, range.children_count, children.count)
-            return false if key_binder == value_binder or not proof_kernel_replay_quantifier_marker_available(nodes, PROOF_KERNEL_REPLAY_QUANTIFIER_KEY_MARKER) or not proof_kernel_replay_quantifier_marker_available(nodes, PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER)
+            return false if key_binder == value_binder or not proof_kernel_replay_quantifier_marker_available_with_work(nodes, PROOF_KERNEL_REPLAY_QUANTIFIER_KEY_MARKER, work_used) or not proof_kernel_replay_quantifier_marker_available_with_work(nodes, PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER, work_used)
+            return false if not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge(work_used)
+            return false if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET - 2
             key_marker: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, PROOF_KERNEL_REPLAY_QUANTIFIER_KEY_MARKER, "")
             value_marker: usize = ElisaProofKernelCore::add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, PROOF_KERNEL_REPLAY_QUANTIFIER_VALUE_MARKER, "")
-            for index in 0..<range.children_count |index, range, children, nodes, facts, body, key_binder, value_binder, kind, depth, remaining|:
+            for index in 0..<range.children_count |index, range, children, nodes, facts, body, key_binder, value_binder, kind, depth, remaining, work_used|:
                 return false if remaining <= 1
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
                 entry_root: usize = children[range.children_start + index]
                 return false if entry_root >= nodes.count or not proof_kernel_replay_valid(nodes, entry_root)
                 entry: ElisaProofKernelCore::ProofKernelNode = nodes[entry_root]
                 return false if entry.kind != "dict_entry"
-                instance: usize = proof_kernel_replay_substitute_dictionary_pair(nodes, children, body, key_binder, value_binder, entry.left, entry.right, key_marker, value_marker)
-                proven: bool = (proof_kernel_replay_goal_depth_remaining(nodes, children, facts, instance, 0, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                return false if work_used >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                instance: usize = proof_kernel_replay_substitute_dictionary_pair_with_work_limit(nodes, children, body, key_binder, value_binder, entry.left, entry.right, key_marker, value_marker, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if instance >= nodes.count or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                proven: bool = (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, facts, instance, 0, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
                 return false if kind == "forall" and not proven
                 return true if kind == "exists" and proven
             return kind == "forall"
 
         def proof_kernel_replay_quantifier_remaining(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], root: usize, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
+            work_used: mutable usize = 0
+            return (proof_kernel_replay_quantifier_remaining_with_work(nodes, children, kind, facts, root, &work_used, depth, remaining) can Global{Read,Write})
+
+        def proof_kernel_replay_quantifier_remaining_with_work(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, kind: sview, facts: darray[usize], root: usize, work_used: mutable usize&, depth: usize, remaining: usize) -> bool can[Global.Read, Global.Write]:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             requires remaining > 0
             decreases remaining
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
             return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if kind != "forall" and kind != "exists"
             return false if not proof_kernel_replay_valid(nodes, root)
@@ -138,20 +240,35 @@ extend ElisaProofKernelReplay:
                 # A constant bound is read without its width, so a wrapped payload could be an
                 # unsigned maximum; only bounds whose value is width-independent may decide
                 # whether the range is empty.
-                return false if proof_kernel_replay_constant_int(nodes, range.left, 0).known and not proof_kernel_replay_safe_comparison_constant(nodes, range.left).known and not proof_kernel_quantifier_small_signed_bound(nodes, range.left)
-                return false if proof_kernel_replay_constant_int(nodes, range.right, 0).known and not proof_kernel_replay_safe_comparison_constant(nodes, range.right).known and not proof_kernel_quantifier_small_signed_bound(nodes, range.right)
-                if not proof_kernel_replay_constant_int(nodes, range.left, 0).known or not proof_kernel_replay_constant_int(nodes, range.right, 0).known:
-                    bounds: mutable darray[ProofKernelReplayBound] = []
-                    for fact in facts |fact, nodes, children, facts, bounds|:
-                        proof_kernel_replay_collect_bounds(nodes, children, facts, fact, &bounds, 0)
-                    proof_kernel_replay_close_equalities(nodes, children, facts, &bounds)
-                    for fact in facts |fact, nodes, children, facts, bounds|:
-                        return false if not proof_kernel_replay_unsigned_expression_safe(nodes, children, fact, facts, &bounds, 0) or not proof_kernel_replay_signed_expression_safe(nodes, children, fact, facts)
-                lower: ProofKernelReplayInt = proof_kernel_replay_exact_int(nodes, children, range.left, facts)
-                upper: ProofKernelReplayInt = proof_kernel_replay_exact_int(nodes, children, range.right, facts)
+                lower_constant: ProofKernelReplayInt = proof_kernel_replay_quantifier_constant_int_with_work(nodes, range.left, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if lower_constant.known:
+                    lower_safe_constant: ProofKernelReplayInt = proof_kernel_replay_quantifier_safe_comparison_constant_with_work(nodes, range.left, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    lower_small_signed: bool = proof_kernel_quantifier_small_signed_bound_with_work(nodes, range.left, work_used) if not lower_safe_constant.known else false
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or (not lower_safe_constant.known and not lower_small_signed)
+                upper_constant: ProofKernelReplayInt = proof_kernel_replay_quantifier_constant_int_with_work(nodes, range.right, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if upper_constant.known:
+                    upper_safe_constant: ProofKernelReplayInt = proof_kernel_replay_quantifier_safe_comparison_constant_with_work(nodes, range.right, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    upper_small_signed: bool = proof_kernel_quantifier_small_signed_bound_with_work(nodes, range.right, work_used) if not upper_safe_constant.known else false
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or (not upper_safe_constant.known and not upper_small_signed)
+                bounds: mutable darray[ProofKernelReplayBound] = []
+                if not lower_constant.known or not upper_constant.known:
+                    for fact in facts |fact, nodes, children, facts, bounds, work_used|:
+                        proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, fact, &bounds, work_used, 0)
+                        return false if work_used >= PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT
+                    return false if not proof_kernel_replay_close_equalities_with_work(nodes, children, facts, &bounds, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    for fact in facts |fact, nodes, children, facts, bounds, work_used|:
+                        return false if not proof_kernel_replay_unsigned_expression_safe_with_goal_work(nodes, children, fact, facts, &bounds, work_used, 0) or not proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, fact, facts, &bounds, work_used, 0)
+                        return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                lower: ProofKernelReplayInt = proof_kernel_replay_quantifier_exact_int_from_bounds(nodes, range.left, lower_constant, bounds, work_used)
+                upper: ProofKernelReplayInt = proof_kernel_replay_quantifier_exact_int_from_bounds(nodes, range.right, upper_constant, bounds, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 if not lower.known or not upper.known:
                     return false if kind != "forall" or remaining <= 1
-                    return (proof_kernel_replay_symbolic_quantifier_remaining(nodes, children, facts, root, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                    return (proof_kernel_replay_symbolic_quantifier_remaining_with_work(nodes, children, facts, root, work_used, depth + 1, remaining: remaining - 1) can Global{Read,Write})
                 return kind == "forall" if range.operator == "range_lt" and lower.value >= upper.value
                 return kind == "forall" if range.operator == "range_le" and lower.value > upper.value
                 width: mutable ProofKernelReplayInt = proof_kernel_replay_sub_safe(upper.value, lower.value)
@@ -162,17 +279,23 @@ extend ElisaProofKernelReplay:
                     width <- width_with_end
                 return false if width.value <= 0 or width.value > PROOF_KERNEL_REPLAY_MAX_QUANTIFIER_VALUES
                 return false if remaining <= 1
+                return false if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET - 3
                 candidate: mutable i64 = lower.value
                 offset: mutable i64 = 0
-                while offset < width.value |offset, candidate, facts, nodes, children, quantifier, kind, depth, remaining|:
+                while offset < width.value |offset, candidate, facts, nodes, children, quantifier, kind, depth, remaining, work_used|:
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                    return false if nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET - 3
                     candidate_root: mutable usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, candidate, "", "")
                     if candidate < 0:
                         magnitude: ProofKernelReplayInt = proof_kernel_replay_sub_safe(0, candidate)
                         if magnitude.known:
+                            return false if not proof_kernel_replay_goal_search_charge(work_used) or not proof_kernel_replay_goal_search_charge(work_used)
                             positive_root: usize = ElisaProofKernelCore::add_node(nodes, "int", "", 0, 0, 0, 0, 0, magnitude.value, "", "")
                             candidate_root <- ElisaProofKernelCore::add_node(nodes, "unary", "-", positive_root, 0, 0, 0, 0, 0, "", "")
-                    instance: usize = proof_kernel_replay_substitute(nodes, children, quantifier.right, quantifier.name, candidate_root, 0)
-                    proven: bool = (proof_kernel_replay_goal_depth_remaining(nodes, children, facts, instance, 0, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                    return false if work_used >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    instance: usize = proof_kernel_replay_substitute_with_work_limit(nodes, children, quantifier.right, quantifier.name, candidate_root, 0, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if instance >= nodes.count or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    proven: bool = (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, facts, instance, 0, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
                     return false if kind == "forall" and not proven
                     return true if kind == "exists" and proven
                     offset <- offset + 1
@@ -184,13 +307,13 @@ extend ElisaProofKernelReplay:
             return false if remaining <= 1
             match range.kind:
                 "array":
-                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, work_used, depth + 1, remaining: remaining - 1) can Global{Read,Write})
                 "tuple":
-                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, work_used, depth + 1, remaining: remaining - 1) can Global{Read,Write})
                 "set":
-                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, depth + 1, remaining: remaining - 1) can Global{Read,Write})
+                    return (proof_kernel_replay_quantifier_values_remaining(nodes, children, facts, quantifier.right, quantifier.name, range.children_start, range.children_count, work_used, depth + 1, remaining: remaining - 1) can Global{Read,Write})
                 "dict":
-                    return (proof_kernel_replay_quantifier_entries_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, quantifier.secondary_name, range, depth + 1, remaining: remaining - 1) can Global{Read,Write}) if quantifier.auxiliary == 2
+                    return (proof_kernel_replay_quantifier_entries_remaining(nodes, children, kind, facts, quantifier.right, quantifier.name, quantifier.secondary_name, range, work_used, depth + 1, remaining: remaining - 1) can Global{Read,Write}) if quantifier.auxiliary == 2
                     return false
                 _:
                     return false

@@ -1,0 +1,470 @@
+# Exact, bounded module-alias resolution shared by the executable checker and fact publisher.
+extend ElisaProof:
+    private:
+        def proof_module_resolution_charge(amount: usize, work: mutable usize&, limit: usize) -> bool:
+            return false if work > limit or amount > limit - work
+            work <- work + amount
+            return true
+
+        def proof_module_lookup_pair_hash(left_hash: u32, right_hash: u32) -> u32:
+            mixed: i64 = (left_hash.i64() * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME + right_hash.i64()) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return mixed.u32()
+
+        def proof_module_hash_append_view(hash: mutable i64&, value: sview, work: mutable usize&, limit: usize) -> bool:
+            return false if not proof_module_resolution_charge(sview_len(value), work, limit)
+            for offset in 0..<sview_len(value) |offset, hash, value|:
+                hash <- ((hash ^ sview_at(value, offset).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return true
+
+        def proof_module_hash_append_separator(hash: mutable i64&, work: mutable usize&, limit: usize) -> bool:
+            return false if not proof_module_resolution_charge(2, work, limit)
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return true
+
+        def proof_module_path_owner_hash(prefix: sview, first: sview, rest: darray[sview]&, work: mutable usize&, limit: usize) -> (complete: bool, hash: u32):
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            if prefix != "":
+                return (false, 0) if not proof_module_hash_append_view(&hash, prefix, work, limit)
+                return (false, 0) if not proof_module_hash_append_separator(&hash, work, limit)
+            return (false, 0) if not proof_module_hash_append_view(&hash, first, work, limit)
+            for segment in rest |segment, hash, work, limit|:
+                return (false, 0) if not proof_module_hash_append_separator(&hash, work, limit)
+                return (false, 0) if not proof_module_hash_append_view(&hash, segment, work, limit)
+            return (true, hash.u32())
+
+        def proof_module_alias_key_hash(scope: sview, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_module_resolution_charge(sview_len(scope), work, limit) or not proof_module_resolution_charge(sview_len(name), work, limit)
+            return (true, proof_module_lookup_pair_hash(proof_name_hash(scope), proof_name_hash(name)))
+
+        def proof_module_function_key_hash(owner_hash: u32, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_module_resolution_charge(sview_len(name), work, limit)
+            return (true, proof_module_lookup_pair_hash(owner_hash, proof_name_hash(name)))
+
+        def proof_module_alias_lookup_build(index: mutable ProofModuleAliasIndex&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            index.alias_lookup_hashes.clear()
+            index.alias_lookup_values.clear()
+            index.alias_lookup_ambiguous.clear()
+            index.global_alias_lookup_hashes.clear()
+            index.global_alias_lookup_values.clear()
+            count: usize = index.names.count
+            return (false, "module-alias-index-table", count, index.targets.count) if count != index.targets.count or count != index.scopes.count or count != index.lines.count or count != index.offsets.count
+            capacity: usize = proof_name_index_capacity(count)
+            return (false, "module-alias-index-capacity", count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if count > 0 and capacity == 0
+            return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity * 3, source_work)
+            index.alias_lookup_hashes.resize(capacity)
+            index.alias_lookup_values.resize(capacity)
+            index.alias_lookup_ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.alias_lookup_values[slot] <- count
+                index.alias_lookup_ambiguous[slot] <- false
+            for row in 0..<count |row, index, count, capacity, source_work|:
+                key: (complete: bool, hash: u32) = proof_module_alias_key_hash(index.scopes[row], index.names[row], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not key.complete
+                slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, key, row, index, count, capacity, source_work, placed|:
+                    return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.alias_lookup_values[slot]
+                    if current == count:
+                        index.alias_lookup_hashes[slot] <- key.hash
+                        index.alias_lookup_values[slot] <- row
+                        placed <- true
+                        break
+                    return (false, "module-alias-index-table", current, count) if current > count
+                    if index.alias_lookup_hashes[slot] == key.hash:
+                        return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(index.names[current]), source_work)
+                        return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(index.scopes[current]), source_work)
+                        if index.names[current] == index.names[row] and index.scopes[current] == index.scopes[row]:
+                            index.alias_lookup_ambiguous[slot] <- true
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, "module-alias-index-insertion", probes, capacity) if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.alias_lookup_values, count, source_work)
+            return (false, "module-alias-index-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (false, "module-alias-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity * 2, source_work)
+            index.global_alias_lookup_hashes.resize(capacity)
+            index.global_alias_lookup_values.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.global_alias_lookup_values[slot] <- count
+            for row in 0..<count |row, index, count, capacity, source_work|:
+                key: (complete: bool, hash: u32) = proof_module_alias_key_hash("", index.names[row], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not key.complete
+                slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, key, row, index, count, capacity, source_work, placed|:
+                    return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.global_alias_lookup_values[slot]
+                    if current == count:
+                        index.global_alias_lookup_hashes[slot] <- key.hash
+                        index.global_alias_lookup_values[slot] <- row
+                        placed <- true
+                        break
+                    return (false, "module-alias-index-table", current, count) if current > count
+                    if index.global_alias_lookup_hashes[slot] == key.hash:
+                        return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(index.names[current]), source_work)
+                        if index.names[current] == index.names[row]:
+                            # Preserve the compiler backend's first global declaration for this
+                            # spelling. Lexical lookup below is compared with this row per call.
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, "module-alias-index-insertion", probes, capacity) if not placed
+            global_cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.global_alias_lookup_values, count, source_work)
+            return (false, "module-alias-index-work", global_cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not global_cluster_status.complete
+            return (false, "module-alias-index-cluster", global_cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not global_cluster_status.bounded
+            return (true, "", 0, 0)
+
+        def proof_module_function_lookup_build(names: darray[sview]&, owners: darray[sview]&, index: mutable ProofModuleAliasIndex&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            index.function_lookup_hashes.clear()
+            index.function_lookup_values.clear()
+            index.function_lookup_ambiguous.clear()
+            index.function_lookup_complete <- false
+            count: usize = names.count
+            return (false, "module-function-index-table", count, owners.count) if count != owners.count
+            capacity: usize = proof_name_index_capacity(count)
+            return (false, "module-function-index-capacity", count, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2) if count > 0 and capacity == 0
+            return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(capacity * 3, source_work)
+            index.function_lookup_hashes.resize(capacity)
+            index.function_lookup_values.resize(capacity)
+            index.function_lookup_ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.function_lookup_values[slot] <- count
+                index.function_lookup_ambiguous[slot] <- false
+            for row in 0..<count |row, names, owners, index, count, capacity, source_work|:
+                return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(owners[row]), source_work)
+                key: (complete: bool, hash: u32) = proof_module_function_key_hash(proof_name_hash(owners[row]), names[row], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not key.complete
+                slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, key, row, names, owners, index, count, capacity, source_work, placed|:
+                    return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.function_lookup_values[slot]
+                    if current == count:
+                        index.function_lookup_hashes[slot] <- key.hash
+                        index.function_lookup_values[slot] <- row
+                        placed <- true
+                        break
+                    return (false, "module-function-index-table", current, count) if current > count
+                    if index.function_lookup_hashes[slot] == key.hash:
+                        return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(names[current]), source_work)
+                        return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(names[row]), source_work)
+                        return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(owners[current]), source_work)
+                        return (false, "module-function-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_report_source_work_charge(sview_len(owners[row]), source_work)
+                        if names[current] == names[row] and owners[current] == owners[row]:
+                            index.function_lookup_ambiguous[slot] <- true
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, "module-function-index-insertion", probes, capacity) if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.function_lookup_values, count, source_work)
+            return (false, "module-function-index-work", cluster_status.observed, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not cluster_status.complete
+            return (false, "module-function-index-cluster", cluster_status.observed, PROOF_NAME_INDEX_MAX_CLUSTER) if not cluster_status.bounded
+            index.function_lookup_complete <- true
+            return (true, "", 0, 0)
+
+        def proof_module_alias_lookup_scope(index: ProofModuleAliasIndex&, scope: sview, alias_name: sview, work: mutable usize&, limit: usize) -> (complete: bool, matched: bool, valid: bool, row: usize):
+            count: usize = index.names.count
+            capacity: usize = index.alias_lookup_values.count
+            return (false, false, false, count) if count != index.targets.count or count != index.scopes.count or count != index.lines.count or count != index.offsets.count
+            return (false, false, false, count) if capacity != index.alias_lookup_hashes.count or capacity != index.alias_lookup_ambiguous.count
+            return (true, false, false, count) if count == 0 and capacity == 0
+            return (false, false, false, count) if count == 0 or capacity == 0 or capacity != proof_name_index_capacity(count)
+            key: (complete: bool, hash: u32) = proof_module_alias_key_hash(scope, alias_name, work, limit)
+            return (false, false, false, count) if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, key, index, count, capacity, work|:
+                return (false, false, false, count) if not proof_module_resolution_charge(1, work, limit)
+                current: usize = index.alias_lookup_values[slot]
+                return (true, false, false, count) if current == count
+                return (false, false, false, count) if current > count
+                if index.alias_lookup_hashes[slot] == key.hash:
+                    return (false, false, false, count) if not proof_module_resolution_charge(sview_len(index.names[current]), work, limit)
+                    return (false, false, false, count) if not proof_module_resolution_charge(sview_len(index.scopes[current]), work, limit)
+                    if index.names[current] == alias_name and index.scopes[current] == scope:
+                        return (true, true, false, count) if index.alias_lookup_ambiguous[slot]
+                        return (true, true, true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, false, count)
+
+        # The compiler backend lowers aliases through the first global spelling match. Keep
+        # that table separate from lexical lookup so replay can require both mappings to agree.
+        def proof_module_alias_lookup_global(index: ProofModuleAliasIndex&, alias_name: sview, work: mutable usize&, limit: usize) -> (complete: bool, matched: bool, valid: bool, row: usize):
+            count: usize = index.names.count
+            capacity: usize = index.global_alias_lookup_values.count
+            return (false, false, false, count) if count != index.targets.count or count != index.scopes.count or count != index.lines.count or count != index.offsets.count
+            return (false, false, false, count) if capacity != index.global_alias_lookup_hashes.count
+            return (true, false, false, count) if count == 0 and capacity == 0
+            return (false, false, false, count) if count == 0 or capacity == 0 or capacity != proof_name_index_capacity(count)
+            key: (complete: bool, hash: u32) = proof_module_alias_key_hash("", alias_name, work, limit)
+            return (false, false, false, count) if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, key, index, count, capacity, alias_name, work, limit|:
+                return (false, false, false, count) if not proof_module_resolution_charge(1, work, limit)
+                current: usize = index.global_alias_lookup_values[slot]
+                return (true, false, false, count) if current == count
+                return (false, false, false, count) if current > count
+                if index.global_alias_lookup_hashes[slot] == key.hash:
+                    return (false, false, false, count) if not proof_module_resolution_charge(sview_len(index.names[current]), work, limit)
+                    if index.names[current] == alias_name:
+                        return (true, true, false, count) if index.targets[current] == ""
+                        return (true, true, true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, false, count)
+
+        # Search lexical scopes from nearest to root. Exact scope/name duplicates remain
+        # ambiguous even if their targets agree; a nearer match shadows every parent alias.
+        def proof_module_alias_target(index: ProofModuleAliasIndex&, caller_module: sview, alias_name: sview, work: mutable usize&, limit: usize) -> (complete: bool, matched: bool, valid: bool, target: sview, scope: sview):
+            return (true, true, false, "", "") if not index.complete
+            prefix: mutable sview = caller_module
+            while true |prefix, index, alias_name, work, limit|:
+                lookup: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_scope(index, prefix, alias_name, work, limit)
+                return (false, false, false, "", "") if not lookup.complete
+                if lookup.matched:
+                    return (true, true, false, "", prefix) if not lookup.valid or lookup.row >= index.targets.count or index.targets[lookup.row] == ""
+                    return (true, true, true, index.targets[lookup.row], prefix)
+                break if prefix == ""
+                return (false, false, false, "", "") if not proof_module_resolution_charge(sview_len(prefix), work, limit)
+                prefix <- proof_module_parent_scope(prefix)
+            return (true, false, false, "", "")
+
+        # Follow source-visible and backend-global mappings in parallel. A path is admitted
+        # only while every alias hop agrees; cycles and lexical/global disagreements fail closed.
+        def proof_module_alias_targets_compatible(index: ProofModuleAliasIndex&, initial_scope: sview, initial_target: sview, work: mutable usize&, limit: usize) -> (complete: bool, compatible: bool, target: sview):
+            resolved: mutable sview = initial_target
+            current_scope: mutable sview = initial_scope
+            steps: mutable usize = 0
+            while steps <= index.names.count |steps, resolved, current_scope, index, work, limit|:
+                lexical: (complete: bool, matched: bool, valid: bool, target: sview, scope: sview) = proof_module_alias_target(index, current_scope, resolved, work, limit)
+                return (false, false, "") if not lexical.complete
+                backend: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_global(index, resolved, work, limit)
+                return (false, false, "") if not backend.complete
+                return (true, false, "") if lexical.matched != backend.matched
+                return (true, true, resolved) if not lexical.matched
+                return (true, false, "") if not lexical.valid or not backend.valid or backend.row >= index.targets.count
+                return (false, false, "") if not proof_module_resolution_charge(sview_len(lexical.target), work, limit)
+                return (false, false, "") if not proof_module_resolution_charge(sview_len(index.targets[backend.row]), work, limit)
+                return (true, false, "") if lexical.target != index.targets[backend.row]
+                resolved <- lexical.target
+                current_scope <- lexical.scope
+                steps <- steps + 1
+            return (true, false, "")
+
+        def proof_module_alias_annotation_charge(annotation: Ast::EnumAnnotation, source_work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(1, source_work)
+            return false if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+            return false if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+            return proof_report_source_work_charge(sview_len(annotation.module), source_work)
+
+        def proof_module_parent_scope(scope: sview) -> sview:
+            length: usize = sview_len(scope)
+            return "" if length == 0
+            cursor: mutable usize = length
+            while cursor >= 2 |cursor, scope|:
+                cursor <- cursor - 1
+                if sview_at(scope, cursor) == 58 and sview_at(scope, cursor - 1) == 58:
+                    return string_view_slice(scope, 0, (cursor - 1).i64())
+            return ""
+
+        def proof_module_owner_matches_parts(owner: sview, prefix: sview, first: sview, rest: darray[sview]&) -> bool:
+            owner_length: usize = sview_len(owner)
+            prefix_length: usize = sview_len(prefix)
+            first_length: usize = sview_len(first)
+            return false if first_length == 0 or prefix_length > owner_length
+            for offset in 0..<prefix_length |offset, owner, prefix|:
+                return false if sview_at(owner, offset) != sview_at(prefix, offset)
+            cursor: mutable usize = prefix_length
+            if prefix_length > 0:
+                return false if owner_length - cursor < 2 or sview_at(owner, cursor) != 58 or sview_at(owner, cursor + 1) != 58
+                cursor <- cursor + 2
+            return false if first_length > owner_length - cursor
+            for offset in 0..<first_length |offset, owner, first, cursor|:
+                return false if sview_at(owner, cursor + offset) != sview_at(first, offset)
+            cursor <- cursor + first_length
+            for segment in rest |owner, cursor, owner_length|:
+                segment_length: usize = sview_len(segment)
+                return false if segment_length == 0 or owner_length - cursor < 2 or sview_at(owner, cursor) != 58 or sview_at(owner, cursor + 1) != 58
+                cursor <- cursor + 2
+                return false if segment_length > owner_length - cursor
+                for offset in 0..<segment_length |offset, owner, segment, cursor|:
+                    return false if sview_at(owner, cursor + offset) != sview_at(segment, offset)
+                cursor <- cursor + segment_length
+            return cursor == owner_length
+
+        def proof_module_function_path_lookup(names: darray[sview]&, owners: darray[sview]&, index: ProofModuleAliasIndex&, wanted_name: sview, prefix: sview, first: sview, rest: darray[sview]&, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            count: usize = names.count
+            return (false, count) if count != owners.count
+            return (true, count) if count == 0
+            # Replay routes that validate one already selected declaration do not need a
+            # whole-program index. Keep that exact one-row check cheap and collision-free.
+            if count == 1:
+                return (false, count) if not proof_module_resolution_charge(sview_len(names[0]), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(wanted_name), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(owners[0]), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(prefix), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(first), work, limit)
+                for segment in rest |work, limit|:
+                    return (false, count) if not proof_module_resolution_charge(sview_len(segment), work, limit)
+                return (true, count) if names[0] != wanted_name
+                return (false, count) if not proof_module_resolution_charge(sview_len(owners[0]), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(prefix), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(first), work, limit)
+                for segment in rest |work, limit|:
+                    return (false, count) if not proof_module_resolution_charge(sview_len(segment), work, limit)
+                return (true, 0) if proof_module_owner_matches_parts(owners[0], prefix, first, rest)
+                return (true, count)
+            capacity: usize = index.function_lookup_values.count
+            return (false, count) if not index.function_lookup_complete or capacity == 0 or capacity != proof_name_index_capacity(count) or capacity != index.function_lookup_hashes.count or capacity != index.function_lookup_ambiguous.count
+            owner_key: (complete: bool, hash: u32) = proof_module_path_owner_hash(prefix, first, rest, work, limit)
+            return (false, count) if not owner_key.complete
+            key: (complete: bool, hash: u32) = proof_module_function_key_hash(owner_key.hash, wanted_name, work, limit)
+            return (false, count) if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, key, index, names, owners, wanted_name, prefix, first, rest, count, capacity, work, limit|:
+                return (false, count) if not proof_module_resolution_charge(1, work, limit)
+                current: usize = index.function_lookup_values[slot]
+                return (true, count) if current == count
+                return (false, count) if current > count
+                if index.function_lookup_hashes[slot] == key.hash:
+                    return (false, count) if not proof_module_resolution_charge(sview_len(names[current]), work, limit)
+                    return (false, count) if not proof_module_resolution_charge(sview_len(wanted_name), work, limit)
+                    if names[current] == wanted_name:
+                        return (false, count) if not proof_module_resolution_charge(sview_len(owners[current]), work, limit)
+                        return (false, count) if not proof_module_resolution_charge(sview_len(prefix), work, limit)
+                        return (false, count) if not proof_module_resolution_charge(sview_len(first), work, limit)
+                        for segment in rest |work, limit|:
+                            return (false, count) if not proof_module_resolution_charge(sview_len(segment), work, limit)
+                        if proof_module_owner_matches_parts(owners[current], prefix, first, rest):
+                            return (true, count) if index.function_lookup_ambiguous[slot]
+                            return (true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, count)
+
+        def proof_module_row_for_path(names: darray[sview]&, owners: darray[sview]&, aliases: ProofModuleAliasIndex&, wanted_name: sview, prefix: sview, first: sview, rest: darray[sview]&, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            return proof_module_function_path_lookup(names, owners, aliases, wanted_name, prefix, first, rest, work, limit)
+
+        def proof_module_path_row(names: darray[sview]&, owners: darray[sview]&, aliases: ProofModuleAliasIndex&, caller_module: sview, wanted_name: sview, segments: darray[sview]&, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            count: usize = names.count
+            return (true, count) if segments.count == 0
+            alias: (complete: bool, matched: bool, valid: bool, target: sview, scope: sview) = proof_module_alias_target(aliases, caller_module, segments[0], work, limit)
+            return (false, count) if not alias.complete
+            backend_alias: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_global(aliases, segments[0], work, limit)
+            return (false, count) if not backend_alias.complete
+            rest: mutable darray[sview] = []
+            for index in 1..<segments.count |index, segments, rest|:
+                return (false, count) if not proof_module_resolution_charge(sview_len(segments[index]), work, limit)
+                rest.push(segments[index])
+            if alias.matched:
+                return (true, count) if not alias.valid
+                return (true, count) if not backend_alias.matched or not backend_alias.valid or backend_alias.row >= aliases.targets.count
+                return (false, count) if not proof_module_resolution_charge(sview_len(alias.target), work, limit)
+                return (false, count) if not proof_module_resolution_charge(sview_len(aliases.targets[backend_alias.row]), work, limit)
+                return (true, count) if alias.target != aliases.targets[backend_alias.row]
+                expanded: (complete: bool, compatible: bool, target: sview) = proof_module_alias_targets_compatible(aliases, alias.scope, alias.target, work, limit)
+                return (false, count) if not expanded.complete
+                return (true, count) if not expanded.compatible
+                # Qualified call lowering substitutes the alias at the root and appends
+                # remaining path segments. Keep the source and backend alias chains aligned
+                # before resolving that resulting root-relative owner path.
+                return proof_module_row_for_path(names, owners, aliases, wanted_name, "", expanded.target, rest, work, limit)
+            # Codegen aliases are global today. If this spelling is not visible lexically but
+            # exists in the backend table, its emitted call differs from the source path.
+            return (true, count) if backend_alias.matched
+            return (true, count) if not aliases.complete
+            prefix: mutable sview = caller_module
+            while true |prefix, names, owners, wanted_name, segments, rest, count, work, limit|:
+                candidate: (complete: bool, row: usize) = proof_module_row_for_path(names, owners, aliases, wanted_name, prefix, segments[0], rest, work, limit)
+                return (false, count) if not candidate.complete
+                return candidate if candidate.row < count
+                break if prefix == ""
+                return (false, count) if not proof_module_resolution_charge(sview_len(prefix), work, limit)
+                prefix <- proof_module_parent_scope(prefix)
+            return (true, count)
+
+        def proof_qualified_path_segments(expression: Ast::Expr, segments: mutable darray[sview]&, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                    segments.push(name)
+                    return true
+                Ast::Expr.Scope(base, member, _):
+                    return false if member == "" or not proof_qualified_path_segments(base, segments, depth + 1)
+                    segments.push(member)
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_qualified_path_segments(inner, segments, depth + 1)
+                _:
+                    return false
+
+        def proof_module_function_index_for_callee(names: darray[sview]&, owners: darray[sview]&, aliases: ProofModuleAliasIndex&, caller_module: sview, callee: Ast::Expr, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            count: usize = names.count
+            match callee:
+                Ast::Expr.Scope(base, _, _):
+                    segments: mutable darray[sview] = []
+                    return (true, count) if not proof_qualified_path_segments(base, &segments, 0)
+                    return proof_module_path_row(names, owners, aliases, caller_module, proof_callable_name(callee), segments, work, limit)
+                _:
+                    return (true, count)
+
+        def proof_build_module_alias_index(annotations: darray[Ast::EnumAnnotation]&, index: mutable ProofModuleAliasIndex&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            index.names.clear()
+            index.targets.clear()
+            index.scopes.clear()
+            index.lines.clear()
+            index.offsets.clear()
+            index.alias_lookup_hashes.clear()
+            index.alias_lookup_values.clear()
+            index.alias_lookup_ambiguous.clear()
+            index.global_alias_lookup_hashes.clear()
+            index.global_alias_lookup_values.clear()
+            index.function_lookup_hashes.clear()
+            index.function_lookup_values.clear()
+            index.function_lookup_ambiguous.clear()
+            index.function_lookup_complete <- false
+            index.complete <- true
+            cursor: mutable usize = 0
+            while cursor < annotations.count |cursor, annotations, index, source_work|:
+                annotation: Ast::EnumAnnotation = annotations[cursor]
+                return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_module_alias_annotation_charge(annotation, source_work)
+                if annotation.name == "__using" and cursor + 2 < annotations.count:
+                    alias: Ast::EnumAnnotation = annotations[cursor + 1]
+                    target: Ast::EnumAnnotation = annotations[cursor + 2]
+                    return (false, "module-alias-index-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_module_alias_annotation_charge(alias, source_work) or not proof_module_alias_annotation_charge(target, source_work)
+                    if alias.name == "__using_alias" or target.name == "__using_alias_target":
+                        valid_pair: bool = alias.name == "__using_alias" and target.name == "__using_alias_target" and alias.owner != "" and target.owner == annotation.owner and alias.module == target.module and alias.line == annotation.line and target.line == annotation.line and alias.offset == target.offset and alias.offset > annotation.offset
+                        index.complete <- false if not valid_pair
+                        if valid_pair:
+                            index.names.push(alias.owner)
+                            index.targets.push(target.owner)
+                            index.scopes.push(alias.module)
+                            index.lines.push(alias.line)
+                            index.offsets.push(alias.offset)
+                        cursor <- cursor + 3
+                        continue
+                if annotation.name == "__using_alias" or annotation.name == "__using_alias_target":
+                    index.complete <- false
+                cursor <- cursor + 1
+            return proof_module_alias_lookup_build(index, source_work)
+
+        def proof_build_function_module_aliases(annotations: darray[Ast::EnumAnnotation]&, functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            aliases: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(annotations, &functions.module_aliases, source_work)
+            return aliases if not aliases.complete
+            return proof_module_function_lookup_build(functions.names, functions.owner_modules, &functions.module_aliases, source_work)

@@ -121,6 +121,35 @@ extend ElisaProof:
             work <- work + repetitions * name_cost
             return true
 
+        def proof_replay_type_bound_scope_equal_with_work(left: darray[sview]&, right: darray[sview]&, work: mutable usize&) -> (complete: bool, equal: bool):
+            return (false, false) if not proof_replay_type_bound_local_work_charge(1, work)
+            return (true, false) if left.count != right.count
+            for index in 0..<left.count |index, left, right, work|:
+                return (false, false) if not proof_replay_type_bound_local_text_compare_charge(left[index], right[index], work)
+                return (true, false) if left[index] != right[index]
+            return (true, true)
+
+        def proof_replay_type_bound_scope_with_module_with_work(current: darray[sview]&, module_name: sview, work: mutable usize&) -> (complete: bool, scope: darray[sview]):
+            module_length: usize = sview_len(module_name)
+            return (false, []) if module_length > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT / 2
+            return (false, []) if not proof_replay_type_bound_local_work_charge(module_length * 2, work)
+            segments: mutable darray[sview] = []
+            segment_start: mutable usize = 0
+            qualified: mutable bool = false
+            for cursor in 0..<module_length |cursor, module_name, segments, segment_start, qualified, work|:
+                if sview_at(module_name, cursor) == 58 and cursor + 1 < module_length and sview_at(module_name, cursor + 1) == 58:
+                    segments.push(string_view_prefix(string_view_suffix(module_name, segment_start.i64()), (cursor - segment_start).i64()))
+                    segment_start <- cursor + 2
+                    qualified <- true
+            if segment_start < module_length:
+                segments.push(string_view_suffix(module_name, segment_start.i64()))
+            return (true, segments) if qualified
+            return (false, []) if not proof_replay_type_bound_local_work_charge(current.count + segments.count, work)
+            normalized: mutable darray[sview] = []
+            normalized.extend(current)
+            normalized.extend(segments)
+            (true, normalized)
+
         def proof_replay_type_bound_local_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> (complete: bool, equal: bool):
             return (false, false) if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             cost: mutable usize = 0
@@ -225,7 +254,7 @@ extend ElisaProof:
                 Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
                     return proof_replay_type_bound_local_signed_width(report, base, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_type_bound_local_signed_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_replay_type_bound_local_signed_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                 Ast::Expr.Ident(name, _):
                     return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
                     primitive: i64 = proof_signed_primitive_width(expression)
@@ -273,6 +302,48 @@ extend ElisaProof:
                 _:
                     pass
             return 0
+
+        def proof_replay_type_bound_parameter_fact(report: ProofReport&, parameter: Ast::ParamDecl, expression: Ast::Expr, position: Ast::Pos, work: mutable usize&) -> bool:
+            return false if parameter.name == ""
+            term: Ast::Expr = Ast::Expr.Ident(parameter.name, position)
+            unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, parameter.type_expression, work, 0)
+            equal: mutable (complete: bool, equal: bool) = (true, false)
+            if unsigned_width > 0:
+                equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_unsigned_type_marker(parameter.name, unsigned_width, position), work)
+                return false if not equal.complete
+                return true if equal.equal
+                lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, term, position)
+                equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, lower, work)
+                return false if not equal.complete
+                return true if equal.equal
+                if unsigned_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                    upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(proof_unsigned_width_max(unsigned_width), position), position)
+                    equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, upper, work)
+                    return false if not equal.complete
+                    return true if equal.equal
+            signed_width: i64 = proof_replay_type_bound_local_signed_width(report, parameter.type_expression, work, 0)
+            if signed_width > 0:
+                equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_signed_type_marker(term, signed_width, position), work)
+                return false if not equal.complete
+                return true if equal.equal
+                if signed_width < PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH:
+                    maximum: i64 = ElisaProofKernelCore::proof_kernel_signed_width_max(signed_width)
+                    upper: Ast::Expr = Ast::Expr.Binary(term, TokenKind.LtEq, Ast::Expr.IntLit(maximum, position), position)
+                    equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, upper, work)
+                    return false if not equal.complete
+                    return true if equal.equal
+                    magnitude: Ast::Expr = Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(maximum, position), position)
+                    floor: Ast::Expr = Ast::Expr.Binary(magnitude, TokenKind.Minus, Ast::Expr.IntLit(1, position), position)
+                    lower: Ast::Expr = Ast::Expr.Binary(floor, TokenKind.LtEq, term, position)
+                    equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, lower, work)
+                    return false if not equal.complete
+                    return true if equal.equal
+            scalar_kind: i64 = proof_replay_type_bound_local_scalar_kind(report, parameter.type_expression, work, 0)
+            if unsigned_width <= 0 and scalar_kind == 1:
+                equal <- proof_replay_type_bound_local_expr_equal_with_work(expression, proof_scalar_type_marker(parameter.name, position), work)
+                return false if not equal.complete
+                return true if equal.equal
+            return false
 
         def proof_replay_type_bound_local_scalar_fact(report: ProofReport&, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, expression: Ast::Expr, line: u32) -> bool:
             work: mutable usize = 0

@@ -1,0 +1,342 @@
+# A bounded hash fast path with a deterministic sorted fallback associates fatal findings.
+const PROOF_REPORT_GOAL_FINDING_PROBE_LIMIT: usize = 64
+
+extend ElisaProof:
+    private:
+        struct ProofGoalFindingSortedEntry:
+            name: sview
+            line: u32
+            goal_id: usize
+            refuting: mutable bool
+
+        struct ProofGoalRefutation:
+            finding_index: usize
+
+        struct ProofGoalFindingIndex:
+            slot_used: mutable darray[bool] = []
+            slot_hashes: mutable darray[u32] = []
+            slot_names: mutable darray[sview] = []
+            slot_lines: mutable darray[u32] = []
+            slot_heads: mutable darray[usize] = []
+            slot_refuting: mutable darray[bool] = []
+            used_slots: mutable darray[usize] = []
+            relation_goal_ids: mutable darray[usize] = []
+            relation_next: mutable darray[usize] = []
+            sorted_entries: mutable darray[ProofGoalFindingSortedEntry] = []
+            empty_relation: usize = 0
+            sorted_mode: mutable bool = false
+            valid: bool = false
+
+        def proof_report_goal_finding_index_create(goal_count: usize, source_work: mutable usize&) -> ProofGoalFindingIndex can[Memory.Allocate]:
+            return ProofGoalFindingIndex{valid: true} if goal_count == 0
+            source_work_limit: usize = proof_replay_summary_source_work_limit()
+            return ProofGoalFindingIndex{} if goal_count > source_work_limit / 7
+            relation_capacity: usize = goal_count * 2
+            target_capacity: usize = relation_capacity * 2
+            slot_capacity: mutable usize = 1
+            while slot_capacity < target_capacity |slot_capacity, target_capacity, relation_capacity|:
+                return ProofGoalFindingIndex{} if slot_capacity > source_work_limit / 7
+                slot_capacity <- slot_capacity * 2
+            return ProofGoalFindingIndex{} if slot_capacity > source_work_limit / 7
+            return ProofGoalFindingIndex{} if not proof_report_source_work_charge(slot_capacity * 7, source_work)
+            index: mutable ProofGoalFindingIndex = ProofGoalFindingIndex{valid: true, empty_relation: relation_capacity}
+            index.slot_used.resize(slot_capacity)
+            index.slot_hashes.resize(slot_capacity)
+            index.slot_names.resize(slot_capacity)
+            index.slot_lines.resize(slot_capacity)
+            index.slot_heads.resize(slot_capacity)
+            index.slot_refuting.resize(slot_capacity)
+            for slot in 0..<slot_capacity |slot, index, relation_capacity|:
+                index.slot_used[slot] <- false
+                index.slot_refuting[slot] <- false
+                index.slot_heads[slot] <- relation_capacity
+            return index
+
+        def proof_report_goal_finding_hash(name: sview, line: u32, source_work: mutable usize&) -> (complete: bool, hash: u32):
+            name_bytes: usize = sview_len(name)
+            return (false, 0) if not proof_report_source_work_charge(name_bytes, source_work)
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            for offset in 0..<name_bytes |offset, name, hash|:
+                hash <- ((hash ^ sview_at(name, offset).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return (false, 0) if not proof_report_source_work_charge(1, source_work)
+            hash <- ((hash ^ line.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            (true, hash.u32())
+
+        def proof_report_goal_finding_key_compare(first_name: sview, first_line: u32, second_name: sview, second_line: u32, source_work: mutable usize&) -> (complete: bool, order: i64):
+            first_length: usize = sview_len(first_name)
+            second_length: usize = sview_len(second_name)
+            common_length: usize = first_length if first_length < second_length else second_length
+            for offset in 0..<common_length |offset, first_name, second_name, source_work|:
+                return (false, 0) if not proof_report_source_work_charge(1, source_work)
+                first_byte: u8 = sview_at(first_name, offset)
+                second_byte: u8 = sview_at(second_name, offset)
+                return (true, -1) if first_byte < second_byte
+                return (true, 1) if first_byte > second_byte
+            return (true, -1) if first_length < second_length
+            return (true, 1) if first_length > second_length
+            return (true, -1) if first_line < second_line
+            return (true, 1) if first_line > second_line
+            return (true, 0)
+
+        def proof_report_goal_finding_entry_compare(first: ProofGoalFindingSortedEntry, second: ProofGoalFindingSortedEntry, source_work: mutable usize&) -> (complete: bool, order: i64):
+            key_order: (complete: bool, order: i64) = proof_report_goal_finding_key_compare(first.name, first.line, second.name, second.line, source_work)
+            return key_order if not key_order.complete or key_order.order != 0
+            return (true, -1) if first.goal_id < second.goal_id
+            return (true, 1) if first.goal_id > second.goal_id
+            return (true, 0)
+
+        def proof_report_goal_finding_sorted_sift_down(entries: mutable darray[ProofGoalFindingSortedEntry]&, start: usize, end: usize, source_work: mutable usize&) -> bool:
+            root: mutable usize = start
+            while root < end / 2 |root, end, entries, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                child: usize = root * 2 + 1
+                swap_index: mutable usize = root
+                left_order: (complete: bool, order: i64) = proof_report_goal_finding_entry_compare(entries[swap_index], entries[child], source_work)
+                return false if not left_order.complete
+                swap_index <- child if left_order.order < 0
+                if child + 1 < end:
+                    right_order: (complete: bool, order: i64) = proof_report_goal_finding_entry_compare(entries[swap_index], entries[child + 1], source_work)
+                    return false if not right_order.complete
+                    swap_index <- child + 1 if right_order.order < 0
+                return true if swap_index == root
+                temporary: ProofGoalFindingSortedEntry = entries[root]
+                entries[root] <- entries[swap_index]
+                entries[swap_index] <- temporary
+                root <- swap_index
+            return true
+
+        def proof_report_goal_finding_sorted_sort(entries: mutable darray[ProofGoalFindingSortedEntry]&, source_work: mutable usize&) -> bool:
+            start: mutable usize = entries.count / 2
+            while start > 0 |start, entries, source_work|:
+                start <- start - 1
+                return false if not proof_report_goal_finding_sorted_sift_down(entries, start, entries.count, source_work)
+            end: mutable usize = entries.count
+            while end > 1 |end, entries, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                temporary: ProofGoalFindingSortedEntry = entries[0]
+                entries[0] <- entries[end - 1]
+                entries[end - 1] <- temporary
+                end <- end - 1
+                return false if not proof_report_goal_finding_sorted_sift_down(entries, 0, end, source_work)
+            return true
+
+        def proof_report_goal_finding_index_promote_existing(index: mutable ProofGoalFindingIndex&, source_work: mutable usize&) -> bool:
+            for used_index in 0..<index.used_slots.count |used_index, index, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                slot: usize = index.used_slots[used_index]
+                return false if slot >= index.slot_used.count or not index.slot_used[slot]
+                relation: mutable usize = index.slot_heads[slot]
+                while relation != index.empty_relation |relation, slot, index, source_work|:
+                    return false if relation >= index.relation_goal_ids.count or relation >= index.relation_next.count
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    index.sorted_entries.push(ProofGoalFindingSortedEntry{name: index.slot_names[slot], line: index.slot_lines[slot], goal_id: index.relation_goal_ids[relation], refuting: false})
+                    relation <- index.relation_next[relation]
+            index.sorted_mode <- true
+            return true
+
+        def proof_report_goal_finding_index_promote(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, goal_id: usize, source_work: mutable usize&) -> bool:
+            return false if not proof_report_goal_finding_index_promote_existing(index, source_work)
+            return false if not proof_report_source_work_charge(1, source_work)
+            index.sorted_entries.push(ProofGoalFindingSortedEntry{name: name, line: line, goal_id: goal_id, refuting: false})
+            return true
+
+        def proof_report_goal_finding_index_apply_table_refutations(index: ProofGoalFindingIndex&, goal_finding_clear: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            for used_index in 0..<index.used_slots.count |used_index, index, goal_finding_clear, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                slot: usize = index.used_slots[used_index]
+                return false if slot >= index.slot_used.count or not index.slot_used[slot]
+                continue if not index.slot_refuting[slot]
+                relation: mutable usize = index.slot_heads[slot]
+                while relation != index.empty_relation |relation, index, goal_finding_clear, source_work|:
+                    return false if relation >= index.relation_goal_ids.count or relation >= index.relation_next.count
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    goal_id: usize = index.relation_goal_ids[relation]
+                    return false if goal_id >= goal_finding_clear.count
+                    goal_finding_clear[goal_id] <- false
+                    relation <- index.relation_next[relation]
+            return true
+
+        def proof_report_goal_finding_index_add(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, goal_id: usize, source_work: mutable usize&) -> bool:
+            return false if not index.valid or index.slot_used.count == 0 or goal_id * 2 >= index.empty_relation
+            if index.sorted_mode:
+                return false if not proof_report_source_work_charge(1, source_work)
+                index.sorted_entries.push(ProofGoalFindingSortedEntry{name: name, line: line, goal_id: goal_id, refuting: false})
+                return true
+            hash_result: (complete: bool, hash: u32) = proof_report_goal_finding_hash(name, line, source_work)
+            return false if not hash_result.complete
+            hash: u32 = hash_result.hash
+            capacity: usize = index.slot_used.count
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_REPORT_GOAL_FINDING_PROBE_LIMIT |probes, slot, hash, name, line, goal_id, index, capacity, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if not index.slot_used[slot]:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    index.slot_used[slot] <- true
+                    index.slot_hashes[slot] <- hash
+                    index.slot_names[slot] <- name
+                    index.slot_lines[slot] <- line
+                    index.slot_refuting[slot] <- false
+                    index.used_slots.push(slot)
+                    relation_index: usize = index.relation_goal_ids.count
+                    return false if relation_index >= index.empty_relation
+                    index.relation_goal_ids.push(goal_id)
+                    index.relation_next.push(index.empty_relation)
+                    index.slot_heads[slot] <- relation_index
+                    return true
+                if index.slot_hashes[slot] == hash:
+                    return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                    if index.slot_names[slot] == name and index.slot_lines[slot] == line:
+                        relation_index: usize = index.relation_goal_ids.count
+                        return false if relation_index >= index.empty_relation
+                        index.relation_goal_ids.push(goal_id)
+                        index.relation_next.push(index.slot_heads[slot])
+                        index.slot_heads[slot] <- relation_index
+                        return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return proof_report_goal_finding_index_promote(index, name, line, goal_id, source_work)
+
+        def proof_report_goal_finding_index_find(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, source_work: mutable usize&) -> (complete: bool, found: bool, probe_limited: bool, slot: usize):
+            capacity: usize = index.slot_used.count
+            return (false, false, false, 0) if not index.valid
+            return (true, false, false, 0) if capacity == 0
+            hash_result: (complete: bool, hash: u32) = proof_report_goal_finding_hash(name, line, source_work)
+            return (false, false, false, 0) if not hash_result.complete
+            hash: u32 = hash_result.hash
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_REPORT_GOAL_FINDING_PROBE_LIMIT |probes, slot, hash, name, line, index, capacity, source_work|:
+                return (false, false, false, 0) if not proof_report_source_work_charge(1, source_work)
+                return (true, false, false, 0) if not index.slot_used[slot]
+                if index.slot_hashes[slot] == hash:
+                    return (false, false, false, 0) if not proof_report_source_work_charge(sview_len(name), source_work)
+                    return (true, true, false, slot) if index.slot_names[slot] == name and index.slot_lines[slot] == line
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, false, probes < capacity, 0)
+
+        def proof_report_goal_finding_index_refute_sorted(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, source_work: mutable usize&) -> bool:
+            low: mutable usize = 0
+            high: mutable usize = index.sorted_entries.count
+            while low < high |low, high, index, name, line, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                entry: ProofGoalFindingSortedEntry = index.sorted_entries[middle]
+                order: (complete: bool, order: i64) = proof_report_goal_finding_key_compare(entry.name, entry.line, name, line, source_work)
+                return false if not order.complete
+                if order.order < 0:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            while low < index.sorted_entries.count |low, index, name, line, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                entry: mutable ProofGoalFindingSortedEntry = index.sorted_entries[low]
+                order: (complete: bool, order: i64) = proof_report_goal_finding_key_compare(entry.name, entry.line, name, line, source_work)
+                return false if not order.complete
+                return true if order.order != 0
+                entry.refuting <- true
+                index.sorted_entries[low] <- entry
+                return true
+            return true
+
+        def proof_report_goal_finding_index_apply_sorted_refutations(index: ProofGoalFindingIndex, goal_finding_clear: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            cursor: mutable usize = 0
+            while cursor < index.sorted_entries.count |cursor, index, goal_finding_clear, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                entry: ProofGoalFindingSortedEntry = index.sorted_entries[cursor]
+                if not entry.refuting:
+                    cursor <- cursor + 1
+                else:
+                    key_name: sview = entry.name
+                    key_line: u32 = entry.line
+                    while cursor < index.sorted_entries.count |cursor, index, goal_finding_clear, source_work, key_name, key_line|:
+                        return false if not proof_report_source_work_charge(1, source_work)
+                        related: ProofGoalFindingSortedEntry = index.sorted_entries[cursor]
+                        order: (complete: bool, order: i64) = proof_report_goal_finding_key_compare(related.name, related.line, key_name, key_line, source_work)
+                        return false if not order.complete
+                        break if order.order != 0
+                        return false if related.goal_id >= goal_finding_clear.count
+                        goal_finding_clear[related.goal_id] <- false
+                        cursor <- cursor + 1
+            return true
+
+        def proof_report_goal_finding_index_refute(index: mutable ProofGoalFindingIndex&, name: sview, line: u32, goal_finding_clear: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            return proof_report_goal_finding_index_refute_sorted(index, name, line, source_work) if index.sorted_mode
+            key_result: (complete: bool, found: bool, probe_limited: bool, slot: usize) = proof_report_goal_finding_index_find(index, name, line, source_work)
+            return false if not key_result.complete and not key_result.probe_limited
+            if key_result.probe_limited:
+                return false if not proof_report_goal_finding_index_promote_existing(index, source_work)
+                return false if not proof_report_goal_finding_sorted_sort(&index.sorted_entries, source_work)
+                return false if not proof_report_goal_finding_index_apply_table_refutations(index, goal_finding_clear, source_work)
+                return proof_report_goal_finding_index_refute_sorted(index, name, line, source_work)
+            index.slot_refuting[key_result.slot] <- true if key_result.found
+            return true
+
+        def proof_report_goal_finding_is_refuting(kind: sview) -> bool:
+            return kind == "contract-proposition-type" or kind == "parse-error" or kind == "arithmetic-safety-refuted" or kind == "semantic-permission-ungranted"
+
+        def proof_report_source_goal_finding_snapshot_from_refutations(report: ProofReport&, refutations: darray[ProofGoalRefutation]&, source_work: mutable usize&) -> (goal_finding_clear: darray[bool], complete: bool) can[Memory.Allocate]:
+            goal_finding_clear: mutable darray[bool] = []
+            for _ in 0..<report.goal_attempts.count |goal_finding_clear, source_work|:
+                return ([], false) if not proof_report_source_work_charge(1, source_work)
+                goal_finding_clear.push(true)
+            return (goal_finding_clear, true) if report.goal_attempts.count == 0 or refutations.count == 0
+
+            # All callers have already admitted the report-wide source structure. Reuse the
+            # caller's bounded refutation list instead of scanning findings a second time.
+            return ([], false) if not proof_report_source_goal_finding_apply_refutations(report, refutations, &goal_finding_clear, source_work)
+            (goal_finding_clear, true)
+
+        def proof_report_source_goal_finding_apply_refutations(report: ProofReport&, refutations: darray[ProofGoalRefutation]&, goal_finding_clear: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
+            return true if report.goal_attempts.count == 0 or refutations.count == 0
+
+            goal_event_seen: mutable darray[bool] = []
+            for _ in 0..<report.goal_attempts.count |goal_event_seen, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                goal_event_seen.push(false)
+            index: mutable ProofGoalFindingIndex = proof_report_goal_finding_index_create(report.goal_attempts.count, source_work)
+            return false if not index.valid
+
+            for obligation in report.obligation_inventory |index, report, goal_event_seen, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if obligation.attempts_start > report.goal_attempts.count or obligation.attempts_count > report.goal_attempts.count - obligation.attempts_start:
+                    return false
+                for offset in 0..<obligation.attempts_count |offset, obligation, report, index, goal_event_seen, source_work|:
+                    goal_id: usize = obligation.attempts_start + offset
+                    return false if goal_event_seen[goal_id]
+                    goal_event_seen[goal_id] <- true
+                    attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
+                    return false if not proof_report_goal_finding_index_add(index, attempt.name, attempt.line, goal_id, source_work)
+                    return false if not proof_report_goal_finding_index_add(index, attempt.name, obligation.source_line, goal_id, source_work)
+
+            for goal_id in 0..<goal_event_seen.count |goal_id, goal_event_seen, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not goal_event_seen[goal_id]
+            return false if index.sorted_mode and not proof_report_goal_finding_sorted_sort(&index.sorted_entries, source_work)
+
+            for refutation in refutations |refutation, report, index, goal_finding_clear, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if refutation.finding_index >= report.findings.count
+                finding: ProofFinding = report.findings[refutation.finding_index]
+                if finding.has_goal and finding.goal_id < goal_finding_clear.count:
+                    goal_finding_clear[finding.goal_id] <- false
+                return false if not proof_report_goal_finding_index_refute(index, finding.name, finding.line, goal_finding_clear, source_work)
+            if index.sorted_mode:
+                return false if not proof_report_goal_finding_index_apply_sorted_refutations(index, goal_finding_clear, source_work)
+            else:
+                return false if not proof_report_goal_finding_index_apply_table_refutations(index, goal_finding_clear, source_work)
+            return true
+
+        def proof_report_source_goal_finding_snapshot(report: ProofReport&, source_work: mutable usize&) -> (goal_finding_clear: darray[bool], complete: bool) can[Memory.Allocate]:
+            return ([], true) if report.goal_attempts.count == 0
+            refutations: mutable darray[ProofGoalRefutation] = []
+            for finding_index in 0..<report.findings.count |finding_index, report, refutations, source_work|:
+                return ([], false) if not proof_report_source_work_charge(1, source_work)
+                finding: ProofFinding = report.findings[finding_index]
+                return ([], false) if not proof_report_source_work_charge(sview_len(finding.kind), source_work)
+                if proof_report_goal_finding_is_refuting(finding.kind):
+                    return ([], false) if not proof_report_source_work_charge(1, source_work)
+                    refutations.push(ProofGoalRefutation{finding_index: finding_index})
+            clear_snapshot: (goal_finding_clear: darray[bool], complete: bool) = proof_report_source_goal_finding_snapshot_from_refutations(report, refutations, source_work)
+            return clear_snapshot

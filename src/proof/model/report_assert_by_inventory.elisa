@@ -144,8 +144,8 @@ extend ElisaProof:
                     inventory.push((function_name, position.line, position.line, position.offset, false, Ast::Expr.Invalid, false))
 
         # This mirrors the proof-step forms that actually create proposition attempts.
-        # Other statements are recursively scanned for nested block expressions; if one owns
-        # assert-by source, it is recorded with supported=false until scope identity is modeled.
+        # Other statements are recursively scanned for nested block expressions; unsupported
+        # executable scopes keep their assert-by entries marked unsupported.
         def proof_source_assert_by_collect_steps(function_name: sview, scope_supported: bool, body: darray[Ast::Stmt]&, start: usize, inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, depth: usize, work: mutable usize&) -> void:
             return if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
             if depth >= PROOF_SOURCE_ASSERT_BY_AST_DEPTH_LIMIT:
@@ -174,9 +174,12 @@ extend ElisaProof:
                                 pass
                     Ast::Stmt.Block(kind, _, _, nested, _):
                         if kind == "assert_by":
-                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr) = proof_source_assert_by_candidate(function_name, false, statement)
+                            # A nested assert-by inside a supported proof block has an exact
+                            # source identity and its own certified goal attempt. Carry the
+                            # enclosing support state so report admission can bind that goal.
+                            candidate: (found: bool, supported: bool, name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr) = proof_source_assert_by_candidate(function_name, scope_supported, statement)
                             inventory.push((candidate.name, candidate.attempt_line, candidate.goal_line, candidate.goal_offset, candidate.expected_value, candidate.source_goal, candidate.supported)) if candidate.found
-                            proof_source_assert_by_collect_steps(function_name, false, nested, 1, inventory, depth + 1, work)
+                            proof_source_assert_by_collect_steps(function_name, scope_supported, nested, 1, inventory, depth + 1, work)
                         else:
                             proof_source_assert_by_collect_body(function_name, false, nested, inventory, depth + 1, false, false, work)
                     Ast::Stmt.If(condition, then_body, else_body, _):
@@ -334,12 +337,20 @@ extend ElisaProof:
                         inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false))
 
     public:
-        def proof_source_assert_by_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]:
+        def proof_source_assert_by_inventory_with_status(declarations: darray[Ast::Decl]&) -> (inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)], complete: bool, work_limited: bool):
             inventory: mutable darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = []
             work: mutable usize = 0
             proof_source_assert_by_collect_declarations(declarations, true, inventory, 0, &work)
-            inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false)) if work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
-            return inventory
+            work_limited: bool = work >= PROOF_SOURCE_ASSERT_BY_WORK_LIMIT
+            inventory.push(("", 0, 0, 0, false, Ast::Expr.Invalid, false)) if work_limited
+            complete: mutable bool = not work_limited
+            for expected in inventory |complete|:
+                complete <- false if expected.name == ""
+            (inventory, complete, work_limited)
+
+        def proof_source_assert_by_inventory(declarations: darray[Ast::Decl]&) -> darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]:
+            inventory_status: (inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)], complete: bool, work_limited: bool) = proof_source_assert_by_inventory_with_status(declarations)
+            inventory_status.inventory
 
         def proof_source_assert_by_inventory_has_unsupported(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&) -> bool:
             for expected in inventory:
@@ -354,11 +365,12 @@ extend ElisaProof:
             return proof_source_assert_by_coverage(inventory, report)
 
     private:
-        def proof_source_assert_by_inventory_find(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal: Ast::Expr) -> usize:
+        def proof_source_assert_by_inventory_find(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, goal: Ast::Expr, source_work: mutable usize&) -> usize:
             position: Ast::Pos = Ast::expr_pos(goal)
             low: mutable usize = 0
             high: mutable usize = inventory.count
-            while low < high |low, high, inventory, position|:
+            while low < high |low, high, inventory, position, source_work|:
+                return inventory.count if not proof_report_source_work_charge(1, source_work)
                 middle: usize = low + (high - low) / 2
                 if inventory[middle].goal_offset < position.offset:
                     low <- middle + 1
@@ -368,16 +380,17 @@ extend ElisaProof:
             return low if inventory[low].goal_offset == position.offset and inventory[low].goal_line == position.line
             return inventory.count
 
-        def proof_source_assert_by_goal_has_identity(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)) -> bool:
+        def proof_source_assert_by_goal_has_identity(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool), source_work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(1, source_work)
             position: Ast::Pos = Ast::expr_pos(goal)
             source_position: Ast::Pos = Ast::expr_pos(expected.source_goal)
             return false if position.line != expected.goal_line or position.offset != expected.goal_offset
             return false if source_position.line != expected.goal_line or source_position.offset != expected.goal_offset
             return position.line == source_position.line and position.column == source_position.column and position.offset == source_position.offset and position.end_line == source_position.end_line and position.end_column == source_position.end_column and position.end_offset == source_position.end_offset
 
-        def proof_source_assert_by_goal_matches(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)) -> bool:
-            return false if not expected.supported or not proof_source_assert_by_goal_has_identity(goal, expected)
-            return false if not proof_expr_equal(goal, expected.source_goal)
+        def proof_source_assert_by_goal_matches(goal: Ast::Expr, expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool), source_work: mutable usize&) -> bool:
+            return false if not expected.supported or not proof_source_assert_by_goal_has_identity(goal, expected, source_work)
+            return false if not proof_replay_summary_expr_proof_equal_with_limit(goal, expected.source_goal, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             match expected.source_goal:
                 Ast::Expr.BoolLit(source_value, position):
                     return source_value == expected.expected_value and position.line == expected.goal_line and position.offset == expected.goal_offset
@@ -385,18 +398,24 @@ extend ElisaProof:
                     return true
 
     private:
-        def proof_source_assert_by_coverage_inner(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&, require_replayed: bool) -> bool:
+        def proof_source_assert_by_coverage_inner(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&, require_replayed: bool, source_work: mutable usize&) -> bool:
             matched: mutable darray[bool] = []
             previous_offset: mutable u32 = 0
             has_previous: mutable bool = false
-            for expected in inventory |matched, previous_offset, has_previous|:
+            for expected in inventory |matched, previous_offset, has_previous, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                return false if not proof_report_source_work_charge(sview_len(expected.name), source_work)
                 return false if expected.name == "" or not expected.supported
                 return false if has_previous and expected.goal_offset <= previous_offset
                 previous_offset <- expected.goal_offset
                 has_previous <- true
                 matched.push(false)
-            for attempt in report.goal_attempts |inventory, matched, report|:
-                expected_index: usize = proof_source_assert_by_inventory_find(inventory, attempt.goal)
+            for attempt in report.goal_attempts |inventory, matched, report, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                expected_index: usize = proof_source_assert_by_inventory_find(inventory, attempt.goal, source_work)
+                if expected_index < inventory.count:
+                    return false if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+                    return false if not proof_report_source_work_charge(sview_len(inventory[expected_index].name), source_work)
                 if expected_index < inventory.count and attempt.name == inventory[expected_index].name:
                     expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool) = inventory[expected_index]
                     return false if matched[expected_index]
@@ -404,9 +423,12 @@ extend ElisaProof:
                     return false if attempt.rule != "goal" or attempt.line != expected.attempt_line or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
                     certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
                     return false if require_replayed and not certificate.replayed
+                    return false if not proof_report_source_work_charge(sview_len(certificate.name), source_work)
+                    return false if not proof_report_source_work_charge(sview_len(expected.name), source_work)
                     return false if certificate.name != expected.name or certificate.line != expected.attempt_line or certificate.rule != "goal"
-                    return false if not proof_source_assert_by_goal_matches(attempt.goal, expected) or not proof_source_assert_by_goal_matches(certificate.goal, expected)
-            for expected_index in 0..<matched.count |expected_index, matched|:
+                    return false if not proof_source_assert_by_goal_matches(attempt.goal, expected, source_work) or not proof_source_assert_by_goal_matches(certificate.goal, expected, source_work)
+            for expected_index in 0..<matched.count |expected_index, matched, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
                 return false if not matched[expected_index]
             return true
 
@@ -414,28 +436,34 @@ extend ElisaProof:
         # Before replay, bind source targets and proof steps to their produced attempts and
         # certificate claims. Replay remains an explicit API operation for compatibility.
         def proof_source_assert_by_attempt_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&) -> bool:
-            return proof_source_assert_by_coverage_inner(inventory, report, false)
+            source_work: mutable usize = 0
+            proof_source_assert_by_coverage_inner(inventory, report, false, &source_work)
 
         # Final admission additionally requires every certificate to have been replayed.
         # Direct if/match branches and loops preserve the function owner; unsupported nested
         # control paths and scopes fail closed until their path identity is modeled.
         def proof_source_assert_by_coverage(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&) -> bool:
-            return proof_source_assert_by_coverage_inner(inventory, report, true)
+            source_work: mutable usize = 0
+            proof_source_assert_by_coverage_inner(inventory, report, true, &source_work)
 
     private:
         # Bind one selected attempt to its exact source `assert … by:` goal without
         # requiring unrelated assertions in the same file to be complete.
-        def proof_source_assert_by_goal_attempt_admitted(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&, goal_id: usize) -> bool:
+        def proof_source_assert_by_goal_attempt_admitted(inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, report: ProofReport&, goal_id: usize, source_work: mutable usize&) -> bool:
             return false if goal_id >= report.goal_attempts.count
             attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
-            expected_index: usize = proof_source_assert_by_inventory_find(inventory, attempt.goal)
+            expected_index: usize = proof_source_assert_by_inventory_find(inventory, attempt.goal, source_work)
             return false if expected_index >= inventory.count
             expected: (name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool) = inventory[expected_index]
+            return false if not proof_report_source_work_charge(sview_len(attempt.name), source_work)
+            return false if not proof_report_source_work_charge(sview_len(expected.name), source_work)
             return false if not expected.supported or attempt.name != expected.name or attempt.line != expected.attempt_line or attempt.rule != "goal"
-            return false if not proof_source_assert_by_goal_matches(attempt.goal, expected)
+            return false if not proof_source_assert_by_goal_matches(attempt.goal, expected, source_work)
             return false if attempt.has_certificate != attempt.proven
             if attempt.proven:
                 return false if attempt.certificate_index >= report.certificates.count
                 certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
-                return certificate.name == expected.name and certificate.line == expected.attempt_line and certificate.rule == "goal" and proof_source_assert_by_goal_matches(certificate.goal, expected)
+                return false if not proof_report_source_work_charge(sview_len(certificate.name), source_work)
+                return false if not proof_report_source_work_charge(sview_len(expected.name), source_work)
+                return certificate.name == expected.name and certificate.line == expected.attempt_line and certificate.rule == "goal" and proof_source_assert_by_goal_matches(certificate.goal, expected, source_work)
             return true

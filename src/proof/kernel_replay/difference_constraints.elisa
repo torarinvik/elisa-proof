@@ -1,5 +1,7 @@
 const PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS: usize = 4096
+const PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT: usize = 65536
 const PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK: usize = 4000000
+const PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_PENDING: usize = 65536
 
 extend ElisaProofKernelReplay:
     private:
@@ -51,6 +53,7 @@ extend ElisaProofKernelReplay:
             return false
 
         def proof_kernel_replay_difference_push(left: ProofKernelReplayAffine, right: ProofKernelReplayAffine, reverse: bool, strict: bool, constraints: mutable darray[ProofKernelReplayDifference]&) -> void:
+            return if constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
             first: ProofKernelReplayAffine = left if not reverse else right
             second: ProofKernelReplayAffine = right if not reverse else left
             difference: ProofKernelReplayInt = proof_kernel_replay_sub_safe(second.offset, first.offset)
@@ -67,16 +70,16 @@ extend ElisaProofKernelReplay:
                 constraints.push(ProofKernelReplayDifference{left: "", right: "", bound: bound})
                 return
             if first.base == "":
-                constraints.push(ProofKernelReplayDifference{left: second.base, right: "", bound: bound}) if second.negative
-                constraints.push(ProofKernelReplayDifference{left: "", right: second.base, bound: bound}) if not second.negative
+                constraints.push(ProofKernelReplayDifference{left: second.base, right: "", bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and second.negative
+                constraints.push(ProofKernelReplayDifference{left: "", right: second.base, bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and not second.negative
                 return
             if second.base == "":
-                constraints.push(ProofKernelReplayDifference{left: "", right: first.base, bound: bound}) if first.negative
-                constraints.push(ProofKernelReplayDifference{left: first.base, right: "", bound: bound}) if not first.negative
+                constraints.push(ProofKernelReplayDifference{left: "", right: first.base, bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and first.negative
+                constraints.push(ProofKernelReplayDifference{left: first.base, right: "", bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and not first.negative
                 return
             return if first.negative != second.negative
-            constraints.push(ProofKernelReplayDifference{left: second.base, right: first.base, bound: bound}) if first.negative
-            constraints.push(ProofKernelReplayDifference{left: first.base, right: second.base, bound: bound}) if not first.negative
+            constraints.push(ProofKernelReplayDifference{left: second.base, right: first.base, bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and first.negative
+            constraints.push(ProofKernelReplayDifference{left: first.base, right: second.base, bound: bound}) if constraints.count < PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS and not first.negative
 
         # Mirror of the producer's fact-side increment guard. The peer argument is asked of the
         # facts rather than of the constraint graph, because a fact is being imported into that
@@ -93,9 +96,11 @@ extend ElisaProofKernelReplay:
             return false if not unit.known
             return proof_kernel_replay_unsigned_increment_has_strict_peer(nodes, children, unit.base, width, facts)
 
-        def proof_kernel_replay_collect_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, bounds: darray[ProofKernelReplayBound]&, children: darray[usize]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, depth: usize) -> void:
+        def proof_kernel_replay_collect_differences(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, bounds: darray[ProofKernelReplayBound]&, children: darray[usize]&, facts: darray[usize], constraints: mutable darray[ProofKernelReplayDifference]&, work_used: mutable usize&, depth: usize) -> void:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return if work_used >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT or constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+            work_used <- work_used + 1
             return if not ElisaProofKernelCore::depth_valid(depth)
             return if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return if root >= nodes.count
@@ -126,8 +131,8 @@ extend ElisaProofKernelReplay:
                                 proof_kernel_replay_difference_push(left, right, true, false, constraints)
                 return
             if node.kind == "binary" and node.operator == "and":
-                proof_kernel_replay_collect_differences(nodes, node.left, bounds, children, facts, constraints, depth + 1)
-                proof_kernel_replay_collect_differences(nodes, node.right, bounds, children, facts, constraints, depth + 1)
+                proof_kernel_replay_collect_differences(nodes, node.left, bounds, children, facts, constraints, work_used, depth + 1)
+                proof_kernel_replay_collect_differences(nodes, node.right, bounds, children, facts, constraints, work_used, depth + 1)
                 return
             return if node.kind != "binary" or node.operator != "==" and node.operator != "<" and node.operator != "<=" and node.operator != ">" and node.operator != ">="
             return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
@@ -203,8 +208,10 @@ extend ElisaProofKernelReplay:
             # literals over the integers, so its ground forms are exact values.
             return false if not certified and left.base == "" and right.base == ""
             constraints: mutable darray[ProofKernelReplayDifference] = []
-            for fact in facts |fact, nodes, bounds, constraints|:
-                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, 0)
+            collection_work: mutable usize = 0
+            for fact in facts |fact, nodes, bounds, constraints, collection_work|:
+                break if collection_work >= PROOF_KERNEL_REPLAY_DIFFERENCE_COLLECT_WORK_LIMIT or constraints.count >= PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
+                proof_kernel_replay_collect_differences(nodes, fact, bounds, children, facts, &constraints, &collection_work, 0)
             return false if constraints.count > PROOF_KERNEL_REPLAY_MAX_DIFFERENCE_CONSTRAINTS
             # Collected before the overflow guard runs, because they are what gives a name an
             # interval when no fact states one about it directly.
@@ -290,28 +297,32 @@ extend ElisaProofKernelReplay:
             return ">" if operator == ">="
             ""
 
-        def proof_kernel_replay_expr_pair_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_equality_work_charge(1, work_limit, work_used)
             return false if scheduled >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+            return false if pending.count >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_PENDING
             pending.push(ProofKernelReplayExprPair{left: left, right: right, depth: depth, call_argument: false})
             scheduled <- scheduled + 1
             return true
 
-        def proof_kernel_replay_expr_call_argument_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+        def proof_kernel_replay_expr_call_argument_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left: usize, right: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_equality_work_charge(1, work_limit, work_used)
             return false if scheduled >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+            return false if pending.count >= PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_PENDING
             pending.push(ProofKernelReplayExprPair{left: left, right: right, depth: depth, call_argument: true})
             scheduled <- scheduled + 1
             return true
 
-        def proof_kernel_replay_expr_child_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left: usize, right: usize, depth: usize, call_argument: bool) -> bool:
-            return proof_kernel_replay_expr_call_argument_enqueue(pending, scheduled, left, right, depth) if call_argument
-            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left, right, depth)
+        def proof_kernel_replay_expr_child_enqueue(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left: usize, right: usize, depth: usize, call_argument: bool) -> bool:
+            return proof_kernel_replay_expr_call_argument_enqueue(pending, scheduled, work_limit, work_used, left, right, depth) if call_argument
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left, right, depth)
 
-        def proof_kernel_replay_expr_child_span_enqueue(children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_start: usize, right_start: usize, count: usize, depth: usize, call_arguments: bool) -> bool:
+        def proof_kernel_replay_expr_child_span_enqueue(children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left_start: usize, right_start: usize, count: usize, depth: usize, call_arguments: bool) -> bool:
             return false if count > children.count or left_start > children.count - count or right_start > children.count - count
-            for index in 0..<count |index, children, pending, scheduled, left_start, right_start, depth, call_arguments|:
+            for index in 0..<count |index, children, pending, scheduled, work_limit, work_used, left_start, right_start, depth, call_arguments|:
                 left_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, left_start + index)
                 right_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, right_start + index)
-                return false if not left_child.known or not right_child.known or not proof_kernel_replay_expr_child_enqueue(pending, scheduled, left_child.value, right_child.value, depth, call_arguments)
+                return false if not left_child.known or not right_child.known or not proof_kernel_replay_expr_child_enqueue(pending, scheduled, work_limit, work_used, left_child.value, right_child.value, depth, call_arguments)
             return true
 
         def proof_kernel_replay_expr_leaf_equal(kind: sview, left_value: i64, right_value: i64, left_name: sview, right_name: sview) -> (handled: bool, equal: bool):
@@ -336,117 +347,110 @@ extend ElisaProofKernelReplay:
             return false if not same_root and not proof_kernel_replay_arena_shape_valid(right)
             return true
 
-        def proof_kernel_replay_expr_equality_payload_work(node: ElisaProofKernelCore::ProofKernelNode) -> usize:
-            return sview_len(node.kind) + sview_len(node.name) + sview_len(node.secondary_name) + sview_len(node.operator)
+        def proof_kernel_replay_expr_equality_work_charge(amount: usize, work_limit: usize, work_used: mutable usize&) -> bool:
+            effective_limit: usize = work_limit if work_limit < PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK else PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK
+            if work_used > effective_limit:
+                return false
+            if amount > effective_limit - work_used:
+                work_used <- effective_limit
+                return false
+            work_used <- work_used + amount
+            return true
+
+        def proof_kernel_replay_expr_equality_node_work(node: ElisaProofKernelCore::ProofKernelNode, work_limit: usize, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_expr_equality_work_charge(sview_len(node.kind), work_limit, work_used)
+            return false if not proof_kernel_replay_expr_equality_work_charge(sview_len(node.name), work_limit, work_used)
+            return false if not proof_kernel_replay_expr_equality_work_charge(sview_len(node.secondary_name), work_limit, work_used)
+            return proof_kernel_replay_expr_equality_work_charge(sview_len(node.operator), work_limit, work_used)
 
         def proof_kernel_replay_expr_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
-            return false if not proof_kernel_replay_valid(nodes, left_root) or not proof_kernel_replay_valid(nodes, right_root)
-            first_left: ElisaProofKernelCore::ProofKernelNode = nodes[left_root]
-            first_right: ElisaProofKernelCore::ProofKernelNode = nodes[right_root]
-            return false if not proof_kernel_replay_expr_pair_nodes_valid(first_left, first_right, left_root == right_root, false, depth)
-            first_leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(first_left.kind, first_left.value, first_right.value, first_left.name, first_right.name)
-            return first_leaf.equal if first_leaf.handled
-            pending: mutable darray[ProofKernelReplayExprPair] = [ProofKernelReplayExprPair{left: left_root, right: right_root, depth: depth, call_argument: false}]
-            scheduled: mutable usize = 1
-            while pending.count > 0 |pending, scheduled, nodes, children|:
-                invariant true
-                pair: ProofKernelReplayExprPair = pending.pop()
-                return false if not proof_kernel_replay_expr_pair_expand(nodes, children, &pending, &scheduled, pair)
-            return true
+            work_used: mutable usize = 0
+            proof_kernel_replay_expr_equal_with_work(nodes, children, left_root, right_root, depth, PROOF_KERNEL_REPLAY_MAX_EXPR_EQUALITY_WORK, &work_used)
 
         # Report adapters that search many candidate traces need the actual bounded equality
-        # work, not merely one charge per root pair. The worklist cap remains authoritative for
-        # an individual comparison; callers can add this count to their batch budget.
-        def proof_kernel_replay_expr_equal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize, work_used: mutable usize&) -> bool:
-            work_used <- 1
-            # Most marker lookups compare leaves or different node kinds. Apply the same
-            # validation as the worklist before allocating its scratch storage.
+        # work, not merely one charge per root pair. Reserve bytes before node validation or
+        # string comparison, so this is a hard limit on the comparison itself rather than a
+        # post-hoc accounting estimate. The same budget includes one unit before each pair is
+        # scheduled; total scheduled work and live pending storage have separate caps so a wide
+        # aggregate cannot allocate millions of pair records before the walk begins.
+        def proof_kernel_replay_expr_equal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize, work_limit: usize, work_used: mutable usize&) -> bool:
+            work_used <- 0
             return false if not proof_kernel_replay_valid(nodes, left_root) or not proof_kernel_replay_valid(nodes, right_root)
-            first_left: ElisaProofKernelCore::ProofKernelNode = nodes[left_root]
-            first_right: ElisaProofKernelCore::ProofKernelNode = nodes[right_root]
-            work_used <- work_used + proof_kernel_replay_expr_equality_payload_work(first_left) + proof_kernel_replay_expr_equality_payload_work(first_right)
-            return false if not proof_kernel_replay_expr_pair_nodes_valid(first_left, first_right, left_root == right_root, false, depth)
-            first_leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(first_left.kind, first_left.value, first_right.value, first_left.name, first_right.name)
-            return first_leaf.equal if first_leaf.handled
-            # Compare with an explicit worklist: serialized AST arenas are untrusted input, and
-            # recursion on caller-owned arenas prevents resource-summary convergence in our
-            # verifier. Each pending pair retains the original per-path depth bound.
+            return false if not proof_kernel_replay_expr_equality_work_charge(1, work_limit, work_used)
             pending: mutable darray[ProofKernelReplayExprPair] = [ProofKernelReplayExprPair{left: left_root, right: right_root, depth: depth, call_argument: false}]
             scheduled: mutable usize = 1
-            while pending.count > 0 |pending, scheduled, nodes, children|:
+            while pending.count > 0 |pending, scheduled, nodes, children, work_used|:
                 invariant true
                 pair: ProofKernelReplayExprPair = pending.pop()
-                if pair.left < nodes.count and pair.right < nodes.count:
-                    work_used <- work_used + proof_kernel_replay_expr_equality_payload_work(nodes[pair.left]) + proof_kernel_replay_expr_equality_payload_work(nodes[pair.right])
-                if not proof_kernel_replay_expr_pair_expand(nodes, children, &pending, &scheduled, pair):
-                    work_used <- scheduled if work_used < scheduled
-                    return false
-            work_used <- scheduled if work_used < scheduled
+                return false if pair.left >= nodes.count or pair.right >= nodes.count
+                return false if not proof_kernel_replay_expr_equality_node_work(nodes[pair.left], work_limit, work_used)
+                return false if not proof_kernel_replay_expr_equality_node_work(nodes[pair.right], work_limit, work_used)
+                return false if not proof_kernel_replay_expr_pair_expand(nodes, children, &pending, &scheduled, work_limit, work_used, pair)
             return true
 
-        def proof_kernel_replay_expr_pair_enqueue_two(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, depth: usize) -> bool:
-            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_first, right_first, depth)
-            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_second, right_second, depth)
+        def proof_kernel_replay_expr_pair_enqueue_two(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left_first, right_first, depth)
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left_second, right_second, depth)
 
-        def proof_kernel_replay_expr_pair_enqueue_three(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, left_third: usize, right_third: usize, depth: usize) -> bool:
-            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_first, right_first, depth)
-            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_second, right_second, depth)
-            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left_third, right_third, depth)
+        def proof_kernel_replay_expr_pair_enqueue_three(pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, left_first: usize, right_first: usize, left_second: usize, right_second: usize, left_third: usize, right_third: usize, depth: usize) -> bool:
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left_first, right_first, depth)
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left_second, right_second, depth)
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left_third, right_third, depth)
 
-        def proof_kernel_replay_expr_pair_enqueue_aggregate_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize, call_arguments: bool) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize, call_arguments: bool) -> bool:
             return false if left.children_count != right.children_count
-            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, left.children_start, right.children_start, left.children_count, depth, call_arguments)
+            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, work_limit, work_used, left.children_start, right.children_start, left.children_count, depth, call_arguments)
 
-        def proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize, call_arguments: bool) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize, call_arguments: bool) -> bool:
             return false if left.children_count != right.children_count
-            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left.left, right.left, depth)
-            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, left.children_start, right.children_start, left.children_count, depth, call_arguments)
+            return false if not proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left.left, right.left, depth)
+            return proof_kernel_replay_expr_child_span_enqueue(children, pending, scheduled, work_limit, work_used, left.children_start, right.children_start, left.children_count, depth, call_arguments)
 
-        def proof_kernel_replay_expr_pair_enqueue_aggregate_index(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_index(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             return false if left.children_count == 0
-            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, false)
+            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, work_limit, work_used, depth, false)
 
-        def proof_kernel_replay_expr_pair_enqueue_aggregate_call(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_aggregate_call(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             return false if left.auxiliary != right.auxiliary
-            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, true)
+            return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, work_limit, work_used, depth, true)
 
-        def proof_kernel_replay_expr_pair_enqueue_aggregate(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_aggregate(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             match left.kind:
                 "index-n":
-                    return proof_kernel_replay_expr_pair_enqueue_aggregate_index(left, right, children, pending, scheduled, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_index(left, right, children, pending, scheduled, work_limit, work_used, depth)
                 "call":
-                    return proof_kernel_replay_expr_pair_enqueue_aggregate_call(left, right, children, pending, scheduled, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_call(left, right, children, pending, scheduled, work_limit, work_used, depth)
                 "construct" | "record-update":
-                    return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, depth, false)
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_with_head(left, right, children, pending, scheduled, work_limit, work_used, depth, false)
                 "array" | "tuple" | "set" | "dict":
-                    return proof_kernel_replay_expr_pair_enqueue_aggregate_children(left, right, children, pending, scheduled, depth, false)
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate_children(left, right, children, pending, scheduled, work_limit, work_used, depth, false)
                 _:
                     return false
 
-        def proof_kernel_replay_expr_pair_enqueue_single(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_single(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             if left.kind == "field" or left.kind == "scope" or left.kind == "call_arg" or left.kind == "field-init":
                 return false if left.name != right.name
-            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, left.left, right.left, depth)
+            return proof_kernel_replay_expr_pair_enqueue(pending, scheduled, work_limit, work_used, left.left, right.left, depth)
 
-        def proof_kernel_replay_expr_pair_enqueue_quantifier(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_quantifier(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             return false if left.name != right.name or left.secondary_name != right.secondary_name
-            return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, left.left, right.left, left.right, right.right, depth)
+            return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, work_limit, work_used, left.left, right.left, left.right, right.right, depth)
 
-        def proof_kernel_replay_expr_pair_enqueue_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, depth: usize) -> bool:
+        def proof_kernel_replay_expr_pair_enqueue_children(left: ElisaProofKernelCore::ProofKernelNode, right: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, depth: usize) -> bool:
             match left.kind:
                 "field" | "scope" | "call_arg" | "field-init" | "unary" | "move":
-                    return proof_kernel_replay_expr_pair_enqueue_single(left, right, pending, scheduled, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_single(left, right, pending, scheduled, work_limit, work_used, depth)
                 "binary" | "index" | "dict_entry":
-                    return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, left.left, right.left, left.right, right.right, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_two(pending, scheduled, work_limit, work_used, left.left, right.left, left.right, right.right, depth)
                 "slice" | "if":
-                    return proof_kernel_replay_expr_pair_enqueue_three(pending, scheduled, left.left, right.left, left.right, right.right, left.auxiliary, right.auxiliary, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_three(pending, scheduled, work_limit, work_used, left.left, right.left, left.right, right.right, left.auxiliary, right.auxiliary, depth)
                 "index-n" | "call" | "array" | "tuple" | "set" | "dict" | "construct" | "record-update":
-                    return proof_kernel_replay_expr_pair_enqueue_aggregate(left, right, children, pending, scheduled, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_aggregate(left, right, children, pending, scheduled, work_limit, work_used, depth)
                 "quantifier":
-                    return proof_kernel_replay_expr_pair_enqueue_quantifier(left, right, pending, scheduled, depth)
+                    return proof_kernel_replay_expr_pair_enqueue_quantifier(left, right, pending, scheduled, work_limit, work_used, depth)
             return false
 
-        def proof_kernel_replay_expr_pair_expand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, pair: ProofKernelReplayExprPair) -> bool:
+        def proof_kernel_replay_expr_pair_expand(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, pending: mutable darray[ProofKernelReplayExprPair]&, scheduled: mutable usize&, work_limit: usize, work_used: mutable usize&, pair: ProofKernelReplayExprPair) -> bool:
             pair_left: usize = pair.left
             pair_right: usize = pair.right
             return false if not proof_kernel_replay_valid(nodes, pair_left) or not proof_kernel_replay_valid(nodes, pair_right)
@@ -456,7 +460,7 @@ extend ElisaProofKernelReplay:
             return false if not proof_kernel_replay_expr_pair_nodes_valid(left, right, pair_left == pair_right, pair.call_argument, pair.depth)
             leaf: (handled: bool, equal: bool) = proof_kernel_replay_expr_leaf_equal(left.kind, left.value, right.value, left.name, right.name)
             return leaf.equal if leaf.handled
-            return proof_kernel_replay_expr_pair_enqueue_children(left, right, children, pending, scheduled, pair.depth + 1)
+            return proof_kernel_replay_expr_pair_enqueue_children(left, right, children, pending, scheduled, work_limit, work_used, pair.depth + 1)
 
         def proof_kernel_replay_definitionally_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left_root: usize, right_root: usize, depth: usize) -> bool:
             # This normalization follows only a finite chain of explicit identity rewrites. The
@@ -555,22 +559,28 @@ extend ElisaProofKernelReplay:
         # proposition shape of every fact and goal is checked before this runs.
         def proof_kernel_replay_fact_contains_signed(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, negated: bool, depth: usize) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            work_used: mutable usize = 0
+            proof_kernel_replay_fact_contains_signed_with_work(nodes, children, root, goal_root, negated, &work_used, depth)
+
+        def proof_kernel_replay_fact_contains_signed_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, goal_root: usize, negated: bool, work_used: mutable usize&, depth: usize) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
             return false if not ElisaProofKernelCore::depth_valid(depth)
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             return false if root >= nodes.count
             return false if not proof_kernel_replay_valid(nodes, root)
             if not negated:
-                return true if proof_kernel_replay_expr_equal(nodes, children, root, goal_root, 0)
+                return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, root, goal_root, work_used)
             else:
                 goal_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
                 if goal_located.known and goal_located.node.kind == "unary" and goal_located.node.operator == "not":
-                    return true if proof_kernel_replay_expr_equal(nodes, children, goal_located.node.left, root, 0)
+                    return true if proof_kernel_replay_goal_search_expr_equal(nodes, children, goal_located.node.left, root, work_used)
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "unary" and node.operator == "not":
-                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, not negated, depth + 1)
+                return proof_kernel_replay_fact_contains_signed_with_work(nodes, children, node.left, goal_root, not negated, work_used, depth + 1)
             if node.kind == "binary" and node.operator == "and" and not negated:
-                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, false, depth + 1) or proof_kernel_replay_fact_contains_signed(nodes, children, node.right, goal_root, false, depth + 1)
+                return proof_kernel_replay_fact_contains_signed_with_work(nodes, children, node.left, goal_root, false, work_used, depth + 1) or proof_kernel_replay_fact_contains_signed_with_work(nodes, children, node.right, goal_root, false, work_used, depth + 1)
             if node.kind == "binary" and node.operator == "or" and negated:
-                return proof_kernel_replay_fact_contains_signed(nodes, children, node.left, goal_root, true, depth + 1) or proof_kernel_replay_fact_contains_signed(nodes, children, node.right, goal_root, true, depth + 1)
+                return proof_kernel_replay_fact_contains_signed_with_work(nodes, children, node.left, goal_root, true, work_used, depth + 1) or proof_kernel_replay_fact_contains_signed_with_work(nodes, children, node.right, goal_root, true, work_used, depth + 1)
             return false

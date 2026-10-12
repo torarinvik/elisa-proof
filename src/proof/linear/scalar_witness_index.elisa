@@ -1,3 +1,6 @@
+# Keep the common hash lookup bounded, with an exact sorted fallback for collision-heavy inputs.
+const PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT: usize = 64
+
 extend ElisaProof:
     public:
         # The scalar-witness judgements recurse over every subterm and, at each node, looked for
@@ -20,9 +23,11 @@ extend ElisaProof:
             # ordered source list so exact equality remains authoritative.
             name_hashes: mutable darray[u32]
             name_slots: mutable darray[usize]
+            # Exact deterministic fallback, sorted by name without changing source order above.
+            sorted_name_indices: mutable darray[usize]
 
         def proof_scalar_witness_markers(facts: darray[Ast::Expr]&) -> ProofScalarWitnesses:
-            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], element_terms: [], element_depths: [], name_hashes: [], name_slots: []}
+            witnesses: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], element_terms: [], element_depths: [], name_hashes: [], name_slots: [], sorted_name_indices: []}
             for fact in facts |witnesses|:
                 callee: sview = proof_marker_callee_name(fact)
                 if callee == "__elisa_untrusted_operator_type":
@@ -50,7 +55,8 @@ extend ElisaProof:
                             _:
                                 pass
             # Keep `names` in source order for diagnostics and differential checks. The hash
-            # table is only an accelerator and stores exact source-list indexes.
+            # table is the common-case index; build an exact sorted fallback only if a collision
+            # cluster exceeds the bounded probe window.
             capacity: mutable usize = 1 if witnesses.names.count > 0 else 0
             target: usize = witnesses.names.count * 2
             while capacity > 0 and capacity < target |capacity, target|:
@@ -62,20 +68,66 @@ extend ElisaProof:
                     witnesses.name_hashes[name_index] <- proof_name_hash(witnesses.names[name_index])
                 for slot in 0..<capacity |slot, witnesses, capacity|:
                     witnesses.name_slots[slot] <- witnesses.names.count
-                for name_index in 0..<witnesses.names.count |name_index, witnesses, capacity|:
+                needs_sorted_fallback: mutable bool = false
+                for name_index in 0..<witnesses.names.count |name_index, witnesses, capacity, needs_sorted_fallback|:
                     hash: u32 = witnesses.name_hashes[name_index]
                     slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                     probes: mutable usize = 0
-                    while probes < capacity |probes, slot, hash, name_index, witnesses, capacity|:
+                    placed: mutable bool = false
+                    while probes < capacity and probes < PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT |probes, slot, hash, name_index, witnesses, capacity, placed|:
                         existing: usize = witnesses.name_slots[slot]
                         if existing >= witnesses.names.count:
                             witnesses.name_slots[slot] <- name_index
+                            placed <- true
                             break
                         if witnesses.name_hashes[existing] == hash and witnesses.names[existing] == witnesses.names[name_index]:
+                            placed <- true
                             break
                         slot <- (slot + 1) % capacity
                         probes <- probes + 1
+                    needs_sorted_fallback <- true if not placed
+                if needs_sorted_fallback:
+                    for name_index in 0..<witnesses.names.count |name_index, witnesses|:
+                        witnesses.sorted_name_indices.push(name_index)
+                    proof_scalar_witness_name_indices_sort(&witnesses.sorted_name_indices, witnesses.names)
             return witnesses
+
+        def proof_scalar_witness_name_less(first: sview, second: sview) -> bool:
+            first_length: usize = sview_len(first)
+            second_length: usize = sview_len(second)
+            common_length: usize = first_length if first_length < second_length else second_length
+            for offset in 0..<common_length |offset, first, second|:
+                first_byte: u8 = sview_at(first, offset)
+                second_byte: u8 = sview_at(second, offset)
+                return first_byte < second_byte if first_byte != second_byte
+            return first_length < second_length
+
+        def proof_scalar_witness_name_sift_down(indices: mutable darray[usize]&, names: darray[sview]&, start: usize, end: usize) -> void:
+            root: mutable usize = start
+            while root < end / 2 |root, end, indices, names|:
+                child: usize = root * 2 + 1
+                swap_index: mutable usize = root
+                swap_index <- child if proof_scalar_witness_name_less(names[indices[swap_index]], names[indices[child]])
+                if child + 1 < end:
+                    swap_index <- child + 1 if proof_scalar_witness_name_less(names[indices[swap_index]], names[indices[child + 1]])
+                return if swap_index == root
+                temporary: usize = indices[root]
+                indices[root] <- indices[swap_index]
+                indices[swap_index] <- temporary
+                root <- swap_index
+
+        def proof_scalar_witness_name_indices_sort(indices: mutable darray[usize]&, names: darray[sview]&) -> void:
+            start: mutable usize = indices.count / 2
+            while start > 0 |start, indices, names|:
+                start <- start - 1
+                proof_scalar_witness_name_sift_down(indices, names, start, indices.count)
+            end: mutable usize = indices.count
+            while end > 1 |end, indices, names|:
+                temporary: usize = indices[0]
+                indices[0] <- indices[end - 1]
+                indices[end - 1] <- temporary
+                end <- end - 1
+                proof_scalar_witness_name_sift_down(indices, names, 0, end)
 
         def proof_scalar_witnesses_name(witnesses: ProofScalarWitnesses&, name: sview) -> bool:
             return false if name == ""
@@ -84,10 +136,24 @@ extend ElisaProof:
             wanted_hash: u32 = proof_name_hash(name)
             slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, wanted_hash, name, witnesses, capacity|:
+            while probes < capacity and probes < PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT |probes, slot, wanted_hash, name, witnesses, capacity|:
                 current: usize = witnesses.name_slots[slot]
                 return false if current >= witnesses.names.count
                 return true if witnesses.name_hashes[current] == wanted_hash and witnesses.names[current] == name
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
+            # The bounded hash chain can stop before an adversarial collision cluster ends.
+            # Binary search the full source list so every retained marker remains discoverable.
+            return false if witnesses.sorted_name_indices.count == 0
+            lower: mutable usize = 0
+            upper: mutable usize = witnesses.sorted_name_indices.count
+            while lower < upper |lower, upper, name, witnesses|:
+                middle: usize = lower + (upper - lower) / 2
+                current: sview = witnesses.names[witnesses.sorted_name_indices[middle]]
+                return true if current == name
+                current_less: bool = proof_scalar_witness_name_less(current, name)
+                if current_less:
+                    lower <- middle + 1
+                else:
+                    upper <- middle
             return false

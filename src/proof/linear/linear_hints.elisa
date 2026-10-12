@@ -10,32 +10,194 @@
 const module ProofLinearExportLimit:
     ATOMS: usize = 24
     ROWS: usize = 48
+const PROOF_LINEAR_HINT_INDEX_WORK_LIMIT: usize = 1048576
+const PROOF_LINEAR_HINT_INDEX_MAX_VALUES: usize = 65536
+const PROOF_LINEAR_HINT_INDEX_MAX_PROBES: usize = 64
 
 extend ElisaProof:
     public:
-        # The facts a goal attempt would capture, in report order (see `proof_add_goal_attempt`).
-        def proof_linear_hint_captured(facts: darray[Ast::Expr]&, report: ProofReport&, name: sview, captured: mutable darray[Ast::Expr]&) -> void:
-            for fact in facts |fact, report, name, captured|:
-                trace_index: usize = proof_certificate_fact_trace_index(report, fact, name)
-                captured.push(fact) if proof_kernel_expression_supported(fact) and trace_index < report.traces.records.count
+        def proof_linear_hint_index_reset(report: mutable ProofReport&) -> void:
+            report.linear_hint_index.slots.clear()
+            report.linear_hint_index.goal_ids.clear()
+            report.linear_hint_index.record_starts.clear()
+            report.linear_hint_index.row_count <- 0
+            report.linear_hint_index.work_used <- 0
+            report.linear_hint_index.ready <- false
+            report.linear_hint_index.disabled <- false
 
-        def proof_linear_hint_certificate(facts: darray[Ast::Expr]&, report: ProofReport&, line: u32, name: sview) -> (found: bool, certificate: Ast::Expr):
+    private:
+        def proof_linear_hint_index_disable(report: mutable ProofReport&) -> bool:
+            report.linear_hint_index.disabled <- true
+            report.linear_hint_index.ready <- true
+            report.linear_hint_index.slots.clear()
+            report.linear_hint_index.goal_ids.clear()
+            report.linear_hint_index.record_starts.clear()
+            report.linear_hint_index.row_count <- 0
+            return false
+
+        def proof_linear_hint_index_charge(report: mutable ProofReport&, amount: usize) -> bool:
+            return false if report.linear_hint_index.disabled or report.linear_hint_index.work_used > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT
+            return false if amount > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - report.linear_hint_index.work_used
+            report.linear_hint_index.work_used <- report.linear_hint_index.work_used + amount
+            return true
+
+        # Build once per report. Malformed input, an excessive input, or a long collision chain
+        # disables hints for this run; none of those conditions affects the ordinary solver.
+        def proof_linear_hint_index_build(report: mutable ProofReport&) -> bool:
+            return not report.linear_hint_index.disabled if report.linear_hint_index.ready
+            report.linear_hint_index.ready <- true
+            hints: darray[i64] = report.linear_hints
+            return true if hints.count == 0
+            return proof_linear_hint_index_disable(report) if hints.count > PROOF_LINEAR_HINT_INDEX_MAX_VALUES
+            maximum_rows: usize = hints.count / 3
+            target_capacity: usize = maximum_rows * 2
+            capacity: mutable usize = 1
+            while capacity < target_capacity |capacity, target_capacity, report|:
+                return proof_linear_hint_index_disable(report) if capacity > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / 2
+                capacity <- capacity * 2
+            return proof_linear_hint_index_disable(report) if not proof_linear_hint_index_charge(report, capacity + maximum_rows * 2)
+            report.linear_hint_index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, report|:
+                report.linear_hint_index.slots[slot] <- 0
+            report.linear_hint_index.goal_ids.resize(maximum_rows)
+            report.linear_hint_index.record_starts.resize(maximum_rows)
+            start: mutable usize = 0
+            while start < hints.count |start, hints, maximum_rows, capacity, report|:
+                return proof_linear_hint_index_disable(report) if start > hints.count
+                return proof_linear_hint_index_disable(report) if hints.count - start < 3
+                goal_id: i64 = hints[start]
+                count: i64 = hints[start + 2]
+                return proof_linear_hint_index_disable(report) if goal_id < 0 or count < 0 or count > ProofLinearCertificateLimit::PREMISES.i64()
+                pair_values: usize = count.usize() * 2
+                return proof_linear_hint_index_disable(report) if pair_values > hints.count - start - 3
+                record_size: usize = 3 + pair_values
+                return proof_linear_hint_index_disable(report) if not proof_linear_hint_index_charge(report, record_size)
+                slot: mutable usize = goal_id.usize() % capacity
+                probes: mutable usize = 0
+                inserted: mutable bool = false
+                while probes < capacity and probes < PROOF_LINEAR_HINT_INDEX_MAX_PROBES |probes, slot, capacity, maximum_rows, goal_id, start, report, inserted|:
+                    return proof_linear_hint_index_disable(report) if not proof_linear_hint_index_charge(report, 1)
+                    stored: usize = report.linear_hint_index.slots[slot]
+                    if stored == 0:
+                        row: usize = report.linear_hint_index.row_count
+                        return proof_linear_hint_index_disable(report) if row >= maximum_rows
+                        report.linear_hint_index.goal_ids[row] <- goal_id
+                        report.linear_hint_index.record_starts[row] <- start
+                        report.linear_hint_index.row_count <- row + 1
+                        report.linear_hint_index.slots[slot] <- row + 1
+                        inserted <- true
+                        break
+                    row: usize = stored - 1
+                    return proof_linear_hint_index_disable(report) if row >= report.linear_hint_index.row_count
+                    if report.linear_hint_index.goal_ids[row] == goal_id:
+                        # Keep the first record, matching the former linear search.
+                        inserted <- true
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return proof_linear_hint_index_disable(report) if not inserted
+                start <- start + record_size
+            return true
+
+        def proof_linear_hint_index_lookup(report: mutable ProofReport&, goal_id: i64) -> usize:
+            sentinel: usize = report.linear_hints.count
+            return sentinel if goal_id < 0 or not proof_linear_hint_index_build(report)
+            capacity: usize = report.linear_hint_index.slots.count
+            return sentinel if capacity == 0
+            slot: mutable usize = goal_id.usize() % capacity
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_LINEAR_HINT_INDEX_MAX_PROBES |probes, slot, capacity, goal_id, report|:
+                if not proof_linear_hint_index_charge(report, 1):
+                    proof_linear_hint_index_disable(report)
+                    return sentinel
+                stored: usize = report.linear_hint_index.slots[slot]
+                return sentinel if stored == 0
+                row: usize = stored - 1
+                if row >= report.linear_hint_index.row_count:
+                    proof_linear_hint_index_disable(report)
+                    return sentinel
+                return report.linear_hint_index.record_starts[row] if report.linear_hint_index.goal_ids[row] == goal_id
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            proof_linear_hint_index_disable(report)
+            sentinel
+
+        def proof_linear_hint_expression_charge(report: mutable ProofReport&, expression: Ast::Expr) -> (ok: bool, cost: usize):
+            cost: mutable usize = 0
+            return (false, 0) if not proof_replay_summary_expr_cost(expression, &cost, report.linear_hint_index.work_used, 0)
+            return (false, 0) if report.linear_hint_index.work_used > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT
+            remaining: usize = PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - report.linear_hint_index.work_used
+            return (false, 0) if cost > remaining / 3
+            return (false, 0) if not proof_linear_hint_index_charge(report, cost * 3)
+            (true, cost)
+
+        # Bound the producer-side trace lookup before invoking its linear authoritative scan.
+        # Root-compatible records can each reach `proof_expr_equal`, so reserve a full exact
+        # comparison for every active trace using the largest trace expression observed here.
+        def proof_linear_hint_trace_lookup_reserve(report: mutable ProofReport&, owner: sview, fact_cost: usize) -> bool:
+            count: usize = report.traces.records.count
+            start: mutable usize = report.traces.active_start
+            start <- 0 if start > count
+            trace_count: usize = count - start
+            owner_bytes: usize = sview_len(owner)
+            return false if owner_bytes >= PROOF_LINEAR_HINT_INDEX_WORK_LIMIT
+            trace_name_bytes: mutable usize = 0
+            maximum_trace_cost: mutable usize = 0
+            for trace_index in start..<count |trace_index, count, owner, report, trace_name_bytes, maximum_trace_cost|:
+                return false if not proof_linear_hint_index_charge(report, 1)
+                trace: ProofFactTrace = report.traces.records[trace_index]
+                trace_name_length: usize = sview_len(trace.name)
+                return false if trace_name_length > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - trace_name_bytes
+                trace_name_bytes <- trace_name_bytes + trace_name_length
+                trace_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost(trace.expression, &trace_cost, report.linear_hint_index.work_used, 0)
+                return false if not proof_linear_hint_index_charge(report, trace_cost)
+                maximum_trace_cost <- trace_cost if trace_cost > maximum_trace_cost
+            # The actual scan compares every owner name before it can test roots. Charge loop
+            # visits and both sides' name bytes, including records that will not match.
+            per_scan: usize = 1 + owner_bytes
+            return false if trace_count > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / per_scan
+            scan_work: usize = trace_count * per_scan
+            return false if trace_name_bytes > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT - scan_work
+            return false if not proof_linear_hint_index_charge(report, scan_work + trace_name_bytes)
+            # Each trace may pass the cheap root filter and enter the five-pass proof comparator.
+            pair_cost: usize = fact_cost + maximum_trace_cost
+            return false if pair_cost > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / 6
+            per_candidate: usize = pair_cost * 6
+            return false if trace_count > PROOF_LINEAR_HINT_INDEX_WORK_LIMIT / per_candidate
+            proof_linear_hint_index_charge(report, trace_count * per_candidate)
+
+        # The facts a goal attempt would capture, in report order (see `proof_add_goal_attempt`).
+        def proof_linear_hint_captured(facts: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, captured: mutable darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact, report, name, captured|:
+                if not proof_linear_hint_index_charge(report, 1):
+                    proof_linear_hint_index_disable(report)
+                    return false
+                fact_cost: (ok: bool, cost: usize) = proof_linear_hint_expression_charge(report, fact)
+                if not fact_cost.ok:
+                    proof_linear_hint_index_disable(report)
+                    return false
+                continue if not proof_kernel_expression_supported(fact)
+                if not proof_linear_hint_trace_lookup_reserve(report, name, fact_cost.cost):
+                    proof_linear_hint_index_disable(report)
+                    return false
+                trace_index: usize = proof_certificate_fact_trace_index(report, fact, name)
+                captured.push(fact) if trace_index < report.traces.records.count
+            return true
+
+        def proof_linear_hint_certificate(facts: darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview) -> (found: bool, certificate: Ast::Expr):
             position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
             invalid: Ast::Expr = Ast::Expr.BoolLit(false, position)
             hints: darray[i64] = report.linear_hints
             goal_id: i64 = report.goal_attempts.count.i64()
-            index: mutable usize = 0
-            while index + 3 <= hints.count |index, hints, goal_id|:
-                break if hints[index] == goal_id
-                count: i64 = hints[index + 2]
-                return (false, invalid) if count < 0 or count > ProofLinearCertificateLimit::PREMISES.i64()
-                index <- index + 3 + 2 * count.usize()
-            return (false, invalid) if index + 3 > hints.count
+            index: usize = proof_linear_hint_index_lookup(report, goal_id)
+            return (false, invalid) if index >= hints.count
+            return (false, invalid) if hints.count - index < 3
             count: i64 = hints[index + 2]
             return (false, invalid) if count <= 0 or count > ProofLinearCertificateLimit::PREMISES.i64()
-            return (false, invalid) if index + 3 + 2 * count.usize() > hints.count
+            return (false, invalid) if 2 * count.usize() > hints.count - index - 3
             captured: mutable darray[Ast::Expr] = []
-            proof_linear_hint_captured(facts, report, name, &captured)
+            return (false, invalid) if not proof_linear_hint_captured(facts, report, name, &captured)
             arguments: mutable darray[Ast::Expr] = [proof_linear_multiplier_expr(hints[index + 1], position)]
             for premise in 0..<count.usize() |premise, hints, index, captured, arguments, position|:
                 fact_index: i64 = hints[index + 3 + 2 * premise]
@@ -48,6 +210,7 @@ extend ElisaProof:
         # The oracle's problem: every certificate fact that reads as a linear constraint, as a row
         # `sum coefficient * atom + constant <= 0`, beside the negated goal (fact -1). `equalities`
         # marks rows whose multiplier may be negative. False when the problem exceeds its caps.
+    public:
         def proof_linear_export_rows(facts: darray[Ast::Expr]&, goal: Ast::Expr, atoms: mutable darray[sview]&, rows: mutable ProofLinearRows&, row_facts: mutable darray[i64]&, equalities: mutable darray[bool]&) -> bool:
             return false if not proof_linear_fact_names(goal, true, facts, atoms)
             for fact in facts |fact, facts, atoms|:

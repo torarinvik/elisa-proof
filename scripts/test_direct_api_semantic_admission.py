@@ -12,6 +12,23 @@ prefix = next(ast.literal_eval(node.value) for node in tree.body
               if isinstance(node, ast.Assign)
               and any(isinstance(target, ast.Name) and target.id == "REPLAY_HARNESS"
                       for target in node.targets)).split("def main()")[0]
+prefix += r'''
+def api_legacy_receipt_cannot_authorize_source[@r](report: mutable ProofReport& @r) -> bool can Memory.Allocate, Abort.Panic, Global.Read, Global.Write:
+    receipt: ProofReplayReceipt[r] = (proof_replay_certificates(report) can Global{Read,Write})
+    return false if not proof_replay_receipt_is_issued(receipt)
+    return false if not proof_replay_receipt_is_complete(receipt)
+    return false if proof_replay_receipt_source_validated(receipt)
+    replayed_attempt: mutable bool = false
+    replayed_attempt_index: mutable usize = proof_replay_receipt_attempt_count(receipt)
+    for attempt_index in 0..<proof_replay_receipt_attempt_count(receipt) |attempt_index, receipt, replayed_attempt, replayed_attempt_index|:
+        return false if proof_replay_receipt_attempt_is_proven(receipt, attempt_index)
+        if proof_replay_receipt_attempt_status(receipt, attempt_index):
+            replayed_attempt <- true
+            replayed_attempt_index <- attempt_index if replayed_attempt_index >= proof_replay_receipt_attempt_count(receipt)
+    return false if not replayed_attempt or replayed_attempt_index >= proof_replay_receipt_attempt_count(receipt)
+    report.goal_attempts.clear()
+    proof_replay_receipt_attempt_status(receipt, replayed_attempt_index)
+'''
 valid = "def checked() -> i64:\n    ensure result == 1\n    return 1\n"
 invalid = (
     valid + "\ndef missing_name() -> bool:\n    ensure result == true\n    undefined_value\n",
@@ -313,6 +330,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         return 212 if report.replay_gaps != 0
         (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 175 if report.certificates.count == 0 or report.failed != 0 or report.replay_gaps != 0
+        return 260 if not (api_legacy_receipt_cannot_authorize_source(&report) can Global{Read,Write})
         (api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 190 if report.certificates.count == 0
         return 191 if report.proven == 0

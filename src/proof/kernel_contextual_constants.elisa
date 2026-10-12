@@ -139,6 +139,140 @@ extend ElisaProofKernelCore:
             result: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: value.bits.i64(), name: sort, secondary_name: ""}
             return (true, result, explicit)
 
+        def contextual_goal_charge_amount(work_used: mutable usize&, work_limit: usize, amount: usize) -> bool:
+            return false if work_used > work_limit
+            if amount > work_limit - work_used:
+                work_used <- work_limit + 1
+                return false
+            work_used <- work_used + amount
+            true
+
+        def contextual_goal_charge_node_text(nodes: darray[ProofKernelNode]&, root: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if root >= nodes.count
+            return false if not contextual_goal_charge_amount(work_used, work_limit, 1)
+            return false if not contextual_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].kind))
+            return false if not contextual_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].operator))
+            return false if not contextual_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].name))
+            contextual_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].secondary_name))
+
+        def contextual_untyped_literal_value_with_goal_work(nodes: darray[ProofKernelNode]&, root: usize, remaining: usize, local_work: mutable usize&, shared_work: mutable usize&, work_limit: usize) -> (known: bool, value: i64):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            return (false, 0) if remaining <= 1 or local_work == 0 or root >= nodes.count
+            local_work <- local_work - 1
+            return (false, 0) if not contextual_goal_charge_node_text(nodes, root, shared_work, work_limit)
+            node: ProofKernelNode = nodes[root]
+            return (false, 0) if not contextual_constant_shape(node)
+            return (true, node.value) if node.kind == "int"
+            return (false, 0) if node.kind != "if"
+            decision: (known: bool, value: bool) = contextual_constant_guard_with_goal_work(nodes, node.left, remaining - 1, local_work, shared_work, work_limit)
+            return (false, 0) if not decision.known
+            yes: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, node.right, remaining - 1, local_work, shared_work, work_limit)
+            return (false, 0) if not yes.known
+            no: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, node.auxiliary, remaining - 1, local_work, shared_work, work_limit)
+            return (false, 0) if not no.known
+            return yes if decision.value
+            no
+
+        def contextual_constant_sort_with_goal_work(nodes: darray[ProofKernelNode]&, root: usize, remaining: usize, local_work: mutable usize&, shared_work: mutable usize&, work_limit: usize) -> (known: bool, sort: sview):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            return (false, "") if remaining <= 1 or local_work == 0 or root >= nodes.count
+            local_work <- local_work - 1
+            return (false, "") if not contextual_goal_charge_node_text(nodes, root, shared_work, work_limit)
+            node: ProofKernelNode = nodes[root]
+            return (false, "") if not contextual_constant_shape(node)
+            if node.kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = typed_literal_value(node)
+                return (literal.known and literal.unsigned, node.name)
+            return (true, "") if node.kind == "int"
+            left_root: usize = node.right if node.kind == "if" else node.left
+            right_root: usize = node.auxiliary if node.kind == "if" else node.right
+            left_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, left_root, remaining - 1, local_work, shared_work, work_limit)
+            return (false, "") if not left_sort.known
+            right_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, right_root, remaining - 1, local_work, shared_work, work_limit)
+            return (false, "") if not right_sort.known
+            return (false, "") if left_sort.sort != "" and right_sort.sort != "" and left_sort.sort != right_sort.sort
+            (true, left_sort.sort if left_sort.sort != "" else right_sort.sort)
+
+        def contextual_constant_guard_with_goal_work(nodes: darray[ProofKernelNode]&, root: usize, remaining: usize, local_work: mutable usize&, shared_work: mutable usize&, work_limit: usize) -> (known: bool, value: bool):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            return (false, false) if remaining <= 1 or local_work == 0 or root >= nodes.count
+            local_work <- local_work - 1
+            return (false, false) if not contextual_goal_charge_node_text(nodes, root, shared_work, work_limit)
+            guard: ProofKernelNode = nodes[root]
+            return (false, false) if guard.kind != "binary" or guard.auxiliary != 0 or guard.children_start != 0 or guard.children_count != 0 or guard.value != 0 or guard.name != "" or guard.secondary_name != ""
+            if guard.operator == "and" or guard.operator == "or":
+                a: (known: bool, value: bool) = contextual_constant_guard_with_goal_work(nodes, guard.left, remaining - 1, local_work, shared_work, work_limit)
+                return (false, false) if not a.known
+                b: (known: bool, value: bool) = contextual_constant_guard_with_goal_work(nodes, guard.right, remaining - 1, local_work, shared_work, work_limit)
+                return (false, false) if not b.known
+                return (true, a.value and b.value) if guard.operator == "and"
+                return (true, a.value or b.value)
+            a_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, guard.left, remaining - 1, local_work, shared_work, work_limit)
+            return (false, false) if not a_sort.known
+            b_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, guard.right, remaining - 1, local_work, shared_work, work_limit)
+            return (false, false) if not b_sort.known or (a_sort.sort != "" and b_sort.sort != "" and a_sort.sort != b_sort.sort)
+            guard_sort: sview = a_sort.sort if a_sort.sort != "" else b_sort.sort
+            if guard_sort == "":
+                a: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, guard.left, remaining - 1, local_work, shared_work, work_limit)
+                return (false, false) if not a.known
+                b: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, guard.right, remaining - 1, local_work, shared_work, work_limit)
+                return (false, false) if not b.known
+                return contextual_nonnegative_literal_comparison(a.value, guard.operator, b.value)
+            a_value: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, guard.left, guard_sort, remaining - 1, local_work, shared_work, work_limit)
+            return (false, false) if not a_value.known
+            b_value: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, guard.right, guard_sort, remaining - 1, local_work, shared_work, work_limit)
+            return (false, false) if not b_value.known
+            (true, typed_literal_comparison(a_value.node, guard.operator, b_value.node))
+
+        def contextual_constant_value_with_goal_work(nodes: darray[ProofKernelNode]&, root: usize, sort: sview, remaining: usize, local_work: mutable usize&, shared_work: mutable usize&, work_limit: usize) -> (known: bool, node: ProofKernelNode, explicit: bool):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            empty: ProofKernelNode = ProofKernelNode{kind: "unsupported", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty, false) if remaining <= 1 or local_work == 0 or root >= nodes.count
+            local_work <- local_work - 1
+            return (false, empty, false) if not contextual_goal_charge_node_text(nodes, root, shared_work, work_limit)
+            node: ProofKernelNode = nodes[root]
+            return (false, empty, false) if not contextual_constant_shape(node)
+            if node.kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = typed_literal_value(node)
+                return (literal.known and literal.unsigned and node.name == sort, node, true)
+            if node.kind == "int":
+                literal: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: node.value, name: sort, secondary_name: ""}
+                value: (known: bool, bits: u64, unsigned: bool, width: i64) = typed_literal_value(literal)
+                return (value.known and value.unsigned, literal, false)
+            if node.kind == "if":
+                return (false, empty, false) if node.left >= nodes.count or remaining <= 2
+                decision: (known: bool, value: bool) = contextual_constant_guard_with_goal_work(nodes, node.left, remaining - 1, local_work, shared_work, work_limit)
+                return (false, empty, false) if not decision.known
+                yes: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, node.right, sort, remaining - 1, local_work, shared_work, work_limit)
+                return (false, empty, false) if not yes.known
+                no: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, node.auxiliary, sort, remaining - 1, local_work, shared_work, work_limit)
+                return (false, empty, false) if not no.known
+                return yes if decision.value
+                return no
+            left_value: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, node.left, sort, remaining - 1, local_work, shared_work, work_limit)
+            return (false, empty, false) if not left_value.known
+            right_value: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, node.right, sort, remaining - 1, local_work, shared_work, work_limit)
+            return (false, empty, false) if not right_value.known
+            a: (known: bool, bits: u64, unsigned: bool, width: i64) = typed_literal_value(left_value.node)
+            b: (known: bool, bits: u64, unsigned: bool, width: i64) = typed_literal_value(right_value.node)
+            explicit: bool = left_value.explicit or right_value.explicit
+            if not explicit:
+                maximum: u64 = 255 if a.width == 8 else 65535 if a.width == 16 else 4294967295 if a.width == 32 else 9223372036854775807u64
+                return (false, empty, false) if node.operator == "+" and a.bits > maximum - b.bits
+                return (false, empty, false) if node.operator == "-" and a.bits < b.bits
+            value: (known: bool, bits: u64, width: i64) = typed_unsigned_add_sub(left_value.node, node.operator, right_value.node)
+            return (false, empty, false) if not value.known
+            result: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: value.bits.i64(), name: sort, secondary_name: ""}
+            (true, result, explicit)
+
     public:
         def contextual_constant_expression_unsigned_width(nodes: darray[ProofKernelNode]&, root: usize) -> i64:
             work: mutable usize = CONTEXTUAL_CONSTANT_WORK_BUDGET
@@ -197,3 +331,31 @@ extend ElisaProofKernelCore:
             b = contextual_constant_value(nodes, right, sort, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &work)
             return (false, false) if not b.known
             return typed_literal_comparison(a.node, operator, b.node)
+
+        def contextual_unsigned_constant_comparison_with_goal_work(nodes: darray[ProofKernelNode]&, left: usize, operator: sview, right: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, value: bool):
+            return (false, false) if left >= nodes.count or right >= nodes.count
+            return (false, false) if not contextual_goal_charge_node_text(nodes, left, work_used, work_limit) or not contextual_goal_charge_node_text(nodes, right, work_used, work_limit)
+            return (false, false) if not contextual_goal_charge_amount(work_used, work_limit, sview_len(operator))
+            left_kind: sview = nodes[left].kind
+            right_kind: sview = nodes[right].kind
+            return (false, false) if left_kind != "typed-int" and left_kind != "int" and left_kind != "binary" and left_kind != "if"
+            return (false, false) if right_kind != "typed-int" and right_kind != "int" and right_kind != "binary" and right_kind != "if"
+            return (false, false) if left_kind == "int" and right_kind == "int"
+            local_work: mutable usize = CONTEXTUAL_CONSTANT_WORK_BUDGET
+            a_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, left, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not a_sort.known
+            b_sort: (known: bool, sort: sview) = contextual_constant_sort_with_goal_work(nodes, right, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not b_sort.known
+            return (false, false) if a_sort.sort != "" and b_sort.sort != "" and a_sort.sort != b_sort.sort
+            sort: sview = a_sort.sort if a_sort.sort != "" else b_sort.sort
+            if sort == "":
+                a: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, left, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+                return (false, false) if not a.known
+                b: (known: bool, value: i64) = contextual_untyped_literal_value_with_goal_work(nodes, right, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+                return (false, false) if not b.known
+                return contextual_nonnegative_literal_comparison(a.value, operator, b.value)
+            a: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, left, sort, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not a.known
+            b: (known: bool, node: ProofKernelNode, explicit: bool) = contextual_constant_value_with_goal_work(nodes, right, sort, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not b.known
+            (true, typed_literal_comparison(a.node, operator, b.node))

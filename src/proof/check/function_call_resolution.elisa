@@ -1,0 +1,259 @@
+# Bounded source-level function call resolution and graph admission.
+extend ElisaProof:
+    private:
+        # True when rows `row` and `caller` sit directly in the same module, which is the
+        # top level when both module prefixes are 0.
+        def proof_function_same_module(functions: ProofFunctionTable&, row: usize, caller: usize, work: mutable usize&, limit: usize) -> (complete: bool, same: bool):
+            return (false, false) if row >= functions.module_prefixes.count or caller >= functions.module_prefixes.count
+            prefix: usize = functions.module_prefixes[row]
+            return (true, false) if prefix != functions.module_prefixes[caller]
+            return proof_function_path_prefix_equal(functions, row, caller, prefix, work, limit)
+
+        # True when `row` sits directly in a module that strictly encloses the caller's module.
+        def proof_function_in_enclosing_module(functions: ProofFunctionTable&, row: usize, caller: usize, work: mutable usize&, limit: usize) -> (complete: bool, enclosing: bool):
+            return (false, false) if row >= functions.module_prefixes.count or caller >= functions.module_prefixes.count
+            prefix: usize = functions.module_prefixes[row]
+            return (true, false) if prefix == 0 or prefix >= functions.module_prefixes[caller]
+            return proof_function_path_prefix_equal(functions, row, caller, prefix, work, limit)
+
+        def proof_function_path_prefix_equal(functions: ProofFunctionTable&, row: usize, caller: usize, prefix: usize, work: mutable usize&, limit: usize) -> (complete: bool, equal: bool):
+            return (false, false) if row >= functions.declaration_path_starts.count or caller >= functions.declaration_path_starts.count
+            return (false, false) if row >= functions.declaration_path_counts.count or caller >= functions.declaration_path_counts.count
+            return (false, false) if functions.declaration_path_counts[row] < prefix or functions.declaration_path_counts[caller] < prefix
+            row_start: usize = functions.declaration_path_starts[row]
+            caller_start: usize = functions.declaration_path_starts[caller]
+            return (false, false) if row_start > functions.all_declaration_path.count or caller_start > functions.all_declaration_path.count
+            return (false, false) if prefix > functions.all_declaration_path.count - row_start or prefix > functions.all_declaration_path.count - caller_start
+            for offset in 0..<prefix |offset, functions, row_start, caller_start, work, limit|:
+                row_segment: usize = functions.all_declaration_path[row_start + offset]
+                caller_segment: usize = functions.all_declaration_path[caller_start + offset]
+                return (false, false) if not proof_function_graph_charge(1, work, limit)
+                return (true, false) if row_segment != caller_segment
+            return (true, true)
+
+        def proof_function_graph_charge(amount: usize, work: mutable usize&, limit: usize) -> bool:
+            if work > limit or amount > limit - work:
+                work <- limit + 1
+                return false
+            work <- work + amount
+            return true
+
+        # Bare-call graph resolution uses one meter shared across every edge. It mirrors the
+        # caller-module, enclosing-module, and top-level search order without allowing each
+        # repeated-name fallback to restart an unbounded whole-table scan.
+        def proof_function_resolve_bare_call_bounded(functions: ProofFunctionTable&, caller: usize, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, row: usize, repeated: bool):
+            count: usize = functions.names.count
+            return (true, count, false) if name == ""
+            return (false, count, false) if functions.names.count != functions.owner_modules.count
+            matches: mutable darray[usize] = []
+            for index in 0..<count |index, functions, name, matches, work, limit|:
+                return (false, count, false) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(functions.owner_modules[index]), work, limit)
+                matches.push(index) if functions.names[index] == name
+            return (true, count, false) if matches.count == 0
+            return (true, matches[0], false) if matches.count == 1
+            return (true, count, true) if caller >= count or caller >= functions.owner_modules.count
+            found: mutable usize = count
+            for row in matches |row, matches, functions, caller, found, work, limit|:
+                return (false, count, true) if row >= functions.owner_modules.count or not proof_function_graph_charge(1 + sview_len(functions.owner_modules[row]) + sview_len(functions.owner_modules[caller]), work, limit)
+                same_module: (complete: bool, same: bool) = proof_function_same_module(functions, row, caller, work, limit)
+                return (false, count, true) if not same_module.complete
+                if same_module.same:
+                    return (true, count, true) if found < count
+                    found <- row
+            return (true, found, true) if found < count
+            for row in matches |row, matches, functions, caller, work, limit|:
+                return (false, count, true) if row >= functions.owner_modules.count or not proof_function_graph_charge(1 + sview_len(functions.owner_modules[row]) + sview_len(functions.owner_modules[caller]), work, limit)
+                enclosing: (complete: bool, enclosing: bool) = proof_function_in_enclosing_module(functions, row, caller, work, limit)
+                return (false, count, true) if not enclosing.complete
+                return (true, count, true) if enclosing.enclosing
+            found <- count
+            for row in matches |row, matches, functions, found, work, limit|:
+                return (false, count, true) if row >= functions.module_prefixes.count or not proof_function_graph_charge(1, work, limit)
+                if functions.module_prefixes[row] == 0:
+                    return (true, count, true) if found < count
+                    found <- row
+            return (true, found, true)
+
+        def proof_function_resolve_exact_owner_bounded(functions: ProofFunctionTable&, name: sview, owner: sview, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            count: usize = functions.names.count
+            return (false, count) if count != functions.owner_modules.count
+            found: mutable usize = count
+            for index in 0..<count |index, functions, name, owner, found, work, limit|:
+                return (false, count) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(owner) + sview_len(functions.names[index]) + sview_len(functions.owner_modules[index]), work, limit)
+                if functions.names[index] == name and functions.owner_modules[index] == owner:
+                    return (true, count) if found < count
+                    found <- index
+            return (true, found)
+
+        def proof_function_index_for_callee_with_work(functions: ProofFunctionTable&, caller: usize, callee: Ast::Expr, work: mutable usize&, limit: usize) -> (complete: bool, row: usize):
+            name: sview = proof_callable_name(callee)
+            count: usize = functions.names.count
+            return (true, count) if name == ""
+            match callee:
+                Ast::Expr.Scope(_, _, _):
+                    caller_module: sview = functions.owner_modules[caller] if caller < functions.owner_modules.count else ""
+                    return (false, count) if caller >= functions.owner_modules.count
+                    return proof_module_function_index_for_callee(functions.names, functions.owner_modules, functions.module_aliases, caller_module, callee, work, limit)
+                _:
+                    bare: (complete: bool, row: usize, repeated: bool) = proof_function_resolve_bare_call_bounded(functions, caller, name, work, limit)
+                    return (bare.complete, bare.row)
+
+        def proof_function_local_callee_base_name(callee: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match callee:
+                Ast::Expr.Ident(name, _):
+                    return name
+                Ast::Expr.Scope(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_function_local_callee_base_name(base, depth + 1)
+                _:
+                    return ""
+
+        # Method-shaped conversions have no callable leaf for the name graph. Admit only
+        # compiler conversions that are independently recognized by the resource checker,
+        # are not shadowed by a source declaration, and fit the shared resolution budget.
+        def proof_function_call_name_is_declared_bounded(functions: ProofFunctionTable&, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, declared: bool):
+            for candidate in functions.names |candidate, name, work, limit|:
+                return (false, true) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(candidate), work, limit)
+                return (true, true) if candidate == name
+            for signature in functions.extern_signatures |signature, name, work, limit|:
+                return (false, true) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(signature.name), work, limit)
+                return (true, true) if signature.name == name
+            return (true, false)
+
+        # An empty graph name is reserved for a small set of intrinsic conversions. Every
+        # other call whose callee cannot be resolved as a named declaration is made opaque.
+        def proof_function_unclassified_call_is_intrinsic(functions: ProofFunctionTable&, expression: Ast::Expr, work: mutable usize&, limit: usize) -> (complete: bool, intrinsic: bool):
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    if argument_names.count != 0 and argument_names.count != arguments.count:
+                        return (true, false)
+                    for label in argument_names |label, work, limit|:
+                        return (false, false) if not proof_function_graph_charge(1 + sview_len(label), work, limit)
+                        return (true, false) if label != ""
+                    plain_callee: Ast::Expr = proof_strip_parens(callee)
+                    scalar_name: sview = proof_ident_name(plain_callee)
+                    if scalar_name != "":
+                        return (false, false) if not proof_function_graph_charge(1 + sview_len(scalar_name), work, limit)
+                        return (true, arguments.count == 1) if proof_builtin_scalar_type_name(scalar_name)
+                    return (true, false) if arguments.count != 0
+                    match plain_callee:
+                        Ast::Expr.Field(_, method, _):
+                            return (true, false) if not proof_resource_pure_conversion(method)
+                            return (false, false) if not proof_function_graph_charge(1 + sview_len(method), work, limit)
+                            numeric: (known: bool, receiver: Ast::Expr) = proof_runtime_builtin_numeric_cast(plain_callee, 0, functions)
+                            if numeric.known:
+                                return (true, true)
+                            return (true, false) if proof_expr_numeric_cast_target(method)
+                            # The non-numeric conversions use the same no-shadowing rule as
+                            # method builtins. A custom cast hook also makes dispatch opaque.
+                            return (true, false) if functions.custom_cast_hook_present
+                            declaration: (complete: bool, declared: bool) = proof_function_call_name_is_declared_bounded(functions, method, work, limit)
+                            return (false, false) if not declaration.complete
+                            return (true, not declaration.declared)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)
+
+        # Parameter defaults are collected in the call graph but do not live in the function
+        # body or contract snapshot. Locate those edges directly from the indexed default ASTs
+        # so a plain global helper call in a default keeps its summary, while an earlier formal
+        # or nested default-expression binder that shadows it remains opaque.
+        def proof_function_default_call_shadow(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, functions: ProofFunctionTable&, caller: usize, callee: Ast::Expr, call_position: Ast::Pos, work: mutable usize&, limit: usize) -> (complete: bool, is_default: bool, shadowed: bool):
+            if caller >= functions.param_starts.count or caller >= functions.param_counts.count:
+                return (false, false, false)
+            return (false, false, false) if functions.all_defaults.count != functions.all_has_defaults.count or functions.all_defaults.count != functions.all_params.count
+            param_start: usize = functions.param_starts[caller]
+            param_count: usize = functions.param_counts[caller]
+            return (false, false, false) if param_start > functions.all_defaults.count or param_count > functions.all_defaults.count - param_start
+            default_slot: mutable usize = functions.all_defaults.count
+            for offset in 0..<param_count |offset, param_start, functions, call_position, default_slot, work, limit|:
+                slot: usize = param_start + offset
+                return (false, false, false) if not proof_function_graph_charge(1, work, limit)
+                continue if not functions.all_has_defaults[slot]
+                default_position: Ast::Pos = Ast::expr_pos(functions.all_defaults[slot])
+                span: (valid: bool, contains: bool) = proof_fact_call_shape_source_span_contains(default_position, call_position.offset)
+                return (false, false, false) if not span.valid
+                if span.contains:
+                    return (false, false, false) if default_slot < functions.all_defaults.count
+                    default_slot <- slot
+            return (true, false, false) if default_slot == functions.all_defaults.count
+            local_name: sview = proof_function_local_callee_base_name(callee, 0)
+            return (true, true, true) if local_name == ""
+            shadowed: mutable bool = false
+            prior_count: usize = default_slot - param_start
+            for offset in 0..<prior_count |offset, param_start, functions, local_name, shadowed, work, limit|:
+                slot: usize = param_start + offset
+                prior_name: sview = functions.all_params[slot]
+                return (false, true, false) if not proof_function_graph_charge(1 + sview_len(local_name) + sview_len(prior_name), work, limit)
+                shadowed <- true if prior_name == local_name
+            return (true, true, true) if shadowed
+            located: mutable bool = false
+            if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, functions.all_defaults[default_slot], local_name, call_position.offset, &shadowed, &located, 0) or not located:
+                return (true, true, true)
+            return (true, true, shadowed)
+
+        # Resolve every collected call edge from its own caller once the table is complete.
+        def proof_resolve_function_call_targets(report: mutable ProofReport&, functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
+            functions.current_caller <- functions.names.count
+            functions.all_call_targets.clear()
+            return (false, "call-graph-callee-source-table", functions.all_call_callee_sources.count, functions.all_calls.count) if functions.all_call_callee_sources.count != functions.all_calls.count
+            shadow_snapshot: mutable ProofFactCallShapeSnapshot& = &report.fact_call_shapes
+            return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_function_graph_charge(functions.all_calls.count, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            for _ in 0..<functions.all_calls.count |functions|:
+                functions.all_call_targets.push(functions.names.count)
+            for caller in 0..<functions.names.count |caller, functions, source_work, report, shadow_snapshot|:
+                continue if caller >= functions.call_starts.count or caller >= functions.call_counts.count
+                start: usize = functions.call_starts[caller]
+                count: usize = functions.call_counts[caller]
+                continue if start > functions.all_calls.count or count > functions.all_calls.count - start
+                for offset in 0..<count |offset, start, caller, functions, source_work, report, shadow_snapshot|:
+                    called: sview = functions.all_calls[start + offset]
+                    continue if called == "__opaque_call__"
+                    source: Ast::Expr = functions.all_call_callee_sources[start + offset]
+                    return (false, "call-graph-callee-source", start + offset, functions.all_calls.count) if source is Ast::Expr.Invalid
+                    if called == "":
+                        intrinsic: (complete: bool, intrinsic: bool) = proof_function_unclassified_call_is_intrinsic(functions, source, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not intrinsic.complete
+                        functions.all_calls[start + offset] <- "__opaque_call__" if not intrinsic.intrinsic
+                        continue
+                    source_position: Ast::Pos = Ast::expr_pos(source)
+                    default_shadow: (complete: bool, is_default: bool, shadowed: bool) = proof_function_default_call_shadow(report, shadow_snapshot, functions, caller, source, source_position, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not default_shadow.complete
+                    shadowed_local: bool = default_shadow.shadowed if default_shadow.is_default else proof_fact_call_shape_local_scope_shadowed(report, shadow_snapshot, caller, source, source_position, 0)
+                    if shadowed_local:
+                        # A local callable (including a formal parameter) does not inherit the
+                        # purity, termination or effects of a same-spelled global declaration.
+                        # Keep the edge opaque for every graph consumer.
+                        functions.all_calls[start + offset] <- "__opaque_call__"
+                        continue
+                    resolved: (complete: bool, row: usize) = proof_function_index_for_callee_with_work(functions, caller, source, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not resolved.complete
+                    functions.all_call_targets[start + offset] <- resolved.row
+            resolved_work: usize = source_work
+            functions.module_resolution_work_used <- resolved_work
+            return (true, "", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+
+        # The row a collected call edge resolves to, names.count when unresolved or opaque.
+        def proof_function_call_target(functions: ProofFunctionTable&, edge: usize) -> usize:
+            return functions.all_call_targets[edge] if edge < functions.all_call_targets.count
+            return functions.names.count if edge >= functions.all_calls.count
+            return proof_function_index(functions, functions.all_calls[edge])
+
+        # The row of the function whose body is being checked, by its name. A repeated name
+        # resolves to the scheduled caller when it bears that name.
+        def proof_function_index_of_current(functions: ProofFunctionTable&, name: sview) -> usize:
+            direct: usize = proof_function_index(functions, name)
+            return direct if direct < functions.names.count
+            return functions.current_caller if functions.current_caller < functions.names.count and functions.names[functions.current_caller] == name
+            return functions.names.count
+
+        # Resolve a call's callee from the function whose body is being checked.
+        def proof_function_index_for_callee(functions: mutable ProofFunctionTable&, callee: Ast::Expr) -> usize:
+            return functions.names.count if functions.module_resolution_work_exhausted
+            resolved: (complete: bool, row: usize) = proof_function_index_for_callee_with_work(functions, functions.current_caller, callee, functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            if not resolved.complete:
+                functions.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                functions.module_resolution_work_exhausted <- true
+                return functions.names.count
+            return resolved.row

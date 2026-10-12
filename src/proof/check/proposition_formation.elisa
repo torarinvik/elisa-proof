@@ -44,15 +44,17 @@ extend ElisaProof:
         # Preserve a compiler-declared tuple signature when a local's type is inferred from a
         # direct call. The kernel needs the declaration's tuple identity and named field map;
         # the coarse semantic `Tuple` family alone intentionally does not carry either.
-        def proof_source_function_return_type(declarations: darray[Ast::Decl]&, function_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+        def proof_source_function_return_type_with_work(declarations: darray[Ast::Decl]&, function_name: sview, source_work: mutable usize&, depth: usize) -> (count: usize, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
             requires depth <= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             decreases PROOF_PROPOSITION_TYPE_DEPTH_LIMIT - depth
             return (2, Ast::Expr.Absent) if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             count: mutable usize = 0
             selected: mutable Ast::Expr = Ast::Expr.Absent
-            for declaration in declarations |function_name, depth, count, selected|:
+            for declaration in declarations |function_name, source_work, depth, count, selected|:
+                return (2, Ast::Expr.Absent) if not proof_source_kernel_charge_work(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, _, return_type, _, _, _, _):
+                        return (2, Ast::Expr.Absent) if not proof_source_kernel_charge_text_comparison(name, function_name, source_work)
                         if name == function_name:
                             if return_type is declared_return_type:
                                 selected <- declared_return_type
@@ -60,34 +62,51 @@ extend ElisaProof:
                                 selected <- Ast::Expr.Ident("void", Ast::pos_at_line(0))
                             count <- count + 1
                     Ast::Decl.Module(_, body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(body, function_name, depth + 1)
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type_with_work(body, function_name, source_work, depth + 1)
+                        return (2, Ast::Expr.Absent) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(body, function_name, depth + 1)
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type_with_work(body, function_name, source_work, depth + 1)
+                        return (2, Ast::Expr.Absent) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     _:
                         pass
             return (count, selected)
 
-        def proof_source_inferred_tuple_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, local_names: darray[sview]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+        # Compatibility callers get the same per-query ceiling; source preparation below passes
+        # its report-wide meter through the work-aware helper instead.
+        def proof_source_function_return_type(declarations: darray[Ast::Decl]&, function_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr) can[Memory.Allocate, Abort.Panic]:
+            source_work: mutable usize = 0
+            proof_source_function_return_type_with_work(declarations, function_name, &source_work, depth)
+
+        def proof_source_inferred_tuple_type_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, local_names: darray[sview]&, source_work: mutable usize&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
             requires depth <= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             decreases PROOF_PROPOSITION_TYPE_DEPTH_LIMIT - depth
+            return Ast::Expr.Absent if not proof_source_kernel_charge_work(1, source_work)
             return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(Ast::Expr.Ident(function_name, _), _, _, _):
                     # Lexical bindings take precedence over same-spelled declarations.
                     # A local callable needs its own resolved signature; never borrow
                     # a global function's tuple type for an opaque or invalid call.
-                    return Ast::Expr.Absent if any local_name in local_names where local_name == function_name
-                    found: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(declarations, function_name, 0)
+                    for local_name in local_names |function_name, source_work|:
+                        return Ast::Expr.Absent if not proof_source_kernel_charge_work(1, source_work) or not proof_source_kernel_charge_text_comparison(local_name, function_name, source_work)
+                        return Ast::Expr.Absent if local_name == function_name
+                    found: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type_with_work(declarations, function_name, source_work, 0)
                     return found.type_expression if found.count == 1
                     return Ast::Expr.Absent
                 Ast::Expr.Paren(inner, _):
-                    return proof_source_inferred_tuple_type(inner, declarations, local_names, depth + 1)
+                    return proof_source_inferred_tuple_type_with_work(inner, declarations, local_names, source_work, depth + 1)
                 _:
                     return Ast::Expr.Absent
+
+        # Compatibility callers get a per-query ceiling. Source proposition preparation passes
+        # its report-wide source-work counter to the work-aware helper directly.
+        def proof_source_inferred_tuple_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, local_names: darray[sview]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            source_work: mutable usize = 0
+            proof_source_inferred_tuple_type_with_work(expression, declarations, local_names, &source_work, depth)
 
         def proof_source_range_element_type(range: Ast::Expr, names: darray[sview]&, types: darray[sview]&, table: Semantic::SymbolTable&) -> sview can[Memory.Allocate, Abort.Panic]:
             match range:
@@ -156,7 +175,7 @@ extend ElisaProof:
                 report.proof_obligation(false)
                 source_position: Ast::Pos = Ast::expr_pos(expression)
                 diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
-                proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
+                proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic) if kernel_failure != "kernel source work budget exceeded"
 
         def proof_source_for_element_type(iterable: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&) -> sview can[Memory.Allocate, Abort.Panic]:
             range_element: sview = proof_source_range_element_type(iterable, names, types, table)
@@ -189,7 +208,7 @@ extend ElisaProof:
                         if not has_declared_type:
                             inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
                             type_name <- proof_source_inferred_type_spelling(inferred)
-                            context_type <- proof_source_inferred_tuple_type(initializer, file.top_decls, names, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
+                            context_type <- proof_source_inferred_tuple_type_with_work(initializer, file.top_decls, names, kernel_workspace.source_work_used, 0) if inferred.kind == Semantic::SemTypeKind.Tuple
                         names.push(local_name)
                         types.push(type_name)
                         source_types.push(context_type)
@@ -201,7 +220,7 @@ extend ElisaProof:
                         local_name: sview = proof_ident_name(target)
                         if local_name != "":
                             inferred: Semantic::InferType = Semantic::infer_expression_type_for_proof(initializer, names, types, table)
-                            declared_return: Ast::Expr = proof_source_inferred_tuple_type(initializer, file.top_decls, names, 0)
+                            declared_return: Ast::Expr = proof_source_inferred_tuple_type_with_work(initializer, file.top_decls, names, kernel_workspace.source_work_used, 0)
                             context_type: mutable Ast::Expr = Ast::Expr.Absent
                             type_name: mutable sview = proof_source_inferred_type_spelling(inferred)
                             match declared_return:
@@ -311,7 +330,9 @@ extend ElisaProof:
                 types.push(proof_source_type_spelling(parameter.type_expression, 0))
                 source_types.push(parameter.type_expression)
             requirements: mutable darray[Ast::Expr] = proof_contracts(body, "requires")
-            requirements.extend(proof_signature_contracts(file, position.line, "requires"))
+            signature_contracts: (complete: bool, preconditions: darray[Ast::Expr], postconditions: darray[Ast::Expr]) = proof_signature_contracts_for_line_with_work(file, position.line, kernel_workspace.source_work_used)
+            kernel_workspace.source_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if not signature_contracts.complete
+            requirements.extend(signature_contracts.preconditions)
             for requirement in requirements |names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, table, file, report, name|:
                 kernel_failure: mutable sview = ""
                 kernel_formed: bool = proof_source_kernel_proposition_formed(requirement, names, types, source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, file, &kernel_failure)
@@ -319,7 +340,7 @@ extend ElisaProof:
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(requirement)
                     diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
-                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic) if kernel_failure != "kernel source work budget exceeded"
             post_names: mutable darray[sview] = []
             post_types: mutable darray[sview] = []
             post_source_types: mutable darray[Ast::Expr] = []
@@ -331,7 +352,7 @@ extend ElisaProof:
                 post_types.push(proof_source_type_spelling(declared_return_type, 0))
                 post_source_types.push(declared_return_type)
             postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
-            postconditions.extend(proof_signature_contracts(file, position.line, "ensure"))
+            postconditions.extend(signature_contracts.postconditions)
             postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls)) if postconditions.count == 0
             for postcondition in postconditions |post_names, post_types, post_source_types, module_path, global_kernel_bindings, kernel_workspace, table, file, report, name|:
                 kernel_failure: mutable sview = ""
@@ -340,7 +361,7 @@ extend ElisaProof:
                     report.proof_obligation(false)
                     source_position: Ast::Pos = Ast::expr_pos(postcondition)
                     diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
-                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic)
+                    proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic) if kernel_failure != "kernel source work budget exceeded"
             body_names: mutable darray[sview] = []
             body_types: mutable darray[sview] = []
             body_source_types: mutable darray[Ast::Expr] = []

@@ -1,0 +1,153 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Mirror the legacy sum witness search while charging premise flattening, readable-order
+        # checks, term comparisons and bound searches to the caller's goal-search budget.
+        def proof_kernel_replay_sum_witness_for_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, first: usize, second: usize, facts: darray[usize], work_used: mutable usize&) -> (known: bool, bound: usize, strict: bool):
+            conjuncts: mutable darray[usize] = []
+            proof_kernel_replay_conjunct_facts_with_goal_work(nodes, facts, &conjuncts, work_used)
+            return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            for fact in conjuncts |fact, nodes, children, first, second, facts, work_used|:
+                return (false, 0, false) if not proof_kernel_replay_goal_search_charge(work_used)
+                readable: (known: bool, left: usize, operator: sview, right: usize) = proof_kernel_replay_readable_order_with_work(nodes, children, facts, fact, work_used)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not readable.known
+                continue if readable.operator != "<" and readable.operator != "<="
+                difference: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands_with_goal_work(nodes, readable.right, "-", work_used)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not difference.known
+                continue if not proof_kernel_replay_goal_search_expr_equal(nodes, children, difference.right, first, work_used)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not proof_kernel_replay_has_order_fact_with_work(nodes, children, first, difference.left, false, facts, work_used)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if proof_kernel_replay_goal_search_expr_equal(nodes, children, readable.left, second, work_used):
+                    return (true, difference.left, readable.operator == "<")
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if proof_kernel_replay_has_order_fact_with_work(nodes, children, second, readable.left, true, facts, work_used):
+                    return (true, difference.left, true)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                has_nonstrict_order: bool = proof_kernel_replay_has_order_fact_with_work(nodes, children, second, readable.left, false, facts, work_used)
+                return (false, 0, false) if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if has_nonstrict_order:
+                    return (true, difference.left, readable.operator == "<")
+            return (false, 0, false)
+
+        def proof_kernel_replay_sum_upper_witness_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: usize, right: usize, facts: darray[usize], work_used: mutable usize&) -> (known: bool, bound: usize, strict: bool):
+            forward: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_witness_for_with_goal_work(nodes, children, left, right, facts, work_used)
+            return forward if forward.known or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            proof_kernel_replay_sum_witness_for_with_goal_work(nodes, children, right, left, facts, work_used)
+
+        def proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], work_used: mutable usize&, depth: usize) -> i64:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return 0 if not proof_kernel_replay_goal_search_charge(work_used)
+            return 0 if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth)
+            return 0 if not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            return 0 if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "typed-int":
+                literal = ElisaProofKernelCore::typed_literal_value(node)
+                return literal.width if literal.known and literal.unsigned
+            if node.kind == "ident":
+                return proof_kernel_replay_linear_unsigned_marker_width_for_name_with_work(nodes, children, facts, node.name, work_used)
+            if node.kind == "field":
+                return proof_kernel_replay_linear_place_marker_width_with_work(nodes, children, facts, root, work_used)
+            if node.kind == "index" or node.kind == "index-n":
+                return proof_kernel_replay_linear_element_width_with_work(nodes, children, facts, root, work_used)
+            if node.kind == "unary":
+                return proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, node.left, facts, work_used, depth + 1)
+            if node.kind == "binary":
+                left_width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, node.left, facts, work_used, depth + 1)
+                right_width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, node.right, facts, work_used, depth + 1)
+                return right_width if left_width == 0
+                return left_width if right_width == 0 or left_width < right_width
+                return right_width
+            if node.kind == "if":
+                then_width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, node.right, facts, work_used, depth + 1)
+                else_width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, node.auxiliary, facts, work_used, depth + 1)
+                return 0 if then_width == 0 or else_width == 0
+                return then_width if then_width < else_width
+                return else_width
+            0
+
+        def proof_kernel_replay_sum_peer_unsigned_width_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, facts: darray[usize], work_used: mutable usize&) -> i64:
+            declared: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, root, facts, work_used, 0)
+            return declared if declared != 0 or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return 0 if not proof_kernel_replay_goal_search_charge(work_used)
+            return 0 if not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+            located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
+            return 0 if not located.known or located.node.kind != "field"
+            count_field: bool = proof_kernel_replay_goal_search_text_equal(located.node.name, "count", work_used)
+            return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not count_field
+            base: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, located.node.left)
+            return 0 if base.known and not proof_kernel_replay_goal_search_charge(work_used)
+            return 0 if base.known and not proof_kernel_replay_goal_search_charge_node_text(nodes, located.node.left, work_used)
+            return 0 if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS if base.known and base.node.kind == "ident" and base.node.name != ""
+            0
+
+        # This is the legacy unsigned-goal safety proof expressed over shared goal work. It keeps
+        # separate plain-order and signed-safety bounds because the unsigned guard intentionally
+        # does not use difference propagation to justify its own non-wrapping premise.
+        def proof_kernel_replay_unsigned_goal_safe_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, work_used: mutable usize&) -> bool:
+            unsigned_bounds: mutable darray[ProofKernelReplayBound] = []
+            for fact in facts |fact, nodes, children, facts, unsigned_bounds, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, fact, &unsigned_bounds, work_used, 0)
+                return false if work_used > PROOF_KERNEL_REPLAY_COLLECT_BOUNDS_WORK_LIMIT or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return false if not proof_kernel_replay_close_equalities_with_work(nodes, children, facts, &unsigned_bounds, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if not proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, root, facts, &unsigned_bounds, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            signed_bounds: darray[ProofKernelReplayBound] = proof_kernel_replay_signed_safety_bounds_with_goal_work(nodes, children, facts, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, root, facts, signed_bounds, work_used, 0)
+
+        # Metered counterpart of `proof_kernel_replay_sum_bound`; the caller shares one budget
+        # across the shape check, witness lookup, type evidence and safety proof.
+        def proof_kernel_replay_sum_bound_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, operator: sview, right: usize, work_used: mutable usize&) -> bool:
+            return false if operator != "<" and operator != "<="
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            operands: (known: bool, left: usize, right: usize) = proof_kernel_replay_binary_operands_with_goal_work(nodes, left, "+", work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not operands.known
+            witness: (known: bool, bound: usize, strict: bool) = proof_kernel_replay_sum_upper_witness_with_goal_work(nodes, children, operands.left, operands.right, facts, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not witness.known
+            return false if not proof_kernel_replay_goal_search_expr_equal(nodes, children, witness.bound, right, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return false if operator == "<" and not witness.strict
+            width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, left, facts, work_used, 0)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return proof_kernel_replay_unsigned_goal_safe_with_goal_work(nodes, children, facts, left, work_used) if width == 0
+            nameable: bool = proof_kernel_replay_peer_is_nameable_with_goal_work(nodes, witness.bound, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if nameable:
+                peer_width: i64 = proof_kernel_replay_sum_peer_unsigned_width_with_goal_work(nodes, children, witness.bound, facts, work_used)
+                return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return true if peer_width == width
+            return proof_kernel_replay_unsigned_literal_bound_fits_with_goal_work(nodes, witness.bound, width, work_used)
+
+        # Literal caps are shallow, but the legacy predicate still reads several node strings.
+        # Charge each comparison so serialized long tags cannot bypass the caller's meter.
+        def proof_kernel_replay_unsigned_literal_bound_fits_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, width: i64, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_valid(nodes, root)
+            maximum: i64 = proof_kernel_replay_unsigned_width_max(width)
+            return false if maximum <= 0 or not proof_kernel_replay_goal_search_charge(work_used)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            operator_empty: bool = proof_kernel_replay_goal_search_text_equal(node.operator, "", work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not operator_empty
+            return false if node.left != 0 or node.right != 0 or node.auxiliary != 0
+            return false if node.children_start != 0 or node.children_count != 0
+            name_empty: bool = proof_kernel_replay_goal_search_text_equal(node.name, "", work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not name_empty
+            secondary_name_empty: bool = proof_kernel_replay_goal_search_text_equal(node.secondary_name, "", work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not secondary_name_empty
+            integer: bool = proof_kernel_replay_goal_search_text_equal(node.kind, "int", work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not integer
+            node.value >= 0 and node.value <= maximum
+
+        # The early dispatcher tier historically gated the rule on the unsigned width of the
+        # whole comparison before running the sum-bound proof. Keep that order while sharing the
+        # same meter; the proof helper then checks the sum's own width and witness as before.
+        def proof_kernel_replay_guarded_unsigned_sum_bound_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, left: usize, operator: sview, right: usize, work_used: mutable usize&) -> bool:
+            return false if operator != "<" and operator != "<="
+            goal_width: i64 = proof_kernel_replay_sum_unsigned_width_with_goal_work(nodes, children, goal_root, facts, work_used, 0)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or goal_width == 0
+            proof_kernel_replay_sum_bound_with_goal_work(nodes, children, facts, left, operator, right, work_used)

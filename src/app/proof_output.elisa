@@ -1,17 +1,10 @@
-def proof_push_proof_check(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+def proof_push_proof_check_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, contents: darray[u8]&, replay_work: mutable usize&) -> i64 can[Memory.Allocate, Abort.Panic]:
     claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
-    # This compatibility entrypoint has no frozen source inventories, so report-wide
-    # admissibility cannot authorize the selected goal.
-    # It also has no replay receipt, so it cannot authorize the selected attempt.
-    return proof_push_proof_check_claimed(buffer, report, contents, source_fingerprint, source_complete, source_admissible, false, claimed, false)
+    return proof_push_proof_check_claimed(buffer, checked_view, contents, claimed, replay_work)
 
-def proof_push_proof_check_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool, import_failed: bool, semantic_errors: u32, literal_ensure_inventory: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)]&, assert_by_inventory: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)]&, replayed_goals: darray[bool]&) -> i64 can[Memory.Allocate, Abort.Panic]:
-    claimed: (known: bool, goal_id: usize) = proof_rendered_goal_id(contents)
-    attempt_replayed: bool = claimed.known and claimed.goal_id < report.goal_attempts.count and proof_output_cached_replay_status(replayed_goals, claimed.goal_id)
-    goal_source_admissible: bool = claimed.known and proof_report_goal_source_admissible(report, claimed.goal_id, import_failed, semantic_errors, literal_ensure_inventory, assert_by_inventory)
-    return proof_push_proof_check_claimed(buffer, report, contents, source_fingerprint, source_complete, source_admissible, goal_source_admissible, claimed, attempt_replayed)
-
-def proof_push_proof_check_claimed(buffer: mutable darray[u8]&, report: ProofReport&, contents: darray[u8]&, source_fingerprint: u32, source_complete: bool, source_admissible: bool, goal_source_admissible: bool, claimed: (known: bool, goal_id: usize), attempt_replayed: bool) -> i64 can[Memory.Allocate, Abort.Panic]:
+def proof_push_proof_check_claimed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, contents: darray[u8]&, claimed: (known: bool, goal_id: usize), replay_work: mutable usize&) -> i64 can[Memory.Allocate, Abort.Panic]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    source_admissible: bool = proof_checked_view_source_admissible(checked_view)
     if not claimed.known:
         proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":\"unreadable\",\"verification_state\":\"unknown\",\"goal_id\":null,\"differences\":[]}\n")
         return 2
@@ -21,7 +14,7 @@ def proof_push_proof_check_claimed(buffer: mutable darray[u8]&, report: ProofRep
         proof_push(buffer, ",\"verification_state\":\"unknown\",\"differences\":[]}\n")
         return 2
     canonical: mutable darray[u8] = []
-    proof_push_elisa_proof_with_replayed(&canonical, report, claimed.goal_id, source_fingerprint, source_complete, source_admissible, goal_source_admissible, attempt_replayed)
+    goal_state_result: (complete: bool, state: sview, replayed: bool, source_admitted: bool) = proof_push_elisa_proof_with_replayed(&canonical, checked_view, claimed.goal_id, replay_work)
     differences: mutable darray[u8] = []
     difference_count: mutable usize = 0
     file_cursor: mutable usize = 0
@@ -52,9 +45,8 @@ def proof_push_proof_check_claimed(buffer: mutable darray[u8]&, report: ProofRep
         difference_count <- difference_count + 1 if not equal
         file_cursor <- file_line.next if file_present else file_cursor + 1
         canonical_cursor <- canonical_line.next if canonical_present else canonical_cursor + 1
-    goal_state: sview = proof_output_goal_state_with_source_admissibility(report, claimed.goal_id, goal_source_admissible, attempt_replayed)
     verification_state: mutable sview = "unknown"
-    verification_state <- goal_state if difference_count == 0
+    verification_state <- goal_state_result.state if difference_count == 0
     proof_push(buffer, "{\"format\":\"elisa-proof-proof-check-v1\",\"status\":")
     proof_push(buffer, "\"matches\"" if difference_count == 0 else "\"diverges\"")
     proof_push(buffer, ",\"verification_state\":")
@@ -66,34 +58,35 @@ def proof_push_proof_check_claimed(buffer: mutable darray[u8]&, report: ProofRep
     proof_push(buffer, ",\"admissible\":")
     proof_push(buffer, "true" if source_admissible else "false")
     proof_push(buffer, ",\"goal_admissible\":")
-    proof_push(buffer, "true" if goal_source_admissible else "false")
+    proof_push(buffer, "true" if goal_state_result.source_admitted else "false")
     proof_push(buffer, ",\"difference_count\":")
     proof_push_number(buffer, difference_count.u32())
     proof_push(buffer, ",\"differences\":[")
-    for index in 0..<differences.count |index, buffer, differences|:
-        buffer.push(differences[index])
+    buffer.extend(differences)
     proof_push(buffer, "]}\n")
-    return 0 if difference_count == 0 and verification_state == "proved" else 1
+    return 0 if difference_count == 0 and source_admissible and goal_state_result.complete and verification_state == "proved" else 1
 
-def proof_push_elisa_proof(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    if goal_id >= report.goal_attempts.count:
-        proof_push_elisa_proof_with_replayed(buffer, report, goal_id, source_fingerprint, source_complete, source_admissible, false, false)
-        return
-    # This compatibility entrypoint has no frozen source inventories, so report-wide
-    # admissibility cannot authorize the selected goal.
-    # It also has no replay receipt, so it cannot authorize the selected certificate.
-    proof_push_elisa_proof_with_replayed(buffer, report, goal_id, source_fingerprint, source_complete, source_admissible, false, false)
-
-def proof_push_elisa_proof_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool, goal_source_admissible: bool, certificate_replayed: bool) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_elisa_proof_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, replay_work: mutable usize&) -> (complete: bool, state: sview, replayed: bool, source_admitted: bool) can[Memory.Allocate, Abort.Panic]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
+    source_complete: bool = proof_checked_view_source_complete(checked_view)
+    source_admissible: bool = proof_checked_view_source_admissible(checked_view)
+    goal_status: (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool)) = ElisaProofOutputReplayStatus::proof_goal_status_with_finding_with_work(checked_view, goal_id, replay_work)
+    goal_source_admissible: bool = goal_status.source_admitted
+    certificate_replayed: bool = goal_status.replayed
+    status_snapshot_complete: bool = goal_status.complete
+    diagnostic_selection: (complete: bool, known: bool, index: usize, ambiguous: bool) = goal_status.finding_selection
     proof_push(buffer, "# elisa-proof-proof-v1\n")
     if goal_id >= report.goal_attempts.count:
         proof_push(buffer, "# goal ")
         proof_push_number(buffer, goal_id.u32())
         proof_push(buffer, " does not exist in this source\n")
-        return
+        return (status_snapshot_complete, goal_status.state, certificate_replayed, goal_source_admissible)
     attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
     origin_work: mutable usize = report.traces.lookup_work_used
-    goal_verified: bool = proof_output_goal_state_with_source_admissibility(report, goal_id, goal_source_admissible, certificate_replayed) == "proved"
+    goal_state_result: (complete: bool, state: sview) = (status_snapshot_complete, goal_status.state)
+    goal_state: sview = goal_status.state
+    goal_verified: bool = goal_state == "proved"
     proof_push(buffer, "# source: fingerprint fnv1a32=")
     proof_push_number(buffer, source_fingerprint)
     proof_push(buffer, ", complete=")
@@ -151,43 +144,55 @@ def proof_push_elisa_proof_with_replayed(buffer: mutable darray[u8]&, report: Pr
         proof_push(buffer, ", arena root ")
         proof_push_number(buffer, attempt.kernel_goal.u32())
         proof_push(buffer, "\nqed\n")
-        return
+        return (goal_state_result.complete, goal_state, certificate_replayed, goal_source_admissible)
     if attempt.proven and not certificate_replayed:
         proof_push(buffer, "    by producer only\n")
-        return
+        return (goal_state_result.complete, goal_state, certificate_replayed, goal_source_admissible)
     if certificate_replayed:
         proof_push(buffer, "    by kernel replay; selected-goal admission was not established\n")
-        return
+        return (goal_state_result.complete, goal_state, certificate_replayed, goal_source_admissible)
     if attempt.has_certificate:
         proof_push(buffer, "    by certificate not replayed\n")
-        return
-    selected: (known: bool, index: usize, ambiguous: bool) = proof_repair_finding_index(report, attempt, goal_id)
+        return (goal_state_result.complete, goal_state, certificate_replayed, goal_source_admissible)
+    selected: (complete: bool, known: bool, index: usize, ambiguous: bool) = diagnostic_selection
     proof_push(buffer, "    unproved: ")
-    if selected.known:
-        proof_push(buffer, report.findings[selected.index].kind)
-        proof_push(buffer, " (")
-        proof_push(buffer, report.findings[selected.index].status)
-        proof_push(buffer, ") - ")
-        proof_push(buffer, report.findings[selected.index].message)
+    finding_rendered: mutable bool = true
+    if selected.complete and selected.known:
+        finding: ProofFinding = report.findings[selected.index]
+        finding_rendered <- proof_output_reserve_status_snapshot_work(replay_work, sview_len(finding.kind))
+        finding_rendered <- false if finding_rendered and not proof_output_reserve_status_snapshot_work(replay_work, sview_len(finding.status))
+        finding_rendered <- false if finding_rendered and not proof_output_reserve_status_snapshot_work(replay_work, sview_len(finding.message))
+        if finding_rendered:
+            proof_push(buffer, finding.kind)
+            proof_push(buffer, " (")
+            proof_push(buffer, finding.status)
+            proof_push(buffer, ") - ")
+            proof_push(buffer, finding.message)
+        else:
+            proof_push(buffer, "unknown (diagnostic rendering exceeded output work limit)")
     else:
         proof_push(buffer, "unknown")
     proof_push(buffer, "\n")
+    return (goal_state_result.complete and selected.complete and finding_rendered, "unknown" if not selected.complete or not finding_rendered else goal_state, certificate_replayed, goal_source_admissible)
 
-def proof_push_json_focused_goal(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool) -> void can[Memory.Allocate, Abort.Panic]:
-    # This compatibility entrypoint has no frozen source inventories, so report-wide
-    # admissibility cannot authorize the selected goal.
-    # It also has no replay receipt, so it cannot authorize the selected attempt.
-    proof_push_json_focused_goal_with_replayed(buffer, report, goal_id, source_bytes, source_fingerprint, source_complete, source_admissible, false, false)
-
-def proof_push_json_focused_goal_with_replayed(buffer: mutable darray[u8]&, report: ProofReport&, goal_id: usize, source_bytes: usize, source_fingerprint: u32, source_complete: bool, source_admissible: bool, goal_source_admissible: bool, attempt_replayed: bool) -> void can[Memory.Allocate, Abort.Panic]:
+def proof_push_json_focused_goal_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, replay_work: mutable usize&) -> (complete: bool, state: sview) can[Memory.Allocate, Abort.Panic]:
+    report: ProofReport& = proof_checked_view_report(checked_view)
+    source_bytes: usize = proof_checked_view_source_bytes(checked_view)
+    source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
+    source_complete: bool = proof_checked_view_source_complete(checked_view)
+    source_admissible: bool = proof_checked_view_source_admissible(checked_view)
+    goal_status: (complete: bool, state: sview, replayed: bool, source_admitted: bool, finding_selection: (complete: bool, known: bool, index: usize, ambiguous: bool)) = ElisaProofOutputReplayStatus::proof_goal_status_with_finding_with_work(checked_view, goal_id, replay_work)
+    goal_source_admissible: bool = goal_status.source_admitted
+    attempt_replayed: bool = goal_status.replayed
     origin_work: mutable usize = report.traces.lookup_work_used
     found: bool = goal_id < report.goal_attempts.count
+    diagnostic_selection: (complete: bool, known: bool, index: usize, ambiguous: bool) = goal_status.finding_selection
+    attempt_status_result: (complete: bool, state: sview) = (goal_status.complete, goal_status.state)
     proof_push(buffer, "{\"format\":\"elisa-proof-goal-v1\",\"status\":")
     if not found:
         proof_push_json_string(buffer, "not_found")
     else:
-        attempt_status: mutable sview = proof_output_goal_state_with_source_admissibility(report, goal_id, goal_source_admissible, attempt_replayed)
-        proof_push_json_string(buffer, attempt_status)
+        proof_push_json_string(buffer, attempt_status_result.state)
     proof_push(buffer, ",\"source\":{\"bytes\":")
     proof_push_number(buffer, source_bytes.u32())
     proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
@@ -214,7 +219,7 @@ def proof_push_json_focused_goal_with_replayed(buffer: mutable darray[u8]&, repo
     proof_push(buffer, ",\"goal\":")
     if not found:
         proof_push(buffer, "null,\"failure\":null}\n")
-        return
+        return (goal_status.complete, "not_found")
     attempt: ProofGoalAttempt = report.goal_attempts[goal_id]
     replay_status: mutable sview = "not_certified"
     replay_status <- "gap" if attempt.has_certificate
@@ -226,7 +231,8 @@ def proof_push_json_focused_goal_with_replayed(buffer: mutable darray[u8]&, repo
     proof_push(buffer, ",\"rule\":")
     proof_push_json_string(buffer, attempt.rule)
     proof_push(buffer, ",\"proven\":")
-    replay_proven: bool = proof_output_goal_state_with_source_admissibility(report, goal_id, goal_source_admissible, attempt_replayed) == "proved"
+    attempt_status: sview = attempt_status_result.state
+    replay_proven: bool = attempt_status == "proved"
     proof_push(buffer, "true" if replay_proven else "false")
     proof_push(buffer, ",\"replay_status\":")
     proof_push_json_string(buffer, replay_status)
@@ -252,8 +258,11 @@ def proof_push_json_focused_goal_with_replayed(buffer: mutable darray[u8]&, repo
     proof_push(buffer, ",\"proposition\":")
     proof_push_json_expr(buffer, attempt.goal)
     proof_push(buffer, "},\"failure\":")
+    failure_complete: mutable bool = true
     if replay_proven:
         proof_push(buffer, "null")
     else:
-        proof_push_json_repair_failure(buffer, report, attempt, goal_id)
+        failure_complete <- proof_push_json_repair_failure_from_selection(buffer, report, diagnostic_selection, replay_work)
+    proof_push(buffer, ",\"failure_complete\":true" if failure_complete else ",\"failure_complete\":false")
     proof_push(buffer, "}\n")
+    return (goal_status.complete and attempt_status_result.complete and failure_complete, attempt_status)

@@ -61,6 +61,83 @@ extend ElisaProofKernelCore:
             result: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: value.bits.i64(), name: left.node.name, secondary_name: ""}
             return (true, result)
 
+        def typed_constant_goal_charge_amount(work_used: mutable usize&, work_limit: usize, amount: usize) -> bool:
+            return false if work_used > work_limit
+            if amount > work_limit - work_used:
+                work_used <- work_limit + 1
+                return false
+            work_used <- work_used + amount
+            true
+
+        def typed_constant_goal_charge_node(nodes: darray<ProofKernelNode>&, root: usize, work_used: mutable usize&, work_limit: usize) -> bool:
+            return false if root >= nodes.count
+            return false if not typed_constant_goal_charge_amount(work_used, work_limit, 1)
+            return false if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].kind))
+            return false if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].operator))
+            return false if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].name))
+            typed_constant_goal_charge_amount(work_used, work_limit, sview_len(nodes[root].secondary_name))
+
+        def typed_constant_expression_goal_work(nodes: darray<ProofKernelNode>&, root: usize, remaining: usize, local_work: mutable usize&, work_used: mutable usize&, work_limit: usize) -> (known: bool, node: ProofKernelNode):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            empty: ProofKernelNode = ProofKernelNode{kind: "unsupported", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty) if remaining <= 1 or local_work >= TYPED_CONSTANT_WORK_BUDGET or root >= nodes.count
+            local_work <- local_work + 1
+            return (false, empty) if not typed_constant_goal_charge_node(nodes, root, work_used, work_limit)
+            node: ProofKernelNode = nodes[root]
+            return (typed_literal_value(node).known, node) if node.kind == "typed-int"
+            if node.kind == "if":
+                return (false, node) if node.operator != "" or node.children_start != 0 or node.children_count != 0 or node.value != 0 or node.name != "" or node.secondary_name != "" or node.left >= nodes.count
+                decision: (known: bool, value: bool) = typed_constant_guard_goal_work(nodes, node.left, remaining - 1, local_work, work_used, work_limit)
+                return (false, node) if not decision.known
+                yes: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, node.right, remaining - 1, local_work, work_used, work_limit)
+                return (false, node) if not yes.known
+                no: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, node.auxiliary, remaining - 1, local_work, work_used, work_limit)
+                return (false, node) if not no.known
+                return (false, node) if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(yes.node.name)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(no.node.name))
+                return (false, node) if yes.node.name != no.node.name
+                return yes if decision.value
+                return no
+            return (false, node) if node.kind != "binary" or (node.operator != "+" and node.operator != "-" and node.operator != ">>")
+            return (false, node) if node.auxiliary != 0 or node.children_start != 0 or node.children_count != 0 or node.value != 0 or node.name != "" or node.secondary_name != ""
+            left: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, node.left, remaining - 1, local_work, work_used, work_limit)
+            return (false, node) if not left.known
+            right: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, node.right, remaining - 1, local_work, work_used, work_limit)
+            return (false, node) if not right.known
+            return (false, node) if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(node.operator)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(left.node.name)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(right.node.name))
+            value: mutable (known: bool, bits: u64, width: i64) = (false, 0, 0)
+            if node.operator == ">>":
+                value <- typed_unsigned_shift_right(left.node, node.operator, right.node)
+            else:
+                value <- typed_unsigned_add_sub(left.node, node.operator, right.node)
+            return (false, node) if not value.known
+            result: ProofKernelNode = ProofKernelNode{kind: "typed-int", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: value.bits.i64(), name: left.node.name, secondary_name: ""}
+            return (true, result)
+
+        def typed_constant_guard_goal_work(nodes: darray<ProofKernelNode>&, root: usize, remaining: usize, local_work: mutable usize&, work_used: mutable usize&, work_limit: usize) -> (known: bool, value: bool):
+            requires remaining > 0
+            requires remaining <= PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1
+            decreases remaining
+            return (false, false) if remaining <= 1 or local_work >= TYPED_CONSTANT_WORK_BUDGET or root >= nodes.count
+            local_work <- local_work + 1
+            return (false, false) if not typed_constant_goal_charge_node(nodes, root, work_used, work_limit)
+            guard: ProofKernelNode = nodes[root]
+            return (false, false) if guard.kind != "binary" or guard.auxiliary != 0 or guard.children_start != 0 or guard.children_count != 0 or guard.value != 0 or guard.name != "" or guard.secondary_name != ""
+            if guard.operator == "and" or guard.operator == "or":
+                left: (known: bool, value: bool) = typed_constant_guard_goal_work(nodes, guard.left, remaining - 1, local_work, work_used, work_limit)
+                return (false, false) if not left.known
+                right: (known: bool, value: bool) = typed_constant_guard_goal_work(nodes, guard.right, remaining - 1, local_work, work_used, work_limit)
+                return (false, false) if not right.known
+                return (true, left.value and right.value) if guard.operator == "and"
+                return (true, left.value or right.value)
+            a: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, guard.left, remaining - 1, local_work, work_used, work_limit)
+            return (false, false) if not a.known
+            b: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, guard.right, remaining - 1, local_work, work_used, work_limit)
+            return (false, false) if not b.known
+            return (false, false) if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(guard.operator)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(a.node.name)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(b.node.name))
+            typed_literal_comparison(a.node, guard.operator, b.node)
+
     public:
         def typed_constant_expression_unsigned_width(nodes: darray[ProofKernelNode]&, root: usize) -> i64:
             work: mutable usize = TYPED_CONSTANT_WORK_BUDGET
@@ -81,3 +158,19 @@ extend ElisaProofKernelCore:
             b = typed_constant_expression_remaining(nodes, right, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &work)
             return (false, false) if not b.known
             return typed_literal_comparison(a.node, operator, b.node)
+
+        # Preserve the per-comparison cap while charging visited nodes and text bytes to the
+        # caller's shared work counter, including typed arithmetic under nested constant guards.
+        def typed_constant_expression_comparison_with_goal_work(nodes: darray<ProofKernelNode>&, left: usize, operator: sview, right: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, value: bool):
+            return (false, false) if left >= nodes.count or right >= nodes.count
+            return (false, false) if not typed_constant_goal_charge_node(nodes, left, work_used, work_limit) or not typed_constant_goal_charge_node(nodes, right, work_used, work_limit)
+            return (false, false) if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(operator))
+            return (false, false) if nodes[left].kind != "typed-int" and nodes[left].kind != "binary" and nodes[left].kind != "if"
+            return (false, false) if nodes[right].kind != "typed-int" and nodes[right].kind != "binary" and nodes[right].kind != "if"
+            local_work: mutable usize = 0
+            a: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, left, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not a.known
+            b: (known: bool, node: ProofKernelNode) = typed_constant_expression_goal_work(nodes, right, PROOF_KERNEL_REPLAY_DEPTH_LIMIT + 1, &local_work, work_used, work_limit)
+            return (false, false) if not b.known
+            return (false, false) if not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(operator)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(a.node.name)) or not typed_constant_goal_charge_amount(work_used, work_limit, sview_len(b.node.name))
+            typed_literal_comparison(a.node, operator, b.node)

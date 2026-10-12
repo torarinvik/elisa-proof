@@ -1,14 +1,185 @@
 extend ElisaProof:
     private:
-        # Whether any collected lemma carries this exact name. `proof_lemma_index` answers "not a
-        # lemma" for a name declared twice (an ambiguity sentinel, so calls fail closed), but a
-        # declaration must still be classified as a lemma: an ambiguous lemma that fell through
-        # to the executable tables was checked as a function and crashed the checker.
-        def proof_lemma_name_declared(lemmas: ProofLemmaTable&, name: sview) -> bool:
-            return false if name == ""
-            for candidate in lemmas.names |name|:
-                return true if candidate == name
-            return false
+        const PROOF_LEMMA_DECLARATION_DEPTH_LIMIT: usize = 64
+
+        # Resolve a lemma-table leaf through the prebuilt exact-name index while charging the
+        # input bytes and each probe. Ambiguity is still a successful lookup result for this
+        # census, but makes the target unusable as a proof summary.
+        def proof_lemma_index_with_work(lemmas: ProofLemmaTable&, name: sview, work: mutable usize&) -> (complete: bool, index: usize, declared: bool):
+            missing: usize = lemmas.names.count
+            return (true, missing, false) if name == "" or lemmas.names.count == 0
+            if lemmas.index_values.count == 0 or lemmas.index_values.count != lemmas.index_hashes.count or lemmas.index_values.count != lemmas.index_ambiguous.count:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, missing, false)
+            if not proof_report_source_work_charge(sview_len(name), work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, missing, false)
+            wanted_hash: u32 = proof_name_hash(name)
+            capacity: usize = lemmas.index_values.count
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_NAME_INDEX_MAX_CLUSTER + 1 |probes, slot, wanted_hash, name, lemmas, capacity, work|:
+                if not proof_report_source_work_charge(1, work):
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (false, missing, false)
+                current: usize = lemmas.index_values[slot]
+                return (true, missing, false) if current == missing
+                if current >= lemmas.names.count:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return (false, missing, false)
+                if lemmas.index_hashes[slot] == wanted_hash:
+                    if not proof_report_source_work_charge(sview_len(lemmas.names[current]), work):
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (false, missing, false)
+                    if lemmas.names[current] == name:
+                        return (true, missing, true) if lemmas.index_ambiguous[slot]
+                        return (true, current, true)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            return (false, missing, false)
+
+        # Parser import annotations are source bindings too. Since current lemma summaries are
+        # indexed by leaf name, imported visible leaves can shadow a candidate declared in a
+        # nested module. Resolve those leaves once during summary setup with the shared work budget;
+        # never perform an unbounded annotation scan at each proof call.
+        def proof_lemma_import_bindings_usable(annotations: darray[Ast::EnumAnnotation]&, lemmas: mutable ProofLemmaTable&, work: mutable usize&) -> (complete: bool, has_unresolved_import: bool):
+            from_source: mutable sview = ""
+            from_line: mutable u32 = 0
+            from_offset: mutable u32 = 0
+            from_has_member: mutable bool = false
+            index: mutable usize = 0
+            while index < annotations.count |index, annotations, lemmas, work, from_source, from_line, from_offset, from_has_member|:
+                annotation: Ast::EnumAnnotation = annotations[index]
+                return (false, false) if not proof_report_source_work_charge(1, work)
+                return (false, false) if not proof_report_source_work_charge(sview_len(annotation.owner), work)
+                return (false, false) if not proof_report_source_work_charge(sview_len(annotation.name), work)
+                # A bare `using` can expose an unknown leaf set. Namespace aliases are
+                # qualified-only, but must be paired with their exact target metadata.
+                if annotation.name == "__binding_wildcard_import":
+                    return (true, true)
+                if annotation.name == "__using":
+                    return (true, true) if index + 2 >= annotations.count
+                    return (false, false) if not proof_report_source_work_charge(2, work)
+                    alias: Ast::EnumAnnotation = annotations[index + 1]
+                    alias_target: Ast::EnumAnnotation = annotations[index + 2]
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias.owner), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias.name), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias.module), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias_target.owner), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias_target.name), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(alias_target.module), work)
+                    alias_pair: bool = alias.name == "__using_alias" and alias_target.name == "__using_alias_target" and alias.owner != "" and alias_target.owner == annotation.owner and alias.module == alias_target.module and alias.line == annotation.line and alias_target.line == annotation.line and alias.offset == alias_target.offset and alias.offset > annotation.offset
+                    return (true, true) if not alias_pair
+                    index <- index + 3
+                    continue
+                if annotation.owner == "__from_src" or annotation.name == "__using_member":
+                    return (true, true)
+                # Orphan alias metadata is incomplete source binding evidence.
+                if annotation.name == "__using_alias" or annotation.name == "__using_alias_target":
+                    return (true, true)
+                if annotation.name == "__from_decl":
+                    return (true, true) if from_source != "" and not from_has_member
+                    from_source <- annotation.owner
+                    from_line <- annotation.line
+                    from_offset <- annotation.offset
+                    from_has_member <- false
+                    index <- index + 1
+                    continue
+                if annotation.owner == "__from_member":
+                    return (true, true) if index + 1 >= annotations.count
+                    return (false, false) if not proof_report_source_work_charge(1, work)
+                    source: Ast::EnumAnnotation = annotations[index + 1]
+                    return (false, false) if not proof_report_source_work_charge(sview_len(source.owner), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(source.name), work)
+                    return (false, false) if not proof_report_source_work_charge(sview_len(source.module), work)
+                    exact_source_pair: bool = source.owner == "__from_src" and source.line == annotation.line and source.offset == annotation.offset and source.module == annotation.module
+                    return (true, true) if not exact_source_pair or source.name == ""
+                    using_member: mutable bool = false
+                    if index + 2 < annotations.count:
+                        return (false, false) if not proof_report_source_work_charge(1, work)
+                        possible_using: Ast::EnumAnnotation = annotations[index + 2]
+                        return (false, false) if not proof_report_source_work_charge(sview_len(possible_using.name), work)
+                        if possible_using.name == "__using_member":
+                            using: Ast::EnumAnnotation = possible_using
+                            return (false, false) if not proof_report_source_work_charge(sview_len(using.owner), work)
+                            return (false, false) if not proof_report_source_work_charge(sview_len(using.module), work)
+                            using_member <- using.owner == source.name and using.module == annotation.name and using.line == annotation.line and using.offset == annotation.offset
+                            return (true, true) if not using_member
+                            using_member <- true
+                    if not using_member:
+                        from_pair: bool = from_source == source.name and from_line == annotation.line and from_offset < annotation.offset
+                        return (true, true) if not from_pair
+                        from_has_member <- true
+                    lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, annotation.name, work)
+                    return (false, false) if not lookup.complete
+                    lemmas.unqualified_usable[lookup.index] <- false if lookup.index < lemmas.unqualified_usable.count
+                    if using_member:
+                        index <- index + 3
+                    else:
+                        index <- index + 2
+                    continue
+                index <- index + 1
+            return (true, true) if from_source != "" and not from_has_member
+            return (true, false)
+
+        # The executable function helpers predate bounded source admission and do not expose
+        # probe counts. Resolve the same identity here while charging each probe and compared
+        # name, so a large or adversarial index cannot make lemma setup unbounded.
+        def proof_function_identity_with_work(functions: ProofFunctionTable&, name: sview, work: mutable usize&) -> (complete: bool, index: usize, repeated: bool):
+            missing: usize = functions.names.count
+            return (false, missing, true) if not proof_report_source_work_charge(sview_len(name), work)
+            wanted_hash: u32 = proof_name_hash(name)
+            if functions.index_values.count > 0:
+                capacity: usize = functions.index_values.count
+                return (false, missing, true) if capacity != functions.index_hashes.count or capacity != functions.index_ambiguous.count
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, wanted_hash, functions, capacity, work, missing|:
+                    return (false, missing, true) if not proof_report_source_work_charge(1, work)
+                    current: usize = functions.index_values[slot]
+                    return (true, missing, false) if current == missing
+                    return (false, missing, true) if current >= functions.names.count
+                    if functions.index_hashes[slot] == wanted_hash:
+                        return (false, missing, true) if not proof_report_source_work_charge(sview_len(functions.names[current]), work)
+                        if functions.names[current] == name:
+                            return (true, missing, true) if functions.index_ambiguous[slot]
+                            return (true, current, false)
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (true, missing, false)
+
+            found: mutable usize = missing
+            for index in 0..<functions.names.count |index, functions, wanted_hash, name, found, work, missing|:
+                return (false, missing, true) if not proof_report_source_work_charge(1, work)
+                if index >= functions.name_hashes.count or functions.name_hashes[index] == wanted_hash:
+                    return (false, missing, true) if not proof_report_source_work_charge(sview_len(functions.names[index]), work)
+                    if functions.names[index] == name:
+                        return (true, missing, true) if found < missing
+                        found <- index
+            (true, found, false)
+
+        # Count every source function row for lemma leaves, including declarations that the
+        # executable function table omits because a same-leaf lemma marker matched by name.
+        def proof_lemma_source_function_name_counts(declarations: darray[Ast::Decl]&, lemmas: ProofLemmaTable&, counts: mutable darray[usize]&, source_functions: mutable darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
+            return true if lemmas.names.count == 0
+            return false if depth >= PROOF_LEMMA_DECLARATION_DEPTH_LIMIT
+            for declaration in declarations |lemmas, counts, source_functions, work, depth|:
+                return false if not proof_report_source_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(name, _, _, _, _, _, _):
+                        lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, name, work)
+                        return false if not lookup.complete
+                        lemma_index: usize = lookup.index
+                        if lemma_index < lemmas.names.count:
+                            return false if lemma_index >= counts.count or lemma_index >= source_functions.count
+                            source_functions[lemma_index] <- declaration if counts[lemma_index] == 0
+                            counts[lemma_index] <- counts[lemma_index] + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_lemma_source_function_name_counts(nested, lemmas, counts, source_functions, work, depth + 1)
+                    _:
+                        pass
+            return true
 
         def proof_finding_only_widens_state(kind: sview) -> bool:
             return true if kind == "captured-block-unsupported"
@@ -50,11 +221,14 @@ extend ElisaProof:
                 return true if finding.kind == kind and proof_finding_is_about(finding, functions.names[row], functions.owner_modules[row])
             return false
 
-        def proof_function_component_ready(functions: ProofFunctionTable&, scheduled: darray[bool]&, source: usize) -> bool:
+        def proof_function_component_ready(functions: ProofFunctionTable&, scheduled: darray[bool]&, source: usize, work: mutable usize&) -> bool:
             return false if source >= functions.names.count or source >= functions.call_starts.count or source >= functions.call_counts.count
             start: usize = functions.call_starts[source]
             count: usize = functions.call_counts[source]
             return false if start > functions.all_calls.count or count > functions.all_calls.count - start
+            if not proof_report_source_work_charge(count, work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
             for offset in 0..<count |offset, start, functions, scheduled, source|:
                 called: sview = functions.all_calls[start + offset]
                 continue if called == "__opaque_call__"
@@ -73,7 +247,7 @@ extend ElisaProof:
             if path_offset + 1 == path_count:
                 match declaration:
                     Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        (proof_check_function(file, name, parameters, return_type, body, position, lemmas, functions, report) can Global{Read,Write})
+                        (proof_check_function(file, name, parameters, return_type, body, position, false, lemmas, functions, report) can Global{Read,Write})
                         can Global.Write:
                             proof_float_mode <- false
                         return true
@@ -93,50 +267,103 @@ extend ElisaProof:
             return false if target >= functions.owner_modules.count
             return true if proof_report_row_has_finding(report, functions, target, "contract-proposition-type")
             # Unqualified calls in this body resolve from its own module.
-            saved_caller: usize = functions.current_caller
-            functions.current_caller <- target
-            report.finding_function <- functions.names[target]
-            report.finding_owner <- functions.owner_modules[target]
+            saved_caller: usize = proof_fact_call_shape_begin_caller(report, functions, target)
             found: bool = (proof_check_function_path(file, declarations, functions.all_declaration_path, functions.declaration_path_starts[target], functions.declaration_path_counts[target], 0, lemmas, functions, report) can Global{Read,Write})
-            report.finding_function <- ""
-            report.finding_owner <- ""
-            functions.current_caller <- saved_caller
+            proof_fact_call_shape_end_caller(report, functions, saved_caller)
             return found
 
-        def proof_lemma_component_ready(lemmas: ProofLemmaTable&, scheduled: darray[bool]&, source: usize) -> bool:
+        def proof_lemma_component_ready(lemmas: ProofLemmaTable&, scheduled: darray[bool]&, source: usize, work: mutable usize&) -> bool:
             return false if source >= lemmas.names.count or source >= lemmas.call_starts.count or source >= lemmas.call_counts.count
             start: usize = lemmas.call_starts[source]
             count: usize = lemmas.call_counts[source]
             return false if start > lemmas.all_calls.count or count > lemmas.all_calls.count - start
-            for offset in 0..<count |offset, start, lemmas, scheduled, source|:
+            if not proof_report_source_work_charge(count, work):
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            for offset in 0..<count |offset, start, lemmas, scheduled, source, work|:
                 called: sview = lemmas.all_calls[start + offset]
-                next: usize = proof_lemma_index(lemmas, called)
+                lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, called, work)
+                return false if not lookup.complete
+                next: usize = lookup.index
                 continue if next >= lemmas.names.count
                 continue if proof_lemmas_same_recursive_component(lemmas, source, next)
                 return false if next >= scheduled.count or not scheduled[next]
             return true
 
-        def proof_check_scheduled_lemma(file: Ast::File&, declarations: darray[Ast::Decl]&, target: usize, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> bool can[Global.Read, Global.Write]:
-            for declaration in declarations |file, declarations, lemmas, functions, report|:
-                match declaration:
-                    Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
-                        if proof_lemma_index(lemmas, name) == target:
-                            if return_type is lemma_return_type:
-                                proof_add_finding(report, "lemma-return", position.line, name, "lemmas are proof-only and may not return runtime values")
-                            return true if proof_report_function_has_finding(report, name, "contract-proposition-type")
-                            (proof_check_function(file, name, parameters, return_type, body, position, lemmas, functions, report) can Global{Read,Write})
-                            can Global.Write:
-                                proof_float_mode <- false
-                            return true
-                    Ast::Decl.Module(_, module_body, _):
-                        return true if (proof_check_scheduled_lemma(file, module_body, target, lemmas, functions, report) can Global{Read,Write})
-                    Ast::Decl.Scoped(scoped_body, _):
-                        return true if (proof_check_scheduled_lemma(file, scoped_body, target, lemmas, functions, report) can Global{Read,Write})
-                    _:
-                        pass
-            return false
+        def proof_check_scheduled_lemma(file: Ast::File&, target: usize, lemmas: ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> bool can[Global.Read, Global.Write]:
+            return false if target >= lemmas.unqualified_usable.count or not lemmas.unqualified_usable[target]
+            return false if target >= lemmas.source_functions.count
+            match lemmas.source_functions[target]:
+                Ast::Decl.Func(name, parameters, return_type, body, _, _, position):
+                    return false if name != lemmas.names[target]
+                    if return_type is lemma_return_type:
+                        proof_add_finding(report, "lemma-return", position.line, name, "lemmas are proof-only and may not return runtime values")
+                    return true if proof_report_function_has_finding(report, name, "contract-proposition-type")
+                    (proof_check_function(file, name, parameters, return_type, body, position, true, lemmas, functions, report) can Global{Read,Write})
+                    can Global.Write:
+                        proof_float_mode <- false
+                    return true
+                _:
+                    return false
 
         def proof_compute_verified_lemmas(file: Ast::File&, declarations: darray[Ast::Decl]&, lemmas: mutable ProofLemmaTable&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void can[Global.Read, Global.Write]:
+            if lemmas.names.count == 0:
+                lemmas.unqualified_usable.clear()
+                lemmas.verified.clear()
+                lemmas.verification_reasons.clear()
+                return
+            source_function_counts: mutable darray[usize] = []
+            lemmas.source_functions.clear()
+            for _ in 0..<lemmas.names.count |lemmas|:
+                lemmas.source_functions.push(Ast::Decl.Invalid)
+            source_scan_work: mutable usize = 0
+            source_function_counts_complete: mutable bool = proof_report_source_work_charge(lemmas.names.count, &source_scan_work)
+            if source_function_counts_complete:
+                for _ in 0..<lemmas.names.count |source_function_counts|:
+                    source_function_counts.push(0)
+                source_function_counts_complete <- proof_lemma_source_function_name_counts(declarations, lemmas, &source_function_counts, &lemmas.source_functions, &source_scan_work, 0)
+            identity_lookups_complete: mutable bool = source_function_counts_complete
+            lemmas.unqualified_usable.clear()
+            for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, functions, source_function_counts, source_function_counts_complete, identity_lookups_complete, source_scan_work|:
+                lemma_name: sview = lemmas.names[lemma_index]
+                ordinary_row: mutable usize = functions.names.count
+                repeated_ordinary_name: mutable bool = true
+                unique_lemma_row: mutable bool = false
+                if identity_lookups_complete:
+                    function_identity: (complete: bool, index: usize, repeated: bool) = proof_function_identity_with_work(functions, lemma_name, &source_scan_work)
+                    if not function_identity.complete:
+                        identity_lookups_complete <- false
+                    else:
+                        lemma_identity: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, lemma_name, &source_scan_work)
+                        if not lemma_identity.complete:
+                            identity_lookups_complete <- false
+                        else:
+                            ordinary_row <- function_identity.index
+                            repeated_ordinary_name <- function_identity.repeated
+                            unique_lemma_row <- lemma_identity.index < lemmas.names.count
+                source_function_count: usize = source_function_counts[lemma_index] if lemma_index < source_function_counts.count else 0
+                one_source_function: bool = source_function_counts_complete and source_function_count == 1
+                lemmas.unqualified_usable.push(identity_lookups_complete and unique_lemma_row and one_source_function and ordinary_row >= functions.names.count and not repeated_ordinary_name)
+            if identity_lookups_complete:
+                import_bindings: (complete: bool, has_unresolved_import: bool) = proof_lemma_import_bindings_usable(file.enum_annotations, lemmas, &source_scan_work)
+                identity_lookups_complete <- false if not import_bindings.complete
+                if import_bindings.has_unresolved_import:
+                    for lemma_index in 0..<lemmas.unqualified_usable.count |lemma_index, lemmas|:
+                        lemmas.unqualified_usable[lemma_index] <- false
+            # Extern declarations use a separate index, so resolve their leaves through the
+            # same charged helper before allowing any summary to remain usable.
+            if identity_lookups_complete:
+                for signature in functions.extern_signatures |signature, functions, lemmas, identity_lookups_complete, source_scan_work|:
+                    lookup: (complete: bool, index: usize, declared: bool) = proof_lemma_index_with_work(lemmas, signature.name, &source_scan_work)
+                    if not lookup.complete:
+                        identity_lookups_complete <- false
+                        break
+                    elif lookup.index < lemmas.names.count and lookup.index < lemmas.unqualified_usable.count:
+                        lemmas.unqualified_usable[lookup.index] <- false
+            if not identity_lookups_complete:
+                lemmas.unqualified_usable.clear()
+                for _ in 0..<lemmas.names.count |lemmas|:
+                    lemmas.unqualified_usable.push(false)
             lemmas.verified.clear()
             lemmas.verification_reasons.clear()
             for _ in 0..<lemmas.names.count |lemmas|:
@@ -146,12 +373,40 @@ extend ElisaProof:
             for _ in 0..<lemmas.names.count |scheduled|:
                 scheduled.push(false)
             scheduled_count: mutable usize = 0
-            while scheduled_count < lemmas.names.count |scheduled_count, scheduled, lemmas, file, declarations, functions, report|:
+            candidate_start: mutable usize = 0
+            if not identity_lookups_complete:
+                reason: sview = "source-identity-work-limit" if source_scan_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else "source-identity-index-incomplete"
+                for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, scheduled_count, reason|:
+                    lemmas.verification_reasons[lemma_index] <- reason
+                    scheduled[lemma_index] <- true
+                    scheduled_count <- scheduled_count + 1
+                proof_add_finding(report, "lemma-summary-unverified", 0, "", "lemma owner identities could not be established from bounded source indexes")
+            else:
+                for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, scheduled_count, report|:
+                    continue if lemma_index >= lemmas.unqualified_usable.count or lemmas.unqualified_usable[lemma_index]
+                    lemmas.verification_reasons[lemma_index] <- "owner-ambiguous"
+                    proof_add_finding(report, "lemma-summary-unverified", 0, lemmas.names[lemma_index], "lemma name resolves to multiple function declarations without an owner-aware summary lookup")
+                    scheduled[lemma_index] <- true
+                    scheduled_count <- scheduled_count + 1
+            while scheduled_count < lemmas.names.count |scheduled_count, scheduled, lemmas, file, declarations, functions, report, source_scan_work|:
                 candidate: mutable usize = lemmas.names.count
-                for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, candidate|:
-                    if not scheduled[lemma_index] and proof_lemma_component_ready(lemmas, scheduled, lemma_index):
-                        candidate <- lemma_index
+                for search_offset in 0..<lemmas.names.count |search_offset, lemmas, scheduled, candidate, candidate_start, source_scan_work|:
+                    lemma_index: usize = (candidate_start + search_offset) % lemmas.names.count
+                    if not proof_report_source_work_charge(1, &source_scan_work):
+                        source_scan_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                         break
+                    if not scheduled[lemma_index] and proof_lemma_component_ready(lemmas, scheduled, lemma_index, &source_scan_work):
+                        candidate <- lemma_index
+                        candidate_start <- (lemma_index + 1) % lemmas.names.count
+                        break
+                if source_scan_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, scheduled_count|:
+                        if not scheduled[lemma_index]:
+                            lemmas.verification_reasons[lemma_index] <- "source-schedule-work-limit"
+                            scheduled[lemma_index] <- true
+                            scheduled_count <- scheduled_count + 1
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma dependency scheduling exceeded its validated work bound", "lemma-schedule-work", source_scan_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    break
                 if candidate >= lemmas.names.count:
                     for lemma_index in 0..<lemmas.names.count |lemma_index, lemmas, scheduled, report|:
                         if not scheduled[lemma_index]:
@@ -167,8 +422,8 @@ extend ElisaProof:
                         lemmas.verified[lemma_index] <- true
                         lemmas.verification_reasons[lemma_index] <- "pending"
                 bodies_checked: mutable bool = true
-                for member in component |member, component, file, declarations, lemmas, functions, report, bodies_checked|:
-                    found: bool = (proof_check_scheduled_lemma(file, declarations, member, lemmas, functions, report) can Global{Read,Write})
+                for member in component |member, component, file, lemmas, functions, report, bodies_checked|:
+                    found: bool = (proof_check_scheduled_lemma(file, member, lemmas, functions, report) can Global{Read,Write})
                     lemmas.verification_reasons[member] <- "body-missing" if not found
                     bodies_checked <- false if not found
                 # A body that was never checked produced no finding, so a clean report alone must
@@ -258,6 +513,8 @@ extend ElisaProof:
             proof_filter_unrequested_function_proposition_findings(report, functions, required) if focus_name != ""
             scheduled: mutable darray[bool] = []
             scheduled_count: mutable usize = 0
+            schedule_work: mutable usize = 0
+            candidate_start: mutable usize = 0
             for _ in 0..<functions.names.count |functions|:
                 functions.verified.push(false)
             for function_index in 0..<functions.names.count |function_index, functions, required, scheduled, scheduled_count|:
@@ -265,12 +522,25 @@ extend ElisaProof:
                 functions.verification_reasons.push("pending" if selected else "not-requested")
                 scheduled.push(not selected)
                 scheduled_count <- scheduled_count + 1 if not selected
-            while scheduled_count < functions.names.count |scheduled_count, scheduled, functions, file, declarations, lemmas, report|:
+            while scheduled_count < functions.names.count |scheduled_count, scheduled, functions, file, declarations, lemmas, report, schedule_work|:
                 candidate: mutable usize = functions.names.count
-                for function_index in 0..<functions.names.count |function_index, functions, scheduled, candidate|:
-                    if not scheduled[function_index] and proof_function_component_ready(functions, scheduled, function_index):
-                        candidate <- function_index
+                for search_offset in 0..<functions.names.count |search_offset, functions, scheduled, candidate, candidate_start, schedule_work|:
+                    function_index: usize = (candidate_start + search_offset) % functions.names.count
+                    if not proof_report_source_work_charge(1, &schedule_work):
+                        schedule_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                         break
+                    if not scheduled[function_index] and proof_function_component_ready(functions, scheduled, function_index, &schedule_work):
+                        candidate <- function_index
+                        candidate_start <- (function_index + 1) % functions.names.count
+                        break
+                if schedule_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    for function_index in 0..<functions.names.count |function_index, functions, scheduled, scheduled_count|:
+                        if not scheduled[function_index]:
+                            functions.verification_reasons[function_index] <- "verification-schedule-work-limit"
+                            scheduled[function_index] <- true
+                            scheduled_count <- scheduled_count + 1
+                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function dependency scheduling exceeded its validated work bound", "function-schedule-work", schedule_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    break
                 if candidate >= functions.names.count:
                     # A well-formed collected call graph should always expose a ready SCC. If
                     # metadata becomes malformed, reject every remaining summary explicitly.
@@ -321,5 +591,6 @@ extend ElisaProof:
                     functions.verification_reasons[member] <- "recursive-component-unverified" if not component_ok and functions.verification_reasons[member] == "pending"
                     functions.verification_reasons[member] <- "body-unverified" if not component_ok and not functions.recursive[member]
                     functions.verification_reasons[member] <- "dependency-unverified" if not component_ok and (proof_report_row_has_finding(report, functions, member, "function-summary-unverified") or proof_report_row_has_finding(report, functions, member, "lemma-summary-unverified"))
+                    proof_fact_call_shape_update_verification(report, functions, member)
                     scheduled[member] <- true
                     scheduled_count <- scheduled_count + 1

@@ -2,7 +2,7 @@ extend ElisaProof:
     private:
         const PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT: usize = 64
 
-        def proof_resource_check_expression[@s, @r](expression: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
+        def proof_resource_check_expression[@s, @r](expression: Ast::Expr, state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, function_name: sview, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
             state.expression_depth <- state.expression_depth + 1
             if state.expression_depth > PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
                 rejected_depth: usize = state.expression_depth
@@ -50,9 +50,11 @@ extend ElisaProof:
                             resource_expression_argument <- true if proof_resource_expr_carries_resource(argument, state, report)
                             region_argument <- true if proof_resource_expr_contains_region_value(argument, state)
                     callee_name: sview = proof_callable_name(callee)
-                    callee_index: usize = proof_function_index_for_callee(functions, callee)
+                    local_callee: bool = proof_resource_callee_shadowed_by_local(callee, state)
+                    callee_index: mutable usize = functions.names.count
+                    callee_index <- proof_function_index_for_callee(functions, callee) if not local_callee
                     resource_argument <- resource_expression_argument
-                    resource_argument <- false if resource_expression_argument and proof_resource_extern_scalar_value_call(functions, callee_name, normalized_arguments, argument_names, state, report)
+                    resource_argument <- false if resource_expression_argument and not local_callee and proof_resource_extern_scalar_value_call(functions, callee_name, normalized_arguments, argument_names, state, report)
                     resource_lend_summary_safe: mutable bool = true
                     resource_summary_for_safety: mutable (known: bool, root: usize) = (false, report.kernel.nodes.count)
                     if callee_index < functions.names.count and resource_expression_argument:
@@ -223,23 +225,29 @@ extend ElisaProof:
                 Ast::Expr.Refinement(base, predicate, _):
                     (proof_resource_check_expression(base, state, report, function_name, functions) can Global{Read,Write})
                     (proof_resource_check_expression(predicate, state, report, function_name, functions) can Global{Read,Write})
-                Ast::Expr.Match(scrutinee, arms, _):
+                Ast::Expr.Match(scrutinee, arms, position):
                     (proof_resource_check_expression(scrutinee, state, report, function_name, functions) can Global{Read,Write})
-                    for arm in arms |arm, state, report, function_name, functions|:
+                    pattern_source_classified: mutable bool = false
+                    pattern_source_supported: mutable bool = false
+                    pattern_source_carries_resource: mutable bool = false
+                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state)
                         proof_resource_mark_scope_inherited(state, &arm_state)
-                        proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
+                        proof_resource_check_pattern_names_with_source(arm.pattern, scrutinee, &pattern_source_classified, &pattern_source_supported, &pattern_source_carries_resource, &arm_state, report, functions, position, function_name)
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_child(state, arm_state, report, true)
-                Ast::Expr.Catch(guarded, arms, _):
+                Ast::Expr.Catch(guarded, arms, position):
                     (proof_resource_check_expression(guarded, state, report, function_name, functions) can Global{Read,Write})
-                    for arm in arms |arm, state, report, function_name, functions|:
+                    pattern_source_classified: mutable bool = false
+                    pattern_source_supported: mutable bool = false
+                    pattern_source_carries_resource: mutable bool = false
+                    for arm in arms |arm, state, report, function_name, functions, pattern_source_classified, pattern_source_supported, pattern_source_carries_resource|:
                         arm_state: mutable ProofResourceState = proof_resource_empty()
                         proof_resource_copy_into(state, &arm_state)
                         proof_resource_mark_scope_inherited(state, &arm_state)
-                        proof_resource_check_pattern_names(arm.pattern, &arm_state, report, functions)
+                        proof_resource_check_pattern_names_with_source(arm.pattern, guarded, &pattern_source_classified, &pattern_source_supported, &pattern_source_carries_resource, &arm_state, report, functions, position, function_name)
                         (proof_resource_check_expression(arm.guard, &arm_state, report, function_name, functions) can Global{Read,Write})
                         (proof_resource_check_statements(arm.body, &arm_state, report, function_name, functions) can Global{Read,Write})
                         proof_resource_close_child(state, arm_state, report, true)
@@ -273,7 +281,7 @@ extend ElisaProof:
         # executable callee receiving a borrow. Still walk the operand normally:
         # address-taking, moves, nested calls and unavailable resources remain checked.
         # Other source shapes use the ordinary walker rather than erasing unknown syntax.
-        def proof_resource_check_contract_expression(expression: Ast::Expr, state: mutable ProofResourceState&, report: mutable ProofReport&, function_name: sview, functions: ProofFunctionTable&, depth: usize) -> void can[Global.Read, Global.Write]:
+        def proof_resource_check_contract_expression(expression: Ast::Expr, state: mutable ProofResourceState&, report: mutable ProofReport&, function_name: sview, functions: mutable ProofFunctionTable&, depth: usize) -> void can[Global.Read, Global.Write]:
             if depth >= PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT:
                 position: Ast::Pos = Ast::expr_pos(expression)
                 proof_add_budget_finding(report, "resource-expression-depth", position.line, function_name, "contract resource expression exceeds the bounded AST recursion depth", "depth", depth, PROOF_RESOURCE_EXPRESSION_DEPTH_LIMIT)

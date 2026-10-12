@@ -1,13 +1,15 @@
 # Call-graph edge collection: callable leaves with the module qualifier they were written with.
 extend ElisaProof:
     public:
-        # The module qualifier of a `Module::name` callee, by its innermost segment, or "" for a
-        # bare name. Call-graph rows keep it beside the name so a repeated name can be resolved
-        # against the owner the source actually wrote.
+        # The module qualifier of a one-segment `Module::name` callee, or "" for a bare name.
+        # Call-graph rows keep it beside the name. Multi-segment paths are left opaque here;
+        # source-aware call resolution receives the AST and retains every path segment.
         def proof_call_qualifier(callee: Ast::Expr) -> sview:
             match callee:
-                Ast::Expr.Scope(base, _, _):
-                    return proof_head_name(base)
+                Ast::Expr.Scope(Ast::Expr.Ident(name, _), _, _):
+                    return name
+                Ast::Expr.Scope(_, _, _):
+                    return "<qualified-path>"
                 _:
                     return ""
 
@@ -135,3 +137,135 @@ extend ElisaProof:
                     proof_collect_call_names(value, names, qualifiers)
                 _:
                     proof_push_call_name(names, qualifiers, "__opaque_call__", "")
+
+        # Source-aware graph collection preserves the callee AST for named edges and the whole
+        # call for unclassified callable forms. The name-only collector above intentionally
+        # deduplicates by leaf name and qualifier, which is not a sound identity for
+        # multi-segment module paths. Graph rows may contain duplicate edges; exact source
+        # identity is more important than deduplicating them.
+        def proof_push_call_source(names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&, called: sview, qualifier: sview, source: Ast::Expr) -> void:
+            names.push(called)
+            qualifiers.push(qualifier)
+            sources.push(source)
+
+        def proof_collect_call_edges(expression: Ast::Expr, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&) -> void:
+            match expression:
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    called: sview = proof_callable_name(callee)
+                    source: Ast::Expr = callee if called != "" else expression
+                    proof_push_call_source(names, qualifiers, sources, called, proof_call_qualifier(callee), source)
+                    proof_collect_call_edges(callee, names, qualifiers, sources)
+                    for argument in arguments |names, qualifiers, sources|:
+                        proof_collect_call_edges(argument, names, qualifiers, sources)
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        proof_collect_call_edges(lowered.call, names, qualifiers, sources)
+                    else:
+                        proof_push_call_source(names, qualifiers, sources, "__opaque_call__", "", Ast::Expr.Invalid)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_collect_call_edges(inner, names, qualifiers, sources)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    proof_collect_call_edges(left, names, qualifiers, sources)
+                    proof_collect_call_edges(right, names, qualifiers, sources)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_collect_call_edges(object, names, qualifiers, sources)
+                Ast::Expr.Slice(object, low, high, _):
+                    proof_collect_call_edges(object, names, qualifiers, sources)
+                    proof_collect_call_edges(low, names, qualifiers, sources)
+                    proof_collect_call_edges(high, names, qualifiers, sources)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_collect_call_edges(object, names, qualifiers, sources)
+                    for argument in arguments |names, qualifiers, sources|:
+                        proof_collect_call_edges(argument, names, qualifiers, sources)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, qualifiers, sources|:
+                        proof_collect_call_edges(element, names, qualifiers, sources)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, qualifiers, sources|:
+                        proof_collect_call_edges(entry.key, names, qualifiers, sources)
+                        proof_collect_call_edges(entry.value, names, qualifiers, sources)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    proof_collect_call_edges(type_expression, names, qualifiers, sources)
+                    for field in fields |names, qualifiers, sources|:
+                        proof_collect_call_edges(field.value, names, qualifiers, sources)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_collect_call_edges(base, names, qualifiers, sources)
+                    for field in fields |names, qualifiers, sources|:
+                        proof_collect_call_edges(field.value, names, qualifiers, sources)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    proof_collect_call_edges(condition, names, qualifiers, sources)
+                    proof_collect_call_edges(then_expr, names, qualifiers, sources)
+                    proof_collect_call_edges(else_expr, names, qualifiers, sources)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    proof_collect_call_edges(iterable, names, qualifiers, sources)
+                    proof_collect_call_edges(condition, names, qualifiers, sources)
+                    proof_collect_call_edges(body, names, qualifiers, sources)
+                Ast::Expr.Refinement(base, predicate, _):
+                    proof_collect_call_edges(base, names, qualifiers, sources)
+                    proof_collect_call_edges(predicate, names, qualifiers, sources)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    proof_collect_call_edges(scrutinee, names, qualifiers, sources)
+                    for arm in arms |names, qualifiers, sources|:
+                        proof_collect_call_edges(arm.guard, names, qualifiers, sources)
+                        proof_collect_body_call_edges(arm.body, names, qualifiers, sources)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_collect_call_edges(guarded, names, qualifiers, sources)
+                    proof_collect_body_call_edges(recovery, names, qualifiers, sources)
+                Ast::Expr.Lambda(_, _, _):
+                    proof_push_call_source(names, qualifiers, sources, "__opaque_call__", "", Ast::Expr.Invalid)
+                Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_collect_body_call_edges(statements, names, qualifiers, sources)
+                    proof_collect_call_edges(value, names, qualifiers, sources)
+                _:
+                    proof_push_call_source(names, qualifiers, sources, "__opaque_call__", "", Ast::Expr.Invalid)
+
+        def proof_collect_body_call_edges(body: darray[Ast::Stmt]&, names: mutable darray[sview]&, qualifiers: mutable darray[sview]&, sources: mutable darray[Ast::Expr]&) -> void:
+            for statement in body |names, qualifiers, sources|:
+                match statement:
+                    Ast::Stmt.Return(value, _):
+                        proof_collect_call_edges(returned, names, qualifiers, sources) if value is returned
+                    Ast::Stmt.Expr(expression, _):
+                        proof_collect_call_edges(expression, names, qualifiers, sources)
+                    Ast::Stmt.Contract(kind, expression, _):
+                        # Contracts can contribute call dependencies to purity and recursive
+                        # summary analysis even when their calls are logical rather than runtime.
+                        proof_collect_call_edges(expression, names, qualifiers, sources) if kind != ""
+                    Ast::Stmt.VarDecl(_, _, initializer, _):
+                        proof_collect_call_edges(initializer, names, qualifiers, sources)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        proof_collect_call_edges(target, names, qualifiers, sources)
+                        proof_collect_call_edges(initializer, names, qualifiers, sources)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_collect_call_edges(condition, names, qualifiers, sources)
+                        proof_collect_body_call_edges(then_body, names, qualifiers, sources)
+                        proof_collect_body_call_edges(else_body, names, qualifiers, sources)
+                    Ast::Stmt.While(condition, loop_body, _):
+                        proof_collect_call_edges(condition, names, qualifiers, sources)
+                        proof_collect_body_call_edges(loop_body, names, qualifiers, sources)
+                    Ast::Stmt.For(_, _, iterable, loop_body, _):
+                        proof_collect_call_edges(iterable, names, qualifiers, sources)
+                        proof_collect_body_call_edges(loop_body, names, qualifiers, sources)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        proof_collect_call_edges(scrutinee, names, qualifiers, sources)
+                        for arm in arms |names, qualifiers, sources|:
+                            proof_collect_call_edges(arm.guard, names, qualifiers, sources)
+                            proof_collect_body_call_edges(arm.body, names, qualifiers, sources)
+                    Ast::Stmt.Block(block_kind, _, _, block_body, _):
+                        if block_kind == "assert_by":
+                            if block_body.count > 0:
+                                match block_body[0]:
+                                    Ast::Stmt.Contract(_, goal, _):
+                                        proof_collect_call_edges(goal, names, qualifiers, sources)
+                                    _:
+                                        pass
+                        else:
+                            proof_collect_body_call_edges(block_body, names, qualifiers, sources)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        proof_push_call_source(names, qualifiers, sources, "__opaque_call__", "", Ast::Expr.Invalid)

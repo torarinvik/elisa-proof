@@ -309,30 +309,114 @@ extend ElisaProof:
                     return false
             return false
 
-        # Resolve a qualified deterministic call directly to the declaration under that exact
-        # source module path. Same-leaf functions in other modules are irrelevant to this lookup.
-        def proof_replay_deterministic_qualified_path_matches_owner(owner: sview, qualifier: Ast::Expr, caller_owner: sview) -> bool:
-            return true if proof_replay_exact_module_path_matches_owner(owner, qualifier)
-            match qualifier:
-                Ast::Expr.Ident(module_name, _):
-                    return proof_replay_relative_module_path_matches_owner(owner, module_name, caller_owner)
-                _:
-                    return false
+        def proof_replay_deterministic_module_alias_imports_supported(annotations: darray[Ast::EnumAnnotation]&, alias_count: mutable usize&, work: mutable usize&) -> bool:
+            cursor: mutable usize = 0
+            while cursor < annotations.count |cursor, annotations, work|:
+                annotation: Ast::EnumAnnotation = annotations[cursor]
+                return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 1 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                work <- work + 1
+                return false if sview_len(annotation.owner) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                work <- work + sview_len(annotation.owner)
+                return false if sview_len(annotation.name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                work <- work + sview_len(annotation.name)
+                return false if sview_len(annotation.module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                work <- work + sview_len(annotation.module)
+                if annotation.name == "__using":
+                    return false if cursor + 2 >= annotations.count
+                    alias: Ast::EnumAnnotation = annotations[cursor + 1]
+                    target: Ast::EnumAnnotation = annotations[cursor + 2]
+                    return false if alias.name != "__using_alias" or target.name != "__using_alias_target"
+                    return false if alias.owner == "" or target.owner != annotation.owner or alias.module != target.module or alias.line != annotation.line or target.line != annotation.line or alias.offset != target.offset or alias.offset <= annotation.offset
+                    for paired in [alias, target] |paired, work|:
+                        return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 1 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + 1
+                        return false if sview_len(paired.owner) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(paired.owner)
+                        return false if sview_len(paired.name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(paired.name)
+                        return false if sview_len(paired.module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(paired.module)
+                    alias_count <- alias_count + 1
+                    cursor <- cursor + 3
+                    continue
+                match annotation.name:
+                    "__using_alias" | "__using_alias_target" | "__using_member" | "__binding_wildcard_import" | "__from_member" | "__from_src" | "__from_decl":
+                        return false
+                    _:
+                        pass
+                cursor <- cursor + 1
+            return true
 
-        def proof_replay_deterministic_qualified_declaration(declarations: darray[Ast::Decl]&, wanted: sview, qualifier: Ast::Expr, caller_owner: sview, current: sview, selected: mutable Ast::Decl&, matches: mutable usize&, depth: usize) -> void:
-            return if depth >= 96 or wanted == ""
-            for declaration in declarations |wanted, qualifier, caller_owner, current, selected, matches, depth|:
+        # Import declarations are usable here only when the parser's source annotations carry
+        # one exact, paired namespace-alias witness for each declaration. Other import forms
+        # still lack the selected-callee evidence required by deterministic replay.
+        def proof_replay_deterministic_alias_import_declarations_supported(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, import_count: mutable usize&, matched_count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |annotations, import_count, matched_count, work, depth|:
+                match declaration:
+                    Ast::Decl.Import(module, position):
+                        return false if import_count >= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+                        import_count <- import_count + 1
+                        return false if sview_len(module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module)
+                        matches: mutable usize = 0
+                        for index in 0..<annotations.count |index, annotations, module, position, matches, work|:
+                            return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 1 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                            work <- work + 1
+                            candidate: Ast::EnumAnnotation = annotations[index]
+                            return false if sview_len(candidate.owner) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                            work <- work + sview_len(candidate.owner)
+                            return false if sview_len(candidate.name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                            work <- work + sview_len(candidate.name)
+                            if candidate.name == "__using" and index + 2 < annotations.count:
+                                target: Ast::EnumAnnotation = annotations[index + 2]
+                                return false if sview_len(target.owner) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                                work <- work + sview_len(target.owner)
+                                if candidate.owner == module and candidate.line == position.line and target.owner == module:
+                                    matches <- matches + 1
+                                    return false if matches > 1
+                        return false if matches != 1
+                        matched_count <- matched_count + 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_deterministic_alias_import_declarations_supported(nested, annotations, import_count, matched_count, work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        # Resolve a qualified deterministic call through the same source-derived module and
+        # alias index as checker admission. A single candidate row keeps this exact-owner query
+        # bounded while preserving every AST path segment.
+        def proof_replay_deterministic_qualified_path_matches_owner(owner: sview, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 2 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+            work <- work + 2
+            names: darray[sview] = [wanted]
+            owners: darray[sview] = [owner]
+            resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(names, owners, aliases, caller_owner, callee, work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
+            return work <= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT and resolved.complete and resolved.row == 0
+
+        def proof_replay_deterministic_qualified_declaration(declarations: darray[Ast::Decl]&, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, current: sview, selected: mutable Ast::Decl&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or wanted == ""
+            for declaration in declarations |wanted, callee, caller_owner, aliases, current, selected, matches, work, depth|:
+                return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 1 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                work <- work + 1
                 match declaration:
                     Ast::Decl.Func(name, _, _, _, _, _, _):
-                        if name == wanted and proof_replay_deterministic_qualified_path_matches_owner(current, qualifier, caller_owner):
+                        return false if sview_len(name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                        if name == wanted and proof_replay_deterministic_qualified_path_matches_owner(current, wanted, callee, caller_owner, aliases, work):
                             matches <- matches + 1
                             selected <- declaration
                     Ast::Decl.Module(module_name, body, _):
-                        proof_replay_deterministic_qualified_declaration(body, wanted, qualifier, caller_owner, module_name, selected, matches, depth + 1)
+                        return false if sview_len(module_name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        return false if not proof_replay_deterministic_qualified_declaration(body, wanted, callee, caller_owner, aliases, module_name, selected, matches, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_replay_deterministic_qualified_declaration(body, wanted, qualifier, caller_owner, current, selected, matches, depth + 1)
+                        return false if not proof_replay_deterministic_qualified_declaration(body, wanted, callee, caller_owner, aliases, current, selected, matches, work, depth + 1)
                     _:
                         pass
+            return true
 
         def proof_replay_deterministic_declaration_scan_charge(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 96 or work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
@@ -437,8 +521,15 @@ extend ElisaProof:
             return false if report.source_annotations.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
             work <- work + report.source_annotations.count
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
-            return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
-            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
+            aliases: mutable ProofModuleAliasIndex = ProofModuleAliasIndex{names: [], targets: [], scopes: [], lines: [], offsets: [], alias_lookup_hashes: [], alias_lookup_values: [], alias_lookup_ambiguous: [], global_alias_lookup_hashes: [], global_alias_lookup_values: [], function_lookup_hashes: [], function_lookup_values: [], function_lookup_ambiguous: [], function_lookup_complete: false, complete: false}
+            alias_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(report.source_annotations, &aliases, work)
+            return false if not alias_status.complete or not aliases.complete
+            alias_count: mutable usize = 0
+            return false if not proof_replay_deterministic_module_alias_imports_supported(report.source_annotations, alias_count, work)
+            import_count: mutable usize = 0
+            matched_import_count: mutable usize = 0
+            return false if not proof_replay_deterministic_alias_import_declarations_supported(report.source_declarations, report.source_annotations, import_count, matched_import_count, work, 0)
+            return false if import_count != alias_count or matched_import_count != import_count
             marker = trace.expression
             match marker:
                 Ast::Expr.Call(Ast::Expr.Ident(marker_name, _), arguments, _, _):
@@ -451,7 +542,7 @@ extend ElisaProof:
                             match callee_expression:
                                 Ast::Expr.Ident(name, _):
                                     callee <- name
-                                Ast::Expr.Scope(base, name, _):
+                                Ast::Expr.Scope(_, name, _):
                                     qualified_matches: mutable usize = 0
                                     caller_line: mutable u32 = 0
                                     proof_replay_owner_function_line(report.source_declarations, trace.name, trace.line, &caller_line, 0)
@@ -459,7 +550,7 @@ extend ElisaProof:
                                     caller_count: mutable usize = 0
                                     proof_replay_module_at_function_line(report.source_declarations, caller_line, "", &caller_owner, &caller_count, 0)
                                     return false if caller_line == 0 or caller_count != 1
-                                    proof_replay_deterministic_qualified_declaration(report.source_declarations, name, base, caller_owner, "", qualified_declaration, qualified_matches, 0)
+                                    return false if not proof_replay_deterministic_qualified_declaration(report.source_declarations, name, callee_expression, caller_owner, aliases, "", qualified_declaration, qualified_matches, work, 0)
                                     return false if qualified_matches != 1
                                     callee <- name
                                     qualified_call <- true

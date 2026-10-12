@@ -13,10 +13,15 @@ extend ElisaProof:
                 _:
                     return resolved
 
-        def proof_apply_function(expression: Ast::Expr, result_value: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, caller_parameters: darray[sview]&, caller_changes: darray[ProofFramePlace]&, caller_preserves: darray[ProofFramePlace]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_apply_function(expression: Ast::Expr, result_value: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, caller_names: darray[sview]&, caller_values: darray[Ast::Expr]&, caller_parameters: darray[sview]&, caller_changes: darray[ProofFramePlace]&, caller_preserves: darray[ProofFramePlace]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
+                    match callee:
+                        Ast::Expr.Ident(local_name, _):
+                            return false if any local in caller_names where local == local_name
+                        _:
+                            pass
                     function_index: usize = proof_function_index_for_callee(functions, callee)
                     return false if function_name == "" or function_index >= functions.names.count
                     caller_index: usize = proof_function_index_of_current(functions, name)
@@ -196,7 +201,7 @@ extend ElisaProof:
                         # opaque one, and the same argument bounds that havoc: a callee reaches the
                         # caller only through references and globals, so a fact over a by-value
                         # scalar the caller's body never references survives this call too.
-                        proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_value_thread_lends(threading, proof_statement_lend_roots(expression, functions)))
+                        proof_restore_call_stable_facts(old_facts, facts, caller_names, caller_parameters, report, name, proof_value_thread_lends(threading, proof_statement_lend_roots(expression, functions, caller_names)))
                     proof_value_thread_post(threading, facts, report, name, position)
                     proof_restore_literal_call_facts(literal_symbols, literal_widths, literal_values, facts, report, name, position) if literal_symbols.count > 0
                     ensures_start: usize = functions.ensure_starts[function_index]
@@ -245,15 +250,15 @@ extend ElisaProof:
                             _:
                                 ensured <- proof_substitute(ensured, result_names, result_values)
                         proof_value_thread_record(threading, report, true)
-                        proof_add_function_summary_fact(facts, report, ensured, position.line, name, function_name, parameter_names, argument_values, proof_value_thread_summary_result(threading, result_value, expression, caller_names, caller_values), require_goal_ids, ensure_index, has_call_old, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
+                        proof_add_function_summary_fact(facts, report, functions, ensured, position.line, name, function_name, parameter_names, argument_values, proof_value_thread_summary_result(threading, result_value, expression, caller_names, caller_values), require_goal_ids, ensure_index, has_call_old, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
                         proof_value_thread_record(threading, report, false)
                         if proof_ident_name(result_value) != "" and not has_call_old and not threading.active:
                             direct_results: darray[Ast::Expr] = [expression]
                             direct_ensure: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, argument_values), result_names, direct_results)
-                            proof_add_function_summary_fact(facts, report, direct_ensure, position.line, name, function_name, parameter_names, argument_values, expression, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
+                            proof_add_function_summary_fact(facts, report, functions, direct_ensure, position.line, name, function_name, parameter_names, argument_values, expression, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0)
                         if literal_symbols.count > 0 and not has_call_old and not threading.active:
                             literal_ensured: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, summary_arguments), result_names, result_values)
-                            proof_add_function_summary_fact(facts, report, literal_ensured, position.line, name, function_name, parameter_names, summary_arguments, result_value, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0) if not proof_expr_equal(literal_ensured, ensured)
+                            proof_add_function_summary_fact(facts, report, functions, literal_ensured, position.line, name, function_name, parameter_names, summary_arguments, result_value, require_goal_ids, ensure_index, false, call_old_snapshot, functions.lines[function_index] if function_index < functions.lines.count else 0) if not proof_expr_equal(literal_ensured, ensured)
                         proof_add_pure_call_witnesses(result_value, facts, functions, report, position.line, name, 0)
                         proof_add_deterministic_call_witness(result_value, facts, functions, report, position.line, name, caller_names, caller_parameters)
                     return true
@@ -404,65 +409,6 @@ extend ElisaProof:
                 return true if variable != "" and proof_expr_mentions_name(invariant, variable)
             return false
 
-        # A proof block is erased by the backend. Reject executable statements rather than
-        # accidentally accepting an effectful proof that will not run at runtime.
-        def proof_check_purity(body: darray[Ast::Stmt]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview) -> void:
-            for statement in body |report, name, lemmas|:
-                match statement:
-                    Ast::Stmt.Expr(expression, position):
-                        match expression:
-                            Ast::Expr.Call(callee, arguments, _, _):
-                                called: sview = proof_callable_name(callee)
-                                if called != "assert" and proof_lemma_index(lemmas, called) >= lemmas.names.count:
-                                    proof_add_finding(report, "proof-unknown", position.line, name, "proof blocks may contain only assert facts")
-                                proof_add_finding(report, "proof-malformed", position.line, name, "assert requires exactly one proposition") if called == "assert" and arguments.count != 1
-                            _:
-                                # `pass` and an `assert ?` hole run nothing; the proof steps report the hole.
-                                proof_add_finding(report, "proof-impure", position.line, name, "proof blocks may contain only assert facts") if proof_inert_statement_kind(statement, report) == PROOF_INERT_NONE
-                    Ast::Stmt.Contract(kind, expression, position):
-                        proof_add_finding(report, "proof-unknown", position.line, name, "unsupported contract in proof block") if kind != "assert"
-                        proof_add_finding(report, "proof-impure", position.line, name, "proof assertions may not evaluate executable calls or ownership transfers") if kind == "assert" and (proof_expr_has_call(expression) or proof_expr_has_move(expression))
-                    Ast::Stmt.Block(block_kind, _, _, nested, _):
-                        proof_check_purity(nested, lemmas, report, name) if block_kind == "assert_by"
-                    _:
-                        proof_add_finding(report, "proof-impure", 0, name, "proof blocks may not mutate or return")
-
-        # Lemmas are erased proof declarations too. Their body may contain contracts, checked
-        # assertions, lemma applications, and nested assert-by blocks, but no executable state
-        # change or return. Otherwise an assignment could manufacture a postcondition in the
-        # symbolic evaluator even though the erased lemma never executes at runtime.
-        def proof_check_lemma_purity(body: darray[Ast::Stmt]&, lemmas: ProofLemmaTable&, report: mutable ProofReport&, name: sview) -> void:
-            for statement in body |lemmas, report, name|:
-                match statement:
-                    Ast::Stmt.Contract(kind, _, position):
-                        if kind != "requires" and not proof_is_ensure_kind(kind) and kind != "assert" and kind != "decreases" and kind != "decreases*":
-                            proof_add_finding(report, "lemma-impure", position.line, name, "lemmas may contain only requires, ensure, decreases, and checked assertions")
-                        if kind == "assert":
-                            match statement:
-                                Ast::Stmt.Contract(_, assertion_expression, _):
-                                    proof_add_finding(report, "lemma-impure", position.line, name, "lemma assertions may not evaluate executable calls") if proof_expr_has_call(assertion_expression)
-                                _:
-                                    pass
-                    Ast::Stmt.Expr(expression, position):
-                        match expression:
-                            Ast::Expr.Call(callee, arguments, _, _):
-                                called: sview = proof_callable_name(callee)
-                                if called != "assert" and proof_lemma_index(lemmas, called) >= lemmas.names.count:
-                                    proof_add_finding(report, "lemma-impure", position.line, name, "lemma bodies may call only assert or another lemma")
-                                proof_add_finding(report, "lemma-malformed", position.line, name, "assert requires exactly one proposition") if called == "assert" and arguments.count != 1
-                            _:
-                                # `pass` runs nothing, and the return checker reports an `assert ?` hole.
-                                proof_add_finding(report, "lemma-impure", position.line, name, "lemma bodies may contain only proof calls") if proof_inert_statement_kind(statement, report) == PROOF_INERT_NONE
-                    Ast::Stmt.Block(block_kind, _, _, nested, _):
-                        proof_check_purity(nested, lemmas, report, name) if block_kind == "assert_by"
-                        proof_add_finding(report, "lemma-impure", 0, name, "lemma bodies may contain only proof blocks") if block_kind != "assert_by"
-                    Ast::Stmt.If(condition, then_body, else_body, position):
-                        proof_add_finding(report, "lemma-impure", position.line, name, "lemma branch conditions may not evaluate executable calls") if proof_expr_has_call(condition)
-                        proof_check_lemma_purity(then_body, lemmas, report, name)
-                        proof_check_lemma_purity(else_body, lemmas, report, name)
-                    _:
-                        proof_add_finding(report, "lemma-impure", 0, name, "lemma bodies may not mutate or return")
-
         def proof_check_frame_specs(body: darray[Ast::Stmt]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, parameter_names: darray[sview]&, report: mutable ProofReport&, name: sview) -> void:
             for statement in body |changes, preserves, parameter_names, report, name|:
                 match statement:
@@ -557,7 +503,7 @@ extend ElisaProof:
         # is refused at the wrap guard (G75). A chain of bare links, `step(step(...))`, needs no
         # place to be read and keeps the plain limit, so the fact headroom a dispatcher body was
         # sized for is untouched.
-        def proof_add_deterministic_call_witness(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, caller_names: darray[sview]&, caller_parameters: darray[sview]&) -> void:
+        def proof_add_deterministic_call_witness(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, caller_names: darray[sview]&, caller_parameters: darray[sview]&) -> void:
             witnessed_calls: mutable usize = 0
             links: mutable darray[Ast::Expr] = []
             for fact in facts |witnessed_calls, links, expression|:
@@ -590,11 +536,8 @@ extend ElisaProof:
                     report.scalar_witness_facts <- report.scalar_witness_facts + 1
                     proof_add_traced_fact(facts, report, deterministic_marker, "deterministic-call", line, owner)
                     # The declared signed width, exactly as for a pure call's witness.
-                    callee_name: sview = proof_callable_name(callee)
-                    return if callee_name == ""
-                    declared: (count: usize, type_expression: Ast::Expr) = proof_source_function_return_type(report.source_declarations, callee_name, 0)
-                    return if declared.count != 1
-                    width: i64 = proof_signed_type_width(declared.type_expression, report.source_declarations, 0)
+                    return if called >= functions.return_types.count
+                    width: i64 = proof_signed_type_width(functions.return_types[called], report.source_declarations, 0)
                     proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(expression, width, position), line, owner) if width > 0
                 _:
                     pass
