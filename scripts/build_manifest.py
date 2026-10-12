@@ -18,6 +18,7 @@ import sys
 import uuid
 from build_manifest_hashes import (INCLUDE_RE, dependency_digest,
     effective_environment, effective_environment_digest, file_digest, tree_digest)
+from strict_json import load as strict_json_load
 from stage1_provenance_validation import (
     LEGACY_RECIPE_PATHS,
     SUPPORTED_STAGE1_PROVENANCE_SCHEMAS,
@@ -184,7 +185,9 @@ def main() -> int:
     if arguments.check_existing:
         try:
             with open(arguments.existing_manifest, encoding="utf-8") as handle:
-                previous = json.load(handle)
+                previous = strict_json_load(handle)
+            if not isinstance(previous, dict):
+                raise ValueError("cached build manifest is not an object")
             current_digest = file_digest(arguments.existing_binary)["sha256"]
             manifest_digest = file_digest(arguments.existing_manifest)["sha256"]
             with open(arguments.existing_manifest_sha256, encoding="ascii") as handle:
@@ -193,7 +196,7 @@ def main() -> int:
                        and previous.get("binary", {}).get("sha256") == current_digest
                        and manifest_digest == recorded_manifest_digest
                        and current_digest is not None)
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
             matches = False
         return 0 if matches else 1
 
@@ -207,7 +210,9 @@ def main() -> int:
         checksum_path = manifest_path + ".sha256"
         try:
             with open(manifest_path, encoding="utf-8") as handle:
-                manifest = json.load(handle)
+                manifest = strict_json_load(handle)
+            if not isinstance(manifest, dict):
+                raise ValueError("build manifest root is not an object")
             current_proof = {
                 "head": git(arguments.refresh_proof_root, "rev-parse", "HEAD") or None,
                 "source_dirty": bool(git(arguments.refresh_proof_root, "status", "--porcelain", "--", "src")),

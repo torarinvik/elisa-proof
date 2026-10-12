@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from build_manifest_hashes import file_digest
+from strict_json import load as strict_json_load, loads as strict_json_loads
 
 SUPPORTED_STAGE1_PROVENANCE_SCHEMAS = frozenset({
     "elisa-stage1-provenance-v1",
@@ -351,7 +352,7 @@ def verify_stage1_v5_seed_chain(product: str, provenance: dict, frontend_repo: s
         raise ValueError("Stage1 bootstrap provenance contains a cycle")
     nested_path = Path(str(bootstrap_path) + ".provenance.json")
     try:
-        nested = json.loads(nested_path.read_text(encoding="utf-8"))
+        nested = strict_json_loads(nested_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Stage1 bootstrap provenance is unavailable: {error}") from error
     if not isinstance(nested, dict) or nested.get("schema") != "elisa-stage1-provenance-v5":
@@ -369,6 +370,8 @@ def verify_stage1_v5_seed_chain(product: str, provenance: dict, frontend_repo: s
 
 def validate_stage0_build_info(build_info: str, pinned_revision: str) -> str:
     """Verify a Go Stage0 compiler embeds the pinned revision and clean-source marker."""
+    if re.fullmatch(r"[0-9a-f]{40}", pinned_revision) is None:
+        raise ValueError("ELISA_STAGE0_REV must be an exact 40-character commit hash")
     revision = ""
     modified = ""
     for line in build_info.splitlines():
@@ -380,7 +383,7 @@ def validate_stage0_build_info(build_info: str, pinned_revision: str) -> str:
                 revision = field.removeprefix("vcs.revision=")
             elif field.startswith("vcs.modified="):
                 modified = field.removeprefix("vcs.modified=")
-    if not pinned_revision or not revision.startswith(pinned_revision):
+    if revision != pinned_revision:
         raise ValueError("Stage0 binary revision does not match ELISA_STAGE0_REV")
     if modified != "false":
         raise ValueError("Stage0 binary was built from modified sources or lacks VCS cleanliness")
@@ -397,10 +400,14 @@ def validated_stage1_provenance(product: str, compiler_root: str,
         check_stage1_seed_chain_depth(seen_products)
     if not all((product, frontend_repo, frontend_revision)):
         raise ValueError("Stage1 provenance requires product and pinned frontend inputs")
+    if re.fullmatch(r"[0-9a-f]{40}", frontend_revision) is None:
+        raise ValueError("ELISA_COMPILER_REV must be an exact 40-character commit hash")
+    if pinned_stage0_revision and re.fullmatch(r"[0-9a-f]{40}", pinned_stage0_revision) is None:
+        raise ValueError("ELISA_STAGE0_REV must be an exact 40-character commit hash")
     provenance_path = f"{product}.provenance.json"
     try:
         with open(provenance_path, encoding="utf-8") as handle:
-            provenance = json.load(handle)
+            provenance = strict_json_load(handle)
     except (OSError, json.JSONDecodeError) as error:
         raise ValueError(f"Stage1 provenance unavailable at {provenance_path}: {error}") from error
     # Stage1 v5 adds exact source/toolchain input fingerprints while preserving the v1
@@ -471,7 +478,7 @@ def validated_stage1_provenance(product: str, compiler_root: str,
                         snapshot_values[key.strip()] = value.strip()
             snapshot_revision = (snapshot_values.get("source_revision")
                                  or snapshot_values.get("revision"))
-            if not snapshot_revision or not pinned_revision.startswith(snapshot_revision):
+            if snapshot_revision != pinned_revision:
                 raise ValueError("Stage1 snapshot revision does not match the imported frontend pin")
             if source_revision != pinned_revision:
                 raise ValueError("Stage1 product provenance does not match its installed snapshot")

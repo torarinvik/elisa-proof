@@ -177,7 +177,7 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
                       compiler / "build/runtime", tools):
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
-                 "link_flags.sh", "platform.sh", "build_manifest.py", "build_manifest_hashes.py", "compiler_environment.py",
+                 "link_flags.sh", "platform.sh", "build_manifest.py", "build_manifest_hashes.py", "strict_json.py", "compiler_environment.py",
                  "stage1_provenance_validation.py", "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")
@@ -407,6 +407,30 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
         product.write_bytes(b"rebuilt without refreshing provenance\n")
         with self.assertRaisesRegex(ValueError, "product is stale"):
             self.resolve(self.root, revision, product)
+
+    def test_duplicate_json_keys_fail_closed_in_stage1_and_build_manifests(self) -> None:
+        revision, product = make_compiler(self.root, installed_snapshot=False)
+        sidecar = Path(str(product) + ".provenance.json")
+        sidecar.write_text(
+            '{"schema":"elisa-stage1-provenance-v1",'
+            '"schema":"elisa-stage1-provenance-v1"}'
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate JSON object key"):
+            self.resolve(self.root, revision, product)
+
+        manifest = self.root / "cached.manifest.json"
+        binary = self.root / "cached-proof"
+        checksum = self.root / "cached.manifest.sha256"
+        manifest.write_text('{"build_identity":"first","build_identity":"second"}')
+        binary.write_bytes(b"proof binary")
+        checksum.write_text("irrelevant\n")
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts/build_manifest.py"), "--check-existing",
+             "--existing-manifest", str(manifest), "--existing-binary", str(binary),
+             "--existing-manifest-sha256", str(checksum), "--recorded-build-identity", "first"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
 
     def test_revision_and_source_tree_mismatches_fail_closed(self) -> None:
         revision, product = make_compiler(self.root, installed_snapshot=False)

@@ -239,6 +239,7 @@ fi
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
     "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/build_manifest_hashes.py" \
+    "$ROOT_DIR/scripts/strict_json.py" \
     "$ROOT_DIR/scripts/stage1_provenance_validation.py" \
     "$ROOT_DIR/scripts/compiler_environment.py"
     "$ROOT_DIR/scripts/compiler_recipe_inputs.py")
