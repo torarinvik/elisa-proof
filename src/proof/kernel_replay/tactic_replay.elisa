@@ -208,35 +208,50 @@ extend ElisaProofKernelReplay:
         # fact. Source type checking normally prevents that shape; the independent kernel must
         # not rely on that frontend invariant when it is called on serialized data.
         def proof_kernel_replay_proposition_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> bool:
+            work_used: mutable usize = 0
+            proof_kernel_replay_proposition_shape_with_goal_work(nodes, root, depth, work_used)
+
+        # A serialized arena is a DAG, so recursive edge traversal can revisit one shared
+        # proposition exponentially many times. Charge every visit to the caller's meter.
+        def proof_kernel_replay_proposition_shape_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize, work_used: mutable usize&) -> bool:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
             return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+            return false if not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used) or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             # Enum shorthand is a value atom, not a proposition. It may occur as an operand of
             # a witnessed comparison, but a bare shorthand goal must not be proved by exact
             # containment merely because its fact has the same serialized spelling.
             return true if node.kind == "bool" or node.kind == "ident" or node.kind == "call" or node.kind == "field" or node.kind == "scope" or node.kind == "index" or node.kind == "index-n" or node.kind == "slice" or node.kind == "checked-index" or node.kind == "checked-get"
             if node.kind == "unary" and node.operator == "not":
-                return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1)
+                return proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.left, depth + 1, work_used)
             if node.kind == "binary":
                 if node.operator == "and" or node.operator == "or" or node.operator == "=>":
-                    return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1)
+                    return proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.left, depth + 1, work_used) and proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.right, depth + 1, work_used)
                 return true if node.operator == "==" or node.operator == "!=" or node.operator == "<" or node.operator == ">" or node.operator == "<=" or node.operator == ">=" or node.operator == "in" or node.operator == "is"
             if node.kind == "if":
-                return proof_kernel_replay_proposition_shape(nodes, node.left, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1) and proof_kernel_replay_proposition_shape(nodes, node.auxiliary, depth + 1)
+                return proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.left, depth + 1, work_used) and proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.right, depth + 1, work_used) and proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.auxiliary, depth + 1, work_used)
             if node.kind == "quantifier":
                 # A quantifier's block shape is not enough to determine its proposition. The
                 # parser erases forall/exists, so logical replay requires the producer to bind
                 # that semantic kind into the node before the term can enter a fact or goal.
                 return false if node.operator != "forall" and node.operator != "exists"
-                return proof_kernel_replay_proposition_shape(nodes, node.right, depth + 1)
+                return proof_kernel_replay_proposition_shape_with_goal_work(nodes, node.right, depth + 1, work_used)
             return false
 
         def proof_kernel_replay_proposition_state_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize) -> bool:
-            return false if not proof_kernel_replay_proposition_shape(nodes, goal_root, 0)
+            work_used: mutable usize = 0
+            proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, facts, goal_root, work_used)
+
+        # The report status path passes its existing counter so proposition checks and later
+        # replay share one bound. Other callers use the wrapper's fresh bounded meter.
+        def proof_kernel_replay_proposition_state_valid_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], goal_root: usize, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_proposition_shape_with_goal_work(nodes, goal_root, 0, work_used)
             for fact in facts:
-                return false if not proof_kernel_replay_proposition_shape(nodes, fact, 0)
-            return proof_kernel_replay_state_literals_fit(nodes, children, facts, goal_root)
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                return false if not proof_kernel_replay_proposition_shape_with_goal_work(nodes, fact, 0, work_used)
+            proof_kernel_replay_state_literals_fit_with_goal_work(nodes, children, facts, goal_root, work_used)
 
         # Source-neutral transition checks for the interactive tactic protocol. The caller
         # supplies complete before/after snapshots; this kernel never re-runs an AST tactic.

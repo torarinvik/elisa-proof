@@ -10,34 +10,19 @@ extend ElisaProof:
             work <- work + sview_len(right)
             return true
 
+        def proof_replay_structural_owner_memo_find(owners: darray[sview]&, wanted: sview, source_work: mutable usize&) -> (complete: bool, found: bool):
+            for owner in owners |wanted, source_work|:
+                return (false, false) if not proof_replay_structural_text_compare(owner, wanted, source_work)
+                return (true, true) if owner == wanted
+            return (true, false)
+
         def proof_replay_structural_work_charge(work: mutable usize&, amount: usize) -> bool:
             return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + amount
             return true
 
-        struct ProofReplayStructuralSourceEntry:
-            name: sview
-            declaration: Ast::Decl
-            lemma: bool
-
-        struct ProofReplayStructuralSourceIndex:
-            entries: mutable darray[ProofReplayStructuralSourceEntry]
-            hashes: mutable darray[u32]
-            slots: mutable darray[usize]
-            ambiguous: mutable darray[bool]
-
-        struct ProofReplayStructuralSourceGraph:
-            declarations: mutable darray[Ast::Decl]
-            node_by_source_entry: mutable darray[usize]
-            out_starts: mutable darray[usize]
-            out_counts: mutable darray[usize]
-            out_targets: mutable darray[usize]
-            reverse_starts: mutable darray[usize]
-            reverse_counts: mutable darray[usize]
-            reverse_targets: mutable darray[usize]
-
         def proof_replay_structural_source_graph_empty() -> ProofReplayStructuralSourceGraph:
-            return ProofReplayStructuralSourceGraph{declarations: [], node_by_source_entry: [], out_starts: [], out_counts: [], out_targets: [], reverse_starts: [], reverse_counts: [], reverse_targets: []}
+            return ProofReplayStructuralSourceGraph{declarations: [], node_by_source_entry: [], direct_extern_contract_unsafe: [], out_starts: [], out_counts: [], out_targets: [], reverse_starts: [], reverse_counts: [], reverse_targets: []}
 
         def proof_replay_structural_lemma_name(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, source_work: mutable usize&) -> (complete: bool, found: bool):
             for annotation in annotations |wanted, source_work|:
@@ -293,6 +278,7 @@ extend ElisaProof:
                         node_index: usize = graph.declarations.count
                         return false if not proof_replay_structural_table_add(scratch, entry.name, metadata, node_index)
                         graph.declarations.push(entry.declaration)
+                        graph.direct_extern_contract_unsafe.push(false)
                         graph.node_by_source_entry[entry_index] <- node_index
                     _:
                         pass
@@ -304,13 +290,13 @@ extend ElisaProof:
                 match graph.declarations[source_index]:
                     Ast::Decl.Func(_, parameters, _, body, _, _, position):
                         calls: mutable darray[sview] = []
-                        target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0}
-                        calls_complete: bool = proof_replay_source_calls_with_target_work(parameters, body, &calls, target, source_work)
+                        target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0, source_annotations: []}
+                        calls_complete: bool = proof_replay_source_calls_with_target_work(parameters, body, scratch.source_annotations, &calls, target, source_work)
                         return false if not calls_complete
                         for signature_index in 0..<signature_lines.count |signature_index, signature_lines, signature_kinds, signature_contracts, position, parameters, calls, source_work|:
                             return false if not proof_replay_structural_work_charge(source_work, 1 + sview_len(signature_kinds[signature_index]))
                             continue if signature_lines[signature_index] != position.line or (signature_kinds[signature_index] != "requires" and signature_kinds[signature_index] != "ensure")
-                            return false if not proof_replay_source_expression_calls_with_work(parameters, signature_contracts[signature_index], &calls, source_work)
+                            return false if not proof_replay_source_expression_calls_with_work(parameters, signature_contracts[signature_index], scratch.source_annotations, &calls, source_work)
                         for call in calls |call, graph, index, source_work|:
                             target_source: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(index, call, source_work)
                             return false if not target_source.complete
@@ -326,6 +312,11 @@ extend ElisaProof:
                                     return false if target_index >= node_count
                                     return false if not proof_replay_structural_work_charge(source_work, 1)
                                     graph.out_targets.push(target_index)
+                                Ast::Decl.Extern(_, _, _, _, callable, _, _, _):
+                                    if callable:
+                                        extern_risk: (complete: bool, found: bool, unsafe: bool) = proof_source_extern_contract_unsafe_with_work(scratch, call, source_work)
+                                        return false if not extern_risk.complete
+                                        graph.direct_extern_contract_unsafe[source_index] <- true if extern_risk.found and extern_risk.unsafe
                                 _:
                                     pass
                     _:
@@ -361,41 +352,52 @@ extend ElisaProof:
                     write_cursor[target_index] <- slot + 1
             return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
 
-        def proof_replay_structural_graph_mark_reachable(starts: darray[usize]&, counts: darray[usize]&, targets: darray[usize]&, node_count: usize, source: usize, reachable: mutable darray[bool]&, source_work: mutable usize&) -> bool:
-            return false if source >= node_count or starts.count != node_count or counts.count != node_count
-            return false if not proof_replay_structural_work_charge(source_work, node_count)
-            reachable.clear()
-            reachable.resize(node_count)
-            queue: mutable darray[usize] = [source]
-            reachable[source] <- true
-            cursor: mutable usize = 0
-            while cursor < queue.count |cursor, queue, reachable, starts, counts, targets, node_count, source_work|:
+        def proof_replay_structural_validation_cache_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return false if cache.initialized
+            cache.initialized <- true
+            source_index_result: (complete: bool, index: ProofReplayStructuralSourceIndex) = proof_replay_structural_source_index_build(report.source_declarations, report.source_annotations, source_work)
+            return false if not source_index_result.complete
+            cache.source_index <- source_index_result.index
+            cache.enum_index <- proof_build_enum_index(report.source_declarations, source_work)
+            return false if not cache.enum_index.complete
+            return false if not proof_replay_structural_work_charge(source_work, report.source_declarations.count)
+            cache.scratch.source_declarations.extend(report.source_declarations)
+            return false if not proof_replay_structural_work_charge(source_work, report.source_annotations.count)
+            cache.scratch.source_annotations.extend(report.source_annotations)
+            return false if not proof_replay_structural_work_charge(source_work, report.source_signature_contract_lines.count)
+            cache.scratch.source_signature_contract_lines.extend(report.source_signature_contract_lines)
+            return false if not proof_replay_structural_work_charge(source_work, report.source_signature_contract_kinds.count)
+            cache.scratch.source_signature_contract_kinds.extend(report.source_signature_contract_kinds)
+            return false if not proof_replay_structural_work_charge(source_work, report.source_signature_contracts.count)
+            cache.scratch.source_signature_contracts.extend(report.source_signature_contracts)
+            return false if not proof_replay_structural_work_charge(source_work, report.source_extern_parameters.count)
+            cache.scratch.source_extern_parameters.extend(report.source_extern_parameters)
+            operator_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_operator_impl_index(&cache.scratch, source_work)
+            return false if not operator_index_status.complete
+            operator_mask_status: (complete: bool, primitive_mask: usize, protocol_mask: usize) = proof_source_operator_masks_from_index(cache.scratch, source_work)
+            return false if not operator_mask_status.complete
+            cache.scratch.source_primitive_operator_mask <- operator_mask_status.primitive_mask
+            cache.scratch.source_operator_protocol_mask <- operator_mask_status.protocol_mask
+            drop_type_index: (complete: bool, declared_types: darray[sview], drop_hook_types: darray[sview], alias_names: darray[sview], alias_targets: darray[Ast::Expr], callable_names: darray[sview], callable_return_types: darray[Ast::Expr], declaration_count: usize) = proof_source_drop_type_index_with_work(cache.scratch.source_declarations, cache.scratch.source_annotations, source_work)
+            return false if not drop_type_index.complete
+            cache.scratch.source_effect_index.declared_types <- drop_type_index.declared_types
+            cache.scratch.source_effect_index.drop_hook_types <- drop_type_index.drop_hook_types
+            cache.scratch.source_effect_index.alias_names <- drop_type_index.alias_names
+            cache.scratch.source_effect_index.alias_targets <- drop_type_index.alias_targets
+            cache.scratch.source_effect_index.callable_names <- drop_type_index.callable_names
+            cache.scratch.source_effect_index.callable_return_types <- drop_type_index.callable_return_types
+            cache.scratch.source_effect_index.declaration_count <- drop_type_index.declaration_count
+            return false if not proof_source_callable_extern_contract_index_build(cache.scratch.source_declarations, cache.scratch.source_extern_parameters, cache.scratch.source_signature_contract_lines, cache.scratch.source_signature_contract_kinds, cache.scratch.source_signature_contracts, &cache.scratch, source_work)
+            return false if not proof_replay_structural_source_graph_build(cache.source_index, cache.scratch.source_signature_contract_lines, cache.scratch.source_signature_contract_kinds, cache.scratch.source_signature_contracts, cache.enum_index, &cache.scratch, source_work, &cache.graph)
+            return false if not proof_replay_structural_graph_cache_indexes_build(&cache.graph, source_work)
+            return false if cache.scratch.structural.component_ids.count != cache.graph.component_ids.count
+            for node_index in 0..<cache.graph.component_ids.count |node_index, cache.graph, cache.scratch, source_work|:
                 return false if not proof_replay_structural_work_charge(source_work, 1)
-                current: usize = queue[cursor]
-                start: usize = starts[current]
-                count: usize = counts[current]
-                return false if start > targets.count or count > targets.count - start
-                for offset in 0..<count |offset, current, start, queue, reachable, starts, counts, targets, node_count, source_work|:
-                    return false if not proof_replay_structural_work_charge(source_work, 1)
-                    next: usize = targets[start + offset]
-                    return false if next >= node_count
-                    if not reachable[next]:
-                        reachable[next] <- true
-                        queue.push(next)
-                cursor <- cursor + 1
+                cache.scratch.structural.component_ids[node_index] <- cache.graph.component_ids[node_index]
+            cache.complete <- true
             return true
 
-        def proof_replay_structural_graph_has_edge(graph: ProofReplayStructuralSourceGraph&, source: usize, target: usize, source_work: mutable usize&) -> bool:
-            return false if source >= graph.out_starts.count or source >= graph.out_counts.count
-            start: usize = graph.out_starts[source]
-            count: usize = graph.out_counts[source]
-            return false if start > graph.out_targets.count or count > graph.out_targets.count - start
-            for offset in 0..<count |offset, start, graph, target, source_work|:
-                return false if not proof_replay_structural_work_charge(source_work, 1)
-                return true if graph.out_targets[start + offset] == target
-            return false
-
-        def proof_replay_structural_certificate_source_valid_with_work(report: ProofReport&, certificate: ProofGoalCertificate, source_work: mutable usize&) -> bool:
+        def proof_replay_structural_certificate_source_valid_with_work(report: ProofReport&, certificate: ProofGoalCertificate, source_work: mutable usize&, validated_owners: mutable darray[sview]&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return false if certificate.kernel_goal >= report.kernel.nodes.count
             root: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[certificate.kernel_goal]
             return false if root.kind != "structural-safety" or root.secondary_name != "structural-v2" or root.children_count != 1 or root.children_start > report.kernel.children.count or root.children_count > report.kernel.children.count - root.children_start
@@ -405,15 +407,18 @@ extend ElisaProof:
             edge: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[edge_id]
             return false if edge.kind != "structural-edge"
             return false if not proof_replay_structural_text_compare(edge.name, certificate.name, source_work) or edge.name != certificate.name
-            source_index_result: (complete: bool, index: ProofReplayStructuralSourceIndex) = proof_replay_structural_source_index_build(report.source_declarations, report.source_annotations, source_work)
-            return false if not source_index_result.complete
-            source_index: mutable ProofReplayStructuralSourceIndex = source_index_result.index
-            source_owner: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(source_index, certificate.name, source_work)
-            source_callee: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(source_index, edge.secondary_name, source_work)
+            cached_owner: (complete: bool, found: bool) = proof_replay_structural_owner_memo_find(validated_owners, certificate.name, source_work)
+            return false if not cached_owner.complete
+            return true if cached_owner.found
+            if not cache.initialized:
+                return false if not proof_replay_structural_validation_cache_build(report, source_work, &cache)
+            return false if not cache.complete
+            source_owner: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(cache.source_index, certificate.name, source_work)
+            source_callee: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(cache.source_index, edge.secondary_name, source_work)
             return false if not source_owner.complete or source_owner.matches != 1 or source_owner.lemma
             return false if not source_callee.complete or source_callee.matches != 1 or source_callee.lemma
             match source_owner.declaration:
-                Ast::Decl.Func(_, parameters, _, body, _, _, _):
+                Ast::Decl.Func(_, parameters, _, body, _, _, position):
                     callee_is_function: mutable bool = false
                     match source_callee.declaration:
                         Ast::Decl.Func(_, _, _, _, _, _, _):
@@ -421,42 +426,48 @@ extend ElisaProof:
                         _:
                             pass
                     return false if not callee_is_function
-                    call_target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: root.left, line: certificate.line, name: edge.secondary_name, calls_at_offset: 0, matched_calls: 0}
+                    call_target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: root.left, line: certificate.line, name: edge.secondary_name, calls_at_offset: 0, matched_calls: 0, source_annotations: []}
                     source_calls: mutable darray[sview] = []
-                    return false if not proof_replay_source_calls_with_target_work(parameters, body, &source_calls, call_target, source_work)
+                    return false if not proof_replay_source_calls_with_target_work(parameters, body, cache.scratch.source_annotations, &source_calls, call_target, source_work)
                     return false if call_target.calls_at_offset != 1 or call_target.matched_calls != 1
                     call_found: mutable bool = false
                     for source_call in source_calls |source_call, edge, call_found, source_work|:
                         return false if not proof_replay_structural_text_compare(source_call, edge.secondary_name, source_work)
                         call_found <- true if source_call == edge.secondary_name
                     return false if not call_found
-                    enum_index: ProofEnumIndex = proof_build_enum_index(report.source_declarations, source_work)
-                    return false if not enum_index.complete or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    scratch: mutable ProofReport = proof_empty_report()
-                    graph: mutable ProofReplayStructuralSourceGraph = proof_replay_structural_source_graph_empty()
-                    return false if not proof_replay_structural_source_graph_build(source_index, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, enum_index, &scratch, source_work, &graph)
-                    return false if source_owner.entry_index >= graph.node_by_source_entry.count or source_callee.entry_index >= graph.node_by_source_entry.count
-                    caller_node: usize = graph.node_by_source_entry[source_owner.entry_index]
-                    callee_node: usize = graph.node_by_source_entry[source_callee.entry_index]
-                    return false if caller_node >= graph.declarations.count or callee_node >= graph.declarations.count
-                    return false if caller_node >= scratch.structural.members.count or not scratch.structural.members[caller_node]
-                    return false if not proof_replay_structural_graph_has_edge(graph, caller_node, callee_node, source_work)
-                    caller_reachable: mutable darray[bool] = []
-                    reaches_complete: bool = proof_replay_structural_graph_mark_reachable(graph.out_starts, graph.out_counts, graph.out_targets, graph.declarations.count, caller_node, &caller_reachable, source_work)
-                    return false if not reaches_complete
-                    caller_reaching: mutable darray[bool] = []
-                    reaches_complete <- proof_replay_structural_graph_mark_reachable(graph.reverse_starts, graph.reverse_counts, graph.reverse_targets, graph.declarations.count, caller_node, &caller_reaching, source_work)
-                    return false if not reaches_complete or not caller_reachable[callee_node] or not caller_reaching[callee_node]
-                    for node_index in 0..<graph.declarations.count |node_index, graph, scratch, caller_reachable, caller_reaching|:
-                        scratch.structural.component_ids[node_index] <- caller_node if caller_reachable[node_index] and caller_reaching[node_index]
+                    return false if source_owner.entry_index >= cache.graph.node_by_source_entry.count or source_callee.entry_index >= cache.graph.node_by_source_entry.count
+                    caller_node: usize = cache.graph.node_by_source_entry[source_owner.entry_index]
+                    callee_node: usize = cache.graph.node_by_source_entry[source_callee.entry_index]
+                    return false if caller_node >= cache.graph.declarations.count or callee_node >= cache.graph.declarations.count
+                    return false if caller_node >= cache.scratch.structural.members.count or not cache.scratch.structural.members[caller_node]
+                    return false if not proof_replay_structural_graph_has_edge(cache.graph, caller_node, callee_node, source_work)
+                    return false if cache.graph.component_ids.count != cache.graph.declarations.count or cache.graph.reachable_extern_contract_unsafe.count != cache.graph.declarations.count
+                    return false if cache.graph.component_ids[caller_node] != cache.graph.component_ids[callee_node]
+                    extern_unsafe: bool = cache.graph.reachable_extern_contract_unsafe[caller_node]
                     return false if not proof_replay_structural_charge_check_preflight(parameters, body, source_work)
-                    proof_check_structural_function(enum_index, certificate.name, parameters, body, &scratch)
-                    return false if scratch.failed != 0 or scratch.kernel.budget_exhausted
+                    cache.scratch.findings.clear()
+                    cache.scratch.counterexample_facts.clear()
+                    cache.scratch.goal_attempts.clear()
+                    cache.scratch.obligation_inventory.clear()
+                    cache.scratch.certificates.clear()
+                    cache.scratch.certificate_facts.clear()
+                    cache.scratch.kernel <- ProofKernelArena{}
+                    cache.scratch.failed <- 0
+                    cache.scratch.obligations <- 0
+                    cache.scratch.proven <- 0
+                    cache.scratch.structural.verified_names.clear()
+                    cache.scratch.structural.identity_next <- 0
+                    proof_check_structural_function(cache.enum_index, certificate.name, position.line, parameters, body, true, extern_unsafe, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, source_work, &cache.scratch)
+                    return false if cache.scratch.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return false if cache.scratch.failed != 0 or cache.scratch.kernel.budget_exhausted
                     owner_verified: mutable bool = false
-                    for verified_name in scratch.structural.verified_names |certificate, source_work, owner_verified|:
+                    for verified_name in cache.scratch.structural.verified_names |certificate, source_work, owner_verified|:
                         return false if not proof_replay_structural_text_compare(verified_name, certificate.name, source_work)
                         owner_verified <- true if verified_name == certificate.name
                     return false if not owner_verified
-                    return proof_replay_structural_certificate_set_matches_with_work(report, certificate.name, scratch, source_work)
+                    return false if not proof_replay_structural_certificate_set_matches_with_work(report, certificate.name, cache.scratch, source_work)
+                    return false if not proof_replay_structural_text_compare(certificate.name, certificate.name, source_work)
+                    validated_owners.push(certificate.name)
+                    return true
                 _:
                     return false

@@ -1,0 +1,166 @@
+# Per-validation indexes over the immutable replay call graph.
+extend ElisaProof:
+    private:
+        def proof_replay_structural_graph_work_charge(source_work: mutable usize&, amount: usize) -> bool:
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + amount
+            return true
+
+        def proof_replay_structural_edge_hash(source: usize, target: usize) -> u32:
+            basis: i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            mixed: u32 = proof_expr_shape_mix(basis.u32(), source.i64())
+            return proof_expr_shape_mix(mixed, target.i64())
+
+        def proof_replay_structural_graph_cache_indexes_build(graph: mutable ProofReplayStructuralSourceGraph&, source_work: mutable usize&) -> bool:
+            node_count: usize = graph.declarations.count
+            edge_count: usize = graph.out_targets.count
+            return false if graph.out_starts.count != node_count or graph.out_counts.count != node_count
+            return false if graph.reverse_starts.count != node_count or graph.reverse_counts.count != node_count
+            return false if graph.direct_extern_contract_unsafe.count != node_count
+
+            # Keep a collision-safe pair index so each certificate can check its exact edge in
+            # constant expected time after the source call-site walk has found the call offset.
+            graph.edge_sources.resize(edge_count)
+            if edge_count > 0:
+                capacity: usize = proof_name_index_capacity(edge_count)
+                return false if capacity == 0
+                return false if not proof_replay_structural_graph_work_charge(source_work, capacity)
+                graph.edge_hashes.resize(capacity)
+                graph.edge_slots.resize(capacity)
+                for slot in 0..<capacity |slot, graph, edge_count|:
+                    graph.edge_slots[slot] <- edge_count
+                for source in 0..<node_count |source, graph, edge_count, source_work|:
+                    start: usize = graph.out_starts[source]
+                    count: usize = graph.out_counts[source]
+                    return false if start > edge_count or count > edge_count - start
+                    for offset in 0..<count |offset, source, start, graph, edge_count, capacity, source_work|:
+                        return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                        row: usize = start + offset
+                        target: usize = graph.out_targets[row]
+                        return false if target >= node_count
+                        graph.edge_sources[row] <- source
+                        hash: u32 = proof_replay_structural_edge_hash(source, target)
+                        slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                        probes: mutable usize = 0
+                        placed: mutable bool = false
+                        while probes < capacity |probes, slot, hash, row, source, target, graph, edge_count, capacity, source_work, placed|:
+                            return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                            current: usize = graph.edge_slots[slot]
+                            if current == edge_count:
+                                graph.edge_hashes[slot] <- hash
+                                graph.edge_slots[slot] <- row
+                                placed <- true
+                                break
+                            return false if current >= edge_count
+                            if graph.edge_hashes[slot] == hash and graph.edge_sources[current] == source and graph.out_targets[current] == target:
+                                placed <- true
+                                break
+                            slot <- (slot + 1) % capacity
+                            probes <- probes + 1
+                        return false if not placed
+
+            # Iterative Kosaraju pass. Component IDs match mutual reachability, independent of
+            # certificate owner, and are reused by every structural body check in this batch.
+            return false if not proof_replay_structural_graph_work_charge(source_work, node_count)
+            visited: mutable darray[bool] = []
+            visited.resize(node_count)
+            for node in 0..<node_count |node, visited|:
+                visited[node] <- false
+            order: mutable darray[usize] = []
+            for source in 0..<node_count |source, visited, order, graph, source_work|:
+                return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                continue if visited[source]
+                stack_nodes: mutable darray[usize] = [source]
+                stack_offsets: mutable darray[usize] = [0]
+                visited[source] <- true
+                while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, graph, source_work|:
+                    return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                    top: usize = stack_nodes.count - 1
+                    current: usize = stack_nodes[top]
+                    start: usize = graph.out_starts[current]
+                    count: usize = graph.out_counts[current]
+                    return false if start > graph.out_targets.count or count > graph.out_targets.count - start
+                    if stack_offsets[top] < count:
+                        offset: usize = stack_offsets[top]
+                        stack_offsets[top] <- offset + 1
+                        next: usize = graph.out_targets[start + offset]
+                        return false if not proof_replay_structural_graph_work_charge(source_work, 1) or next >= node_count
+                        if not visited[next]:
+                            visited[next] <- true
+                            stack_nodes.push(next)
+                            stack_offsets.push(0)
+                    else:
+                        order.push(current)
+                        stack_nodes <- stack_nodes.truncate(top)
+                        stack_offsets <- stack_offsets.truncate(top)
+            return false if order.count != node_count
+            return false if not proof_replay_structural_graph_work_charge(source_work, node_count)
+            graph.component_ids.resize(node_count)
+            for node in 0..<node_count |node, graph, node_count|:
+                graph.component_ids[node] <- node_count
+            for order_index in 0..<order.count |order_index, order, graph, node_count, source_work|:
+                return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                seed: usize = order[order.count - 1 - order_index]
+                continue if graph.component_ids[seed] < node_count
+                graph.component_ids[seed] <- seed
+                pending: mutable darray[usize] = [seed]
+                while pending.count > 0 |pending, graph, source_work|:
+                    return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                    current: usize = pending[pending.count - 1]
+                    pending <- pending.truncate(pending.count - 1)
+                    start: usize = graph.reverse_starts[current]
+                    count: usize = graph.reverse_counts[current]
+                    return false if start > graph.reverse_targets.count or count > graph.reverse_targets.count - start
+                    for offset in 0..<count |offset, start, pending, graph, seed, node_count, source_work|:
+                        return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                        predecessor: usize = graph.reverse_targets[start + offset]
+                        return false if predecessor >= node_count
+                        if graph.component_ids[predecessor] == node_count:
+                            graph.component_ids[predecessor] <- seed
+                            pending.push(predecessor)
+
+            # Propagate direct extern-contract hazards backwards once. The result answers whether
+            # any callable extern ensure contract is reachable from each source function.
+            return false if not proof_replay_structural_graph_work_charge(source_work, node_count)
+            graph.reachable_extern_contract_unsafe.resize(node_count)
+            queue: mutable darray[usize] = []
+            for node in 0..<node_count |node, graph, queue, source_work|:
+                return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                graph.reachable_extern_contract_unsafe[node] <- graph.direct_extern_contract_unsafe[node]
+                queue.push(node) if graph.direct_extern_contract_unsafe[node]
+            cursor: mutable usize = 0
+            while cursor < queue.count |cursor, queue, graph, source_work|:
+                return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                current: usize = queue[cursor]
+                start: usize = graph.reverse_starts[current]
+                count: usize = graph.reverse_counts[current]
+                return false if start > graph.reverse_targets.count or count > graph.reverse_targets.count - start
+                for offset in 0..<count |offset, start, queue, graph, node_count, source_work|:
+                    return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                    caller: usize = graph.reverse_targets[start + offset]
+                    return false if caller >= node_count
+                    if not graph.reachable_extern_contract_unsafe[caller]:
+                        graph.reachable_extern_contract_unsafe[caller] <- true
+                        queue.push(caller)
+                cursor <- cursor + 1
+            return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+        def proof_replay_structural_graph_has_edge(graph: ProofReplayStructuralSourceGraph&, source: usize, target: usize, source_work: mutable usize&) -> bool:
+            edge_count: usize = graph.out_targets.count
+            capacity: usize = graph.edge_slots.count
+            return false if source >= graph.declarations.count or target >= graph.declarations.count
+            return false if graph.edge_sources.count != edge_count or graph.edge_hashes.count != capacity
+            return false if edge_count == 0 or capacity == 0
+            hash: u32 = proof_replay_structural_edge_hash(source, target)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, source, target, graph, edge_count, capacity, source_work|:
+                return false if not proof_replay_structural_graph_work_charge(source_work, 1)
+                row: usize = graph.edge_slots[slot]
+                return false if row > edge_count
+                return false if row == edge_count
+                if graph.edge_hashes[slot] == hash and graph.edge_sources[row] == source and graph.out_targets[row] == target:
+                    return true
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false

@@ -95,6 +95,7 @@ run_py_test test_local_function_frame_shadow.py
 run_py_test test_source_call_result_alias.py
 run_py_test test_stable_conditional_predicates.py
 run_py_test test_pattern_literal_collisions.py
+run_py_test tests/test_fixed_width_replay_matrix.py
 run_py_test test_fresh_loop_invariant.py
 run_py_test test_impure_proof_body.py
 run_py_test test_module_scoped_proposition.py

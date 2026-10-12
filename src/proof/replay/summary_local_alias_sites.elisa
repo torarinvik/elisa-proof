@@ -67,33 +67,44 @@ extend ElisaProof:
                 _:
                     return false
 
-        # One source-call slot lookup scans declaration headers and may inspect the selected
-        # parameter type. Keep a byte-aware upper bound so local-write visitors can reserve the
-        # declaration work for every call argument they may encounter in a body.
-        def proof_replay_local_alias_call_slot_declaration_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, comparison_slots: mutable usize&, work: usize, depth: usize) -> bool:
-            return false if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-            cost <- cost + declarations.count
-            for declaration in declarations |cost, comparison_slots, work, depth|:
+        # The reservation census visits every parameter type to bound its own cost, but a call
+        # slot lookup checks the type of at most one selected parameter in each matching function.
+        # Keep those two costs separate so unused parameter types do not multiply by every call
+        # candidate and nested alias-touch pass.
+        def proof_replay_local_alias_call_slot_declaration_cost(declarations: darray[Ast::Decl]&, census_cost: mutable usize&, lookup_cost: mutable usize&, comparison_slots: mutable usize&, work: usize, depth: usize) -> bool:
+            return false if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or census_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work or lookup_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - census_cost
+            census_cost <- census_cost + declarations.count
+            return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, declarations.count)
+            for declaration in declarations |census_cost, lookup_cost, comparison_slots, work, depth|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, _):
                         return false if comparison_slots >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - comparison_slots - 1
                         comparison_slots <- comparison_slots + 1 + parameters.count
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
-                        return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + parameters.count
-                        for parameter in parameters |cost, work, depth|:
-                            return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(parameter.name))
-                            return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, work, depth + 1)
+                        return false if not proof_replay_summary_expr_cost_add(census_cost, work, sview_len(name))
+                        return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, sview_len(name))
+                        return false if not proof_replay_summary_expr_cost_add(census_cost, work, parameters.count)
+                        return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, parameters.count)
+                        maximum_parameter_type_cost: mutable usize = 0
+                        for parameter in parameters |census_cost, lookup_cost, maximum_parameter_type_cost, work, depth|:
+                            return false if not proof_replay_summary_expr_cost_add(census_cost, work, sview_len(parameter.name))
+                            return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, sview_len(parameter.name))
+                            parameter_type_cost: mutable usize = 0
+                            type_work: usize = work + census_cost
+                            return false if not proof_replay_summary_expr_cost(parameter.type_expression, &parameter_type_cost, type_work, depth + 1)
+                            return false if not proof_replay_summary_expr_cost_add(census_cost, work, parameter_type_cost)
+                            maximum_parameter_type_cost <- parameter_type_cost if parameter_type_cost > maximum_parameter_type_cost
+                        return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, maximum_parameter_type_cost)
                     Ast::Decl.Extern(name, _, _, _, _, _, _, _):
                         return false if comparison_slots >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         comparison_slots <- comparison_slots + 1
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
+                        return false if not proof_replay_summary_expr_cost_add(census_cost, work, sview_len(name))
+                        return false if not proof_replay_summary_expr_cost_add(lookup_cost, work, sview_len(name))
                     Ast::Decl.Module(name, nested, _):
-                        return false if not proof_replay_summary_expr_cost_add(cost, work, sview_len(name))
-                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, cost, comparison_slots, work, depth + 1)
+                        return false if not proof_replay_summary_expr_cost_add(census_cost, work, sview_len(name))
+                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, census_cost, lookup_cost, comparison_slots, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, cost, comparison_slots, work, depth + 1)
+                        return false if not proof_replay_local_alias_call_slot_declaration_cost(nested, census_cost, lookup_cost, comparison_slots, work, depth + 1)
                     _:
                         pass
             return true
@@ -151,12 +162,13 @@ extend ElisaProof:
             root_extra_cost: mutable usize = 0
             return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_source_touch_candidate_count_body_with_root_work(body, local_name, true, 0, &candidate_count, &query_bytes, &root_walk_cost, &root_extra_cost, work)
             return proof_replay_mutable_local_work_exhaust(work) if candidate_count > body_cost
-            declaration_cost: mutable usize = 0
+            declaration_census_cost: mutable usize = 0
+            declaration_lookup_cost: mutable usize = 0
             lookup_comparison_slots: mutable usize = 0
             if candidate_count > 0:
-                return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_local_alias_call_slot_declaration_cost(report.source_declarations, &declaration_cost, &lookup_comparison_slots, work, 0)
-                return proof_replay_mutable_local_work_exhaust(work) if declaration_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-                work <- work + declaration_cost
+                return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_local_alias_call_slot_declaration_cost(report.source_declarations, &declaration_census_cost, &declaration_lookup_cost, &lookup_comparison_slots, work, 0)
+                return proof_replay_mutable_local_work_exhaust(work) if declaration_census_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                work <- work + declaration_census_cost
             # Site/control matching and the nested body-bound query are separate from the
             # expression/statement touch wrappers, so charge one bounded body pass for them.
             return proof_replay_mutable_local_work_exhaust(work) if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
@@ -189,7 +201,7 @@ extend ElisaProof:
                 remaining <- remaining - repeated_root_extra_work
                 work <- work + repeated_root_extra_work
             if candidate_count > 0:
-                declaration_cost <- 1 if declaration_cost == 0
+                declaration_lookup_cost <- 1 if declaration_lookup_cost == 0
                 if lookup_comparison_slots > 0:
                     return proof_replay_mutable_local_work_exhaust(work) if touch_passes > remaining / lookup_comparison_slots
                     query_comparison_scale: usize = lookup_comparison_slots * touch_passes
@@ -199,8 +211,8 @@ extend ElisaProof:
                     query_comparison_work: usize = query_bytes * query_comparison_scale
                     remaining <- remaining - query_comparison_work
                     work <- work + query_comparison_work
-                return proof_replay_mutable_local_work_exhaust(work) if touch_passes > remaining / candidate_count or declaration_cost > remaining / candidate_count / touch_passes
-                candidate_lookup_work: usize = candidate_count * touch_passes * declaration_cost
+                return proof_replay_mutable_local_work_exhaust(work) if touch_passes > remaining / candidate_count or declaration_lookup_cost > remaining / candidate_count / touch_passes
+                candidate_lookup_work: usize = candidate_count * touch_passes * declaration_lookup_cost
                 remaining <- remaining - candidate_lookup_work
                 work <- work + candidate_lookup_work
             return true

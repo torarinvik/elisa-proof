@@ -9,15 +9,20 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import selectors
 import subprocess
 import sys
 import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GENERATION_ROOT = ROOT / "build/elisa-proof-generations"
+GENERATION_ROOT = Path(os.environ.get(
+    "ELISA_PROOF_GENERATION_ROOT", ROOT / "build/elisa-proof-generations"))
 TIMEOUT_SECONDS = 60
 OUTPUT_LIMIT = 8 * 1024 * 1024
+sys.path.insert(0, str(ROOT / "scripts"))
+from build_manifest_hashes import tree_digest
 
 SOURCE = """\
 def i8_last_safe_increment(x: i8) -> i8:
@@ -58,15 +63,71 @@ def unbounded_i8_square_is_nonnegative(x: i8) -> i8:
 """
 
 
-def run(command, *, env=None, label):
+def run(command, *, env=None, label, timeout_seconds=TIMEOUT_SECONDS):
+    stdout = bytearray()
+    stderr = bytearray()
+    process = subprocess.Popen(command, cwd=ROOT, env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + timeout_seconds
     try:
-        result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True,
-                                text=True, timeout=TIMEOUT_SECONDS)
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ, stdout)
+            selector.register(process.stderr, selectors.EVENT_READ, stderr)
+            output_size = 0
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError(f"D3 {label} timed out after {timeout_seconds}s: {command[0]}")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        key.fileobj.close()
+                        continue
+                    output_size += len(chunk)
+                    if output_size > OUTPUT_LIMIT:
+                        raise AssertionError(f"D3 {label} output exceeded {OUTPUT_LIMIT} bytes")
+                    key.data.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(f"D3 {label} timed out after {timeout_seconds}s: {command[0]}")
+        returncode = process.wait(timeout=remaining)
+        return subprocess.CompletedProcess(
+            command, returncode, stdout.decode("utf-8", errors="replace"),
+            stderr.decode("utf-8", errors="replace"),
+        )
     except subprocess.TimeoutExpired as error:
-        raise AssertionError(f"D3 {label} timed out after {TIMEOUT_SECONDS}s: {command[0]}") from error
-    output_size = len(result.stdout.encode("utf-8")) + len(result.stderr.encode("utf-8"))
-    assert output_size <= OUTPUT_LIMIT, f"D3 {label} output exceeded {OUTPUT_LIMIT} bytes"
-    return result
+        raise AssertionError(f"D3 {label} timed out after {timeout_seconds}s: {command[0]}") from error
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout is not None and not process.stdout.closed:
+            process.stdout.close()
+        if process.stderr is not None and not process.stderr.closed:
+            process.stderr.close()
+
+
+def verify_run_limits():
+    noisy_command = [sys.executable, "-c",
+                     f"import sys; sys.stdout.write('x' * {OUTPUT_LIMIT + 1}); sys.stdout.flush()"]
+    try:
+        run(noisy_command, label="output-limit self-test", timeout_seconds=10)
+    except AssertionError as error:
+        assert "output exceeded" in str(error), error
+    else:
+        raise AssertionError("D3 bounded runner accepted output beyond its shared cap")
+
+    slow_command = [sys.executable, "-c", "import time; time.sleep(2)"]
+    try:
+        run(slow_command, label="timeout self-test", timeout_seconds=0.05)
+    except AssertionError as error:
+        assert "timed out" in str(error), error
+    else:
+        raise AssertionError("D3 bounded runner accepted a child beyond its deadline")
+
+
+verify_run_limits()
 
 
 def resolve_pair():
@@ -90,6 +151,23 @@ def resolve_pair():
     replay_manifest = json.loads(replay_manifest_path.read_text(encoding="utf-8"))
     assert proof_manifest["pair_generation"] == replay_manifest["pair_generation"] == generation
     assert proof_manifest["proof"] == replay_manifest["proof"], "D3 proof/replay source provenance differs"
+    assert proof_manifest["proof"]["source_tree_sha256"] == tree_digest(str(ROOT / "src")), (
+        "D3 product pair was built from a different proof source tree"
+    )
+    compiler_source = Path(os.environ.get("ELISA_COMPILER_SRC", ROOT.parent / "Elisa-compiler"))
+    compiler_pin = os.environ.get("ELISA_COMPILER_REV") or (
+        ROOT / "ELISA_COMPILER_REV").read_text(encoding="ascii").strip()
+    resolved_pin = run(
+        ["git", "-C", str(compiler_source), "rev-parse", "--verify", f"{compiler_pin}^{{commit}}"],
+        label="pinned compiler revision resolution",
+    )
+    assert resolved_pin.returncode == 0, (
+        "D3 could not resolve its pinned Elisa compiler source revision: " + resolved_pin.stderr[-1000:]
+    )
+    expected_compiler_revision = resolved_pin.stdout.strip()
+    assert proof_manifest["frontend"]["revision"] == expected_compiler_revision, (
+        "D3 pair does not use the pinned Elisa compiler source revision"
+    )
     assert hashlib.sha256(proof.read_bytes()).hexdigest() == products["elisa-proof"]["binary_sha256"]
     assert hashlib.sha256(replay.read_bytes()).hexdigest() == products["elisa-proof-replay"]["binary_sha256"]
 
@@ -97,6 +175,9 @@ def resolve_pair():
     compiler = Path(compiler_info["product"]["path"])
     assert compiler_info["stage"] == "stage1" and compiler_info["stage1_revision"], (
         "D3 source-check compiler provenance is not a Stage1 frontend"
+    )
+    assert compiler_info["stage1_revision"] == expected_compiler_revision, (
+        "D3 Stage1 product was built from a different pinned source revision"
     )
     assert compiler.is_file(), f"D3 matched Stage1 compiler is missing: {compiler}"
     assert hashlib.sha256(compiler.read_bytes()).hexdigest() == compiler_info["product"]["sha256"], (
