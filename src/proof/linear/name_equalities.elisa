@@ -21,35 +21,101 @@ extend ElisaProof:
                 _:
                     pass
 
-        # Equality aliases also transport interval bounds. Iterate by relation count so a
-        # chain such as x == y, y == z reaches every member without relying on a host solver.
+        # Equality aliases also transport interval bounds. The graph is undirected: every
+        # name in a connected component has the same strongest lower and upper bounds.
         def proof_close_equalities(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&) -> void:
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            proof_close_equalities_with_markers(facts, markers, bounds)
+
+        def proof_close_equalities_with_markers(facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, bounds: mutable darray[ProofBound]&) -> void:
             left_names: mutable darray[sview] = []
             right_names: mutable darray[sview] = []
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
             for fact in facts |left_names, right_names, markers|:
                 proof_collect_name_equalities(fact, markers, &left_names, &right_names)
-            rounds: mutable usize = 0
-            # A single conjunction may contain more equality edges than there are root facts.
-            # Bounds can move one edge per pass for an unfavorably ordered chain, so cap by the
-            # collected relation count (which bounds every simple alias path), not root facts.
-            max_rounds: usize = left_names.count
-            while rounds < max_rounds |rounds, left_names, right_names, bounds|:
-                changed: mutable bool = false
-                for index in 0..<left_names.count |index, left_names, right_names, bounds|:
-                    left_bound: ProofBound = proof_bound_for(bounds, left_names[index])
-                    right_bound: ProofBound = proof_bound_for(bounds, right_names[index])
-                    if left_bound.has_lower:
-                        changed <- true if proof_equalities_add_lower(bounds, right_names[index], left_bound.lower)
-                    if left_bound.has_upper:
-                        changed <- true if proof_equalities_add_upper(bounds, right_names[index], left_bound.upper)
-                    if right_bound.has_lower:
-                        changed <- true if proof_equalities_add_lower(bounds, left_names[index], right_bound.lower)
-                    if right_bound.has_upper:
-                        changed <- true if proof_equalities_add_upper(bounds, left_names[index], right_bound.upper)
-                rounds <- rounds + 1
-                break if not changed
+
+            # Repeatedly scanning every edge and looking up both bounds for every round is
+            # cubic in long chains. Intern edge endpoints and build adjacency lists once,
+            # then visit each connected component and merge its bounds in one pass.
+            names: mutable darray[sview] = []
+            edge_left: mutable darray[usize] = []
+            edge_right: mutable darray[usize] = []
+            for edge in 0..<left_names.count |edge, left_names, right_names, names, edge_left, edge_right|:
+                left_index: usize = proof_alias_name_index(names, left_names[edge])
+                if left_index == names.count:
+                    names.push(left_names[edge])
+                    left_index <- names.count - 1
+                right_index: usize = proof_alias_name_index(names, right_names[edge])
+                if right_index == names.count:
+                    names.push(right_names[edge])
+                    right_index <- names.count - 1
+                edge_left.push(left_index)
+                edge_right.push(right_index)
+
+            adjacency_heads: mutable darray[usize] = []
+            adjacency_names: mutable darray[usize] = []
+            adjacency_next: mutable darray[usize] = []
+            proof_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next)
+
+            visited: mutable darray[bool] = []
+            for name_index in 0..<names.count |name_index, names, visited|:
+                visited.push(false)
+
+            for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, bounds|:
+                continue if visited[start]
+                queue: mutable darray[usize] = [start]
+                members: mutable darray[usize] = []
+                visited[start] <- true
+                cursor: mutable usize = 0
+                while cursor < queue.count |cursor, queue, members, adjacency_heads, adjacency_names, adjacency_next, visited|:
+                    current: usize = queue[cursor]
+                    members.push(current)
+                    arc: mutable usize = adjacency_heads[current]
+                    while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited|:
+                        arc_index: usize = arc - 1
+                        neighbor: usize = adjacency_names[arc_index]
+                        if not visited[neighbor]:
+                            visited[neighbor] <- true
+                            queue.push(neighbor)
+                        arc <- adjacency_next[arc_index]
+                    cursor <- cursor + 1
+
+                has_lower: mutable bool = false
+                lower: mutable i64 = 0
+                has_upper: mutable bool = false
+                upper: mutable i64 = 0
+                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper|:
+                    bound_index: usize = proof_bound_index(bounds, names[member])
+                    continue if bound_index == bounds.count
+                    bound: ProofBound = bounds[bound_index]
+                    if bound.has_lower and (not has_lower or bound.lower > lower):
+                        has_lower <- true
+                        lower <- bound.lower
+                    if bound.has_upper and (not has_upper or bound.upper < upper):
+                        has_upper <- true
+                        upper <- bound.upper
+
+                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper|:
+                    proof_equalities_add_lower(bounds, names[member], lower) if has_lower
+                    proof_equalities_add_upper(bounds, names[member], upper) if has_upper
             proof_tighten_disequality_bounds(facts, bounds)
+
+        def proof_alias_name_index(names: darray[sview]&, name: sview) -> usize:
+            index: mutable usize = 0
+            while index < names.count |index, names, name|:
+                return index if names[index] == name
+                index <- index + 1
+            return names.count
+
+        def proof_alias_build_adjacency(names: darray[sview]&, edge_left: darray[usize]&, edge_right: darray[usize]&, adjacency_heads: mutable darray[usize]&, adjacency_names: mutable darray[usize]&, adjacency_next: mutable darray[usize]&) -> void:
+            for name in names |name, names, adjacency_heads|:
+                adjacency_heads.push(0)
+            for edge in 0..<edge_left.count |edge, edge_left, edge_right, adjacency_heads, adjacency_names, adjacency_next|:
+                adjacency_names.push(edge_right[edge])
+                adjacency_next.push(adjacency_heads[edge_left[edge]])
+                adjacency_heads[edge_left[edge]] <- adjacency_names.count
+                adjacency_names.push(edge_left[edge])
+                adjacency_next.push(adjacency_heads[edge_right[edge]])
+                adjacency_heads[edge_right[edge]] <- adjacency_names.count
 
         def proof_equalities_add_lower(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> bool:
             return false if name == ""
@@ -81,17 +147,45 @@ extend ElisaProof:
             markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
             for fact in facts |relation_left, relation_right, markers|:
                 proof_collect_name_equalities(fact, markers, &relation_left, &relation_right)
-            reachable: mutable darray[sview] = [left_name]
+
+            names: mutable darray[sview] = []
+            edge_left: mutable darray[usize] = []
+            edge_right: mutable darray[usize] = []
+            for edge in 0..<relation_left.count |edge, relation_left, relation_right, names, edge_left, edge_right|:
+                left_index: usize = proof_alias_name_index(names, relation_left[edge])
+                if left_index == names.count:
+                    names.push(relation_left[edge])
+                    left_index <- names.count - 1
+                right_index: usize = proof_alias_name_index(names, relation_right[edge])
+                if right_index == names.count:
+                    names.push(relation_right[edge])
+                    right_index <- names.count - 1
+                edge_left.push(left_index)
+                edge_right.push(right_index)
+
+            adjacency_heads: mutable darray[usize] = []
+            adjacency_names: mutable darray[usize] = []
+            adjacency_next: mutable darray[usize] = []
+            proof_alias_build_adjacency(names, edge_left, edge_right, &adjacency_heads, &adjacency_names, &adjacency_next)
+            start: usize = proof_alias_name_index(names, left_name)
+            target: usize = proof_alias_name_index(names, right_name)
+            return false if start == names.count or target == names.count
+            visited: mutable darray[bool] = []
+            for name_index in 0..<names.count |name_index, names, visited|:
+                visited.push(false)
+            queue: mutable darray[usize] = [start]
+            visited[start] <- true
             cursor: mutable usize = 0
-            while cursor < reachable.count |cursor, reachable, relation_left, relation_right|:
-                current: sview = reachable[cursor]
-                for index in 0..<relation_left.count |index, relation_left, relation_right, reachable, current, right_name|:
-                    next_name: mutable sview = ""
-                    next_name <- relation_right[index] if relation_left[index] == current
-                    next_name <- relation_left[index] if relation_right[index] == current
-                    if next_name != "":
-                        return true if next_name == right_name
-                        already_seen: bool = any existing in reachable where existing == next_name
-                        reachable.push(next_name) if not already_seen
+            while cursor < queue.count |cursor, queue, adjacency_heads, adjacency_names, adjacency_next, visited, target|:
+                current: usize = queue[cursor]
+                return true if current == target
+                arc: mutable usize = adjacency_heads[current]
+                while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited|:
+                    arc_index: usize = arc - 1
+                    neighbor: usize = adjacency_names[arc_index]
+                    if not visited[neighbor]:
+                        visited[neighbor] <- true
+                        queue.push(neighbor)
+                    arc <- adjacency_next[arc_index]
                 cursor <- cursor + 1
             return false
