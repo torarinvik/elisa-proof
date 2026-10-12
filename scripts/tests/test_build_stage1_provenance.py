@@ -18,6 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 import build_manifest  # noqa: E402
+from stage1_provenance_validation import check_stage1_seed_chain_depth  # noqa: E402
 
 
 def commit(root: Path, message: str) -> str:
@@ -276,6 +277,11 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
             pinned_stage0_revision=pinned_stage0_revision,
             require_stage0_binding=require_stage0_binding,
         )
+
+    def test_stage1_seed_chain_depth_is_bounded_at_sixteen_products(self) -> None:
+        check_stage1_seed_chain_depth({str(index) for index in range(15)})
+        with self.assertRaisesRegex(ValueError, "16-product chain limit"):
+            check_stage1_seed_chain_depth({str(index) for index in range(16)})
 
     def test_source_worktree_without_snapshot_resolves_exact_full_commit(self) -> None:
         revision, product = make_compiler(self.root, installed_snapshot=False)

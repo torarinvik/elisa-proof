@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from build_manifest_hashes import tree_digest
 from build_manifest import stage1_provenance_revision
 from perf_build_provenance import require_clean_toolchain, verify_build_artifacts
+from stage1_provenance_validation import validate_stage0_build_info
 from verify_product_pair import check_current, read_manifest, require_matching_build_identity
 
 
@@ -183,26 +184,6 @@ def validate_frontend_metadata(
     return str(manifests[PRODUCTS[0]]["compiler"]["stage"])
 
 
-def validate_stage0_build_info(build_info: str, pinned_revision: str) -> str:
-    """Verify the Go compiler's embedded VCS revision and clean-source marker."""
-    revision = ""
-    modified = ""
-    for line in build_info.splitlines():
-        fields = line.split()
-        if not fields or fields[0] != "build":
-            continue
-        for field in fields[1:]:
-            if field.startswith("vcs.revision="):
-                revision = field.removeprefix("vcs.revision=")
-            elif field.startswith("vcs.modified="):
-                modified = field.removeprefix("vcs.modified=")
-    if not pinned_revision or not revision.startswith(pinned_revision):
-        raise ValueError("Stage0 binary revision does not match ELISA_STAGE0_REV")
-    if modified != "false":
-        raise ValueError("Stage0 binary was built from modified sources or lacks VCS cleanliness")
-    return revision
-
-
 def verify_stage0_binary(manifest: dict, pinned_revision: str, label: str) -> str:
     compiler = manifest.get("compiler", {})
     product = compiler.get("product", {})
@@ -276,6 +257,8 @@ def qualify_prebuilt(root: Path, snapshot_root: Path, compiler_snapshot: Path,
             compiler_root = Path(product_path).resolve().parent.parent
             product_revision = stage1_provenance_revision(
                 product_path, str(compiler_root), str(compiler_repository), snapshot_revision,
+                pinned_stage0_revision=stage0_pin,
+                require_stage0_binding=True,
             )
             if product_revision != snapshot_revision:
                 raise ValueError(f"{role} Stage1 product source differs from the pinned frontend")

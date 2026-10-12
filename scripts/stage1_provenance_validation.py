@@ -20,6 +20,14 @@ SUPPORTED_STAGE1_PROVENANCE_SCHEMAS = frozenset({
     "elisa-stage1-provenance-v1",
     "elisa-stage1-provenance-v5",
 })
+MAX_STAGE1_SEED_CHAIN_DEPTH = 16
+
+
+def check_stage1_seed_chain_depth(seen_products: set[str] | None) -> None:
+    if len(seen_products or ()) + 1 > MAX_STAGE1_SEED_CHAIN_DEPTH:
+        raise ValueError(
+            f"Stage1 bootstrap provenance exceeds the {MAX_STAGE1_SEED_CHAIN_DEPTH}-product chain limit"
+        )
 
 def git(repository: str, *arguments: str) -> str:
     try:
@@ -385,6 +393,8 @@ def validated_stage1_provenance(product: str, compiler_root: str,
                                 require_stage0_binding: bool = False,
                                 seen_products: set[str] | None = None) -> dict:
     """Validate and return Stage1 provenance against the exact imported frontend commit."""
+    if require_stage0_binding or pinned_stage0_revision:
+        check_stage1_seed_chain_depth(seen_products)
     if not all((product, frontend_repo, frontend_revision)):
         raise ValueError("Stage1 provenance requires product and pinned frontend inputs")
     provenance_path = f"{product}.provenance.json"

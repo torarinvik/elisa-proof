@@ -14,6 +14,11 @@ RSH="ssh -o BatchMode=yes -o LogLevel=ERROR -o ConnectTimeout=20 -o ServerAliveI
 CROOT="${ELISA_COMPILER_ROOT:-$HOME/.cache/elisa-proof/compiler-$(cut -c1-4 "$SRC/ELISA_COMPILER_REV")}"
 WORK="${ELISA_REMOTE_WORK:-${TMPDIR:-/tmp}/elisa-proof-remote-build}"
 REV="$(tr -d '[:space:]' < "$SRC/ELISA_COMPILER_REV")"
+STAGE0_REV="$(tr -d '[:space:]' < "$SRC/ELISA_STAGE0_REV")"
+if [[ ! "$STAGE0_REV" =~ ^[0-9a-f]{40}$ ]]; then
+  printf 'remote build: ELISA_STAGE0_REV must contain an exact 40-character commit hash\n' >&2
+  exit 2
+fi
 TARGET="x86_64-unknown-linux-gnu"
 CROSS_RSS="${ELISA_STAGE1_MAX_RSS_KB:-8388608}"
 GENERATION="$(python3 "$SRC/scripts/build_manifest.py" --new-pair-generation)"
@@ -56,7 +61,7 @@ status=0
   $RSH "$HOST" 'set -e; cd ~/work/elisa-proof; C=~/work/Elisa-compiler; mkdir -p build
     export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=$C  # rsynced checkout, other owner
     export LLVM_CONFIG=/usr/lib/llvm-19/bin/llvm-config PATH=$C/tools/linux_shim:$PATH
-    generation='"$GENERATION"'; stage="build/.remote-pair-$generation"
+    generation='"$GENERATION"'; stage0_revision='"$STAGE0_REV"'; stage="build/.remote-pair-$generation"
     mkdir "$stage"
     trap '\''rm -rf "$stage"'\'' EXIT
     clang -c -O2 -o build/profile_hooks.o $C/test/parity/profile_hooks.c
@@ -68,7 +73,7 @@ status=0
         --binary "$stage/$product" --compiler "$C/scripts/elisac_stage1.sh" \
         --compiler-product "$C/bin/elisac-stage1" --compiler-root "$C" --stage stage1 --stage1-revision "" \
         --runtime "$C/build/runtime/elisacore_runtime.o" --profile-hooks build/profile_hooks.o \
-        --frontend-repo "$C" --frontend-revision "$frontend_revision" --proof-root "$PWD" \
+        --frontend-repo "$C" --frontend-revision "$frontend_revision" --stage0-revision "$stage0_revision" --proof-root "$PWD" \
         --snapshot-root "$PWD" --opt-level '"$OPT"' --compile-mode strict --contract-flag "" \
         --installed-as "build/elisa-proof-generations/$generation/$product" \
         --output "$stage/$product.manifest.json"
