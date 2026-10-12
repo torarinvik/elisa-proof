@@ -1,37 +1,142 @@
 extend ElisaProof:
     private:
-        def proof_replay_control_find_while(body: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, loop_position: mutable Ast::Pos&, matches: mutable usize&, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_control_find_loop_source(statements: darray[Ast::Stmt]&, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, loop_position: mutable Ast::Pos&, matches: mutable usize&, depth: usize, work: mutable usize&, work_limit: usize, include_for: bool) -> bool:
             return false if depth >= 64
-            for statement in body |line, condition, loop_body, loop_position, matches, depth, work|:
-                return false if work >= 4096
+            for statement in statements |statements, line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                return false if work >= work_limit
                 work <- work + 1
                 match statement:
                     Ast::Stmt.While(source_condition, inner, position):
                         if position.line == line:
                             matches <- matches + 1
                             condition <- source_condition
-                            if inner.count > 4096 - work:
-                                work <- 4096
+                            if inner.count > work_limit - work:
+                                work <- work_limit
                                 return false
                             work <- work + inner.count
+                            if statements.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + statements.count
                             loop_body.clear()
                             loop_body.extend(inner)
+                            lexical_body.clear()
+                            lexical_body.extend(statements)
                             loop_position <- position
-                        return false if not proof_replay_control_find_while(inner, line, condition, loop_body, loop_position, matches, depth + 1, work)
-                    Ast::Stmt.For(_, _, _, inner, _) | Ast::Stmt.Block(_, _, _, inner, _):
-                        return false if not proof_replay_control_find_while(inner, line, condition, loop_body, loop_position, matches, depth + 1, work)
-                    Ast::Stmt.If(_, yes, no, _):
-                        return false if not proof_replay_control_find_while(yes, line, condition, loop_body, loop_position, matches, depth + 1, work)
-                        return false if not proof_replay_control_find_while(no, line, condition, loop_body, loop_position, matches, depth + 1, work)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |line, condition, loop_body, loop_position, matches, depth, work|:
-                            return false if work >= 4096
+                        return false if not proof_replay_control_find_loop_source_expr(source_condition, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source(inner, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.For(_, _, iterable, inner, position):
+                        if position.line == line and include_for:
+                            matches <- matches + 1
+                            condition <- iterable
+                            if inner.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + inner.count
+                            if statements.count > work_limit - work:
+                                work <- work_limit
+                                return false
+                            work <- work + statements.count
+                            loop_body.clear()
+                            loop_body.extend(inner)
+                            lexical_body.clear()
+                            lexical_body.extend(statements)
+                            loop_position <- position
+                        return false if not proof_replay_control_find_loop_source_expr(iterable, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source(inner, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.Block(kind, _, _, inner, _):
+                        return false if kind != "assert_by" and not proof_replay_control_find_loop_source(inner, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.If(test, yes, no, _):
+                        return false if not proof_replay_control_find_loop_source_expr(test, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source(yes, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source(no, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.Match(subject, arms, _):
+                        return false if not proof_replay_control_find_loop_source_expr(subject, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        for arm in arms |statements, line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                            return false if work >= work_limit
                             work <- work + 1
-                            return false if not proof_replay_control_find_while(arm.body, line, condition, loop_body, loop_position, matches, depth + 1, work)
-                    Ast::Stmt.Expr(_, _) | Ast::Stmt.Return(_, _) | Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Assign(_, _, _, _) | Ast::Stmt.Contract(_, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                            return false if not proof_replay_control_find_loop_source_expr(arm.guard, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                            return false if not proof_replay_control_find_loop_source(arm.body, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        return false if not proof_replay_control_find_loop_source_expr(expression, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        return false if not proof_replay_control_find_loop_source_expr(type_expression, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source_expr(initializer, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if not proof_replay_control_find_loop_source_expr(target, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source_expr(value, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return false
+            return true
+
+        def proof_replay_control_find_loop_source_expr(expression: Ast::Expr, line: u32, condition: mutable Ast::Expr&, loop_body: mutable darray[Ast::Stmt]&, lexical_body: mutable darray[Ast::Stmt]&, loop_position: mutable Ast::Pos&, matches: mutable usize&, depth: usize, work: mutable usize&, work_limit: usize, include_for: bool) -> bool:
+            return false if depth >= 64 or work >= work_limit
+            work <- work + 1
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return true
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_replay_control_find_loop_source_expr(callee, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    for argument in arguments |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(argument, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if work >= work_limit
+                        work <- work + 1
+                        for capture in candidate.captures |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                            return false if not proof_replay_control_find_loop_source_expr(capture, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    for argument in arguments |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(argument, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
+                    return proof_replay_control_find_loop_source_expr(object, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _) | Ast::Expr.Refinement(object, index, _):
+                    return false if not proof_replay_control_find_loop_source_expr(object, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return proof_replay_control_find_loop_source_expr(index, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return false if not proof_replay_control_find_loop_source_expr(object, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return false if not proof_replay_control_find_loop_source_expr(low, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return proof_replay_control_find_loop_source_expr(high, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_control_find_loop_source_expr(object, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    for argument in arguments |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(argument, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(element, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(entry.key, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source_expr(entry.value, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_control_find_loop_source_expr(base, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    for field in fields |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if not proof_replay_control_find_loop_source_expr(field.value, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    return false if not proof_replay_control_find_loop_source_expr(subject, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    for arm in arms |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if work >= work_limit
+                        work <- work + 1
+                        return false if not proof_replay_control_find_loop_source_expr(arm.guard, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                        return false if not proof_replay_control_find_loop_source(arm.body, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Comprehension(_, iterable, comprehension_condition, value, _):
+                    return false if not proof_replay_control_find_loop_source_expr(iterable, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return false if not proof_replay_control_find_loop_source_expr(comprehension_condition, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return proof_replay_control_find_loop_source_expr(value, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return false if not proof_replay_control_find_loop_source_expr(guarded, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return proof_replay_control_find_loop_source(recovery, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Lambda(parameters, nested, _):
+                    for parameter in parameters |line, condition, loop_body, lexical_body, loop_position, matches, depth, work, work_limit, include_for|:
+                        return false if work >= work_limit
+                        work <- work + 1
+                    return proof_replay_control_find_loop_source(nested, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                Ast::Expr.Block(block_statements, value, _, _):
+                    return false if not proof_replay_control_find_loop_source(block_statements, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                    return proof_replay_control_find_loop_source_expr(value, line, condition, loop_body, lexical_body, loop_position, matches, depth + 1, work, work_limit, include_for)
+                _:
+                    return false
             return true
 
         def proof_replay_control_loop_invariant_context(report: ProofReport&, trace: ProofFactTrace, whole_body: darray[Ast::Stmt], loop_body: darray[Ast::Stmt], lexical_body: darray[Ast::Stmt]) -> bool:
@@ -46,10 +151,8 @@ extend ElisaProof:
             return true if proof_replay_control_assertion_in_scope_with_work(report, whole_body, loop_body, certificate, source_work)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             remaining_work: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
-            no_break_seed: usize = 0 if remaining_work >= 4096 else 4096 - remaining_work
-            no_break_work: mutable usize = no_break_seed
-            has_break: bool = proof_replay_control_body_has_break(loop_body, 0, &no_break_work)
-            no_break_work <- no_break_work - no_break_seed
+            no_break_work: mutable usize = 0
+            has_break: bool = proof_replay_control_body_has_break(loop_body, 0, 0, &no_break_work, remaining_work)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT or no_break_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + no_break_work
             return false if has_break
@@ -235,14 +338,13 @@ extend ElisaProof:
             return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &body, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             condition: mutable Ast::Expr = Ast::Expr.Invalid
             loop_body: mutable darray[Ast::Stmt] = []
+            lexical_body: mutable darray[Ast::Stmt] = []
             loop_position: mutable Ast::Pos = Ast::pos_at_line(0)
             loop_matches: mutable usize = 0
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             remaining_work: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
-            work_seed: usize = 0 if remaining_work >= 4096 else 4096 - remaining_work
-            work: mutable usize = work_seed
-            found_loop: bool = proof_replay_control_find_while(body, trace.line, &condition, &loop_body, &loop_position, &loop_matches, 0, &work)
-            work <- work - work_seed
+            work: mutable usize = 0
+            found_loop: bool = proof_replay_control_find_loop_source(body, trace.line, &condition, &loop_body, &lexical_body, &loop_position, &loop_matches, 0, &work, remaining_work, false)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT or work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + work
             return false if not found_loop or loop_matches != 1
@@ -253,19 +355,11 @@ extend ElisaProof:
                 return proof_replay_control_assertion_in_scope_with_work(report, body, loop_body, certificate, source_work) or proof_replay_control_preservation_contract_source_with_work(report, trace, loop_body, source_work)
             expected_exit: Ast::Expr = proof_replay_control_negation(condition, loop_position)
             return false if not proof_replay_summary_expr_equal_with_limit(trace.expression, expected_exit, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
-            scoped_condition: mutable Ast::Expr = Ast::Expr.Invalid
-            scoped_body: mutable darray[Ast::Stmt] = []
-            lexical_body: mutable darray[Ast::Stmt] = []
-            return false if not proof_replay_loop_scope_with_limit(body, trace.line, &scoped_condition, &scoped_body, &lexical_body, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
-            return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
-            return false if not proof_replay_control_expr_source_equal_with_work(scoped_condition, condition, source_work, PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT)
             return false if not proof_replay_control_assertion_after_loop_with_work(report, body, lexical_body, certificate, trace.line, source_work)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             break_remaining_work: usize = PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
-            break_seed: usize = 0 if break_remaining_work >= 4096 else 4096 - break_remaining_work
-            break_work: mutable usize = break_seed
-            has_break: bool = proof_replay_control_body_has_break(loop_body, 0, &break_work)
-            break_work <- break_work - break_seed
+            break_work: mutable usize = 0
+            has_break: bool = proof_replay_control_body_has_break(loop_body, 0, 0, &break_work, break_remaining_work)
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT or break_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + break_work
             return false if has_break
@@ -318,6 +412,8 @@ extend ElisaProof:
             return false if source_work > PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
             return false if not (proof_replay_control_assertion_in_scope_with_work(report, body, loop_body, certificate, source_work) or proof_replay_control_preservation_contract_source_with_work(report, trace, loop_body, source_work))
             for statement in lexical_body |report, trace, certificate, loop_body, source_work|:
+                return false if source_work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match statement:
                     Ast::Stmt.For(_, variables, iterable, inner, position):
                         continue if position.line != trace.line or variables.count != 1 or variables[0] == ""

@@ -242,6 +242,33 @@ with tempfile.TemporaryDirectory(prefix="elisa-enum-shorthand-") as temporary:
         positive_packages[example] = package
         print("positive:", example, "producer and portable replay passed")
 
+    # Exercise enum shorthand inside a congruence former. Equality symmetry alone does not
+    # visit `.None` as a scalar term; this requires replay to authenticate its unique const-enum
+    # owner before closing equality under the Boolean comparison former.
+    congruence_source = scratch / "shorthand-congruence.elisa"
+    congruence_source.write_text("""const enum CongruenceOption of i64:
+    None = 0
+    Some = 1
+
+def shorthand_congruence(left: CongruenceOption, right: CongruenceOption) -> bool:
+    requires left == right
+    ensure (left == .None) == (right == .None)
+    return true
+""")
+    congruence_run, congruence_report = run_json([str(PROOF), "--json", str(congruence_source)])
+    assert congruence_run.returncode == 0 and congruence_report["status"] == "proved", congruence_report
+    assert congruence_report["replay"]["gaps"] == 0, congruence_report["replay"]
+    assert congruence_report["replay"]["certificates"] == congruence_report["replay"]["replayed"]
+    assert any(goal["name"] == "shorthand_congruence" and goal["proven"] and goal["replay_status"] == "replayed"
+               for goal in congruence_report["goals"]), congruence_report["goals"]
+    _, congruence_package = run_json([str(PROOF), "--package", str(congruence_source)])
+    assert congruence_package["source"]["admissible"] is True
+    congruence_claim = next(theorem for theorem in congruence_package["theorems"]
+                            if theorem["name"] == "shorthand_congruence" and theorem["rule"] == "goal")
+    scalar_shorthand_marker(congruence_package, congruence_claim, "None")
+    package_replay(congruence_package, scratch, "shorthand-congruence-package")
+    print("positive: unique const-enum shorthand congruence replayed")
+
     # Isolate the owner-bound claims as portable positive controls. Later paired
     # marker mutations preserve the claim and report replay's actual verdict without
     # assuming that the portable kernel authenticates source typing metadata.

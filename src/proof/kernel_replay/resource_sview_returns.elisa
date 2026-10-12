@@ -4,22 +4,27 @@ extend ElisaProofKernelReplay:
         # Extract the single lifetime/formal pair carried by a completed sview summary, including
         # returns nested in branch scopes.
         # The summary's replay has already checked any `sview-call` transition that produced it.
-        def proof_kernel_replay_resource_sview_summary_return(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, summary_root: usize) -> (known: bool, region: sview, formal: sview):
+        def proof_kernel_replay_resource_sview_summary_return(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, summary_root: usize, work_used: mutable usize&) -> (known: bool, region: sview, formal: sview):
             markers: mutable darray[usize] = []
-            return (false, "", "") if not proof_kernel_replay_resource_summary_return_markers(nodes, children, summary_root, &markers)
+            return (false, "", "") if not proof_kernel_replay_resource_summary_return_markers(nodes, children, summary_root, &markers, work_used)
             returned_region: mutable sview = ""
             returned_formal: mutable sview = ""
-            for marker_root in markers |marker_root, nodes, returned_region, returned_formal|:
+            for marker_root in markers |marker_root, nodes, returned_region, returned_formal, work_used|:
+                return (false, "", "") if marker_root >= nodes.count
+                return (false, "", "") if not proof_kernel_replay_resource_charge_node_text_used(work_used, nodes[marker_root])
                 marker: ElisaProofKernelCore::ProofKernelNode = nodes[marker_root]
                 return (false, "", "") if marker.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG or marker.right >= nodes.count
                 marker_type: ElisaProofKernelCore::ProofKernelNode = nodes[marker.right]
+                return (false, "", "") if not proof_kernel_replay_resource_charge_node_text_used(work_used, marker_type)
                 return (false, "", "") if marker_type.kind != "ident" or marker_type.name != "sview" or marker_type.left != 0 or marker_type.right != 0 or marker_type.auxiliary != 0 or marker_type.children_start != 0 or marker_type.children_count != 0 or marker_type.value != 0 or marker_type.secondary_name != ""
+                return (false, "", "") if not proof_kernel_replay_resource_charge_text_pair_used(work_used, returned_region, marker.name)
                 returned_region <- marker.name if returned_region == ""
                 return (false, "", "") if returned_region != marker.name
                 marker_formal: mutable sview = ""
                 if marker.operator == "sview":
                     return (false, "", "") if marker.secondary_name != "" or marker.left >= nodes.count
                     witness: ElisaProofKernelCore::ProofKernelNode = nodes[marker.left]
+                    return (false, "", "") if not proof_kernel_replay_resource_charge_node_text_used(work_used, witness)
                     return (false, "", "") if witness.kind != "resource-use" or witness.name == ""
                     marker_formal <- witness.name
                 elif marker.operator == "sview-call":
@@ -27,6 +32,8 @@ extend ElisaProofKernelReplay:
                     marker_formal <- marker.secondary_name
                 else:
                     return (false, "", "")
+                if returned_formal != "":
+                    return (false, "", "") if not proof_kernel_replay_resource_charge_text_pair_used(work_used, returned_formal, marker_formal)
                 return (false, "", "") if returned_formal != "" and returned_formal != marker_formal
                 returned_formal <- marker_formal
             return (false, "", "") if returned_region == "" or returned_formal == ""
@@ -38,15 +45,19 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_resource_sview_call_return[@nodes, @children, @state](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @nodes, children: mutable darray[usize]& @children, state: mutable ProofKernelReplayResourceState& @state, node: ElisaProofKernelCore::ProofKernelNode, previous_event: usize, arena_admitted: bool) -> bool:
             return false if node.operator != "sview-call" or node.auxiliary != PROOF_KERNEL_REPLAY_SVIEW_BORROW_FLAG or node.right >= nodes.count or node.secondary_name == ""
             return false if node.left != previous_event
-            return false if not any prior_call in state.resource_call_events where prior_call == node.left
-            return false if any used_witness in state.resource_return_witnesses_used where used_witness == node.left
+            prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_events, node.left, &state.resource_work_used)
+            return false if not prior_call.complete or not prior_call.found
+            used_witness: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_return_witnesses_used, node.left, &state.resource_work_used)
+            return false if not used_witness.complete or used_witness.found
             call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
             return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
             call: ElisaProofKernelCore::ProofKernelNode = call_located.node
             return false if not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count) or call.auxiliary > call.children_count
             callee_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call.left)
-            return false if not callee_located.known or callee_located.node.kind != "resource-safety" or callee_located.node.name != call.name
-            summary_return: (known: bool, region: sview, formal: sview) = proof_kernel_replay_resource_sview_summary_return(nodes, children, call.left)
+            return false if not callee_located.known
+            return false if not proof_kernel_replay_resource_charge_node_text(state, callee_located.node) or not proof_kernel_replay_resource_charge_text_pair(state, callee_located.node.name, call.name)
+            return false if callee_located.node.kind != "resource-safety" or callee_located.node.name != call.name
+            summary_return: (known: bool, region: sview, formal: sview) = proof_kernel_replay_resource_sview_summary_return(nodes, children, call.left, &state.resource_work_used)
             return false if not summary_return.known
 
             source: (known: bool, slot: usize, place: ProofKernelReplayResourcePlace, excluded_slot: usize) = proof_kernel_replay_resource_call_return_source(nodes, children, state, node, call, summary_return.region, summary_return.formal, arena_admitted)

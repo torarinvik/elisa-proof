@@ -29,7 +29,6 @@ POSITIVE = {
     "checked_index_fallback": {"checked-index"},
     "getelse_recovery": {"checked-get"},
     "effect_containment": {"effect-containment"},
-    "implicit_structural_decreases": {"structural-safety"},
     "early_return_index_guard": {"index-lower", "index-upper"},
     "fixed_array_slice_bounds": {"slice-lower", "slice-upper", "slice-order"},
     "pure_unfolding": {"goal"},
@@ -45,7 +44,7 @@ packages = {}
 for example, rules in POSITIVE.items():
     package = export(example)
     packages[example] = package
-    assert package["format"] == "elisa-proof-package-v1" and package["source"]["admissible"], example
+    assert package["format"] == "elisa-proof-package-v2" and package["source"]["admissible"], example
     assert package["source"]["authenticated"] is False, example
     seen = {theorem["rule"] for theorem in package["theorems"]}
     assert rules <= seen, (example, rules, seen)
@@ -62,6 +61,42 @@ for example, rules in POSITIVE.items():
     assert len(package["theorems"]) == len(replayed_goals), (example, len(package["theorems"]), len(replayed_goals))
 
 check_unresolved_shadow(packages, refused)
+
+# Termination certificates are source-relative: the replay kernel checks witness shape but does
+# not derive recursive call sites from a declaration. Build a validly-shaped, fully resealed
+# certificate to make sure this public route cannot turn that shape alone into a theorem.
+structural_package = copy.deepcopy(packages["verified"])
+structural_package["theorems"] = []
+structural_children = structural_package["kernel"]["children"]
+witness_root = append_node(structural_package, "structural-argument", "strict", value="2",
+                           name="subject", auxiliary=1, secondary_name="child")
+witness_children_start = len(structural_children)
+structural_children.append(witness_root)
+edge_root = append_node(structural_package, "structural-edge", auxiliary=1,
+                        children_start=witness_children_start, children_count=1,
+                        name="f", secondary_name="f")
+edge_children_start = len(structural_children)
+structural_children.append(edge_root)
+structural_root = append_node(structural_package, "structural-safety",
+                              children_start=edge_children_start, children_count=1,
+                              name="f", secondary_name="structural-v1")
+structural_theorem = {
+    "goal_id": 0, "name": "forged-structural", "line": 1, "rule": "structural-safety",
+    "hypotheses": [], "hypothesis_origins": [], "conclusion": structural_root,
+}
+structural_package["theorems"] = [reseal(structural_package, structural_theorem)]
+assert structural_package["source"]["authenticated"] is False
+structural_result = refused(structural_package, "unauthenticated-structural-safety",
+                            "rejected", "source-authentication-required")
+assert structural_result["theorems"] == [], structural_result
+assert structural_result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, structural_result
+assert structural_result["kernel"] == {"nodes": 0, "children": 0}, structural_result
+late_bad_envelope = copy.deepcopy(structural_package)
+late_bad_envelope["theorems"].append(copy.deepcopy(structural_theorem))
+del late_bad_envelope["theorems"][1]["statement"]
+late_bad_result = refused(late_bad_envelope, "structural-rule-does-not-skip-envelope-scan",
+                          "malformed", "theorem-schema")
+assert late_bad_result["theorems"] == [], late_bad_result
 
 # The positive-conjunction rule is useful on its source shape, but a re-sealed portable theorem
 # cannot replace the required conjunct with a merely related comparison.

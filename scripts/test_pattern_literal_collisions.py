@@ -221,6 +221,26 @@ with tempfile.TemporaryDirectory() as folder:
         assert any(finding['name'] == name and finding['kind'] == 'ensure-unproven'
                    for finding in report['findings']), (name, report['findings'])
 
+    # A collision must stay unproved through theorem discovery and package export too. These
+    # routes consume the same checked-view authority but serialize different projections of it.
+    theorem_run = subprocess.run([BINARY, '--theorems', str(path)],
+                                 capture_output=True, text=True, timeout=120)
+    theorem_report = json.loads(theorem_run.stdout)
+    assert theorem_report['source']['admissible'] is True, theorem_report['source']
+    assert theorem_report['source']['goal_admissions_complete'] is True, theorem_report['source']
+    for theorem in theorem_report['theorems']:
+        if theorem['name'] in PATTERN_COLLISIONS:
+            assert theorem['verified'] is False, theorem
+            assert not any(goal['proven'] for goal in theorem['proof_goals']), theorem
+
+    package_run = subprocess.run([BINARY, '--package', str(path)],
+                                 capture_output=True, text=True, timeout=120)
+    package_report = json.loads(package_run.stdout)
+    assert package_report['source']['admissible'] is True, package_report['source']
+    assert package_report['source']['goal_status_snapshot_complete'] is True, package_report['source']
+    assert not any(theorem['name'] in PATTERN_COLLISIONS
+                   for theorem in package_report['theorems']), package_report['theorems']
+
     for name in PATTERN_COLLISIONS:
         focused = subprocess.run([BINARY, '--function-json', name, str(path)],
                                  capture_output=True, text=True, timeout=120)

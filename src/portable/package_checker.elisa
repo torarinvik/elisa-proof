@@ -1,4 +1,4 @@
-# Replays an `elisa-proof-package-v1` with the source-neutral kernel alone.
+# Replays v2 portable packages and legacy v1 packages with the source-neutral kernel alone.
 #
 # The checker admits the whole arena first, then checks each theorem independently:
 #   1. its hypothesis and conclusion roots exist and its rule is one the kernel protocol names;
@@ -48,10 +48,17 @@ def proof_package_rule_known(rule: sview) -> bool:
         _:
             return false
 
+def proof_package_rule_requires_authenticated_source(rule: sview) -> bool:
+    # Structural termination relates recursive calls to source declarations. Portable packages
+    # deliberately carry no authenticated source, so replay cannot authorize this rule.
+    rule == "structural-safety"
+
 # The same rule dispatch the report's own replay uses, with the package's hypotheses as facts.
 def proof_package_replay_rule(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, rule: sview, facts: darray[usize], conclusion: usize, workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&) -> bool:
     return (ElisaProofKernelReplay::proof_kernel_replay_resource_report_with_workspace(nodes, children, facts, conclusion, workspace) can Global{Read,Write}) if rule == "resource-safety"
-    return ElisaProofKernelReplay::proof_kernel_replay_structural_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "structural-safety"
+    # Portable packages do not authenticate source-relative termination claims. The package
+    # preflight rejects this rule before arena admission; keep dispatch fail-closed as well.
+    return false if rule == "structural-safety"
     return ElisaProofKernelReplay::proof_kernel_replay_effect_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "effect-containment"
     return ElisaProofKernelReplay::proof_kernel_replay_checked_index_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "checked-index"
     return ElisaProofKernelReplay::proof_kernel_replay_checked_get_report_with_workspace(nodes, children, facts, conclusion, workspace) if rule == "checked-get"
@@ -90,6 +97,7 @@ def proof_package_check_theorem[@r](theorem: JsonValueHandle[r], keys: darray[sv
         return (proof_package_rejected("root-out-of-range"), 0) if root >= nodes.count
     return (proof_package_rejected("root-out-of-range"), 0) if conclusion.value >= nodes.count
     return (proof_package_rejected("unknown-rule"), 0) if not proof_package_rule_known(rule.value)
+    return (proof_package_rejected("source-authentication-required"), 0) if proof_package_rule_requires_authenticated_source(rule.value)
     identity: mutable darray[u8] = []
     identity_valid: bool = proof_portable_sequent_identity(&identity, nodes, children, &facts, 0, facts.count, conclusion.value)
     return (proof_package_over_budget("identity-budget"), identity.count) if identity.count > identity_remaining
@@ -204,12 +212,18 @@ def proof_package_replay(input: darray[u8]&, out: mutable darray[u8]&) -> i64 ca
     theorem_keys: darray[sview] = ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
     # Check the complete theorem envelope before decoding/admitting the arena. A malformed
     # suffix then costs only bounded schema work and can never trigger replay of a valid prefix.
+    source_authentication_required: mutable bool = false
     for index in 0..<theorem_list.count |index, theorem_list, theorem_keys|:
         theorem: JsonValueHandle[arena] = try ElisaProofJson::at(theorem_list.value, index.i64()) else ElisaProofJson::null_value(root)
         preflight_theorem: ProofPackageVerdict = proof_package_preflight_theorem(theorem, &theorem_keys)
         if sview_len(preflight_theorem.status) > 0:
             proof_package_push_result(out, preflight_theorem, 0, 0, &empty_results, 0, 0)
             return 1
+        rule: (known: bool, value: sview) = proof_package_string_field(theorem, "rule")
+        source_authentication_required <- true if rule.known and proof_package_rule_requires_authenticated_source(rule.value)
+    if source_authentication_required:
+        proof_package_push_result(out, proof_package_rejected("source-authentication-required"), 0, 0, &empty_results, 0, 0)
+        return 1
     kernel: (known: bool, value: JsonValueHandle[arena]) = ElisaProofJson::field(root, "kernel")
     raw: mutable darray[ProofPackageRawNode] = []
     pool: mutable darray[u8] = []

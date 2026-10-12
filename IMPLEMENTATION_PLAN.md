@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-12. **§23.27.123 is the live integration gate and supersedes earlier priority summaries.** Local Elisa-core `main` is at `37482d6e`; a clean Stage0 from that commit passes `make test-prover` and is installed at `~/.elisac/elisac-stage0` (SHA-256 `a4ac8fb37851e2eeec8f9f9f930c243a5c0b92c0333b874ff3eb02c38ccd6b70`). The proof pins remain at Stage0 `8070e39d` and Elisa-compiler `e1361c201` because a fresh Stage1 and strict O2 proof/replay qualification on the new pair have not passed. Elisa-compiler `main` is now `b92bf343`; its focused object-cache, shard-cache, and provenance suites pass, but no Stage1 product from `b92bf343` has been emitted. The newest available Stage1 product comes from ancestor source `58ccbe1e`; its module-worker reproducer fails in `emit_store_capturing_submit`, while `Call(Ident(pool_submit1))` is the outer call shape. The compiler and proof checkouts still contain active dirty migrations; they were not batch-integrated. The user directed this turn to skip the current timing run and merge qualified code. Keep paired timing deferred until a current compiler is qualified, correctness parity passes, and load is below 2.0. Prioritize the isolated submit blocker, safe Task ownership, and strict proof/replay blockers.
+Status refreshed 2026-10-12. **§23.27.123 is the live integration gate and supersedes earlier priority summaries.** The last clean Elisa-core Stage0 at `37482d6e` passed `make test-prover`; local Go Core `main` has since advanced to `604cdf5388d974002d58da1213a47d88a2cf1d15` (one commit ahead of origin), and the installed binary is `vcs.modified=false`. Its focused `TestCollectionAppend` passes, but the full Go suite has 101 failures also reproduced at `37482d6e`, so it is not yet a qualified proof bootstrap. Keep proof pins at Stage0 `8070e39d` and Elisa-compiler `e1361c201` until the exact current pair passes qualification. Elisa-compiler `main` and `origin/main` point at `d4d0507f4`; since `bd22ffda5`, nineteen commits landed covering lexer/parser hardening, semantic ownership/type safety, backend/driver ABI checks, runtime collection and allocator safeguards, indexed codegen metadata, and regression/performance fixtures. The parallel-effect audit (`2cf4f2505`), linker/provenance tracking (`5b493b296`), and deterministic fake-linker seed-smoke fix (`bd22ffda5`) pass their scoped checks, but do not qualify the dirty grant-migration or submit-lowering work. The compiler checkout has active dirty grant, backend, submit-capture, proof, and benchmark edits; do not batch-stage it. The installed Stage1 from `5cda9b4e` and a verified copy from `7e125178` both fail to parse current compiler sources. Stage0 `604cdf53` reaches semantic checking on clean `d4d0507f4` but reports missing `Global.Read/Write` grants; checking the actively edited tree reports parser diagnostics in modified sources. The existing proof binary manifest names compiler `7e125178` and dirty proof inputs, so it is not evidence for the current tree. Current Python/shell syntax and whitespace gates pass, and `scripts/check_source_length.py` passes with `src/proof/kernel_replay/term_arithmetic.elisa` at the 600-line limit; fresh Stage1, full proof/replay tests, and strict O2 qualification remain open. Paired Mac A/B timing remains in scope but pending: the latest load1 was 3.53 against the 2.0 gate. Next prioritize a buildable current compiler with enforced local grants, a provenance-verified Stage1, and strict source-matched proof/replay qualification; then address submit lowering, safe Task ownership, and kernel gaps.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -10556,21 +10556,23 @@ parity passes.
 
 ### 23.27.123 Qualified compiler commits and traced Stage1 blocker (2026-10-12)
 
-Elisa-compiler `main` is `2cf4f250`, ahead of `origin/main` by 23 commits. This turn committed the
-independent parallel-effect audit (`2cf4f250`) after validating it on a clean `b92bf343` snapshot: its
-34 focused tests pass, and `--check` reports 221 concurrent passes append-only plus diagnostic
-ownership coverage for 27 fields and 17 text payloads. This qualifies the static audit tool, not the
-runtime parallel-submit candidate or a new compiler product. Focused object-cache, shard-cache, and
-provenance suites also pass; the qualified shard restore improvement `69d60d82` and its follow-up
-cache-integrity fixes are already on `main`. The current `main` worktree has hundreds of unrelated
-uncommitted source and test changes, so do not stage or reset it as a batch. A separate region-owner branch ending at
-`97f3ef44` contains `8d7cfca2`, but that commit depends on error-family fields absent from current
-`main`; do not cherry-pick it alone. The user directed us to merge only qualified code; paired A/B
-timing remains in scope but is deferred until correctness/parity passes and host load is below the
-agreed limit.
+Elisa-compiler local `main` and `origin/main` now both point at `d4d0507f4`. The nineteen commits
+since `bd22ffda5` integrate lexer/parser hardening, semantic ownership/type safety, backend and driver
+ABI checks, runtime allocator/collection safeguards, indexed codegen metadata, and additional tests and
+performance workloads. The semantic parallel-effect audit (`2cf4f2505`), linker/provenance tracking
+(`5b493b296`), and deterministic linker-probe seed-smoke update (`bd22ffda5`) are on `origin/main`.
+The audit's 35 focused tests pass, `--check` reports 221 concurrent passes append-only plus diagnostic
+ownership coverage for 27 fields and 17 text payloads, and `python3 scripts/test_stage1_provenance.py`
+and `bash test/parity/seed_fresh_worktree_smoke.sh` pass. These checks qualify static/build support,
+not the runtime parallel-submit candidate or a current compiler product. The current compiler checkout
+has seven modified tracked files and one untracked test, including the submit-lowering candidate; do
+not stage or reset them as a batch. A separate region-owner branch ending at `97f3ef44` contains
+`8d7cfca2`, but that commit depends on error-family fields absent from current `main`; do not cherry-pick
+it alone. Paired Mac A/B remains in scope but is deferred until correctness/parity passes and host load
+is below the agreed limit.
 
 The newest on-host Stage1 product found is from compiler source `58ccbe1e90f27c1cab2ec27c523637c7aa90a1be`,
-an ancestor of current `main`, not a product built from `2cf4f250`. Its executable SHA-256 is
+an ancestor of current `main`, not a product built from `bd22ffda5`. Its executable SHA-256 is
 `20e7a5b14b31970740e1be8716b89325dfc246af3e16cb3c83c5308e84b16404`; its runtime object SHA-256 is
 `e6e0d8fe0aee13c176b2c6fd2b111eeda0bd0036b40ac9d3f6fdfdad6d7a0f7e`. The reduced fixture
 `/private/tmp/submit_module_worker_repro.elisa` still fails under that product before LLVM emission.
@@ -10590,40 +10592,58 @@ and `src/semantic/semantic_api.elisa`; its log is preserved at
 at `/private/tmp/elisa-stage1-seed-b92-from-58cc-failure.log`. This attempt ran from fresh detached
 worktree `/private/tmp/elisa-compiler-stage1-b92-from-58cc`, HEAD `b92bf343ffe1e43eebd1d9dc5b63a53224b9a3d3`,
 tree `1220e7c970f2d1e6f6477cd442608462c3b4f76a`; it did not include the dirty candidate fixes. The
-current dirty tree infers submit results as `Task[R, Pending]`, resolves workers with argument context,
-and binds each `job_bits` scalar before submit rather than nesting an indexed expression in the ticket.
-Those fixes postdate the failed source, so treat the failure as baseline evidence, not a rejection of
-the candidate. Separate static review found a remaining overload hazard: `submit_worker_index` chooses
-a row, but lowering still passes bare `sub_callee`; function-value emission may then pick the first
-same-name overload. Carry the chosen row or concrete worker handle through plain and store-capture
-lowering, with a regression containing same-name overloads. The store-capture helper also rejects every
-worker with nonzero hidden arena slots, while `par_pass_worker` declares `Memory.Allocate` and builds a
-local diagnostic array. The older 58cc trace reports `arenas=0` for the selected row, but recheck the
-exact row and ABI on the current candidate; do not infer hidden arena slots from `Memory.Allocate` alone.
-Keep the guard unless a
-dedicated thunk proves the per-job arena stays live through `task_group_wait_all` and no arena-backed
-value escapes. The focused analyzer suite now passes 34/34, and the integrated `--check` passes all 221
-concurrent passes as append-only with diagnostic-ownership checks green. This is a static audit only:
-`test/parity/semantic_parallel_gen_smoke.sh` does not run Stage1 serial-versus-parallel semantics, so
-runtime parity remains open. Further source review requires the chosen overload row to survive lowering,
-proves the worker's hidden-arena count/lifetime, and verifies the explicit TaskGroup capture window.
-Preserve the current fail-closed checks until each case has a precise regression and lifetime proof.
+The current dirty tree infers submit results as `Task[R, Pending]`, resolves workers with argument
+context, binds each `job_bits` scalar before submit, and carries the selected worker row into both
+plain-call and store-capture lowering. These changes postdate the failed source, so treat that failure
+as baseline evidence, not a rejection of the candidate. Same-name worker overload fixtures now exist, but selection currently matches argument types without
+reproducing named-label resolution, and the generated-IR smoke checks pool selection/thunk names but
+not the callback symbol. Neither the overload controls nor the store-capture runtime smoke have been
+executed against a product built from this candidate; add named-label and exact callback-symbol checks. The exact bootstrap failure remains in `emit_store_capturing_submit` for the
+older product. The helper now checks the selected row, two-parameter ABI, active packed-store root,
+and scoped join owner before emitting its thunk; it still rejects nonzero hidden arena slots and
+error-return workers. The older 58cc trace reports `arenas=0` for the selected row, but recheck the
+exact row and ABI on the current candidate; do not infer hidden arena slots from `Memory.Allocate`
+alone. Keep the guard unless a dedicated thunk proves the per-job arena stays live through
+`task_group_wait_all` and no arena-backed value escapes. New controls cover explicit/nested manual
+TaskGroup joins and refusal of user-defined fake TaskGroup APIs. Run them with the overload regression
+on a fresh candidate product. The focused analyzer suite passes 35/35, and I independently reran
+`--check`: all 221 concurrent passes are append-only, with diagnostic ownership covered for 27 fields
+and 17 text payloads. This is a static audit only: `test/parity/semantic_parallel_gen_smoke.sh` does not
+run Stage1 serial-versus-parallel semantics, so runtime parity remains open. Preserve fail-closed
+ownership and lifetime checks until their regressions and runtime gates pass.
 
 The verified `58ccbe1e` Stage1 seed was rechecked in its clean source worktree: its own
 `assert_stage1_fresh.sh` passes and its executable SHA-256 remains
-`20e7a5b14b31970740e1be8716b89325dfc246af3e16cb3c83c5308e84b16404`. After the submit and capture
-regressions pass and the candidate source stops changing, use that exact Stage1 as the seed. If the
-Stage0 freshness guard refuses the dirty Go Stage0, `ELISA_ALLOW_STALE_STAGE0=1` may bypass only that
-guard after verifying the Stage1 seed; the build still fingerprints current source/runtime inputs and
-records new provenance. Then run self-host/fixpoint checks and serial/parallel parity against the same
-source snapshot before relying on the product. Do not substitute the older seed product as the final
-compiler.
+`20e7a5b14b31970740e1be8716b89325dfc246af3e16cb3c83c5308e84b16404`. It cannot seed the current snapshot: tracked `src/parser/parser_numeric_literal_sort_model.elisa` uses
+`when` pattern alternatives that the root Stage1 and three other recent Stage1 products reject. The available Go Stage0 parses this fixture, but it is SHA `a4ac8fb...` from clean Elisa-core commit
+`37482d6e`, not the newer dirty/ahead Go compiler source. The full-tree seed log from that older
+product stops on `semantic_api.elisa` call-holder and missing-effect diagnostics; those results may
+reflect the Stage0/source mismatch. First build and verify a Stage0 from the current Go compiler source,
+then rerun the full-tree seed and classify only reproduced diagnostics. The source-grounded
+`par_pass_run` and synchronous `emit_statements` lifetimes are candidates for narrow summaries if they
+still fail under that current Stage0, but they do not justify broad exemptions. Do not use `58ccbe1e`
+or any other parser-incompatible product as if it matched current source. After the full-tree seed passes,
+verify its source/runtime/provenance identity and `assert_stage1_fresh.sh`, then run self-host/fixpoint
+and serial/parallel parity on that same snapshot. Do not set `ELISA_ALLOW_STALE_STAGE0=1` to conceal
+parser or semantic failures.
+
+The current call-holder failures have two source-grounded narrow candidates: `semantic_api.elisa:223`
+passes `&loop_view` to `par_pass_run`, which stores the pointer in job records, submits workers,
+waits for the whole `TaskGroup` at `semantic_parallel.elisa:224`, then reads results and frees arenas
+before returning; `loop_view` remains caller-owned and alive. `codegen_stmt_blocks_exprs.elisa:155`
+passes a local `static_runtime_body` to synchronous `emit_statements`. Any compiler summary should
+encode those exact join-before-return or synchronous-use guarantees, with negative escape controls;
+do not add a broad call-holder or non-retention exemption.
 
 Cleanup audit: neither repository has stale worktree metadata reported by `git worktree prune --dry-run`.
-The proof repo has seven registered worktrees and every one is dirty. The compiler repo has 143
-registered worktrees and 87 branch heads not merged into `main`; the clean detached baselines still need
-task-ownership confirmation. Preserve these while their contents or owners remain unclear. The two
-isolated failed seed worktrees from this pass were removed after preserving their logs.
+The compiler repo has 143 registered worktrees: 106 clean and 37 dirty. Of the clean checkouts, 71
+are on branch heads not merged into `main` and 35 are detached baselines; the eight checked-out
+branches already merged into `main` all have dirty working trees, as do 19 detached checkouts. There
+are no clean, merged branch checkouts to remove safely, and the clean unmerged branches/detached
+baselines need owner or task-identity confirmation before removal. The proof repo has seven registered
+worktrees and all seven are dirty (three merged branch checkouts and four detached checkouts). No
+remaining worktree was safe to remove from this read-only audit. The two isolated failed-seed
+worktrees created for this pass were removed after preserving their logs.
 
 A clean proof snapshot at `ca594134` initially stopped before object emission with 76 source
 diagnostics. A focused compatibility repair reduced that count to zero and emitted strict O2
@@ -10642,7 +10662,7 @@ including 94 redundant address-of operators, 28 region-outlives escapes, 16 valu
 without `else`, 13 reference-valued Boolean conditions, iterator invalidation hazards, and unresolved
 helper/field mismatches. It emitted no binary. The root source has the one-character syntax correction,
 but the remaining diagnostics need a source-matched current Stage1 before they can be classified.
-Compiler `main` is `2cf4f250`, newer than the available Stage1 product `58ccbe1e`; keep the build
+Compiler `main` is `d4d0507f4`, newer than the available Stage1 product `58ccbe1e`; keep the build
 qualification blocked on a Stage1 emitted from current compiler source, and do not weaken region
 checks, grants, admission, or replay to silence the diagnostics.
 
@@ -10653,6 +10673,13 @@ representation opaque to safe callers, then add compile-negative reconstruction 
 controls for ordinary await, group-only join, add-then-await, duplicate-add, and task-copy before
 considering reference-count changes. Keep this independent from the store-capturing submit failure.
 
+The shorthand const-enum marker gap is currently an expressiveness regression, not a confirmed
+soundness flaw: checked type-bound trace validation rejects the ownerless shorthand node before the
+congruence path, while the producer emits a globally unique const-enum shorthand scalar marker that
+replay's marker-root validation does not admit. Restore this case with source-backed owner/uniqueness
+validation or explicit enum identity, and keep positive plus adversarial replay controls; retain the
+existing trace guard until that identity is independently established.
+
 The mutable-global authority implementation and its regression suites already exist on current
 compiler `main` (`mutable_global_authority_smoke.sh`, `mutable_global_grants_smoke.py`, and
 `unsafe_grant_scope_smoke.sh`). The older grant branch conflicts in core semantic files when replayed
@@ -10661,15 +10688,62 @@ source-matched Stage1 product before advancing the proof pin. The proof pins rem
 `8070e39d` and compiler `e1361c201`; the Stage1 build from current compiler `main`, strict O2 proof
 qualification, source-identity check, and independent replay have not passed.
 
-**Next high-return order:** (1) carry the selected worker overload row through submit lowering and add
-same-name overload regressions; (2) resolve the TaskGroup capture-window and hidden-arena paths with
-focused tests while preserving escape checks; (3) seed the stable compiler snapshot with verified
-Stage1 `58ccbe1e`, then pass self-host/fixpoint and same-source serial/parallel diagnostic parity with
-exact source/runtime/product identities; (4) rerun strict O2 on the current proof tree, fixing remaining
-type, region, grant, and expression-style diagnostics without weakening safety or trust boundaries;
-(5) run tuple-field, outer-region, branch-join, standalone replay, mutable-global authority, and
-source-identity gates, then fix remaining replay gaps; (6) merge only source changes that pass those
-gates, preserving unrelated active dirty worktrees; (7) close the safe `Task` representation escape with
-negative compile and ownership runtime controls; (8) run paired A/B timing once correctness parity
-passes and host load is below 2.0; (9) reconcile remaining Stage0 diagnostics and rank kernel coverage
-gaps by impact.
+**Next high-return order:** (1) build and verify a Stage0 from the newest Go compiler source, rerun the
+full-tree seed, and resolve only diagnostics reproduced against that matched pair; for confirmed
+call-holder failures, use precise joined-lifetime/synchronous-use summaries with negative escape
+controls; (2) freeze the compiler source and emit a source-matched Stage1 with verified provenance;
+(3) on that fresh product, execute same-name overload controls including named-argument labels,
+assert the selected callback symbol in generated IR, run explicit/nested TaskGroup and fake-owner
+controls, then confirm the selected worker's exact hidden-arena count and lifetime while preserving
+fail-closed escape checks; (4) pass self-host/fixpoint and same-source serial/parallel diagnostic parity
+with exact source/runtime/product identities; (5) rerun strict O2 on the current proof tree, fixing
+remaining type, region, grant, and expression-style diagnostics without weakening safety or trust
+boundaries; (6) run tuple-field, outer-region, branch-join, standalone replay, mutable-global
+authority, and source-identity gates, restore source-backed const-enum shorthand replay identity, then
+fix remaining replay gaps; (7) merge only source changes that pass those gates, preserving unrelated
+active dirty worktrees; (8) close the safe `Task` representation escape with negative compile and
+ownership runtime controls; (9) run paired Mac A/B compile-time and generated-program runtime A/B as exploratory gates once correctness/parity passes
+and load1 is below 2.0 (COMPILE_ONLY is supplemental, not a replacement); (10) reconcile remaining
+Stage0 diagnostics and rank kernel coverage
+gaps by impact. The benchmark remains pending; load1 was 6.58 at this checkpoint, so timing was
+deferred for this run.
+
+### 23.27.124 Current compiler snapshot and integration gate (2026-10-12)
+
+The latest committed compiler source is now `550c4bc1aefa7451466443548bc023061aaef4d3` on both
+compiler `main` and `origin/main`, superseding the `d4d0507f4` snapshot recorded above. The proof
+repository remains at `d4a9d935`, with its compiler pin at `e1361c201` and Stage0 pin at `8070e39d`;
+do not advance either pin until a product is built and verified from the selected source/runtime pair.
+The installed compiler Stage1 product still has provenance schema v1 while current verification
+requires v5. A clean seed attempt against compiler `550c4bc1` stopped before publication because the
+bootstrap backend declined `par_pass_run@220` as a call expression. There is no current-source Stage1
+product, so strict O2 proof qualification and compiler-dependent replay gates remain unrun.
+The latest local Elisa-core Stage0 (`604cdf5388d974002d58da1213a47d88a2cf1d15`, VCS-clean) is also
+too old syntactically for compiler `550c4bc1`: its seed attempt reports parser failures in current
+compiler sources, including `when` forms and multiline expressions. This is a Stage0/source-language
+mismatch, not evidence that the current compiler source is invalid; do not bypass freshness checks.
+Use a provenance-verified Stage1 bootstrap after the `par_pass_run@220` emission failure is fixed.
+
+The isolated pre-optimization shard-cache candidate passed 34 shard-cache unit tests, 17 whole-object
+cache tests, Python and shell syntax checks, and native Darwin mapped-image controls for malformed
+signatures and disposable executable/library pathname replacement. These checks cover helpers and
+the native identity boundary; they do not qualify compiler integration. Keep this candidate out of
+`main` until a source-matched Stage1 passes its cold/warm, corruption-repair, body/ABI invalidation,
+ordinary-output parity, and one-/two-digit shard-count controls. The user's direction skips the
+current timing run only; paired timing remains pending after correctness, provenance, and host-load
+gates pass.
+
+Current cleanup audit found 145 compiler worktrees, no prunable entries, and no clean branch worktree
+whose tip is already merged into `main`. All seven proof worktrees contain dirty changes. Preserve
+them until their owners finish and their changes are either integrated or explicitly discarded.
+
+**Next high-return order:** (1) resolve the narrow `par_pass_run@220` self-host failure without
+weakening call-holder, region, or capture-lifetime checks; seed compiler `550c4bc1` with a
+provenance-verified Stage1 bootstrap and verify the resulting product; (2) on that exact pair, pass compiler self-host/fixpoint and the pre-optimization
+cache correctness/parity controls; (3) qualify the current proof sources under strict O2, then run
+source-authenticated structural termination with exact recursive call-site, argument, default-value,
+and implicit operator/index dispatch coverage; retain portable-package rejection until source
+authentication is established; (4) pass the source-identity, independent replay, resource-budget, and
+`Global.Read`/`Global.Write` authority matrices; (5) merge only changes that pass these gates, then
+remove only worktrees proven both clean and obsolete; (6) resume paired A/B timing after the host-load
+gate. Do not treat helper tests or a benchmark waiver as full compiler or kernel qualification.

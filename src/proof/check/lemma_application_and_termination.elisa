@@ -367,6 +367,12 @@ extend ElisaProof:
                 return index if report.structural.names[index] == wanted
             return report.structural.names.count
 
+        # A local/formal with the same spelling as any source function can shadow a direct
+        # callable leaf. The structural checker has no owner-aware local callable resolver, so
+        # such functions fail closed instead of treating a callback as recursion.
+        def proof_structural_name_shadows_function(report: ProofReport&, wanted: sview) -> bool:
+            return wanted != "" and proof_structural_report_index(report, wanted) < report.structural.names.count
+
         def proof_structural_report_same_component(report: ProofReport&, left: usize, right: usize) -> bool:
             return false if left >= report.structural.component_ids.count or right >= report.structural.component_ids.count
             return report.structural.component_ids[left] == report.structural.component_ids[right]
@@ -393,18 +399,28 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     called_name: sview = proof_callable_name(callee)
+                    if proof_callable_is_scoped(callee):
+                        proof_structural_termination_finding(report, position.line, name, "scoped calls are not structurally certified without source-resolved callee identity")
                     own_index: usize = proof_structural_report_index(report, own_name)
                     called_index: usize = proof_structural_report_index(report, called_name)
                     direct_recursive: bool = called_name == own_name
                     mutual_recursive: bool = not direct_recursive and own_index < report.structural.names.count and called_index < report.structural.names.count and proof_structural_report_same_component(report, own_index, called_index) and own_index < report.structural.subject_types.count and called_index < report.structural.subject_types.count and report.structural.subject_types[own_index] != "" and report.structural.subject_types[own_index] == report.structural.subject_types[called_index]
                     if direct_recursive or mutual_recursive:
-                        # When the ranking was inferred from an unannotated function with
-                        # multiple enum parameters, use the sum of their constructor heights.
-                        # Every subject must be passed unchanged or as a known strict subterm,
-                        # and at least one subject must be strict. This is the only place where
-                        # a multi-parameter product ranking is admitted; explicit `decreases`
-                        # clauses retain their exact single-subject meaning.
-                        if subject_position >= parameters.count and direct_recursive:
+                        # The caller's formal list cannot interpret named arguments for a
+                        # different callee: its decreasing parameter position indexes the
+                        # callee's signature. Until callee formal names are available here,
+                        # reject named mutual edges rather than proving descent on the wrong
+                        # actual argument.
+                        has_named_argument: bool = any label in argument_names where label != ""
+                        if mutual_recursive and has_named_argument:
+                            proof_structural_termination_finding(report, position.line, name, "named arguments on mutual structural calls are not supported")
+                        elif subject_position >= parameters.count and direct_recursive:
+                            # When the ranking was inferred from an unannotated function with
+                            # multiple enum parameters, use the sum of their constructor heights.
+                            # Every subject must be passed unchanged or as a known strict subterm,
+                            # and at least one subject must be strict. This is the only place where
+                            # a multi-parameter product ranking is admitted; explicit `decreases`
+                            # clauses retain their exact single-subject meaning.
                             enum_subjects: darray[sview] = proof_enum_parameter_names_from_parameters(parameters, destructurable)
                             multi_valid: mutable bool = enum_subjects.count > 0
                             multi_strict: mutable bool = false
@@ -423,7 +439,7 @@ extend ElisaProof:
                                     subject_identity: usize = proof_structural_parameter_identity(parameters, subject)
                                     witnesses.push(ProofStructuralWitness{subject: subject, argument: subject, strict: false, subject_identity: subject_identity, argument_identity: subject_identity})
                             if multi_valid and multi_strict:
-                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line, position.offset.usize())
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call must preserve or strictly descend every inferred enum subject")
                         else:
@@ -436,7 +452,7 @@ extend ElisaProof:
                                 witness_subject: mutable sview = proof_structural_argument_subject(recursive_argument, smaller)
                                 witness_subject <- parameters[recursive_position].name if witness_subject == "" and recursive_position < parameters.count
                                 witnesses: darray[ProofStructuralWitness] = [ProofStructuralWitness{subject: witness_subject, argument: argument_root, strict: true, subject_identity: proof_structural_argument_subject_identity(recursive_argument, smaller), argument_identity: proof_structural_argument_identity(recursive_argument, smaller)}]
-                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line)
+                                proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line, position.offset.usize())
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
                     proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
@@ -494,6 +510,7 @@ extend ElisaProof:
                     proof_structural_check_expression(else_expr, own_name, subject_position, parameters, destructurable, smaller, report, name)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, _):
                     proof_structural_check_expression(iterable, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a comprehension binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, variable)
                     comprehension_blocked: darray[sview] = [variable]
                     comprehension_destructurable: darray[sview] = proof_structural_without(destructurable, comprehension_blocked)
                     comprehension_smaller: darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, comprehension_blocked)
@@ -508,6 +525,8 @@ extend ElisaProof:
                         arm_bindings: mutable darray[sview] = []
                         arm_pattern_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
                         report.proof_obligation(false) if not arm_pattern_complete
+                        for arm_binding in arm_bindings |arm_binding, report, name, expression|:
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a match binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, arm_binding)
                         arm_destructurable: mutable darray[sview] = proof_structural_without(destructurable, arm_bindings)
                         arm_smaller: mutable darray[ProofStructuralSmaller] = proof_structural_smaller_without(smaller, arm_bindings)
                         scrutinee_name: sview = proof_ident_name(scrutinee)
@@ -520,6 +539,11 @@ extend ElisaProof:
                 Ast::Expr.Catch(guarded, arms, _):
                     proof_structural_check_expression(guarded, own_name, subject_position, parameters, destructurable, smaller, report, name)
                     for arm in arms |own_name, subject_position, parameters, destructurable, smaller, report, name|:
+                        arm_bindings: mutable darray[sview] = []
+                        arm_pattern_complete: bool = proof_structural_pattern_bindings(arm.pattern, &arm_bindings)
+                        report.proof_obligation(false) if not arm_pattern_complete
+                        for arm_binding in arm_bindings |arm_binding, report, name, expression|:
+                            proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "a catch binding shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, arm_binding)
                         proof_structural_check_expression(arm.guard, own_name, subject_position, parameters, destructurable, smaller, report, name)
                         proof_structural_check_body(arm.body, own_name, subject_position, parameters, destructurable, smaller, report, name)
                 Ast::Expr.GetElse(guarded, recovery, _):
@@ -537,5 +561,15 @@ extend ElisaProof:
                     proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "captured value block is not structurally certified") if captures.count > 0 and proof_expr_has_call(expression) and proof_structural_captures_overlap(captures, block_smaller)
                 Ast::Expr.Lambda(_, _, position):
                     proof_structural_termination_finding(report, position.line, name, "recursive calls inside a closure are not structurally certified")
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, position):
+                    # A singleton candidate has an exact backend-equivalent callee and
+                    # capture-plus-argument list. Reuse ordinary call analysis for it; an
+                    # unresolved candidate set remains fail-closed because its target and
+                    # structural parameter positions are not uniquely known here.
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        proof_structural_check_expression(lowered.call, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    else:
+                        proof_structural_termination_finding(report, position.line, name, "unsupported expression may hide a structural recursive call")
                 _:
                     proof_structural_termination_finding(report, Ast::expr_pos(expression).line, name, "unsupported expression may hide a structural recursive call") if proof_expr_has_call(expression)

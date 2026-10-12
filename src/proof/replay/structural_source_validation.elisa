@@ -1,0 +1,462 @@
+# Source authority for structural recursion certificates.
+extend ElisaProof:
+    private:
+        def proof_replay_structural_text_compare(left: sview, right: sview, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            return false if sview_len(left) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + sview_len(left)
+            return false if sview_len(right) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + sview_len(right)
+            return true
+
+        def proof_replay_structural_work_charge(work: mutable usize&, amount: usize) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + amount
+            return true
+
+        struct ProofReplayStructuralSourceEntry:
+            name: sview
+            declaration: Ast::Decl
+            lemma: bool
+
+        struct ProofReplayStructuralSourceIndex:
+            entries: mutable darray[ProofReplayStructuralSourceEntry]
+            hashes: mutable darray[u32]
+            slots: mutable darray[usize]
+            ambiguous: mutable darray[bool]
+
+        struct ProofReplayStructuralSourceGraph:
+            declarations: mutable darray[Ast::Decl]
+            node_by_source_entry: mutable darray[usize]
+            out_starts: mutable darray[usize]
+            out_counts: mutable darray[usize]
+            out_targets: mutable darray[usize]
+            reverse_starts: mutable darray[usize]
+            reverse_counts: mutable darray[usize]
+            reverse_targets: mutable darray[usize]
+
+        def proof_replay_structural_source_graph_empty() -> ProofReplayStructuralSourceGraph:
+            return ProofReplayStructuralSourceGraph{declarations: [], node_by_source_entry: [], out_starts: [], out_counts: [], out_targets: [], reverse_starts: [], reverse_counts: [], reverse_targets: []}
+
+        def proof_replay_structural_lemma_name(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, source_work: mutable usize&) -> (complete: bool, found: bool):
+            for annotation in annotations |wanted, source_work|:
+                return (false, false) if not proof_replay_structural_text_compare(annotation.owner, "__lemma", source_work)
+                continue if annotation.owner != "__lemma"
+                return (false, false) if not proof_replay_structural_text_compare(annotation.name, wanted, source_work)
+                return (true, true) if annotation.name == wanted
+            return (true, false)
+
+        def proof_replay_structural_collect_source_entries(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, entries: mutable darray[ProofReplayStructuralSourceEntry]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            for declaration in declarations |entries, annotations, source_work, depth|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                name: mutable sview = ""
+                lemma: mutable bool = false
+                match declaration:
+                    Ast::Decl.Func(found, _, _, _, _, _, _):
+                        name <- found
+                        marker: (complete: bool, found: bool) = proof_replay_structural_lemma_name(annotations, name, source_work)
+                        return false if not marker.complete
+                        lemma <- marker.found
+                    Ast::Decl.Extern(found, _, _, _, _, _, _, _) | Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Enum(found, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _) | Ast::Decl.Import(found, _):
+                        name <- found
+                    Ast::Decl.Module(found, nested, _):
+                        name <- found
+                        return false if not proof_replay_structural_collect_source_entries(nested, annotations, entries, source_work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_structural_collect_source_entries(nested, annotations, entries, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                if name != "":
+                    return false if not proof_replay_structural_text_compare(name, name, source_work)
+                    entries.push(ProofReplayStructuralSourceEntry{name: name, declaration: declaration, lemma: lemma})
+            return true
+
+        def proof_replay_structural_source_index_build(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, index: ProofReplayStructuralSourceIndex):
+            index: mutable ProofReplayStructuralSourceIndex = ProofReplayStructuralSourceIndex{entries: [], hashes: [], slots: [], ambiguous: []}
+            return (false, index) if not proof_replay_structural_collect_source_entries(declarations, annotations, &index.entries, source_work, 0)
+            return (true, index) if index.entries.count == 0
+            capacity: usize = proof_name_index_capacity(index.entries.count)
+            return (false, index) if capacity == 0 or not proof_replay_structural_work_charge(source_work, capacity)
+            return (false, index) if not proof_replay_structural_work_charge(source_work, index.entries.count)
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            index.ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, index|:
+                index.slots[slot] <- index.entries.count
+                index.ambiguous[slot] <- false
+            for entry_index in 0..<index.entries.count |entry_index, index, capacity, source_work|:
+                entry: ProofReplayStructuralSourceEntry = index.entries[entry_index]
+                return (false, index) if not proof_replay_structural_text_compare(entry.name, entry.name, source_work)
+                hash: u32 = proof_name_hash(entry.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, entry_index, index, capacity, source_work, placed|:
+                    return (false, index) if not proof_replay_structural_work_charge(source_work, 1)
+                    current: usize = index.slots[slot]
+                    if current == index.entries.count:
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- entry_index
+                        placed <- true
+                        break
+                    if index.hashes[slot] == hash:
+                        current_name: sview = index.entries[current].name
+                        return (false, index) if not proof_replay_structural_text_compare(current_name, index.entries[entry_index].name, source_work)
+                        if current_name == index.entries[entry_index].name:
+                            index.ambiguous[slot] <- true
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, index) if not placed
+            return (true, index)
+
+        def proof_replay_structural_source_lookup(index: ProofReplayStructuralSourceIndex&, wanted: sview, source_work: mutable usize&) -> (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool):
+            capacity: usize = index.slots.count
+            return (true, 0, 0, Ast::Decl.Invalid, false) if capacity == 0 or wanted == ""
+            return (false, 0, 0, Ast::Decl.Invalid, false) if index.hashes.count != capacity or index.ambiguous.count != capacity
+            hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, wanted, index, capacity, source_work|:
+                return (false, 0, 0, Ast::Decl.Invalid, false) if not proof_replay_structural_work_charge(source_work, 1)
+                current: usize = index.slots[slot]
+                return (true, 0, 0, Ast::Decl.Invalid, false) if current == index.entries.count
+                return (false, 0, 0, Ast::Decl.Invalid, false) if current >= index.entries.count
+                if index.hashes[slot] == hash:
+                    current_name: sview = index.entries[current].name
+                    return (false, 0, 0, Ast::Decl.Invalid, false) if not proof_replay_structural_text_compare(current_name, wanted, source_work)
+                    if current_name == wanted:
+                        entry: ProofReplayStructuralSourceEntry = index.entries[current]
+                        return (true, 2, current, entry.declaration, entry.lemma) if index.ambiguous[slot]
+                        return (true, 1, current, entry.declaration, entry.lemma)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, 0, 0, Ast::Decl.Invalid, false)
+
+        def proof_replay_structural_charge_check_preflight(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
+            cost: mutable usize = 1
+            return false if not proof_replay_summary_expr_cost_body(body, cost, source_work, 0)
+            for parameter in parameters |cost, source_work|:
+                return false if not proof_replay_summary_expr_cost_add(cost, source_work, 1 + sview_len(parameter.name))
+                return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, source_work, 0)
+                return false if parameter.has_default and not proof_replay_summary_expr_cost(parameter.default_value, cost, source_work, 0)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            return false if cost > remaining / cost
+            square: usize = cost * cost
+            return false if cost > remaining / square
+            source_work <- source_work + square * cost
+            return true
+
+        def proof_replay_structural_metadata_with_work(enum_index: ProofEnumIndex, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], source_work: mutable usize&) -> (complete: bool, member: bool, position: usize, type_name: sview):
+            return (false, false, parameters.count, "") if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + parameters.count
+            body_cost: mutable usize = 0
+            return (false, false, parameters.count, "") if not proof_replay_summary_expr_cost_body(body, body_cost, source_work, 0)
+            return (false, false, parameters.count, "") if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + body_cost
+            max_enum_name_length: mutable usize = 0
+            for enum_name in enum_index.names |enum_name, source_work, max_enum_name_length|:
+                return (false, false, parameters.count, "") if not proof_replay_structural_text_compare(enum_name, enum_name, source_work)
+                max_enum_name_length <- sview_len(enum_name) if sview_len(enum_name) > max_enum_name_length
+            for parameter in parameters |source_work|:
+                return (false, false, parameters.count, "") if not proof_replay_structural_text_compare(parameter.name, parameter.name, source_work)
+                return (false, false, parameters.count, "") if not proof_replay_summary_expr_repeat_charge_with_work(parameter.type_expression, 1, source_work)
+                parameter_type_name: sview = proof_head_name(parameter.type_expression)
+                lookup_unit: usize = 1 + sview_len(parameter_type_name) + max_enum_name_length
+                return (false, false, parameters.count, "") if lookup_unit > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / (PROOF_INDEX_MAX_CHAIN * 2)
+                source_work <- source_work + lookup_unit * PROOF_INDEX_MAX_CHAIN * 2
+            components: mutable darray[Ast::Expr] = []
+            has_unbounded: mutable bool = false
+            for statement in body |source_work, has_unbounded|:
+                return (false, false, parameters.count, "") if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, _):
+                        proof_decreases_components(expression, &components) if kind == "decreases"
+                        has_unbounded <- true if kind == "decreases*"
+                    _:
+                        pass
+            if components.count == 0 and not has_unbounded:
+                inferred: (known: bool, parameter: sview, position: usize, type_name: sview) = proof_infer_structural_decrease(enum_index, parameters)
+                if inferred.known:
+                    components.push(Ast::Expr.Ident(inferred.parameter, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}))
+            member: mutable bool = false
+            position: mutable usize = parameters.count
+            type_name: mutable sview = ""
+            if components.count == 1:
+                subject: sview = proof_ident_name(components[0])
+                for parameter in parameters |parameter, subject, source_work|:
+                    return (false, false, parameters.count, "") if not proof_replay_structural_text_compare(parameter.name, subject, source_work)
+                position <- proof_enum_parameter_position(enum_index, parameters, subject)
+                member <- position < parameters.count
+                type_name <- proof_head_name(parameters[position].type_expression) if member
+            return (true, member, position, type_name)
+
+        def proof_replay_structural_table_add(report: mutable ProofReport&, name: sview, metadata: (complete: bool, member: bool, position: usize, type_name: sview), component: usize) -> bool:
+            return false if not metadata.complete or name == ""
+            report.structural.names.push(name)
+            report.structural.subject_positions.push(metadata.position)
+            report.structural.subject_types.push(metadata.type_name)
+            report.structural.component_ids.push(component)
+            report.structural.members.push(metadata.member)
+            return true
+
+        def proof_replay_structural_nodes_same_with_work(expected_nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, expected_children: darray[usize]&, actual_nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, actual_children: darray[usize]&, expected_edge: ElisaProofKernelCore::ProofKernelNode, actual_edge: ElisaProofKernelCore::ProofKernelNode, source_work: mutable usize&) -> bool:
+            return false if expected_edge.children_count != actual_edge.children_count or expected_edge.children_count == 0
+            return false if expected_edge.children_start > expected_children.count or expected_edge.children_count > expected_children.count - expected_edge.children_start
+            return false if actual_edge.children_start > actual_children.count or actual_edge.children_count > actual_children.count - actual_edge.children_start
+            for index in 0..<expected_edge.children_count |index, expected_nodes, expected_children, actual_nodes, actual_children, expected_edge, actual_edge, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
+                expected_id: usize = expected_children[expected_edge.children_start + index]
+                actual_id: usize = actual_children[actual_edge.children_start + index]
+                return false if expected_id >= expected_nodes.count or actual_id >= actual_nodes.count
+                expected: ElisaProofKernelCore::ProofKernelNode = expected_nodes[expected_id]
+                actual: ElisaProofKernelCore::ProofKernelNode = actual_nodes[actual_id]
+                return false if expected.kind != "structural-argument" or actual.kind != "structural-argument"
+                return false if not proof_replay_structural_text_compare(expected.operator, actual.operator, source_work)
+                return false if not proof_replay_structural_text_compare(expected.name, actual.name, source_work) or not proof_replay_structural_text_compare(expected.secondary_name, actual.secondary_name, source_work)
+                return false if expected.operator != actual.operator or expected.name != actual.name or expected.secondary_name != actual.secondary_name
+                for prior in 0..<index |prior, expected_nodes, expected_children, actual_nodes, actual_children, expected_edge, actual_edge, expected, actual, source_work|:
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 4
+                    source_work <- source_work + 4
+                    expected_prior_id: usize = expected_children[expected_edge.children_start + prior]
+                    actual_prior_id: usize = actual_children[actual_edge.children_start + prior]
+                    return false if expected_prior_id >= expected_nodes.count or actual_prior_id >= actual_nodes.count
+                    expected_prior: ElisaProofKernelCore::ProofKernelNode = expected_nodes[expected_prior_id]
+                    actual_prior: ElisaProofKernelCore::ProofKernelNode = actual_nodes[actual_prior_id]
+                    return false if (expected.value == expected_prior.value) != (actual.value == actual_prior.value)
+                    return false if (expected.value == expected_prior.auxiliary) != (actual.value == actual_prior.auxiliary)
+                    return false if (expected.auxiliary == expected_prior.value) != (actual.auxiliary == actual_prior.value)
+                    return false if (expected.auxiliary == expected_prior.auxiliary) != (actual.auxiliary == actual_prior.auxiliary)
+                return false if (expected.value == expected.auxiliary) != (actual.value == actual.auxiliary)
+            return true
+
+        def proof_replay_structural_certificate_set_matches_with_work(report: ProofReport&, owner: sview, expected: ProofReport&, source_work: mutable usize&) -> bool:
+            expected_count: usize = expected.certificates.count
+            return false if expected_count == 0
+            expected_index: mutable usize = 0
+            for actual_certificate in report.certificates |owner, expected, expected_index, source_work|:
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 1
+                source_work <- source_work + 1
+                return false if not proof_replay_structural_text_compare(actual_certificate.name, owner, source_work)
+                if actual_certificate.rule == "structural-safety" and actual_certificate.name == owner:
+                    return false if expected_index >= expected_count
+                    expected_certificate: ProofGoalCertificate = expected.certificates[expected_index]
+                    return false if actual_certificate.line != expected_certificate.line or actual_certificate.rule != expected_certificate.rule
+                    return false if actual_certificate.kernel_goal >= report.kernel.nodes.count or expected_certificate.kernel_goal >= expected.kernel.nodes.count
+                    actual_root: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[actual_certificate.kernel_goal]
+                    expected_root: ElisaProofKernelCore::ProofKernelNode = expected.kernel.nodes[expected_certificate.kernel_goal]
+                    return false if actual_root.kind != "structural-safety" or expected_root.kind != "structural-safety" or actual_root.secondary_name != "structural-v2" or expected_root.secondary_name != "structural-v2"
+                    return false if actual_root.left != expected_root.left or actual_root.children_count != 1 or expected_root.children_count != 1
+                    return false if not proof_replay_structural_text_compare(actual_root.name, expected_root.name, source_work) or actual_root.name != expected_root.name
+                    return false if actual_root.children_start > report.kernel.children.count or expected_root.children_start > expected.kernel.children.count
+                    return false if actual_root.children_count > report.kernel.children.count - actual_root.children_start or expected_root.children_count > expected.kernel.children.count - expected_root.children_start
+                    actual_edge_id: usize = report.kernel.children[actual_root.children_start]
+                    expected_edge_id: usize = expected.kernel.children[expected_root.children_start]
+                    return false if actual_edge_id >= report.kernel.nodes.count or expected_edge_id >= expected.kernel.nodes.count
+                    actual_edge: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[actual_edge_id]
+                    expected_edge: ElisaProofKernelCore::ProofKernelNode = expected.kernel.nodes[expected_edge_id]
+                    return false if actual_edge.kind != "structural-edge" or expected_edge.kind != "structural-edge"
+                    return false if not proof_replay_structural_text_compare(actual_edge.name, expected_edge.name, source_work) or not proof_replay_structural_text_compare(actual_edge.secondary_name, expected_edge.secondary_name, source_work)
+                    return false if actual_edge.name != expected_edge.name or actual_edge.secondary_name != expected_edge.secondary_name
+                    return false if not proof_replay_structural_nodes_same_with_work(expected.kernel.nodes, expected.kernel.children, report.kernel.nodes, report.kernel.children, expected_edge, actual_edge, source_work)
+                    expected_index <- expected_index + 1
+            return expected_index == expected_count
+
+        # Build the exact supported source call graph. The caller refuses scoped, shadowed,
+        # ambiguous, or unsupported call walks, so no omitted edge can change a mutual-SCC
+        # decision. A zero-match direct name has no declaration in the complete retained source
+        # tree, so it cannot name a row in the producer's source-function table (for example, an
+        # imported or intrinsic callable). Lemmas are also absent from that executable table.
+        def proof_replay_structural_source_graph_build(index: ProofReplayStructuralSourceIndex&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, enum_index: ProofEnumIndex, scratch: mutable ProofReport&, source_work: mutable usize&, graph: mutable ProofReplayStructuralSourceGraph&) -> bool:
+            graph <- proof_replay_structural_source_graph_empty()
+            return false if signature_lines.count != signature_kinds.count or signature_lines.count != signature_contracts.count
+            return false if index.entries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + index.entries.count
+            graph.node_by_source_entry.resize(index.entries.count)
+            for entry_index in 0..<index.entries.count |entry_index, index, graph, scratch, source_work, enum_index|:
+                graph.node_by_source_entry[entry_index] <- index.entries.count
+                entry: ProofReplayStructuralSourceEntry = index.entries[entry_index]
+                match entry.declaration:
+                    Ast::Decl.Func(_, parameters, _, body, _, _, _):
+                        continue if entry.lemma
+                        owner: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(index, entry.name, source_work)
+                        return false if not owner.complete
+                        return false if owner.matches != 1 or owner.entry_index != entry_index
+                        metadata: (complete: bool, member: bool, position: usize, type_name: sview) = proof_replay_structural_metadata_with_work(enum_index, parameters, body, source_work)
+                        return false if not metadata.complete
+                        node_index: usize = graph.declarations.count
+                        return false if not proof_replay_structural_table_add(scratch, entry.name, metadata, node_index)
+                        graph.declarations.push(entry.declaration)
+                        graph.node_by_source_entry[entry_index] <- node_index
+                    _:
+                        pass
+            node_count: usize = graph.declarations.count
+            return false if node_count != scratch.structural.names.count or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for source_index in 0..<node_count |source_index, graph, index, source_work|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                graph.out_starts.push(graph.out_targets.count)
+                match graph.declarations[source_index]:
+                    Ast::Decl.Func(_, parameters, _, body, _, _, position):
+                        calls: mutable darray[sview] = []
+                        target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0}
+                        calls_complete: bool = proof_replay_source_calls_with_target_work(parameters, body, &calls, target, source_work)
+                        return false if not calls_complete
+                        for signature_index in 0..<signature_lines.count |signature_index, signature_lines, signature_kinds, signature_contracts, position, parameters, calls, source_work|:
+                            return false if not proof_replay_structural_work_charge(source_work, 1 + sview_len(signature_kinds[signature_index]))
+                            continue if signature_lines[signature_index] != position.line or (signature_kinds[signature_index] != "requires" and signature_kinds[signature_index] != "ensure")
+                            return false if not proof_replay_source_expression_calls_with_work(parameters, signature_contracts[signature_index], &calls, source_work)
+                        for call in calls |call, graph, index, source_work|:
+                            target_source: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(index, call, source_work)
+                            return false if not target_source.complete
+                            return false if target_source.matches == 2
+                            # No local declaration and erased lemma declarations are not rows in
+                            # `ProofFunctionTable`; neither can connect executable SCCs.
+                            continue if target_source.matches == 0
+                            continue if target_source.lemma
+                            match target_source.declaration:
+                                Ast::Decl.Func(_, _, _, _, _, _, _):
+                                    return false if target_source.entry_index >= graph.node_by_source_entry.count
+                                    target_index: usize = graph.node_by_source_entry[target_source.entry_index]
+                                    return false if target_index >= node_count
+                                    return false if not proof_replay_structural_work_charge(source_work, 1)
+                                    graph.out_targets.push(target_index)
+                                _:
+                                    pass
+                    _:
+                        return false
+                graph.out_counts.push(graph.out_targets.count - graph.out_starts[source_index])
+            graph.reverse_counts.resize(node_count)
+            return false if not proof_replay_structural_work_charge(source_work, node_count)
+            for target_index in graph.out_targets |target_index, graph, node_count|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                return false if target_index >= node_count
+                graph.reverse_counts[target_index] <- graph.reverse_counts[target_index] + 1
+            reverse_cursor: mutable usize = 0
+            for incoming in graph.reverse_counts |incoming, graph, reverse_cursor, source_work|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                graph.reverse_starts.push(reverse_cursor)
+                return false if incoming > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - reverse_cursor
+                reverse_cursor <- reverse_cursor + incoming
+            return false if not proof_replay_structural_work_charge(source_work, reverse_cursor)
+            graph.reverse_targets.resize(reverse_cursor)
+            return false if not proof_replay_structural_work_charge(source_work, node_count)
+            write_cursor: mutable darray[usize] = []
+            write_cursor.extend(graph.reverse_starts)
+            for source_index in 0..<node_count |source_index, graph, write_cursor|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                start: usize = graph.out_starts[source_index]
+                count: usize = graph.out_counts[source_index]
+                return false if start > graph.out_targets.count or count > graph.out_targets.count - start
+                for offset in 0..<count |offset, source_index, graph, write_cursor|:
+                    return false if not proof_replay_structural_work_charge(source_work, 1)
+                    target_index: usize = graph.out_targets[start + offset]
+                    slot: usize = write_cursor[target_index]
+                    graph.reverse_targets[slot] <- source_index
+                    write_cursor[target_index] <- slot + 1
+            return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+        def proof_replay_structural_graph_mark_reachable(starts: darray[usize]&, counts: darray[usize]&, targets: darray[usize]&, node_count: usize, source: usize, reachable: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            return false if source >= node_count or starts.count != node_count or counts.count != node_count
+            return false if not proof_replay_structural_work_charge(source_work, node_count)
+            reachable.clear()
+            reachable.resize(node_count)
+            queue: mutable darray[usize] = [source]
+            reachable[source] <- true
+            cursor: mutable usize = 0
+            while cursor < queue.count |cursor, queue, reachable, starts, counts, targets, node_count, source_work|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                current: usize = queue[cursor]
+                start: usize = starts[current]
+                count: usize = counts[current]
+                return false if start > targets.count or count > targets.count - start
+                for offset in 0..<count |offset, current, start, queue, reachable, starts, counts, targets, node_count, source_work|:
+                    return false if not proof_replay_structural_work_charge(source_work, 1)
+                    next: usize = targets[start + offset]
+                    return false if next >= node_count
+                    if not reachable[next]:
+                        reachable[next] <- true
+                        queue.push(next)
+                cursor <- cursor + 1
+            return true
+
+        def proof_replay_structural_graph_has_edge(graph: ProofReplayStructuralSourceGraph&, source: usize, target: usize, source_work: mutable usize&) -> bool:
+            return false if source >= graph.out_starts.count or source >= graph.out_counts.count
+            start: usize = graph.out_starts[source]
+            count: usize = graph.out_counts[source]
+            return false if start > graph.out_targets.count or count > graph.out_targets.count - start
+            for offset in 0..<count |offset, start, graph, target, source_work|:
+                return false if not proof_replay_structural_work_charge(source_work, 1)
+                return true if graph.out_targets[start + offset] == target
+            return false
+
+        def proof_replay_structural_certificate_source_valid_with_work(report: ProofReport&, certificate: ProofGoalCertificate, source_work: mutable usize&) -> bool:
+            return false if certificate.kernel_goal >= report.kernel.nodes.count
+            root: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[certificate.kernel_goal]
+            return false if root.kind != "structural-safety" or root.secondary_name != "structural-v2" or root.children_count != 1 or root.children_start > report.kernel.children.count or root.children_count > report.kernel.children.count - root.children_start
+            return false if not proof_replay_structural_text_compare(root.name, certificate.name, source_work) or root.name != certificate.name
+            edge_id: usize = report.kernel.children[root.children_start]
+            return false if edge_id >= report.kernel.nodes.count
+            edge: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[edge_id]
+            return false if edge.kind != "structural-edge"
+            return false if not proof_replay_structural_text_compare(edge.name, certificate.name, source_work) or edge.name != certificate.name
+            source_index_result: (complete: bool, index: ProofReplayStructuralSourceIndex) = proof_replay_structural_source_index_build(report.source_declarations, report.source_annotations, source_work)
+            return false if not source_index_result.complete
+            source_index: mutable ProofReplayStructuralSourceIndex = source_index_result.index
+            source_owner: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(source_index, certificate.name, source_work)
+            source_callee: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(source_index, edge.secondary_name, source_work)
+            return false if not source_owner.complete or source_owner.matches != 1 or source_owner.lemma
+            return false if not source_callee.complete or source_callee.matches != 1 or source_callee.lemma
+            match source_owner.declaration:
+                Ast::Decl.Func(_, parameters, _, body, _, _, _):
+                    callee_is_function: mutable bool = false
+                    match source_callee.declaration:
+                        Ast::Decl.Func(_, _, _, _, _, _, _):
+                            callee_is_function <- true
+                        _:
+                            pass
+                    return false if not callee_is_function
+                    call_target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: true, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: false, offset: root.left, line: certificate.line, name: edge.secondary_name, calls_at_offset: 0, matched_calls: 0}
+                    source_calls: mutable darray[sview] = []
+                    return false if not proof_replay_source_calls_with_target_work(parameters, body, &source_calls, call_target, source_work)
+                    return false if call_target.calls_at_offset != 1 or call_target.matched_calls != 1
+                    call_found: mutable bool = false
+                    for source_call in source_calls |source_call, edge, call_found, source_work|:
+                        return false if not proof_replay_structural_text_compare(source_call, edge.secondary_name, source_work)
+                        call_found <- true if source_call == edge.secondary_name
+                    return false if not call_found
+                    enum_index: ProofEnumIndex = proof_build_enum_index(report.source_declarations, source_work)
+                    return false if not enum_index.complete or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    scratch: mutable ProofReport = proof_empty_report()
+                    graph: mutable ProofReplayStructuralSourceGraph = proof_replay_structural_source_graph_empty()
+                    return false if not proof_replay_structural_source_graph_build(source_index, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, enum_index, &scratch, source_work, &graph)
+                    return false if source_owner.entry_index >= graph.node_by_source_entry.count or source_callee.entry_index >= graph.node_by_source_entry.count
+                    caller_node: usize = graph.node_by_source_entry[source_owner.entry_index]
+                    callee_node: usize = graph.node_by_source_entry[source_callee.entry_index]
+                    return false if caller_node >= graph.declarations.count or callee_node >= graph.declarations.count
+                    return false if caller_node >= scratch.structural.members.count or not scratch.structural.members[caller_node]
+                    return false if not proof_replay_structural_graph_has_edge(graph, caller_node, callee_node, source_work)
+                    caller_reachable: mutable darray[bool] = []
+                    reaches_complete: bool = proof_replay_structural_graph_mark_reachable(graph.out_starts, graph.out_counts, graph.out_targets, graph.declarations.count, caller_node, &caller_reachable, source_work)
+                    return false if not reaches_complete
+                    caller_reaching: mutable darray[bool] = []
+                    reaches_complete <- proof_replay_structural_graph_mark_reachable(graph.reverse_starts, graph.reverse_counts, graph.reverse_targets, graph.declarations.count, caller_node, &caller_reaching, source_work)
+                    return false if not reaches_complete or not caller_reachable[callee_node] or not caller_reaching[callee_node]
+                    for node_index in 0..<graph.declarations.count |node_index, graph, scratch, caller_reachable, caller_reaching|:
+                        scratch.structural.component_ids[node_index] <- caller_node if caller_reachable[node_index] and caller_reaching[node_index]
+                    return false if not proof_replay_structural_charge_check_preflight(parameters, body, source_work)
+                    proof_check_structural_function(enum_index, certificate.name, parameters, body, &scratch)
+                    return false if scratch.failed != 0 or scratch.kernel.budget_exhausted
+                    owner_verified: mutable bool = false
+                    for verified_name in scratch.structural.verified_names |certificate, source_work, owner_verified|:
+                        return false if not proof_replay_structural_text_compare(verified_name, certificate.name, source_work)
+                        owner_verified <- true if verified_name == certificate.name
+                    return false if not owner_verified
+                    return proof_replay_structural_certificate_set_matches_with_work(report, certificate.name, scratch, source_work)
+                _:
+                    return false

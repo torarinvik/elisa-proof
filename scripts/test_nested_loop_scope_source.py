@@ -35,7 +35,7 @@ extend ElisaProof:
             return 4 if not proof_replay_loop_scope(body, 10, &condition, &inner, &lexical_body)
             return 5 if proof_replay_loop_scope(body, 9, &condition, &inner, &lexical_body)
             matches: mutable usize = 0
-            work: mutable usize = 4096
+            work: mutable usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return 6 if proof_replay_loop_scope_walk(body, 10, &condition, &inner, &lexical_body, &matches, &work, 0)
             work <- 0
             return 7 if proof_replay_loop_scope_walk(body, 10, &condition, &inner, &lexical_body, &matches, &work, 64)

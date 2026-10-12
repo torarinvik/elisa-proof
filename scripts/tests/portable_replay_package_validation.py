@@ -166,7 +166,7 @@ result = refused(claim, "admissible-type-integer", "malformed", "source-schema")
 assert result["summary"] == {"theorems": 0, "replayed": 0, "not_replayed": 0}, result
 assert result["theorems"] == [], result
 claim = with_theorem(base, assumption)
-claim["format"] = "elisa-proof-package-v2"
+claim["format"] = "elisa-proof-package-v3"
 refused(claim, "format", "malformed", "format")
 for bad in ("01", "-0", "+1", "", " 1", "9223372036854775808", "-9223372036854775809", "1e3"):
     claim = with_theorem(base, assumption)

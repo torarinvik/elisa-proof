@@ -5,7 +5,6 @@ extend ElisaProof:
     private:
         const PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT: usize = 16384
         const PROOF_REPLAY_CONTROL_DEPTH_LIMIT: usize = 64
-        const PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT: usize = 4096
         const PROOF_REPLAY_CONTROL_INVALID_OWNER_LINE: u32 = 4294967295
 
         def proof_replay_control_source_position_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
@@ -237,8 +236,16 @@ extend ElisaProof:
                         work <- work + 1
                     hidden_matches: mutable usize = 0
                     return proof_replay_control_assertion_scan(body, certificate, depth + 1, work, &hidden_matches)
-                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
+                Ast::Expr.Call(callee, arguments, _, _):
                     return false if not proof_replay_control_assertion_expr_scan(callee, certificate, depth + 1, work, matches)
+                    for argument in arguments |certificate, depth, work, matches|:
+                        return false if not proof_replay_control_assertion_expr_scan(argument, certificate, depth + 1, work, matches)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |certificate, depth, work, matches|:
+                        return false if work >= PROOF_REPLAY_CONTROL_SOURCE_WORK_LIMIT
+                        work <- work + 1
+                        for capture in candidate.captures |certificate, depth, work, matches|:
+                            return false if not proof_replay_control_assertion_expr_scan(capture, certificate, depth + 1, work, matches)
                     for argument in arguments |certificate, depth, work, matches|:
                         return false if not proof_replay_control_assertion_expr_scan(argument, certificate, depth + 1, work, matches)
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
@@ -414,73 +421,90 @@ extend ElisaProof:
                     assertion_index <- index
             assertion_matches == 1 and assertion_index > loop_index
 
-        def proof_replay_control_body_has_break(body: darray[Ast::Stmt]&, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_control_body_has_break(body: darray[Ast::Stmt]&, depth: usize, loop_depth: usize, work: mutable usize&, work_limit: usize) -> bool:
             return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT
-            for statement in body |depth, work|:
-                return true if work >= PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT
+            for statement in body |depth, loop_depth, work, work_limit|:
+                return true if work >= work_limit
                 work <- work + 1
                 match statement:
-                    Ast::Stmt.Break(_, _):
-                        return true
+                    Ast::Stmt.Break(label, _):
+                        return true if label != "" or loop_depth == 0
                     Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.VarDecl(_, _, expression, _) | Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_replay_control_expr_has_break(expression, depth + 1, work)
+                        return true if proof_replay_control_expr_has_break(expression, depth + 1, loop_depth, work, work_limit)
                     Ast::Stmt.Assign(target, _, value, _):
-                        return true if proof_replay_control_expr_has_break(target, depth + 1, work) or proof_replay_control_expr_has_break(value, depth + 1, work)
+                        return true if proof_replay_control_expr_has_break(target, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(value, depth + 1, loop_depth, work, work_limit)
                     Ast::Stmt.Block(kind, _, _, inner, _):
-                        return true if kind != "assert_by" and proof_replay_control_body_has_break(inner, depth + 1, work)
-                    Ast::Stmt.While(condition, inner, _) | Ast::Stmt.For(_, _, condition, inner, _):
-                        return true if proof_replay_control_expr_has_break(condition, depth + 1, work) or proof_replay_control_body_has_break(inner, depth + 1, work)
+                        return true if kind != "assert_by" and proof_replay_control_body_has_break(inner, depth + 1, loop_depth, work, work_limit)
+                    Ast::Stmt.While(condition, inner, _):
+                        return true if proof_replay_control_expr_has_break(condition, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(inner, depth + 1, loop_depth + 1, work, work_limit)
+                    Ast::Stmt.For(_, _, iterable, inner, _):
+                        return true if proof_replay_control_expr_has_break(iterable, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(inner, depth + 1, loop_depth + 1, work, work_limit)
                     Ast::Stmt.If(condition, yes, no, _):
-                        return true if proof_replay_control_expr_has_break(condition, depth + 1, work) or proof_replay_control_body_has_break(yes, depth + 1, work) or proof_replay_control_body_has_break(no, depth + 1, work)
+                        return true if proof_replay_control_expr_has_break(condition, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(yes, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(no, depth + 1, loop_depth, work, work_limit)
                     Ast::Stmt.Match(subject, arms, _):
-                        return true if proof_replay_control_expr_has_break(subject, depth + 1, work)
-                        for arm in arms |depth, work|:
-                            return true if proof_replay_control_expr_has_break(arm.guard, depth + 1, work) or proof_replay_control_body_has_break(arm.body, depth + 1, work)
+                        return true if proof_replay_control_expr_has_break(subject, depth + 1, loop_depth, work, work_limit)
+                        for arm in arms |depth, loop_depth, work, work_limit|:
+                            return true if work >= work_limit
+                            work <- work + 1
+                            return true if proof_replay_control_expr_has_break(arm.guard, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(arm.body, depth + 1, loop_depth, work, work_limit)
+                    Ast::Stmt.Continue(_, _):
+                        pass
                     _:
                         return true
             return false
 
-        def proof_replay_control_expr_has_break(expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
-            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= PROOF_REPLAY_CONTROL_EXPR_WORK_LIMIT
+        def proof_replay_control_expr_has_break(expression: Ast::Expr, depth: usize, loop_depth: usize, work: mutable usize&, work_limit: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_CONTROL_DEPTH_LIMIT or work >= work_limit
             work <- work + 1
             match expression:
                 Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
                     return false
-                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.StaticEffectCall(callee, _, _, arguments, _, _):
-                    return true if proof_replay_control_expr_has_break(callee, depth + 1, work)
-                    for argument in arguments |depth, work|:
-                        return true if proof_replay_control_expr_has_break(argument, depth + 1, work)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_replay_control_expr_has_break(callee, depth + 1, loop_depth, work, work_limit)
+                    for argument in arguments |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(argument, depth + 1, loop_depth, work, work_limit)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |depth, loop_depth, work, work_limit|:
+                        return true if work >= work_limit
+                        work <- work + 1
+                        for capture in candidate.captures |depth, loop_depth, work, work_limit|:
+                            return true if proof_replay_control_expr_has_break(capture, depth + 1, loop_depth, work, work_limit)
+                    for argument in arguments |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(argument, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
-                    return proof_replay_control_expr_has_break(object, depth + 1, work)
+                    return proof_replay_control_expr_has_break(object, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _) | Ast::Expr.Refinement(object, index, _):
-                    return proof_replay_control_expr_has_break(object, depth + 1, work) or proof_replay_control_expr_has_break(index, depth + 1, work)
+                    return proof_replay_control_expr_has_break(object, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(index, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
-                    return proof_replay_control_expr_has_break(object, depth + 1, work) or proof_replay_control_expr_has_break(low, depth + 1, work) or proof_replay_control_expr_has_break(high, depth + 1, work)
+                    return proof_replay_control_expr_has_break(object, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(low, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(high, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_replay_control_expr_has_break(object, depth + 1, work)
-                    for argument in arguments |depth, work|:
-                        return true if proof_replay_control_expr_has_break(argument, depth + 1, work)
+                    return true if proof_replay_control_expr_has_break(object, depth + 1, loop_depth, work, work_limit)
+                    for argument in arguments |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(argument, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    for element in elements |depth, work|:
-                        return true if proof_replay_control_expr_has_break(element, depth + 1, work)
+                    for element in elements |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(element, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.DictLit(entries, _):
-                    for entry in entries |depth, work|:
-                        return true if proof_replay_control_expr_has_break(entry.key, depth + 1, work) or proof_replay_control_expr_has_break(entry.value, depth + 1, work)
+                    for entry in entries |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(entry.key, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(entry.value, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_replay_control_expr_has_break(base, depth + 1, work)
-                    for field in fields |depth, work|:
-                        return true if proof_replay_control_expr_has_break(field.value, depth + 1, work)
+                    return true if proof_replay_control_expr_has_break(base, depth + 1, loop_depth, work, work_limit)
+                    for field in fields |depth, loop_depth, work, work_limit|:
+                        return true if proof_replay_control_expr_has_break(field.value, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
-                    return true if proof_replay_control_expr_has_break(subject, depth + 1, work)
-                    for arm in arms |depth, work|:
-                        return true if proof_replay_control_expr_has_break(arm.guard, depth + 1, work) or proof_replay_control_body_has_break(arm.body, depth + 1, work)
+                    return true if proof_replay_control_expr_has_break(subject, depth + 1, loop_depth, work, work_limit)
+                    for arm in arms |depth, loop_depth, work, work_limit|:
+                        return true if work >= work_limit
+                        work <- work + 1
+                        return true if proof_replay_control_expr_has_break(arm.guard, depth + 1, loop_depth, work, work_limit) or proof_replay_control_body_has_break(arm.body, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Comprehension(_, iterable, condition, value, _):
-                    return proof_replay_control_expr_has_break(iterable, depth + 1, work) or proof_replay_control_expr_has_break(condition, depth + 1, work) or proof_replay_control_expr_has_break(value, depth + 1, work)
+                    return true if proof_replay_control_expr_has_break(iterable, depth + 1, loop_depth, work, work_limit)
+                    return proof_replay_control_expr_has_break(condition, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(value, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return true if proof_replay_control_expr_has_break(guarded, depth + 1, work)
-                    return proof_replay_control_body_has_break(recovery, depth + 1, work)
+                    return true if proof_replay_control_expr_has_break(guarded, depth + 1, loop_depth, work, work_limit)
+                    return proof_replay_control_body_has_break(recovery, depth + 1, loop_depth, work, work_limit)
                 Ast::Expr.Lambda(_, _, _):
                     return false
                 Ast::Expr.Block(statements, value, _, _):
-                    return proof_replay_control_body_has_break(statements, depth + 1, work) or proof_replay_control_expr_has_break(value, depth + 1, work)
+                    return proof_replay_control_body_has_break(statements, depth + 1, loop_depth, work, work_limit) or proof_replay_control_expr_has_break(value, depth + 1, loop_depth, work, work_limit)
             return true

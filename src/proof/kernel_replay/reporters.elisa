@@ -156,8 +156,10 @@ extend ElisaProofKernelReplay:
                 return false if not child.known
                 callee_roots.push(child.value)
             callee_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
-            callee_state.formal_names.extend(formal_names)
             callee_state.resource_work_used <- state.resource_work_used
+            return false if not proof_kernel_replay_resource_charge_work(callee_state, formal_names.count)
+            callee_state.formal_names.extend(formal_names)
+            state.resource_work_used <- callee_state.resource_work_used
             callee_effects: mutable darray[ProofKernelReplayResourceEffect] @r = []
             return false if not (proof_kernel_replay_resource_events_remaining(nodes, children, callee_roots, &callee_state, &callee_effects, depth + 1, remaining - 1, arena_admitted) can Global{Read,Write})
             state.resource_work_used <- callee_state.resource_work_used
@@ -210,6 +212,7 @@ extend ElisaProofKernelReplay:
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + index)
                 return false if not child.known
                 roots.push(child.value)
+            return false if not proof_kernel_replay_resource_charge_work(state, formal_names.count)
             state.formal_names.extend(formal_names)
             effects: mutable darray[ProofKernelReplayResourceEffect] @r = []
             return false if not (proof_kernel_replay_resource_events(nodes, children, roots, &state, &effects, 0, arena_admitted) can Global{Read,Write})
@@ -229,25 +232,35 @@ extend ElisaProofKernelReplay:
             return true
 
         # Replay one structural recursive edge. The AST checker supplies the typed match-binder
-        # provenance; this kernel checks the source-neutral ranking relation that is actually
-        # consumed by recursive summaries: every subject is preserved or strictly descended,
-        # at least one subject is strict, same-subject claims are exact, and no subject is
-        # duplicated. Unknown or malformed witness shapes fail closed.
-        def proof_kernel_replay_structural_edge(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, caller: sview, depth: usize) -> bool:
+        # provenance. This checks only source-neutral witness/rank shape: every subject is
+        # preserved or strictly descended, at least one subject is strict, same-subject claims
+        # are exact, and no subject is duplicated. It does not establish source termination;
+        # report admission must separately bind these witnesses to authenticated source calls.
+        # Unknown or malformed witness shapes fail closed.
+        def proof_kernel_replay_structural_edge(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, caller: sview, depth: usize, work_used: mutable usize&) -> bool:
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, root)
-            return false if not located.known or located.node.kind != "structural-edge" or located.node.name != caller
+            return false if not located.known
+            return false if not proof_kernel_replay_resource_charge_node_text_used(work_used, located.node)
+            return false if not proof_kernel_replay_resource_charge_text_pair_used(work_used, located.node.name, caller)
+            return false if located.node.kind != "structural-edge" or located.node.name != caller
             return false if not proof_kernel_replay_child_range_valid(located.node.children_start, located.node.children_count, children.count)
             strict_count: mutable usize = 0
             subjects: mutable darray[usize] = []
-            for index in 0..<located.node.children_count |index, located, children, nodes, subjects, strict_count|:
+            for index in 0..<located.node.children_count |index, located, children, nodes, subjects, strict_count, work_used|:
+                return false if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + index)
                 return false if not child.known
                 witness: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, child.value)
-                return false if not witness.known or witness.node.kind != "structural-argument"
-                return false if any prior in subjects where prior == witness.node.value
+                return false if not witness.known
+                return false if not proof_kernel_replay_resource_charge_node_text_used(work_used, witness.node)
+                return false if witness.node.kind != "structural-argument"
+                for prior in subjects |prior, work_used|:
+                    return false if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
+                    return false if prior == witness.node.value
                 subjects.push(witness.node.value)
                 if witness.node.operator == "same":
+                    return false if not proof_kernel_replay_resource_charge_text_pair_used(work_used, witness.node.name, witness.node.secondary_name)
                     return false if witness.node.name != witness.node.secondary_name or witness.node.value != witness.node.auxiliary
                 elif witness.node.operator == "strict":
                     return false if witness.node.value == witness.node.auxiliary
@@ -260,15 +273,18 @@ extend ElisaProofKernelReplay:
             return false if facts.count != 0
             return false if not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, facts, goal_root)
             located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, goal_root)
-            return false if not located.known or located.node.kind != "structural-safety" or located.node.secondary_name != "structural-v1"
+            return false if not located.known or located.node.kind != "structural-safety" or located.node.secondary_name != "structural-v2"
             return false if not proof_kernel_replay_child_range_valid(located.node.children_start, located.node.children_count, children.count)
             # A structural certificate with no recursive edges proves nothing. Reject the empty
             # trace explicitly instead of letting the edge loop succeed vacuously.
             return false if located.node.children_count == 0
-            for index in 0..<located.node.children_count |index, located, children, nodes|:
+            work_used: mutable usize = 0
+            return false if not proof_kernel_replay_resource_charge_node_text_used(&work_used, located.node)
+            for index in 0..<located.node.children_count |index, located, children, nodes, work_used|:
+                return false if not proof_kernel_replay_resource_charge_work_used(&work_used, 1)
                 child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, located.node.children_start + index)
                 return false if not child.known
-                return false if not proof_kernel_replay_structural_edge(nodes, children, child.value, located.node.name, index)
+                return false if not proof_kernel_replay_structural_edge(nodes, children, child.value, located.node.name, index, &work_used)
             return true
 
         def proof_kernel_replay_effect_report_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize, arena_admitted: bool) -> bool:

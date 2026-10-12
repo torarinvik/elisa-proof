@@ -32,7 +32,8 @@ extend ElisaProofKernelReplay:
                     return false if not goal_located.known or goal_located.node.kind != "binary" or goal_located.node.operator != "!=" or goal_located.node.left != node.left or goal_located.node.right != node.right
                     return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                     proof_facts: mutable darray[usize] = []
-                    for index in 0..<node.children_count |index, node, children, proof_facts|:
+                    for index in 0..<node.children_count |index, node, children, proof_facts, state|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                         return false if not child.known or child.value >= nodes.count
                         proof_facts.push(child.value)
@@ -45,7 +46,8 @@ extend ElisaProofKernelReplay:
                 if node.kind == "resource-scope":
                     return false if not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
                     child_roots: mutable darray[usize] = []
-                    for index in 0..<node.children_count |index, node, children, child_roots|:
+                    for index in 0..<node.children_count |index, node, children, child_roots, state|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                         return false if not child.known
                         child_roots.push(child.value)
@@ -72,6 +74,7 @@ extend ElisaProofKernelReplay:
                     state.resource_work_used <- child_state.resource_work_used
                     return false if not proof_kernel_replay_resource_scope_preserves_parent(state, child_state)
                     for index in 0..<state.binding_moved.count |index, state, child_state|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         return false if index >= child_state.binding_moved.count or index >= state.pending_join_moves.count
                         state.pending_join_moves[index] <- true if not state.binding_moved[index] and child_state.binding_moved[index]
                     continue
@@ -140,7 +143,8 @@ extend ElisaProofKernelReplay:
                     state.resource_call_allocations.push(root)
                     continue
                 if node.kind == "resource-region-return":
-                    return false if any used_witness in state.resource_return_witnesses_used where used_witness == node.left
+                    used_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_return_witnesses_used, node.left, &state.resource_work_used)
+                    return false if not used_witness_membership.complete or used_witness_membership.found
                     if node.name == "":
                         # A region-less reference return: see resource_call_returns.elisa.
                         if node.operator == "param-call":
@@ -151,8 +155,9 @@ extend ElisaProofKernelReplay:
                         continue
                     return false if not proof_kernel_replay_resource_region_external(state, node.name) or not proof_kernel_replay_resource_region_active(state, node.name)
                     if node.operator == "value-param":
-                        return false if node.auxiliary != 0 or not proof_kernel_replay_resource_region_collection_type(nodes, children, node.right)
-                        return false if not any witness in state.resource_return_witnesses where witness == node.left
+                        return false if node.auxiliary != 0 or not proof_kernel_replay_resource_region_collection_type(nodes, children, node.right, &state.resource_work_used)
+                        value_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_return_witnesses, node.left, &state.resource_work_used)
+                        return false if not value_witness_membership.complete or not value_witness_membership.found
                         return false if node.left >= nodes.count or nodes[node.left].kind != "resource-use" or nodes[node.left].name == ""
                         value_slot: usize = proof_kernel_replay_resource_lookup(state, nodes[node.left].name)
                         return false if value_slot >= state.binding_names.count or value_slot >= state.binding_reference.count or state.binding_reference[value_slot]
@@ -167,7 +172,8 @@ extend ElisaProofKernelReplay:
                         return false if not proof_kernel_replay_resource_region_call_return(nodes, children, state, node, prior_event, arena_admitted)
                         state.resource_return_witnesses_used.push(node.left)
                         continue
-                    return false if not any witness in state.resource_return_witnesses where witness == node.left
+                    return_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_return_witnesses, node.left, &state.resource_work_used)
+                    return false if not return_witness_membership.complete or not return_witness_membership.found
                     witness: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                     return false if not witness.known
                     is_sview_return: bool = node.operator == "sview"
@@ -412,26 +418,32 @@ extend ElisaProofKernelReplay:
                         return false if not proof_kernel_replay_resource_sview_call_result(nodes, children, state, node, prior_event, arena_admitted)
                         continue
                     if node.operator == "value":
-                        return false if not any prior_call in state.resource_call_events where prior_call == node.left
-                        return false if any prior_result in state.resource_call_results where prior_result == node.left
+                        value_prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_events, node.left, &state.resource_work_used)
+                        return false if not value_prior_call.complete or not value_prior_call.found
+                        value_prior_result: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_results, node.left, &state.resource_work_used)
+                        return false if not value_prior_result.complete or value_prior_result.found
                         call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                         return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
                         call: ElisaProofKernelCore::ProofKernelNode = call_located.node
                         return false if not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count)
                         callee_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call.left)
                         return false if not callee_located.known or callee_located.node.kind != "resource-safety"
-                        summary_return: (known: bool, region: sview, type_root: usize) = proof_kernel_replay_resource_collection_summary_return(nodes, children, call.left)
+                        summary_return: (known: bool, region: sview, type_root: usize) = proof_kernel_replay_resource_collection_summary_return(nodes, children, call.left, &state.resource_work_used)
                         return false if not summary_return.known or summary_return.region == ""
-                        return false if not proof_kernel_replay_resource_region_collection_type(nodes, children, node.right) or not proof_kernel_replay_expr_equal(nodes, children, summary_return.type_root, node.right, 0)
+                        return false if not proof_kernel_replay_resource_region_collection_type(nodes, children, node.right, &state.resource_work_used) or not proof_kernel_replay_resource_expr_equal(nodes, children, summary_return.type_root, node.right, &state.resource_work_used)
                         mapped_region: mutable sview = ""
-                        for call_child_index in call.auxiliary..<call.children_count |call_child_index, call, children, nodes, summary_return, mapped_region|:
+                        for call_child_index in call.auxiliary..<call.children_count |call_child_index, call, children, nodes, summary_return, mapped_region, state|:
+                            return false if not proof_kernel_replay_resource_charge_work(state, 1)
                             call_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + call_child_index)
                             return false if not call_child.known
                             call_child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call_child.value)
                             return false if not call_child_node.known
+                            return false if not proof_kernel_replay_resource_charge_node_text(state, call_child_node.node)
+                            return false if not proof_kernel_replay_resource_charge_text_pair(state, call_child_node.node.name, summary_return.region)
                             if call_child_node.node.kind == "resource-call-region" and call_child_node.node.name == summary_return.region:
                                 return false if mapped_region != ""
                                 mapped_region <- call_child_node.node.secondary_name
+                        return false if not proof_kernel_replay_resource_charge_text_pair(state, mapped_region, node.secondary_name)
                         return false if mapped_region == "" or mapped_region != node.secondary_name or not proof_kernel_replay_resource_region_active(state, mapped_region)
                         return false if not proof_kernel_replay_resource_binding_name_available(state, node.name)
                         state.binding_names.push(node.name)
@@ -453,8 +465,10 @@ extend ElisaProofKernelReplay:
                         state.binding_origin_places.push(empty_place)
                         state.resource_call_results.push(node.left)
                         continue
-                    return false if not any prior_call in state.resource_call_events where prior_call == node.left
-                    return false if any prior_result in state.resource_call_results where prior_result == node.left
+                    reference_prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_events, node.left, &state.resource_work_used)
+                    return false if not reference_prior_call.complete or not reference_prior_call.found
+                    reference_prior_result: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_results, node.left, &state.resource_work_used)
+                    return false if not reference_prior_result.complete or reference_prior_result.found
                     call_located: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                     return false if not call_located.known or call_located.node.kind != "resource-call" or call_located.node.name == ""
                     call: ElisaProofKernelCore::ProofKernelNode = call_located.node
@@ -464,7 +478,7 @@ extend ElisaProofKernelReplay:
                     return false if not proof_kernel_replay_child_range_valid(callee_located.node.children_start, callee_located.node.children_count, children.count)
                     # The callee summary names the returned formal (directly or through its own
                     # replayed call-return marker) or a fresh allocation; see resource_call_returns.
-                    summary_return: (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool) = proof_kernel_replay_resource_reference_summary_return(nodes, children, call.left)
+                    summary_return: (known: bool, region: sview, formal: sview, mutable_reference: bool, allocation: bool) = proof_kernel_replay_resource_reference_summary_return(nodes, children, call.left, &state.resource_work_used)
                     return false if not summary_return.known
                     returned_region: sview = summary_return.region
                     returned_mutable: bool = summary_return.mutable_reference
@@ -472,14 +486,18 @@ extend ElisaProofKernelReplay:
                     returned_allocation: bool = summary_return.allocation
                     return false if returned_region == ""
                     mapped_region: mutable sview = ""
-                    for call_child_index in call.auxiliary..<call.children_count |call_child_index, call, children, nodes, returned_region, mapped_region|:
+                    for call_child_index in call.auxiliary..<call.children_count |call_child_index, call, children, nodes, returned_region, mapped_region, state|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         call_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + call_child_index)
                         return false if not call_child.known
                         call_child_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call_child.value)
                         return false if not call_child_node.known
+                        return false if not proof_kernel_replay_resource_charge_node_text(state, call_child_node.node)
+                        return false if not proof_kernel_replay_resource_charge_text_pair(state, call_child_node.node.name, returned_region)
                         if call_child_node.node.kind == "resource-call-region" and call_child_node.node.name == returned_region:
                             return false if mapped_region != ""
                             mapped_region <- call_child_node.node.secondary_name
+                    return false if not proof_kernel_replay_resource_charge_text_pair(state, mapped_region, node.secondary_name)
                     return false if mapped_region == "" or mapped_region != node.secondary_name or not proof_kernel_replay_resource_region_active(state, mapped_region)
                     return false if (node.auxiliary & PROOF_KERNEL_REPLAY_REFERENCE_FLAG) == 0
                     return false if ((node.auxiliary & PROOF_KERNEL_REPLAY_MUTABLE_REFERENCE_FLAG) != 0) != returned_mutable
@@ -490,11 +508,14 @@ extend ElisaProofKernelReplay:
                     result_owner: mutable bool = returned_allocation
                     if returned_formal != "":
                         returned_argument: mutable (known: bool, root: usize) = (false, nodes.count)
-                        for call_child_index in 0..<call.auxiliary |call_child_index, call, children, nodes, returned_formal, returned_argument, arena_admitted|:
+                        for call_child_index in 0..<call.auxiliary |call_child_index, call, children, nodes, returned_formal, returned_argument, arena_admitted, state|:
+                            return false if not proof_kernel_replay_resource_charge_work(state, 1)
                             call_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, call.children_start + call_child_index)
                             return false if not call_child.known
                             return false if call_child.value >= nodes.count
+                            return false if not proof_kernel_replay_resource_charge_node_text(state, nodes[call_child.value])
                             return false if nodes[call_child.value].kind != "resource-call-arg"
+                            return false if not proof_kernel_replay_resource_charge_text_pair(state, nodes[call_child.value].name, returned_formal)
                             if nodes[call_child.value].name == returned_formal:
                                 return false if returned_argument.known
                                 returned_argument <- (true, call_child.value)
@@ -550,21 +571,27 @@ extend ElisaProofKernelReplay:
                     # which subsumes every effect any callee summary could have exported — the
                     # summary composer accepts writes rooted at a mutable formal and nothing else.
                     return false if not proof_kernel_replay_resource_lend(nodes, children, state, effects, root)
-                    return false if any prior_call in state.resource_call_events where prior_call == root
+                    lend_prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_events, root, &state.resource_work_used)
+                    return false if not lend_prior_call.complete or lend_prior_call.found
                     state.resource_call_events.push(root)
                     continue
                 if node.kind == "resource-call":
-                    return false if any prior_call in state.resource_call_events where prior_call == root
+                    call_prior: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_events, root, &state.resource_work_used)
+                    return false if not call_prior.complete or call_prior.found
                     return false if remaining <= 1
                     return false if not (proof_kernel_replay_resource_call_remaining(nodes, children, state, effects, node, depth + 1, remaining - 1, arena_admitted) can Global{Read,Write})
                     for call_child_index in 0..<node.children_count |call_child_index, node, children, nodes, state|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         call_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + call_child_index)
                         return false if not call_child.known
                         call_argument: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, call_child.value)
                         return false if not call_argument.known
+                        return false if not proof_kernel_replay_resource_charge_node_text(state, call_argument.node)
                         if call_argument.node.kind == "resource-call-arg" and call_argument.node.operator == "region-new":
-                            return false if any prior_allocation in state.resource_call_allocations_used where prior_allocation == call_argument.node.left
-                            return false if not any allocation in state.resource_call_allocations where allocation == call_argument.node.left
+                            used_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_allocations_used, call_argument.node.left, &state.resource_work_used)
+                            return false if not used_allocation.complete or used_allocation.found
+                            available_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.resource_call_allocations, call_argument.node.left, &state.resource_work_used)
+                            return false if not available_allocation.complete or not available_allocation.found
                             state.resource_call_allocations_used.push(call_argument.node.left)
                     state.resource_call_events.push(root)
                     continue

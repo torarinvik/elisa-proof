@@ -1,0 +1,79 @@
+# Source-backed replay for owner-neutral shorthand scalar witnesses.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_shorthand_variant_scan(declarations: darray[Ast::Decl]&, member_name: sview, matches: mutable usize&, owner: mutable sview&, admissible: mutable bool&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            for declaration in declarations |member_name, matches, owner, admissible, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        for variant in variants |member_name, enum_name, is_const, matches, owner, admissible, work|:
+                            return false if not proof_replay_type_bound_local_work_charge(1, work)
+                            return false if not proof_replay_type_bound_local_text_compare_charge(variant.name, member_name, work)
+                            if variant.name == member_name:
+                                matches <- matches + 1
+                                if matches == 1:
+                                    owner <- enum_name
+                                    admissible <- is_const and variant.fields.count == 0
+                                return false if matches > 1
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_shorthand_variant_scan(nested, member_name, matches, owner, admissible, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+            return true
+
+        def proof_replay_type_bound_shorthand_owner_type_scan(report: ProofReport&, declarations: darray[Ast::Decl]&, owner: sview, enums: mutable usize&, const_enums: mutable usize&, structs: mutable usize&, alias_matches: mutable usize&, primitive_backing: mutable bool&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
+            for declaration in declarations |owner, enums, const_enums, structs, alias_matches, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Enum(name, _, is_const, backing_type, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(name, owner, work)
+                        if name == owner:
+                            enums <- enums + 1
+                            if is_const:
+                                const_enums <- const_enums + 1
+                                if const_enums == 1:
+                                    return false if not proof_replay_summary_expr_charge_with_work(backing_type, work)
+                                    signed_width: i64 = proof_replay_type_bound_local_signed_width(report, backing_type, work, 0)
+                                    return false if signed_width < 0
+                                    unsigned_width: i64 = proof_replay_type_bound_local_unsigned_width(report, backing_type, work, 0)
+                                    return false if unsigned_width < 0
+                                    primitive_backing <- signed_width > 0 or unsigned_width > 0
+                    Ast::Decl.Struct(name, _, _, _, _, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(name, owner, work)
+                        structs <- structs + 1 if name == owner
+                    Ast::Decl.Alias(name, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(name, owner, work)
+                        alias_matches <- alias_matches + 1 if name == owner
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_shorthand_owner_type_scan(report, nested, owner, enums, const_enums, structs, alias_matches, primitive_backing, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Law(_, _, _):
+                        pass
+            return true
+
+        def proof_replay_type_bound_const_enum_shorthand_scalar_with_work(report: ProofReport&, member_name: sview, work: mutable usize&) -> bool:
+            return false if member_name == ""
+            member_matches: mutable usize = 0
+            owner: mutable sview = ""
+            admissible: mutable bool = false
+            return false if not proof_replay_type_bound_shorthand_variant_scan(report.source_declarations, member_name, &member_matches, &owner, &admissible, work, 0)
+            return false if member_matches != 1 or not admissible or owner == ""
+            enums: mutable usize = 0
+            const_enums: mutable usize = 0
+            structs: mutable usize = 0
+            alias_matches: mutable usize = 0
+            primitive_backing: mutable bool = false
+            return false if not proof_replay_type_bound_shorthand_owner_type_scan(report, report.source_declarations, owner, &enums, &const_enums, &structs, &alias_matches, &primitive_backing, work, 0)
+            return false if enums != 1 or const_enums != 1 or structs != 0 or alias_matches != 0 or not primitive_backing
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            for protocol in protocols |report, owner, work|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                override: (complete: bool, exists: bool) = proof_replay_variant_builtin_operator_impl_exists_with_work(report, owner, protocol, work)
+                return false if not override.complete or override.exists
+            return true
+
