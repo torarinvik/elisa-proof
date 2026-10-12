@@ -10,6 +10,23 @@ extend ElisaProof:
             for fact in facts |bounds, facts, markers, constraints|:
                 proof_collect_difference_constraints_marked(fact, bounds, facts, markers, constraints)
 
+        # Bounded counterpart used by signed safety analysis. It stages the graph, charges the
+        # marker selection and each fact walk, and propagates either work or graph-cap exhaustion.
+        def proof_collect_fact_difference_constraints_with_work(facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, constraints: mutable darray[ProofDifference]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            fact_nodes: mutable usize = 0
+            bound_nodes: mutable usize = 0
+            return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
+            return false if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_nodes, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            staged: mutable darray[ProofDifference] = []
+            for fact in facts |fact, bounds, facts, markers, fact_nodes, bound_nodes, staged, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return false if not proof_collect_difference_constraints_marked_work_inner(fact, bounds, facts, markers, fact_nodes, bound_nodes, &staged, 0, budget, exhausted)
+            constraints <- staged
+            return true
+
         # A guarded unsigned subtraction compared with a constant, `stop - start == 4` beside
         # `start <= stop`, is a difference constraint over the integers: the guard rules out the
         # wrap, so `stop - start` is the exact difference. The affine reader declines a side
@@ -36,11 +53,41 @@ extend ElisaProof:
             proof_guarded_difference_push(low, operator, high, constraints)
             true
 
+        def proof_guarded_difference_import_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+            if right_constant.known:
+                split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(left, facts, budget, exhausted)
+                return false if exhausted or not split.known
+                high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
+                low: ProofAffine = ProofAffine{known: true, base: split.low, offset: right_constant.value, negative: false}
+                return false if not proof_guarded_difference_push_with_work(high, operator, low, constraints, budget, exhausted)
+                return true
+            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            return false if not left_constant.known
+            split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(right, facts, budget, exhausted)
+            return false if exhausted or not split.known
+            low: ProofAffine = ProofAffine{known: true, base: split.low, offset: left_constant.value, negative: false}
+            high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
+            return false if not proof_guarded_difference_push_with_work(low, operator, high, constraints, budget, exhausted)
+            return true
+
         def proof_guarded_difference_push(left: ProofAffine, operator: TokenKind, right: ProofAffine, constraints: mutable darray[ProofDifference]&) -> void:
             proof_difference_push(left, right, false, false, constraints) if operator == TokenKind.LtEq or operator == TokenKind.EqEq
             proof_difference_push(left, right, false, true, constraints) if operator == TokenKind.Lt
             proof_difference_push(left, right, true, false, constraints) if operator == TokenKind.GtEq or operator == TokenKind.EqEq
             proof_difference_push(left, right, true, true, constraints) if operator == TokenKind.Gt
+
+        def proof_guarded_difference_push_with_work(left: ProofAffine, operator: TokenKind, right: ProofAffine, constraints: mutable darray[ProofDifference]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            if operator == TokenKind.LtEq or operator == TokenKind.EqEq:
+                return false if not proof_difference_push_with_work(left, right, false, false, &constraints, budget, exhausted)
+            if operator == TokenKind.Lt:
+                return false if not proof_difference_push_with_work(left, right, false, true, &constraints, budget, exhausted)
+            if operator == TokenKind.GtEq or operator == TokenKind.EqEq:
+                return false if not proof_difference_push_with_work(left, right, true, false, &constraints, budget, exhausted)
+            if operator == TokenKind.Gt:
+                return false if not proof_difference_push_with_work(left, right, true, true, &constraints, budget, exhausted)
+            return true
 
         # `high - low` over two same-width unsigned names that a fact orders `low <= high`.
         def proof_guarded_difference_names(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> (known: bool, high: sview, low: sview):
@@ -57,6 +104,26 @@ extend ElisaProof:
                 _:
                     return (false, "", "")
 
+        def proof_guarded_difference_names_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, high: sview, low: sview):
+            nodes: mutable usize = 0
+            return (false, "", "") if not proof_linear_safety_expression_shape_with_work(expression, 0, &nodes, &budget, &exhausted)
+            match proof_strip_parens(expression):
+                Ast::Expr.Binary(minuend, TokenKind.Minus, subtrahend, _):
+                    high: sview = proof_ident_name(proof_strip_parens(minuend))
+                    low: sview = proof_ident_name(proof_strip_parens(subtrahend))
+                    return (false, "", "") if high == "" or low == "" or high == low
+                    return (false, "", "") if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2)
+                    width: i64 = proof_unsigned_marker_width_for_name(facts, high)
+                    return (false, "", "") if width == 0 or proof_unsigned_marker_width_for_name(facts, low) != width
+                    for fact in facts |fact, high, low, budget, exhausted|:
+                        return (false, "", "") if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                        if proof_fact_orders_names_with_work(fact, low, high, 0, budget, exhausted):
+                            return (true, high, low)
+                        return (false, "", "") if exhausted
+                    return (false, "", "")
+                _:
+                    return (false, "", "")
+
         # The fact, or one of its conjuncts, says `low <= high` or `low < high`.
         def proof_fact_orders_names(fact: Ast::Expr, low: sview, high: sview, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
@@ -64,6 +131,22 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
                         return proof_fact_orders_names(left, low, high, depth + 1) or proof_fact_orders_names(right, low, high, depth + 1)
+                    left_name: sview = proof_ident_name(proof_strip_parens(left))
+                    right_name: sview = proof_ident_name(proof_strip_parens(right))
+                    return true if (operator == TokenKind.LtEq or operator == TokenKind.Lt) and left_name == low and right_name == high
+                    return (operator == TokenKind.GtEq or operator == TokenKind.Gt) and left_name == high and right_name == low
+                _:
+                    return false
+
+        def proof_fact_orders_names_with_work(fact: Ast::Expr, low: sview, high: sview, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        return true if proof_fact_orders_names_with_work(left, low, high, depth + 1, budget, exhausted)
+                        return false if exhausted
+                        return proof_fact_orders_names_with_work(right, low, high, depth + 1, budget, exhausted)
                     left_name: sview = proof_ident_name(proof_strip_parens(left))
                     right_name: sview = proof_ident_name(proof_strip_parens(right))
                     return true if (operator == TokenKind.LtEq or operator == TokenKind.Lt) and left_name == low and right_name == high
@@ -132,6 +215,79 @@ extend ElisaProof:
                 proof_collect_plain_differences(fact, bounds, facts, &constraints, 0)
             return if constraints.count == 0 or constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS
             proof_close_bounds_through_differences(constraints, bounds)
+
+        # Bounded plain-order closure for the safety fallback. Both the collected constraints and
+        # narrowed intervals stay local until collection and graph propagation finish, so a cap
+        # or work failure cannot leak a partial closure to the caller.
+        def proof_close_plain_bounds_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if exhausted
+            fact_nodes: mutable usize = 0
+            bound_nodes: mutable usize = 0
+            return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
+            return false if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_nodes, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            staged_bounds: mutable darray[ProofBound] = []
+            for bound in bounds |bound, staged_bounds, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(bound.name))
+                staged_bounds.push(bound)
+            constraints: mutable darray[ProofDifference] = []
+            for fact in facts |fact, staged_bounds, facts, markers, fact_nodes, bound_nodes, constraints, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return false if not proof_collect_plain_differences_with_work(fact, staged_bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
+            if constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS:
+                exhausted <- true
+                return false
+            return false if not proof_close_bounds_through_differences_with_work(constraints, &staged_bounds, budget, exhausted)
+            bounds <- staged_bounds
+            return true
+
+        def proof_collect_plain_differences_with_work(fact: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, fact_nodes: usize, bound_nodes: usize, constraints: mutable darray[ProofDifference]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match proof_strip_parens(fact):
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        return false if not proof_collect_plain_differences_with_work(left, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
+                        return proof_collect_plain_differences_with_work(right, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
+                    return true if not proof_is_comparison(operator) or operator == TokenKind.BangEq
+                    left_nodes: mutable usize = 0
+                    right_nodes: mutable usize = 0
+                    return false if not proof_linear_safety_expression_shape_with_work(left, 0, &left_nodes, &budget, &exhausted)
+                    return false if not proof_linear_safety_expression_shape_with_work(right, 0, &right_nodes, &budget, &exhausted)
+                    term_nodes: usize = left_nodes + right_nodes
+                    return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, fact_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                    return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, bound_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                    return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, constraints.count + 1, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                    return true if not proof_primitive_comparison_marked(left, right, markers)
+                    imported: bool = proof_guarded_difference_import_with_work(left, operator, right, facts, &constraints, budget, exhausted)
+                    return false if exhausted
+                    return true if imported
+                    return true if not proof_plain_order_side(left) or not proof_plain_order_side(right)
+                    normalized: Ast::Expr = proof_strip_parens(fact)
+                    return proof_collect_difference_constraints_marked_work_inner(normalized, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            return true if not proof_is_order_operator(operator)
+                            left_nodes: mutable usize = 0
+                            right_nodes: mutable usize = 0
+                            return false if not proof_linear_safety_expression_shape_with_work(left, 0, &left_nodes, &budget, &exhausted)
+                            return false if not proof_linear_safety_expression_shape_with_work(right, 0, &right_nodes, &budget, &exhausted)
+                            term_nodes: usize = left_nodes + right_nodes
+                            return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, fact_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                            return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, bound_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                            return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, constraints.count + 1, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                            return true if not proof_primitive_comparison_marked(left, right, markers)
+                            return true if not proof_disjunction_denial_integer_term(left, facts, 0) or not proof_disjunction_denial_integer_term(right, facts, 0)
+                            return true if not proof_plain_order_side(left) or not proof_plain_order_side(right)
+                            normalized: Ast::Expr = proof_strip_parens(fact)
+                            return proof_collect_difference_constraints_marked_work_inner(normalized, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
+                        _:
+                            return true
+                _:
+                    return true
 
         def proof_collect_plain_differences(fact: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&, depth: usize) -> void:
             return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT

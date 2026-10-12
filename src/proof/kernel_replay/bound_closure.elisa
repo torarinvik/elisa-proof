@@ -1,7 +1,6 @@
 # Name equalities, affine terms and interval closure for kernel bound replay.
 const PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_VISIT_LIMIT: usize = 65536
-const PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT: usize = 32
-const PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_FACT_LIMIT: usize = 256
+const PROOF_KERNEL_REPLAY_EQUALITY_REACHABILITY_FACT_LIMIT: usize = 256
 
 extend ElisaProofKernelReplay:
     private:
@@ -25,16 +24,23 @@ extend ElisaProofKernelReplay:
                 return bound if bound.name == name
             ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
 
+        def proof_kernel_replay_alias_name_index_with_work(names: darray[sview]&, name: sview, work_used: mutable usize&, work_limit: usize) -> (complete: bool, index: usize):
+            index: mutable usize = 0
+            while index < names.count |index, names, name, work_used, work_limit|:
+                return (false, names.count) if not proof_kernel_replay_equality_closure_charge_text_pair(work_used, names[index], name, work_limit)
+                return (true, index) if names[index] == name
+                index <- index + 1
+            return (true, names.count)
+
         def proof_kernel_replay_add_lower_with_work(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64, work_used: mutable usize&, work_limit: usize) -> bool:
             return false if name == ""
             for mutable bound in bounds |bounds, name, value, work_used, work_limit|:
                 continue if bound.term_key
                 return false if not proof_kernel_replay_equality_closure_charge_text_pair(work_used, bound.name, name, work_limit)
                 if bound.name == name:
-                    old_has: bool = bound.has_lower
-                    old_value: i64 = bound.lower
-                    bound.has_lower <- true
-                    bound.lower <- value if not old_has or value > old_value
+                    if not bound.has_lower or value > bound.lower:
+                        bound.has_lower <- true
+                        bound.lower <- value
                     return true
             return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
             bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
@@ -46,19 +52,20 @@ extend ElisaProofKernelReplay:
                 continue if bound.term_key
                 return false if not proof_kernel_replay_equality_closure_charge_text_pair(work_used, bound.name, name, work_limit)
                 if bound.name == name:
-                    old_has: bool = bound.has_upper
-                    old_value: i64 = bound.upper
-                    bound.has_upper <- true
-                    bound.upper <- value if not old_has or value < old_value
+                    if not bound.has_upper or value < bound.upper:
+                        bound.has_upper <- true
+                        bound.upper <- value
                     return true
             return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
             bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
             return true
 
-        def proof_kernel_replay_collect_name_equalities_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, left_roots: mutable darray[usize]&, right_roots: mutable darray[usize]&, local_work_used: mutable usize&, equality_checks: mutable usize&, work_used: mutable usize&, work_limit: usize, depth: usize) -> void:
+        def proof_kernel_replay_collect_name_equalities_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, markers: darray[ProofKernelReplayWitnessMarker], root: usize, left_roots: mutable darray[usize]&, right_roots: mutable darray[usize]&, local_work_used: mutable usize&, work_used: mutable usize&, work_limit: usize, depth: usize) -> void:
             requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
-            return if local_work_used >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_VISIT_LIMIT or equality_checks >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT
+            if local_work_used >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_VISIT_LIMIT:
+                work_used <- work_limit + 1
+                return
             return if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
             local_work_used <- local_work_used + 1
             return if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or root >= nodes.count
@@ -66,18 +73,16 @@ extend ElisaProofKernelReplay:
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return if not proof_kernel_replay_equality_closure_charge(work_used, sview_len(node.operator), work_limit)
             if node.kind == "binary" and node.operator == "and":
-                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, facts, node.left, left_roots, right_roots, local_work_used, equality_checks, work_used, work_limit, depth + 1)
+                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, markers, node.left, left_roots, right_roots, local_work_used, work_used, work_limit, depth + 1)
                 return if work_used > work_limit
-                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, facts, node.right, left_roots, right_roots, local_work_used, equality_checks, work_used, work_limit, depth + 1)
+                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, markers, node.right, left_roots, right_roots, local_work_used, work_used, work_limit, depth + 1)
                 return
             if node.kind == "binary" and node.operator == "==":
                 return if node.left >= nodes.count or node.right >= nodes.count or nodes[node.left].kind != "ident" or nodes[node.right].kind != "ident"
                 return if nodes[node.left].name == "" or nodes[node.right].name == ""
-                equality_checks <- equality_checks + 1
-                if proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, node.left, node.right, work_used, work_limit):
-                    if left_roots.count < PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT and right_roots.count < PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT:
-                        left_roots.push(node.left)
-                        right_roots.push(node.right)
+                if proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, node.left, node.right, work_used, work_limit):
+                    left_roots.push(node.left)
+                    right_roots.push(node.right)
 
         def proof_kernel_replay_close_equalities(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], bounds: mutable darray[ProofKernelReplayBound]&) -> void:
             work_used: mutable usize = 0
@@ -87,38 +92,102 @@ extend ElisaProofKernelReplay:
             return false if work_used > work_limit
             left_roots: mutable darray[usize] = []
             right_roots: mutable darray[usize] = []
-            bounded_facts: mutable darray[usize] = []
-            fact_count: usize = facts.count if facts.count < PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_FACT_LIMIT else PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_FACT_LIMIT
-            for index in 0..<fact_count |facts, bounded_facts, work_used, work_limit|:
-                return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
-                bounded_facts.push(facts[index])
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            # Bound closure mirrors the producer and must consider every premise. The shared
+            # kernel work limit below is the cap; a fixed prefix here would silently lose aliases
+            # that the producer used to derive interval bounds.
+            return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, work_limit)
             local_work_used: mutable usize = 0
-            equality_checks: mutable usize = 0
-            for fact in bounded_facts |fact, nodes, children, bounded_facts, left_roots, right_roots, local_work_used, equality_checks, work_used, work_limit|:
-                break if local_work_used >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_VISIT_LIMIT or equality_checks >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT or left_roots.count >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT
-                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, bounded_facts, fact, &left_roots, &right_roots, &local_work_used, &equality_checks, work_used, work_limit, 0)
+            for fact in facts |fact, nodes, children, markers, left_roots, right_roots, local_work_used, work_used, work_limit|:
+                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, markers, fact, &left_roots, &right_roots, &local_work_used, work_used, work_limit, 0)
                 return false if work_used > work_limit
-            rounds: mutable usize = 0
-            max_rounds: usize = left_roots.count * 2 + 2
-            while rounds < max_rounds |rounds, left_roots, right_roots, nodes, bounds, work_used, work_limit|:
+            names: mutable darray[sview] = []
+            edge_left: mutable darray[usize] = []
+            edge_right: mutable darray[usize] = []
+            for edge in 0..<left_roots.count |edge, left_roots, right_roots, nodes, names, edge_left, edge_right, work_used, work_limit|:
+                return false if edge >= right_roots.count or left_roots[edge] >= nodes.count or right_roots[edge] >= nodes.count
+                left_name: sview = nodes[left_roots[edge]].name
+                right_name: sview = nodes[right_roots[edge]].name
+                left_index: (complete: bool, index: usize) = proof_kernel_replay_alias_name_index_with_work(names, left_name, work_used, work_limit)
+                return false if not left_index.complete
+                left_value: usize = left_index.index
+                if left_value == names.count:
+                    return false if not proof_kernel_replay_equality_closure_charge(work_used, 1 + sview_len(left_name), work_limit)
+                    names.push(left_name)
+                    left_value <- names.count - 1
+                right_index: (complete: bool, index: usize) = proof_kernel_replay_alias_name_index_with_work(names, right_name, work_used, work_limit)
+                return false if not right_index.complete
+                right_value: usize = right_index.index
+                if right_value == names.count:
+                    return false if not proof_kernel_replay_equality_closure_charge(work_used, 1 + sview_len(right_name), work_limit)
+                    names.push(right_name)
+                    right_value <- names.count - 1
+                return false if not proof_kernel_replay_equality_closure_charge(work_used, 2, work_limit)
+                edge_left.push(left_value)
+                edge_right.push(right_value)
+
+            adjacency_heads: mutable darray[usize] = []
+            adjacency_names: mutable darray[usize] = []
+            adjacency_next: mutable darray[usize] = []
+            for name in names |name, adjacency_heads, work_used, work_limit|:
                 return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
-                for index in 0..<left_roots.count |index, left_roots, right_roots, nodes, bounds, work_used, work_limit|:
-                    continue if index >= right_roots.count or left_roots[index] >= nodes.count or right_roots[index] >= nodes.count
-                    left_name: sview = nodes[left_roots[index]].name
-                    right_name: sview = nodes[right_roots[index]].name
-                    left_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, left_name, work_used, work_limit)
+                adjacency_heads.push(0)
+            for edge in 0..<edge_left.count |edge, edge_left, edge_right, adjacency_heads, adjacency_names, adjacency_next, work_used, work_limit|:
+                return false if not proof_kernel_replay_equality_closure_charge(work_used, 2, work_limit)
+                adjacency_names.push(edge_right[edge])
+                adjacency_next.push(adjacency_heads[edge_left[edge]])
+                adjacency_heads[edge_left[edge]] <- adjacency_names.count
+                adjacency_names.push(edge_left[edge])
+                adjacency_next.push(adjacency_heads[edge_right[edge]])
+                adjacency_heads[edge_right[edge]] <- adjacency_names.count
+
+            visited: mutable darray[bool] = []
+            for name_index in 0..<names.count |name_index, names, visited, work_used, work_limit|:
+                return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                visited.push(false)
+            for start in 0..<names.count |start, names, adjacency_heads, adjacency_names, adjacency_next, visited, bounds, work_used, work_limit|:
+                return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                continue if visited[start]
+                queue: mutable darray[usize] = [start]
+                members: mutable darray[usize] = []
+                visited[start] <- true
+                cursor: mutable usize = 0
+                while cursor < queue.count |cursor, queue, members, adjacency_heads, adjacency_names, adjacency_next, visited, work_used, work_limit|:
+                    return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                    current: usize = queue[cursor]
+                    members.push(current)
+                    arc: mutable usize = adjacency_heads[current]
+                    while arc != 0 |arc, adjacency_names, adjacency_next, queue, visited, work_used, work_limit|:
+                        return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                        arc_index: usize = arc - 1
+                        neighbor: usize = adjacency_names[arc_index]
+                        if not visited[neighbor]:
+                            return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                            visited[neighbor] <- true
+                            queue.push(neighbor)
+                        arc <- adjacency_next[arc_index]
+                    cursor <- cursor + 1
+
+                has_lower: mutable bool = false
+                lower: mutable i64 = 0
+                has_upper: mutable bool = false
+                upper: mutable i64 = 0
+                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper, work_used, work_limit|:
+                    return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                    bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, names[member], work_used, work_limit)
                     return false if work_used > work_limit
-                    right_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, right_name, work_used, work_limit)
-                    return false if work_used > work_limit
-                    if left_bound.has_lower:
-                        return false if not proof_kernel_replay_add_lower_with_work(bounds, right_name, left_bound.lower, work_used, work_limit)
-                    if left_bound.has_upper:
-                        return false if not proof_kernel_replay_add_upper_with_work(bounds, right_name, left_bound.upper, work_used, work_limit)
-                    if right_bound.has_lower:
-                        return false if not proof_kernel_replay_add_lower_with_work(bounds, left_name, right_bound.lower, work_used, work_limit)
-                    if right_bound.has_upper:
-                        return false if not proof_kernel_replay_add_upper_with_work(bounds, left_name, right_bound.upper, work_used, work_limit)
-                rounds <- rounds + 1
+                    if bound.has_lower and (not has_lower or bound.lower > lower):
+                        has_lower <- true
+                        lower <- bound.lower
+                    if bound.has_upper and (not has_upper or bound.upper < upper):
+                        has_upper <- true
+                        upper <- bound.upper
+                for member in members |member, members, names, bounds, has_lower, lower, has_upper, upper, work_used, work_limit|:
+                    return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
+                    if has_lower:
+                        return false if not proof_kernel_replay_add_lower_with_work(bounds, names[member], lower, work_used, work_limit)
+                    if has_upper:
+                        return false if not proof_kernel_replay_add_upper_with_work(bounds, names[member], upper, work_used, work_limit)
             proof_kernel_replay_tighten_disequality_bounds_with_work(nodes, children, facts, bounds, work_used, work_limit)
 
         def proof_kernel_replay_named_root_contains(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, roots: darray[usize], name: sview, work_used: mutable usize&, work_limit: usize) -> bool:
@@ -149,15 +218,15 @@ extend ElisaProofKernelReplay:
             left_roots: mutable darray[usize] = []
             right_roots: mutable darray[usize] = []
             bounded_facts: mutable darray[usize] = []
-            fact_count: usize = facts.count if facts.count < PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_FACT_LIMIT else PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_FACT_LIMIT
+            fact_count: usize = facts.count if facts.count < PROOF_KERNEL_REPLAY_EQUALITY_REACHABILITY_FACT_LIMIT else PROOF_KERNEL_REPLAY_EQUALITY_REACHABILITY_FACT_LIMIT
             for index in 0..<fact_count |facts, bounded_facts, work_used, work_limit|:
                 return false if not proof_kernel_replay_equality_closure_charge(work_used, 1, work_limit)
                 bounded_facts.push(facts[index])
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, bounded_facts, &markers, work_used, work_limit)
             local_work_used: mutable usize = 0
-            equality_checks: mutable usize = 0
-            for fact in bounded_facts |fact, nodes, children, bounded_facts, left_roots, right_roots, local_work_used, equality_checks, work_used, work_limit|:
-                break if local_work_used >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_VISIT_LIMIT or equality_checks >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT or left_roots.count >= PROOF_KERNEL_REPLAY_EQUALITY_CLOSURE_ROOT_LIMIT
-                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, bounded_facts, fact, &left_roots, &right_roots, &local_work_used, &equality_checks, work_used, work_limit, 0)
+            for fact in bounded_facts |fact, nodes, children, markers, left_roots, right_roots, local_work_used, work_used, work_limit|:
+                proof_kernel_replay_collect_name_equalities_with_work(nodes, children, markers, fact, &left_roots, &right_roots, &local_work_used, work_used, work_limit, 0)
                 return false if work_used > work_limit
             reachable: mutable darray[usize] = []
             for index in 0..<left_roots.count |index, left_roots, right_roots, nodes, reachable, left_name, right_name, work_used, work_limit|:

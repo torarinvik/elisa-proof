@@ -1,51 +1,236 @@
 # The wrap guards applied to a whole premise list. Both read the intervals of the list once:
 # they depend on the facts alone, never on the fact being guarded.
+const PROOF_LINEAR_SAFETY_WORK_LIMIT: usize = PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
+const PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER: usize = 32
+
 extend ElisaProof:
     public:
+        # Charge safety analysis to the same linear budget as goal search. A failed charge is
+        # distinct from an ordinary unsafe expression: callers must stop and report exhaustion.
+        def proof_linear_safety_work_charge(budget: mutable usize&, exhausted: mutable bool&, amount: usize) -> bool:
+            if exhausted or budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                exhausted <- true
+                return false
+            remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - budget
+            if amount > remaining:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            budget <- budget + amount
+            return true
+
+        # Multiply a bounded input size without allowing integer overflow. This is used to
+        # reserve for repeated scans of one expression or fact list before legacy pure readers
+        # run; when the worst-case scan does not fit, callers fail closed as unknown.
+        def proof_linear_safety_work_charge_scaled(budget: mutable usize&, exhausted: mutable bool&, count: usize, multiplier: usize) -> bool:
+            return false if exhausted
+            return true if count == 0 or multiplier == 0
+            if count > PROOF_LINEAR_SAFETY_WORK_LIMIT / multiplier:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            return proof_linear_safety_work_charge(budget, exhausted, count * multiplier)
+
+        def proof_unsigned_expression_safety_shape_work(expression: Ast::Expr, depth: usize, nodes: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            nodes <- nodes + 1
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_unsigned_expression_safety_shape_work(inner, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.Field(inner, member, _) | Ast::Expr.Scope(inner, member, _):
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, sview_len(member))
+                    return proof_unsigned_expression_safety_shape_work(inner, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(left, depth + 1, &nodes, &budget, &exhausted)
+                    return proof_unsigned_expression_safety_shape_work(right, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.Index(object, index, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(object, depth + 1, &nodes, &budget, &exhausted)
+                    return proof_unsigned_expression_safety_shape_work(index, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(condition, depth + 1, &nodes, &budget, &exhausted)
+                    return false if not proof_unsigned_expression_safety_shape_work(then_expression, depth + 1, &nodes, &budget, &exhausted)
+                    return proof_unsigned_expression_safety_shape_work(else_expression, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.IndexN(object, indices, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(object, depth + 1, &nodes, &budget, &exhausted)
+                    for index in indices |depth, nodes, budget, exhausted|:
+                        return false if not proof_unsigned_expression_safety_shape_work(index, depth + 1, &nodes, &budget, &exhausted)
+                    return true
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(object, depth + 1, &nodes, &budget, &exhausted)
+                    return false if not proof_unsigned_expression_safety_shape_work(low, depth + 1, &nodes, &budget, &exhausted)
+                    return proof_unsigned_expression_safety_shape_work(high, depth + 1, &nodes, &budget, &exhausted)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_unsigned_expression_safety_shape_work(callee, depth + 1, &nodes, &budget, &exhausted)
+                    for argument in arguments |depth, nodes, budget, exhausted|:
+                        return false if not proof_unsigned_expression_safety_shape_work(argument, depth + 1, &nodes, &budget, &exhausted)
+                    return true
+                _:
+                    return true
+
+        # Legacy unsigned interval and width readers still inspect the fact list and bound terms
+        # recursively. Reserve against their AST size on every expression visit; counting only
+        # list entries let one large conjunction consume far more work than the shared budget
+        # recorded. The scan follows the expression forms those readers actually descend into.
+        def proof_unsigned_safety_environment_shape_work(facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, nodes: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            for fact in facts |fact, nodes, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return false if not proof_unsigned_expression_safety_shape_work(fact, 0, &nodes, &budget, &exhausted)
+            for bound in bounds |bound, nodes, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(bound.name))
+                if bound.term_key:
+                    return false if not proof_unsigned_expression_safety_shape_work(bound.term, 0, &nodes, &budget, &exhausted)
+            return true
+
+        def proof_unsigned_expression_safety_reserve(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            nodes: mutable usize = 0
+            if not proof_unsigned_expression_safety_shape_work(expression, depth, &nodes, budget, exhausted):
+                exhausted <- true
+                return false
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            environment_nodes: mutable usize = 0
+            if not proof_unsigned_safety_environment_shape_work(facts, bounds, &environment_nodes, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_linear_safety_work_charge_scaled(budget, exhausted, environment_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+
+        def proof_unsigned_arm_safe_under_with_work(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, base_bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            guarded: mutable darray[Ast::Expr] = []
+            guarded.extend(facts)
+            guarded.push(condition)
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, guarded.count, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            arm_bounds: mutable darray[ProofBound] = []
+            arm_bounds.extend(base_bounds)
+            return false if not proof_unsigned_expression_safety_reserve(condition, guarded, arm_bounds, depth, budget, exhausted)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(guarded)
+            proof_collect_bounds_marked(condition, guarded, markers, &arm_bounds)
+            if not proof_close_equalities_with_work(guarded, markers, &arm_bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            safe: bool = proof_unsigned_expression_safe_with_work(arm, guarded, arm_bounds, depth + 1, budget, exhausted)
+            return false if exhausted or safe
+            if not proof_close_plain_bounds_with_work(guarded, &arm_bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_unsigned_expression_safe_with_work(arm, guarded, arm_bounds, depth + 1, budget, exhausted)
+
+        def proof_unsigned_arm_safe_unless_with_work(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, base_bounds: darray[ProofBound]&, position: Ast::Pos, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            arm_bounds: mutable darray[ProofBound] = []
+            arm_bounds.extend(base_bounds)
+            negated_condition: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, condition, position)
+            return false if not proof_unsigned_expression_safety_reserve(negated_condition, facts, arm_bounds, depth, budget, exhausted)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            proof_collect_bounds_marked(negated_condition, facts, markers, &arm_bounds)
+            if not proof_close_equalities_with_work(facts, markers, &arm_bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            safe: bool = proof_unsigned_expression_safe_with_work(arm, facts, arm_bounds, depth + 1, budget, exhausted)
+            return false if exhausted or safe
+            if not proof_close_plain_bounds_with_work(facts, &arm_bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_unsigned_expression_safe_with_work(arm, facts, arm_bounds, depth + 1, budget, exhausted)
+
+        def proof_unsigned_safety_context_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            for fact in facts |fact, budget, exhausted|:
+                nodes: mutable usize = 0
+                if not proof_unsigned_expression_safety_shape_work(fact, 0, &nodes, budget, exhausted):
+                    exhausted <- true
+                    return false
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            if not proof_collect_fact_bounds_with_work(facts, markers, &bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            if not proof_close_equalities_with_work(facts, markers, &bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_signed_safety_bounds_from_base_with_work(facts, bounds, &signed_bounds, budget, exhausted)
+
+        def proof_unsigned_expression_safe_with_facts_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            bounds: mutable darray[ProofBound] = []
+            signed_bounds: mutable darray[ProofBound] = []
+            if not proof_unsigned_safety_context_with_work(facts, &bounds, &signed_bounds, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_unsigned_expression_safe_with_context_work(expression, facts, &bounds, &signed_bounds, budget, exhausted)
+
+        def proof_unsigned_expression_safe_with_context_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            unsigned_safe: bool = proof_unsigned_expression_safe_with_work(expression, facts, bounds, 0, budget, exhausted)
+            return false if exhausted
+            if not unsigned_safe:
+                if not proof_close_plain_bounds_with_work(facts, &bounds, budget, exhausted):
+                    exhausted <- true
+                    return false
+                unsigned_safe <- proof_unsigned_expression_safe_with_work(expression, facts, bounds, 0, budget, exhausted)
+                return false if exhausted
+            signed_safe: bool = proof_signed_expression_safe_with_bounds_work(expression, facts, signed_bounds, 0, budget, exhausted)
+            return false if exhausted
+            return unsigned_safe and signed_safe
+
         # `proof_unsigned_expression_safe` of every fact, with the intervals both guards read
         # computed once for the list instead of once per fact: they depend on the facts alone.
         # The plain-order closure is still consulted only for a fact the first intervals miss.
         def proof_unsigned_facts_safe(facts: darray[Ast::Expr]&) -> bool:
-            bounds: mutable darray[ProofBound] = []
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
-            proof_collect_fact_bounds_with_markers(facts, markers, &bounds)
-            proof_close_equalities_with_markers(facts, markers, &bounds)
-            closed: mutable darray[ProofBound] = []
-            has_closed: mutable bool = false
-            signed_bounds: darray[ProofBound] = proof_signed_safety_bounds_from_base(facts, bounds)
-            for fact in facts |facts, bounds, closed, has_closed, signed_bounds|:
-                unsigned_safe: mutable bool = proof_unsigned_expression_safe_with_bounds(fact, facts, bounds)
-                if not unsigned_safe:
-                    if not has_closed:
-                        closed.extend(bounds)
-                        proof_close_plain_bounds(facts, &closed)
-                        has_closed <- true
-                    unsigned_safe <- proof_unsigned_expression_safe_with_bounds(fact, facts, closed)
-                return false if not unsigned_safe or not proof_signed_expression_safe_with_bounds(fact, facts, signed_bounds, 0)
-            return true
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            return proof_unsigned_facts_safe_with_work(facts, &budget, &exhausted) and not exhausted
+
+        def proof_unsigned_facts_safe_with_work(facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            kept: mutable darray[Ast::Expr] = []
+            return proof_unsigned_safe_facts_with_work(facts, &kept, budget, exhausted)
 
         # The facts `proof_unsigned_expression_safe` admits, in order. As above, the intervals
         # depend on the list alone, so they are computed once rather than once per fact. Returning
         # whether every fact survived lets goal search reuse this filtered list instead of
         # rebuilding all safety bounds after discovering the first unsafe premise.
         def proof_unsigned_safe_facts(facts: darray[Ast::Expr]&, kept: mutable darray[Ast::Expr]&) -> bool:
+            budget: mutable usize = 0
+            exhausted: mutable bool = false
+            return proof_unsigned_safe_facts_with_work(facts, kept, &budget, &exhausted) and not exhausted
+
+        # `kept` is usable only when this returns without setting `exhausted`. On exhaustion it
+        # is cleared so a partial prefix can never become premises for an admissible proof.
+        def proof_unsigned_safe_facts_with_work(facts: darray[Ast::Expr]&, kept: mutable darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             bounds: mutable darray[ProofBound] = []
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
-            proof_collect_fact_bounds_with_markers(facts, markers, &bounds)
-            proof_close_equalities_with_markers(facts, markers, &bounds)
+            signed_bounds: mutable darray[ProofBound] = []
+            return proof_unsigned_safe_facts_with_context_work(facts, kept, &bounds, &signed_bounds, budget, exhausted)
+
+        def proof_unsigned_safe_facts_with_context_work(facts: darray[Ast::Expr]&, kept: mutable darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            kept <- []
+            bounds <- []
+            signed_bounds <- []
+            if not proof_unsigned_safety_context_with_work(facts, bounds, signed_bounds, budget, exhausted):
+                exhausted <- true
+                return false
             closed: mutable darray[ProofBound] = []
             has_closed: mutable bool = false
-            signed_bounds: darray[ProofBound] = proof_signed_safety_bounds_from_base(facts, bounds)
             all_safe: mutable bool = true
-            for fact in facts |facts, bounds, closed, has_closed, signed_bounds, kept, all_safe|:
-                unsigned_safe: mutable bool = proof_unsigned_expression_safe_with_bounds(fact, facts, bounds)
+            for fact in facts |facts, bounds, closed, has_closed, signed_bounds, kept, all_safe, budget, exhausted|:
+                unsigned_safe: mutable bool = proof_unsigned_expression_safe_with_work(fact, facts, bounds, 0, budget, exhausted)
+                if exhausted:
+                    kept <- []
+                    return false
                 if not unsigned_safe:
                     if not has_closed:
                         closed.extend(bounds)
-                        proof_close_plain_bounds(facts, &closed)
+                        if not proof_close_plain_bounds_with_work(facts, &closed, budget, exhausted):
+                            kept <- []
+                            exhausted <- true
+                            return false
                         has_closed <- true
-                    unsigned_safe <- proof_unsigned_expression_safe_with_bounds(fact, facts, closed)
-                fact_safe: bool = unsigned_safe and proof_signed_expression_safe_with_bounds(fact, facts, signed_bounds, 0)
+                    unsigned_safe <- proof_unsigned_expression_safe_with_work(fact, facts, closed, 0, budget, exhausted)
+                    if exhausted:
+                        kept <- []
+                        return false
+                signed_safe: bool = proof_signed_expression_safe_with_bounds_work(fact, facts, signed_bounds, 0, budget, exhausted)
+                if exhausted:
+                    kept <- []
+                    return false
+                fact_safe: bool = unsigned_safe and signed_safe
                 kept.push(fact) if fact_safe
                 all_safe <- false if not fact_safe
             return all_safe

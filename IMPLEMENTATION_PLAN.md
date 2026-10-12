@@ -11768,3 +11768,16 @@ which still rejects the installed proof executable because its manifest records 
 dirty proof source revision. Pinned Stage1 qualification also remains pending: the latest observed
 seed exited on arena effect-grant diagnostics from a snapshot taken before later grant edits. The
 new universal claims have not been replayed against a current qualified product.
+
+### 23.27.206 Replay equality closure over every premise (2026-10-12)
+
+Kernel interval closure now collects witnessed identifier equalities from the full premise list,
+matching the producer's bound-closure input. The previous 256-fact prefix could silently omit a
+late equality that the producer used to transport an interval. Replay builds adjacency lists and
+walks each alias component once, then merges its strongest lower and upper bounds instead of
+repeatedly rescanning every equality edge. It builds scalar witness markers once per premise set,
+matching the producer and avoiding a full marker scan for every candidate equality. The shared
+kernel work budget covers marker construction, fact traversal, name interning, graph traversal, and
+bound lookup; exhaustion fails closed. The separately bounded name-reachability query retains its
+256-fact limit and builds markers from that same prefix. `git diff --check` passes. No parser, build,
+tests, or replay were run because the proof/compiler qualification lane remains paused.

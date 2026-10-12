@@ -19,6 +19,71 @@ extend ElisaProof:
                     changed <- true if proof_tighten_by_disequality(fact, facts, bounds)
                 rounds <- rounds + 1
 
+        # Metered sibling used by the safety-analysis context. False means the
+        # shared cap was exhausted, so callers must report unknown.
+        def proof_tighten_disequality_bounds_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            marker_scan: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+            return false if not marker_scan.complete
+            return proof_tighten_disequality_bounds_with_marker_work(facts, bounds, markers, marker_scan.scale, budget, exhausted)
+
+        def proof_tighten_disequality_bounds_with_marker_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            disequalities: mutable darray[Ast::Expr] = []
+            for fact in facts |fact, disequalities, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                disequalities.push(fact) if proof_fact_is_disequality(fact)
+            rounds: mutable usize = 0
+            changed: mutable bool = true
+            while changed and rounds < disequalities.count |rounds, changed, disequalities, facts, bounds, markers, marker_scale, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                changed <- false
+                for fact in disequalities |fact, changed, facts, bounds, markers, marker_scale, budget, exhausted|:
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    tightened: (complete: bool, changed: bool) = proof_tighten_by_disequality_with_work(fact, bounds, markers, marker_scale, budget, exhausted)
+                    return false if not tightened.complete
+                    changed <- true if tightened.changed
+                rounds <- rounds + 1
+            return true
+
+        def proof_tighten_by_disequality_with_work(fact: Ast::Expr, bounds: mutable darray[ProofBound]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, changed: bool):
+            match fact:
+                Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                    return proof_tighten_named_disequality_with_work(left, right, bounds, markers, marker_scale, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                            return proof_tighten_named_disequality_with_work(left, right, bounds, markers, marker_scale, budget, exhausted)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_tighten_named_disequality_with_work(left: Ast::Expr, right: Ast::Expr, bounds: mutable darray[ProofBound]&, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, changed: bool):
+            comparison: (complete: bool, matches: bool) = proof_linear_safety_comparison_with_work(left, right, markers, marker_scale, budget, exhausted)
+            return (false, false) if not comparison.complete
+            return (true, false) if not comparison.matches
+            name: mutable sview = proof_ident_name(left)
+            constant: mutable (known: bool, value: i64) = proof_constant_int(right)
+            if name == "" or not constant.known:
+                name <- proof_ident_name(right)
+                constant <- proof_constant_int(left)
+            return (true, false) if name == "" or not constant.known
+            found: (complete: bool, index: usize) = proof_bound_index_with_work(bounds, name, budget, exhausted)
+            return (false, false) if not found.complete
+            return (true, false) if found.index == bounds.count
+            bound: ProofBound = bounds[found.index]
+            changed: mutable bool = false
+            if bound.has_lower and bound.lower == constant.value:
+                raised: (known: bool, value: i64) = proof_add_safe(constant.value, 1)
+                if raised.known:
+                    return (false, false) if not proof_equalities_add_lower_with_work(bounds, name, raised.value, budget, exhausted)
+                    changed <- true
+            if bound.has_upper and bound.upper == constant.value:
+                lowered: (known: bool, value: i64) = proof_sub_safe(constant.value, 1)
+                if lowered.known:
+                    return (false, false) if not proof_equalities_add_upper_with_work(bounds, name, lowered.value, budget, exhausted)
+                    changed <- true
+            return (true, changed)
+
         def proof_fact_is_disequality(fact: Ast::Expr) -> bool:
             match fact:
                 Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
