@@ -48,6 +48,26 @@ with tempfile.TemporaryDirectory(prefix="elisa-prebuilt-qualification-") as dire
     assert digest == proof_manifest["proof"]["source_tree_sha256"]
     assert validate_frontend_metadata(pair, "b" * 40, "b" * 40, "c" * 40, "e" * 40) == "stage1"
 
+    source_link = source / "linked.elisa"
+    source_link.symlink_to("main.elisa")
+    try:
+        validate_source_metadata(pair, source, snapshot, "a" * 40, False)
+    except ValueError as error:
+        assert "non-regular file" in str(error)
+    else:
+        raise AssertionError("prebuilt gate followed a proof-source file symlink")
+    source_link.unlink()
+
+    snapshot_link_directory = snapshot / "linked-dir"
+    snapshot_link_directory.symlink_to(source, target_is_directory=True)
+    try:
+        validate_source_metadata(pair, source, snapshot, "a" * 40, False)
+    except ValueError as error:
+        assert "non-directory entry" in str(error)
+    else:
+        raise AssertionError("prebuilt gate ignored a proof-source symlinked directory")
+    snapshot_link_directory.unlink()
+
     stale_source = deepcopy(pair)
     stale_source["elisa-proof-replay"]["proof"]["source_tree_sha256"] = "f" * 64
     try:

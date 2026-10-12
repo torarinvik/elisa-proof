@@ -31,16 +31,35 @@ def file_digest(path: str) -> dict:
 
 
 def tree_digest(root: str) -> str:
-    """Hash every file under root by relative path and contents, in a fixed order."""
+    """Hash every regular file under root by relative path and contents, in a fixed order.
+
+    Symlinks are rejected instead of followed: following a file link hashes its current
+    target but loses the link identity, while walking with the default settings omits
+    directory links entirely. Neither behavior can establish an exact source snapshot.
+    """
+    if os.path.islink(root) or not os.path.isdir(root):
+        raise ValueError(f"source tree is not a regular directory: {root}")
     digest = hashlib.sha256()
-    for directory, subdirectories, files in os.walk(root):
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    for directory, subdirectories, files in os.walk(root, onerror=raise_walk_error):
         subdirectories.sort()
+        for name in subdirectories:
+            path = os.path.join(directory, name)
+            if os.path.islink(path) or not os.path.isdir(path):
+                raise ValueError(f"source tree contains a non-directory entry: {path}")
         for name in sorted(files):
             path = os.path.join(directory, name)
+            if os.path.islink(path) or not os.path.isfile(path):
+                raise ValueError(f"source tree contains a non-regular file: {path}")
             relative = os.path.relpath(path, root).replace(os.sep, "/")
             digest.update(relative.encode() + b"\0")
+            file_hash = hashlib.sha256()
             with open(path, "rb") as handle:
-                digest.update(hashlib.sha256(handle.read()).digest())
+                for block in iter(lambda: handle.read(1 << 20), b""):
+                    file_hash.update(block)
+            digest.update(file_hash.digest())
     return digest.hexdigest()
 
 
