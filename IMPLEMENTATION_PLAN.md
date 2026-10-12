@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-12. **§23.27.119 is the live integration gate and supersedes earlier priority summaries.** Local Elisa-core `main` is at `26c1106c`; a clean Stage0 from that commit passes `make test-prover` and is installed at `~/.elisac/elisac-stage0` (SHA-256 `f1b8ee6339ba2b646f93f25baca471522d25ea99a38081caba79b2411e7d5dc3`). The proof pins remain at Stage0 `8070e39d` and Elisa-compiler `e1361c201` because the current compiler has not produced a fresh Stage1 and the strict O2 proof executable/replay gates remain red. The compiler and proof checkouts contain active dirty migrations; they were not included in the core commit. Timing remains skipped. Prioritize a clean newest-compiler bootstrap, then the mutable-global authority matrix, then the strict proof/replay blockers; resume performance work only after correctness parity and the load gate.
+Status refreshed 2026-10-12. **§23.27.120 is the live integration gate and supersedes earlier priority summaries.** Local Elisa-core `main` is at `37482d6e`; a clean Stage0 from that commit passes `make test-prover` and is installed at `~/.elisac/elisac-stage0` (SHA-256 `a4ac8fb37851e2eeec8f9f9f930c243a5c0b92c0333b874ff3eb02c38ccd6b70`). The proof pins remain at Stage0 `8070e39d` and Elisa-compiler `e1361c201` because a fresh Stage1 and strict O2 proof/replay qualification on the new pair have not passed. The compiler and proof checkouts contain active dirty migrations; they were not included in the core commits. Timing remains skipped. Prioritize the newest-compiler bootstrap, then the mutable-global authority matrix, then strict proof/replay blockers; resume performance work only after correctness parity and the load gate.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -10474,3 +10474,30 @@ ownership-binding and replay obligations without weakening checks; (4) finish tu
 contract proofs on a project-aware current-compiler run, including reordered-field and mutation
 controls; (5) resume paired timing only after correctness parity and the load gate. Keep the proof
 compiler pins unchanged until the new product passes the full proof and replay gates.
+
+
+### 23.27.120 Symmetric literal-result projection (2026-10-12)
+
+Elisa-core `main` now also contains `37482d6e`, which makes literal result-field equality
+direction-independent: both `result.binding == "string"` and `"string" == result.binding` use
+the same literal-only projection path. Exact and reversed exact contracts pass, while both forward
+and reversed wrong-value controls are rejected. The complete prover target passed from a clean
+detached checkout (`make test-prover`: semantic 19.662s, SMT 0.246s), and the installed Stage0
+passed a direct CLI check of the reversed tuple-field contract.
+
+The clean Stage0 from `37482d6e` reports `vcs.modified=false` and SHA-256
+`a4ac8fb37851e2eeec8f9f9f930c243a5c0b92c0333b874ff3eb02c38ccd6b70`. It is installed at
+`~/.elisac/elisac-stage0` and `Elisa-core/compiler/bin/elisac`; the preceding `26c1106c` product
+is backed up at `~/.elisac/elisac-stage0.pre-equality-37482d6e-20261012`. The proof pins remain
+unchanged pending a fresh Stage1 and strict O2/replay qualification. The temporary clean validation
+worktree was removed. No timing was run.
+
+The compiler agent's provenance/bootstrap check remains active and has been given the exact
+`37482d6e` Stage0 identity; no bootstrap result is qualified yet.
+
+**Next high-return order:** (1) complete a clean Stage1/gen2 bootstrap from the committed
+Elisa-compiler source with the exact Stage0 above, and separate fatal diagnostics from warnings;
+(2) run the 103-case mutable-global authority matrix on that provenance-matched product; (3) resolve
+the strict proof build's retention, region, ownership-binding, and replay failures without weakening
+the kernel; (4) finish current-compiler tuple/classifier contracts with reordered-field and mutation
+controls; (5) resume paired timing only after correctness parity and the load gate.
