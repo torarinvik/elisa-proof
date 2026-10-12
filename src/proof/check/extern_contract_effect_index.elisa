@@ -1,0 +1,262 @@
+# Bounded source index for effectful contracts on callable extern declarations.
+extend ElisaProof:
+    private:
+        # Match the backend boundary exactly: it checks top-level externs and immediate
+        # members of top-level Modules. Deeper Modules and Scoped declarations are not
+        # included in the runtime extern-ensure table.
+        def proof_source_extern_contract_index_collect(declarations: darray[Ast::Decl]&, extern_parameters: darray[Ast::ExternParam]&, contract_lines: darray[u32]&, contract_kinds: darray[sview]&, contracts: darray[Ast::Expr]&, report: mutable ProofReport&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            return false if contract_lines.count != contract_kinds.count or contract_lines.count != contracts.count
+            for declaration in declarations |extern_parameters, contract_lines, contract_kinds, contracts, report, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Extern(name, first, arity, _, callable, return_type_name, decorators, position):
+                        continue if not callable
+                        trusted: mutable bool = false
+                        for decorator in decorators |decorators, source_work, trusted|:
+                            return false if not proof_report_source_work_charge(1 + sview_len(decorator.name), source_work)
+                            trusted <- true if decorator.name == "trusted"
+                        continue if trusted
+                        start: usize = first.usize()
+                        parameter_count: usize = arity.usize()
+                        return false if start > extern_parameters.count or parameter_count > extern_parameters.count - start
+                        has_pointer_return: mutable bool = false
+                        unsupported_result_shape: mutable bool = false
+                        return_text_markers: mutable usize = 0
+                        return_text_rows: mutable usize = 0
+                        return_text_spelling: mutable sview = ""
+                        return_text_valid: mutable bool = true
+                        for annotation_index in 0..<report.source_annotations.count |annotation_index, name, position, report, source_work, has_pointer_return, unsupported_result_shape, return_text_markers, return_text_rows, return_text_spelling, return_text_valid|:
+                            annotation: Ast::EnumAnnotation = report.source_annotations[annotation_index]
+                            return false if not proof_report_source_work_charge(1 + sview_len(annotation.owner) + sview_len(annotation.name), source_work)
+                            continue if annotation.line != position.line
+                            if annotation.name == "__extern_return_text_complete":
+                                return_text_markers <- return_text_markers + 1
+                                return_text_valid <- false if annotation.owner != name or annotation_index + 1 >= report.source_annotations.count
+                                if annotation_index + 1 < report.source_annotations.count:
+                                    adjacent: Ast::EnumAnnotation = report.source_annotations[annotation_index + 1]
+                                    return_text_valid <- false if adjacent.line != position.line or adjacent.owner != "__extern_return_text"
+                                    if adjacent.line == position.line and adjacent.owner == "__extern_return_text":
+                                        return_text_spelling <- adjacent.name
+                            if annotation.owner == "__extern_return_text":
+                                return_text_rows <- return_text_rows + 1
+                                return_text_valid <- false if annotation_index == 0
+                                if annotation_index > 0:
+                                    previous: Ast::EnumAnnotation = report.source_annotations[annotation_index - 1]
+                                    return_text_valid <- false if previous.line != position.line or previous.owner != name or previous.name != "__extern_return_text_complete"
+                                return_text_valid <- false if annotation.name != return_text_spelling
+                            if annotation.owner == "__extern_return_ptr" and annotation.name == name:
+                                has_pointer_return <- true
+                                unsupported_result_shape <- true
+                            if (annotation.owner == "__extern_return_optional" or annotation.owner == "__extern_return_mutable") and annotation.name == name:
+                                unsupported_result_shape <- true
+                            if annotation.owner == name and annotation.name == "__extern_return_darray":
+                                unsupported_result_shape <- true
+                            if annotation.owner == "__extern_return_shape_fn" and annotation.name == name:
+                                unsupported_result_shape <- true
+                        return_text_valid <- false if return_type_name != "" and (return_text_markers != 1 or return_text_rows != 1)
+                        if return_type_name != "":
+                            return false if not proof_report_source_work_charge(sview_len(return_type_name) + sview_len(return_text_spelling), source_work)
+                            unsupported_result_shape <- true if not return_text_valid or return_text_spelling != return_type_name
+                        else:
+                            unsupported_result_shape <- true if return_text_markers != 0 or return_text_rows != 0 or not return_text_valid
+                        return false if report.source_effect_index.alias_names.count != report.source_effect_index.alias_targets.count
+                        return false if report.source_effect_index.alias_names.count > report.source_effect_index.declaration_count or report.source_effect_index.declaration_count < declarations.count
+                        for alias_index in 0..<report.source_effect_index.alias_names.count |alias_index, return_type_name, report, source_work, unsupported_result_shape|:
+                            alias_name: sview = report.source_effect_index.alias_names[alias_index]
+                            return false if not proof_report_source_work_charge(1 + sview_len(return_type_name) + sview_len(alias_name), source_work)
+                            # The extern node retains only an alias head. Its expansion may be an
+                            # applied type, so do not treat the head as the complete result type.
+                            unsupported_result_shape <- true if alias_name == return_type_name
+                        parameters: mutable darray[Ast::ParamDecl] = []
+                        # The compact extern node retains only the return head. Pointer returns
+                        # such as `void&` therefore need their line-keyed metadata to agree with
+                        # the backend's non-void result slot. A non-simple result's exact type is
+                        # not reconstructed here; ensures that mention it fail closed below.
+                        has_result_binding: bool = (return_type_name != "" and return_type_name != "void") or has_pointer_return
+                        for parameter_index in 0..<parameter_count |parameter_index, extern_parameters, start, parameters, source_work|:
+                            external_parameter: Ast::ExternParam = extern_parameters[start + parameter_index]
+                            return false if not proof_report_source_work_charge(1 + sview_len(external_parameter.name) + sview_len(external_parameter.type_name), source_work)
+                            # The backend declares `result` after formal parameters. For a
+                            # non-void return, that binding shadows any formal with the same
+                            # spelling, so retain only the effective binding for source queries.
+                            continue if has_result_binding and external_parameter.name == "result"
+                            type_expression: Ast::Expr = Ast::Expr.Ident(external_parameter.type_name, external_parameter.pos) if external_parameter.type_name != "" else Ast::Expr.Invalid
+                            parameters.push(Ast::ParamDecl{name: external_parameter.name, type_expression: type_expression, is_mutable: false, has_default: false, default_value: Ast::Expr.Invalid})
+                        if has_result_binding:
+                            return false if not proof_report_source_work_charge(1 + sview_len("result") + sview_len(return_type_name), source_work)
+                            result_type: Ast::Expr = Ast::Expr.Ident(return_type_name, position)
+                            parameters.push(Ast::ParamDecl{name: "result", type_expression: result_type, is_mutable: false, has_default: false, default_value: Ast::Expr.Invalid})
+                        unsafe: mutable bool = false
+                        for index in 0..<contract_lines.count |index, contract_lines, contract_kinds, contracts, report, source_work, position, unsafe, parameters|:
+                            return false if not proof_report_source_work_charge(1 + sview_len(contract_kinds[index]), source_work)
+                            continue if contract_lines[index] != position.line or contract_kinds[index] != "ensure"
+                            repeat_count: usize = 4 if unsupported_result_shape else 3
+                            return false if not proof_replay_summary_expr_repeat_charge_with_work(contracts[index], repeat_count, source_work)
+                            unsafe <- true if unsupported_result_shape and proof_expr_mentions_name(contracts[index], "result")
+                            break if unsafe
+                            unsafe <- proof_expr_has_call(contracts[index])
+                            if not unsafe:
+                                unsafe <- proof_structural_typed_operator_expression_has_overload(contracts[index], parameters, report, 0)
+                            if not unsafe:
+                                unsafe <- proof_source_expression_has_unsafe_runtime_index(contracts[index], parameters, report, 0, [])
+                            if not unsafe:
+                                unsafe <- proof_source_expression_has_drop_risk(contracts[index], parameters, report, 0)
+                            break if unsafe
+                        report.source_effect_index.extern_contract_names.push(name)
+                        report.source_effect_index.extern_contract_lines.push(position.line)
+                        report.source_effect_index.extern_contract_unsafe.push(unsafe)
+                    Ast::Decl.Module(_, body, _):
+                        return false if depth == 0 and not proof_source_extern_contract_index_collect(body, extern_parameters, contract_lines, contract_kinds, contracts, report, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_callable_extern_contract_index_build(declarations: darray[Ast::Decl]&, extern_parameters: darray[Ast::ExternParam]&, contract_lines: darray[u32]&, contract_kinds: darray[sview]&, contracts: darray[Ast::Expr]&, report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: mutable ProofSourceEffectIndex& = &report.source_effect_index
+            index.extern_contract_names.clear()
+            index.extern_contract_lines.clear()
+            index.extern_contract_unsafe.clear()
+            index.extern_contract_hashes.clear()
+            index.extern_contract_slots.clear()
+            index.extern_contract_ambiguous.clear()
+            index.extern_contract_index_valid <- false
+            return false if not proof_source_extern_contract_index_collect(declarations, extern_parameters, contract_lines, contract_kinds, contracts, report, source_work, 0)
+            count: usize = index.extern_contract_names.count
+            return false if count != index.extern_contract_lines.count or count != index.extern_contract_unsafe.count
+            if count == 0:
+                index.extern_contract_index_valid <- true
+                return true
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0 or not proof_report_source_work_charge(capacity + count, source_work)
+            index.extern_contract_hashes.resize(capacity)
+            index.extern_contract_slots.resize(capacity)
+            index.extern_contract_ambiguous.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.extern_contract_slots[slot] <- count
+                index.extern_contract_ambiguous[slot] <- false
+            for row in 0..<count |row, index, count, capacity, source_work|:
+                name: sview = index.extern_contract_names[row]
+                return false if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, index, count, capacity, placed, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.extern_contract_slots[slot]
+                    if current == count:
+                        index.extern_contract_hashes[slot] <- hash
+                        index.extern_contract_slots[slot] <- row
+                        placed <- true
+                        break
+                    if index.extern_contract_hashes[slot] == hash:
+                        current_name: sview = index.extern_contract_names[current]
+                        return false if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            index.extern_contract_ambiguous[slot] <- true
+                            index.extern_contract_unsafe[current] <- index.extern_contract_unsafe[current] or index.extern_contract_unsafe[row]
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            index.extern_contract_index_valid <- true
+            return true
+
+        def proof_source_extern_contract_unsafe_with_work(report: ProofReport&, name: sview, source_work: mutable usize&) -> (complete: bool, found: bool, unsafe: bool):
+            index: ProofSourceEffectIndex& = report.source_effect_index
+            return (false, false, false) if not index.extern_contract_index_valid
+            count: usize = index.extern_contract_names.count
+            capacity: usize = index.extern_contract_slots.count
+            return (false, false, false) if count != index.extern_contract_lines.count or count != index.extern_contract_unsafe.count
+            return (true, false, false) if count == 0
+            return (false, false, false) if capacity == 0 or capacity != index.extern_contract_hashes.count or capacity != index.extern_contract_ambiguous.count
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, name, index, count, capacity, source_work|:
+                return (false, false, false) if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                current: usize = index.extern_contract_slots[slot]
+                return (true, false, false) if current == count
+                return (false, false, false) if current >= count
+                if index.extern_contract_hashes[slot] == hash:
+                    current_name: sview = index.extern_contract_names[current]
+                    return (false, false, false) if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                    if current_name == name:
+                        return (true, true, index.extern_contract_unsafe[current])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (true, false, false)
+
+        def proof_function_extern_contract_reachability_build(report: ProofReport&, functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> bool:
+            count: usize = functions.lookup.names.count
+            return false if functions.call_graph.call_starts.count != count or functions.call_graph.call_counts.count != count or functions.call_graph.all_calls.count != functions.call_graph.all_call_targets.count
+            functions.externs.direct_extern_contract_unsafe.clear()
+            functions.externs.reachable_extern_contract_unsafe.clear()
+            functions.externs.direct_extern_contract_unsafe.resize(count)
+            functions.externs.reachable_extern_contract_unsafe.resize(count)
+            functions.externs.extern_contract_analysis_complete <- false
+            reverse_counts: mutable darray[usize] = []
+            reverse_counts.resize(count)
+            for caller in 0..<count |caller, functions, count, reverse_counts, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                start: usize = functions.call_graph.call_starts[caller]
+                edge_count: usize = functions.call_graph.call_counts[caller]
+                return false if start > functions.call_graph.all_calls.count or edge_count > functions.call_graph.all_calls.count - start
+                for offset in 0..<edge_count |offset, caller, start, edge_count, functions, count, reverse_counts, source_work, report|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    edge: usize = start + offset
+                    target: usize = functions.call_graph.all_call_targets[edge]
+                    return false if target > count
+                    if target < count:
+                        reverse_counts[target] <- reverse_counts[target] + 1
+                    elif functions.call_graph.all_calls[edge] != "__opaque_call__":
+                        hazard: (complete: bool, found: bool, unsafe: bool) = proof_source_extern_contract_unsafe_with_work(report, functions.call_graph.all_calls[edge], source_work)
+                        return false if not hazard.complete
+                        functions.externs.direct_extern_contract_unsafe[caller] <- true if hazard.found and hazard.unsafe
+            reverse_starts: mutable darray[usize] = []
+            cursor: mutable usize = 0
+            for incoming in reverse_counts |incoming, reverse_starts, cursor, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                reverse_starts.push(cursor)
+                return false if cursor > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false if incoming > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cursor
+                cursor <- cursor + incoming
+            return false if not proof_report_source_work_charge(cursor, source_work)
+            reverse_targets: mutable darray[usize] = []
+            reverse_targets.resize(cursor)
+            write_cursor: mutable darray[usize] = []
+            return false if not proof_report_source_work_charge(reverse_starts.count, source_work)
+            write_cursor.extend(reverse_starts)
+            for caller in 0..<count |caller, functions, count, write_cursor, reverse_targets, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                start: usize = functions.call_graph.call_starts[caller]
+                edge_count: usize = functions.call_graph.call_counts[caller]
+                for offset in 0..<edge_count |offset, caller, start, edge_count, functions, count, write_cursor, reverse_targets, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    target: usize = functions.call_graph.all_call_targets[start + offset]
+                    if target < count:
+                        slot: usize = write_cursor[target]
+                        reverse_targets[slot] <- caller
+                        write_cursor[target] <- slot + 1
+            queue: mutable darray[usize] = []
+            for function_index in 0..<count |function_index, functions, queue, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                if functions.externs.direct_extern_contract_unsafe[function_index]:
+                    functions.externs.reachable_extern_contract_unsafe[function_index] <- true
+                    queue.push(function_index)
+            queue_index: mutable usize = 0
+            while queue_index < queue.count |queue_index, queue, reverse_starts, reverse_counts, reverse_targets, functions, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                current: usize = queue[queue_index]
+                start: usize = reverse_starts[current]
+                for offset in 0..<reverse_counts[current] |offset, current, start, reverse_counts, reverse_targets, functions, queue, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    caller: usize = reverse_targets[start + offset]
+                    if not functions.externs.reachable_extern_contract_unsafe[caller]:
+                        functions.externs.reachable_extern_contract_unsafe[caller] <- true
+                        queue.push(caller)
+                queue_index <- queue_index + 1
+            functions.externs.extern_contract_analysis_complete <- true
+            return true

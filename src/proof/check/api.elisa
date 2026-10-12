@@ -22,12 +22,7 @@ extend ElisaProof:
             report.proven <- 0
             report.failed <- 0
             report.source_annotations.clear()
-            report.source_primitive_operator_mask <- PROOF_SOURCE_OPERATOR_MASK_EMPTY
-            report.operator_impls.rows.clear()
-            report.operator_impls.hashes.clear()
-            report.operator_impls.bucket_heads.clear()
-            report.operator_impls.next_indices.clear()
-            report.operator_impls.valid <- false
+            proof_source_analysis_indexes_reset(report)
             report.source_declarations.clear()
             report.source_signature_contract_lines.clear()
             report.source_signature_contract_kinds.clear()
@@ -249,11 +244,18 @@ extend ElisaProof:
             if not operator_index_status.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "operator-implementation index could not be built within its validated bounds", operator_index_status.reason, operator_index_status.observed, operator_index_status.limit)
                 return
-            source_operator_mask_status: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_from_index(report, &name_index_work)
-            if not source_operator_mask_status.complete:
-                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "primitive operator admission mask exceeded its validated work bound", "primitive-operator-mask-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            source_operator_masks_status: (complete: bool, primitive_mask: usize, protocol_mask: usize) = proof_source_operator_masks_from_index(report, &name_index_work)
+            if not source_operator_masks_status.complete:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source operator masks exceeded their validated work bound", "source-operator-mask-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
-            report.source_primitive_operator_mask <- source_operator_mask_status.mask
+            report.source_primitive_operator_mask <- source_operator_masks_status.primitive_mask
+            report.source_operator_protocol_mask <- source_operator_masks_status.protocol_mask
+            if not proof_source_effect_index_build(report, &name_index_work):
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source destructor type index exceeded its validated work bound", "source-drop-type-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            if not proof_source_callable_extern_contract_index_build(report.source_declarations, report.source_extern_parameters, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, report, &name_index_work):
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "callable extern contract index exceeded its validated work bound", "extern-contract-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             lemmas: mutable ProofLemmaTable = proof_empty_lemmas()
             functions: mutable ProofFunctionTable = proof_empty_functions()
             lemma_marker_build: (index: ProofLemmaAnnotationIndex, complete: bool, reason: sview, observed: usize, limit: usize) = proof_lemma_annotation_index(file, &name_index_work)
@@ -270,11 +272,11 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "lemma-name index could not be built within its validated bounds", lemma_index_status.reason, lemma_index_status.observed, lemma_index_status.limit)
                 return
             proof_build_lemma_components(&lemmas)
-            functions.type_audit_index <- proof_type_audit_index(file.top_decls, &name_index_work)
+            functions.type_indexes.type_audit_index <- proof_type_audit_index(file.top_decls, &name_index_work)
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "type audit index exceeded its validated work bound", "type-audit-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
-            functions.enum_index <- proof_build_enum_index(file.top_decls, &name_index_work)
+            functions.type_indexes.enum_index <- proof_build_enum_index(file.top_decls, &name_index_work)
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "enum index exceeded its validated work bound", "enum-index-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
@@ -282,7 +284,7 @@ extend ElisaProof:
             if not frame_annotation_build.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "frame-annotation index could not be built within its validated bounds", frame_annotation_build.reason, frame_annotation_build.observed, frame_annotation_build.limit)
                 return
-            functions.frame_annotation_index <- frame_annotation_build.index
+            functions.type_indexes.frame_annotation_index <- frame_annotation_build.index
             proof_collect_local_region_bindings(file, &functions, &name_index_work)
             proof_collect_mutable_local_bindings(file, &functions, &name_index_work)
             proof_collect_loop_accumulators(file, &functions, &name_index_work)
@@ -314,26 +316,43 @@ extend ElisaProof:
             if not call_target_status.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "call graph targets could not be resolved within their validated bounds", call_target_status.reason, call_target_status.observed, call_target_status.limit)
                 return
-            functions.module_resolution_work_used <- name_index_work
-            proof_qualify_repeated_contract_rows(file, &functions)
-            if functions.module_resolution_work_exhausted:
-                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "qualified contract call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            functions.lookup.module_resolution_work_used <- name_index_work
+            if not proof_function_extern_contract_reachability_build(report, &functions, &name_index_work):
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "reachable callable extern contracts exceeded their validated work bound", "extern-contract-reachability-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
-            name_index_work <- functions.module_resolution_work_used
+            functions.lookup.module_resolution_work_used <- name_index_work
+            proof_qualify_repeated_contract_rows(file, &functions)
+            if functions.lookup.module_resolution_work_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "qualified contract call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            name_index_work <- functions.lookup.module_resolution_work_used
             proof_build_function_components(&functions)
             proof_mark_pure_functions(file, file.top_decls, &functions, report)
+            name_index_work <- functions.lookup.module_resolution_work_used
+            if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source purity analysis exceeded its shared source-work bound", "module-call-resolution-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source purity and implicit-effect analysis exceeded their shared work bound", "source-implicit-effect-work", report.source_effect_index.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             fact_call_purity_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_fact_call_shape_snapshot_purity(&report.fact_call_shapes, functions, &name_index_work)
             if not fact_call_purity_status.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "fact call-shape purity data could not be bound within its validated bounds", fact_call_purity_status.reason, fact_call_purity_status.observed, fact_call_purity_status.limit)
                 return
-            functions.module_resolution_work_used <- name_index_work
+            functions.lookup.module_resolution_work_used <- name_index_work
             proof_check_structural_termination(file, file.top_decls, functions, report, true)
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "structural implicit-effect analysis exceeded its shared work bound", "source-implicit-effect-work", report.source_effect_index.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            if functions.lookup.module_resolution_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "structural source contract analysis exceeded its shared work bound", "structural-source-contract-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             (proof_compute_verified_lemmas(file, file.top_decls, &lemmas, functions, report) can Global{Read,Write})
             (proof_compute_verified_functions(file, file.top_decls, lemmas, &functions, report, focus_function) can Global{Read,Write})
-            name_index_work <- functions.module_resolution_work_used
+            name_index_work <- functions.lookup.module_resolution_work_used
             proof_record_declarations(file, file.top_decls, lemmas, functions, report, &name_index_work)
-            if functions.module_resolution_work_exhausted:
-                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            if functions.lookup.module_resolution_work_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "declaration reporting could not classify lemma names within its validated work bound", "lemma-name-lookup-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)

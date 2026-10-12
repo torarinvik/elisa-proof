@@ -235,16 +235,19 @@ extend ElisaProof:
         # `allow_requires` asks only whether the body is deterministic: a precondition makes the
         # function partial, so it may not be a total contract term, but every call that runs
         # has proved its precondition and still reads nothing but its by-value arguments.
-        def proof_function_is_directly_pure(functions: ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, mutable_globals: darray[sview]&, report: ProofReport&, allow_requires: bool) -> bool:
-            return false if function_index >= functions.param_starts.count or function_index >= functions.param_counts.count
-            return false if function_index >= functions.requires_counts.count or function_index >= functions.changes_counts.count or function_index >= functions.preserves_counts.count
-            return false if (functions.requires_counts[function_index] > 0 and not allow_requires) or functions.changes_counts[function_index] > 0 or functions.preserves_counts[function_index] > 0
+        def proof_function_is_directly_pure(functions: mutable ProofFunctionTable&, function_index: usize, parameters: darray[Ast::ParamDecl]&, effects: darray[sview]&, body: darray[Ast::Stmt]&, declarations: darray[Ast::Decl]&, mutable_globals: darray[sview]&, report: mutable ProofReport&, allow_requires: bool) -> bool:
+            return false if function_index >= functions.parameters.param_starts.count or function_index >= functions.parameters.param_counts.count
+            return false if function_index >= functions.contracts.requires_counts.count or function_index >= functions.contracts.changes_counts.count or function_index >= functions.contracts.preserves_counts.count
+            return false if (functions.contracts.requires_counts[function_index] > 0 and not allow_requires) or functions.contracts.changes_counts[function_index] > 0 or functions.contracts.preserves_counts[function_index] > 0
+            return false if not functions.externs.extern_contract_analysis_complete or function_index >= functions.externs.reachable_extern_contract_unsafe.count
+            return false if functions.externs.reachable_extern_contract_unsafe[function_index]
+            return false if function_index >= functions.lookup.names.count or proof_source_function_has_drop_risk(functions.lookup.names[function_index], parameters, body, report)
             return false if effects.count > 0
-            param_start: usize = functions.param_starts[function_index]
-            return false if function_index >= functions.param_counts.count or functions.param_counts[function_index] != parameters.count
+            param_start: usize = functions.parameters.param_starts[function_index]
+            return false if function_index >= functions.parameters.param_counts.count or functions.parameters.param_counts[function_index] != parameters.count
             for parameter_index in 0..<parameters.count |parameter_index, functions, param_start|:
                 slot: usize = param_start + parameter_index
-                return false if slot >= functions.all_parameter_mutable.count or functions.all_parameter_mutable[slot] or parameter_index >= parameters.count or parameters[parameter_index].is_mutable or proof_parameter_type_is_mutable(parameters[parameter_index].type_expression)
+                return false if slot >= functions.parameters.all_parameter_mutable.count or functions.parameters.all_parameter_mutable[slot] or parameter_index >= parameters.count or parameters[parameter_index].is_mutable or proof_parameter_type_is_mutable(parameters[parameter_index].type_expression)
                 if parameters[parameter_index].has_default:
                     # Defaults execute when the argument is omitted. Their call edges are added
                     # to the same fixed-point graph as body calls, so only verified pure calls
@@ -253,39 +256,46 @@ extend ElisaProof:
                     return false if not proof_pure_expression_shape(parameters[parameter_index].default_value)
                     return false if proof_expr_has_old(parameters[parameter_index].default_value)
                     return false if proof_expr_mentions_any_global(parameters[parameter_index].default_value, mutable_globals)
+                    return false if proof_structural_typed_operator_expression_has_overload(parameters[parameter_index].default_value, parameters, report, 0)
+                    return false if proof_source_expression_has_unsafe_runtime_index(parameters[parameter_index].default_value, parameters, report, 0, [])
+            # Operator implementations and non-builtin indexers are implicit calls absent from
+            # the explicit-call SCC. Exclude them before either the range-search special case
+            # or the ordinary pure-body checker can publish a function summary.
+            return false if proof_structural_typed_operator_statements_have_overload(body, parameters, report, 0)
+            return false if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [])
             return true if proof_pure_range_search_body(body, parameters, mutable_globals, report)
             return false if proof_pure_body_reads_mutable_global(body, mutable_globals)
             return proof_pure_body_direct(body, body, parameters, report)
 
         def proof_recursive_purity_eligible(functions: ProofFunctionTable&, function_index: usize) -> bool:
-            return false if function_index >= functions.recursive.count or not functions.recursive[function_index]
-            return false if function_index >= functions.decreases_counts.count or function_index >= functions.decreases_unbounded.count or function_index >= functions.decreases_starts.count
-            return false if functions.decreases_counts[function_index] == 0 or functions.decreases_unbounded[function_index]
-            return proof_decreases_range_valid(functions.decreases_starts[function_index], functions.decreases_counts[function_index], functions.all_decreases.count)
+            return false if function_index >= functions.summaries.recursive.count or not functions.summaries.recursive[function_index]
+            return false if function_index >= functions.contracts.decreases_counts.count or function_index >= functions.contracts.decreases_unbounded.count or function_index >= functions.contracts.decreases_starts.count
+            return false if functions.contracts.decreases_counts[function_index] == 0 or functions.contracts.decreases_unbounded[function_index]
+            return proof_decreases_range_valid(functions.contracts.decreases_starts[function_index], functions.contracts.decreases_counts[function_index], functions.contracts.all_decreases.count)
 
         # Recursive purity is a component certificate, not a per-edge shortcut. In particular,
         # one locally pure member must not become pure by pointing at another member whose body
         # reaches an unknown or effectful function. Inspect every member and every outgoing edge
         # together before allowing any recursive summary edge in the fixed point.
         def proof_recursive_component_is_pure_candidate(functions: ProofFunctionTable&, source: usize) -> bool:
-            return false if source >= functions.names.count
+            return false if source >= functions.lookup.names.count
             member_index: mutable usize = 0
-            while member_index < functions.names.count |member_index, functions, source|:
+            while member_index < functions.lookup.names.count |member_index, functions, source|:
                 if proof_functions_same_recursive_component(functions, source, member_index):
-                    return false if member_index >= functions.direct_pure.count or not functions.direct_pure[member_index]
+                    return false if member_index >= functions.summaries.direct_pure.count or not functions.summaries.direct_pure[member_index]
                     return false if not proof_recursive_purity_eligible(functions, member_index)
-                    return false if member_index >= functions.call_starts.count or member_index >= functions.call_counts.count
-                    member_start: usize = functions.call_starts[member_index]
-                    member_count: usize = functions.call_counts[member_index]
-                    return false if member_start > functions.all_calls.count or member_count > functions.all_calls.count - member_start
+                    return false if member_index >= functions.call_graph.call_starts.count or member_index >= functions.call_graph.call_counts.count
+                    member_start: usize = functions.call_graph.call_starts[member_index]
+                    member_count: usize = functions.call_graph.call_counts[member_index]
+                    return false if member_start > functions.call_graph.all_calls.count or member_count > functions.call_graph.all_calls.count - member_start
                     for call_offset in 0..<member_count |call_offset, member_start, functions, source|:
-                        called: sview = functions.all_calls[member_start + call_offset]
+                        called: sview = functions.call_graph.all_calls[member_start + call_offset]
                         return false if called == "__opaque_call__"
                         continue if called == ""
                         called_index: usize = proof_function_call_target(functions, member_start + call_offset)
-                        return false if called_index >= functions.names.count
+                        return false if called_index >= functions.lookup.names.count
                         if not proof_functions_same_recursive_component(functions, source, called_index):
-                            return false if called_index >= functions.pure.count or not functions.pure[called_index]
+                            return false if called_index >= functions.summaries.pure.count or not functions.summaries.pure[called_index]
                 member_index <- member_index + 1
             return true
 
@@ -295,17 +305,17 @@ extend ElisaProof:
         # and strict descent while checking the bodies; this helper only opens the summary fixed
         # point for that already-certified recursive component.
         def proof_function_calls_are_pure(functions: ProofFunctionTable&, function_index: usize, allow_recursive_component: bool) -> bool:
-            return false if function_index >= functions.call_starts.count or function_index >= functions.call_counts.count
-            start: usize = functions.call_starts[function_index]
-            count: usize = functions.call_counts[function_index]
-            return false if start > functions.all_calls.count or count > functions.all_calls.count - start
+            return false if function_index >= functions.call_graph.call_starts.count or function_index >= functions.call_graph.call_counts.count
+            start: usize = functions.call_graph.call_starts[function_index]
+            count: usize = functions.call_graph.call_counts[function_index]
+            return false if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start
             for offset in 0..<count |offset, start, functions, function_index, allow_recursive_component|:
-                called: sview = functions.all_calls[start + offset]
+                called: sview = functions.call_graph.all_calls[start + offset]
                 continue if called == ""
                 called_index: usize = proof_function_call_target(functions, start + offset)
                 return false if called == "__opaque_call__"
-                continue if called_index < functions.pure.count and functions.pure[called_index]
-                recursive_member: bool = allow_recursive_component and called_index < functions.recursive.count and functions.recursive[called_index] and proof_functions_same_recursive_component(functions, function_index, called_index)
+                continue if called_index < functions.summaries.pure.count and functions.summaries.pure[called_index]
+                recursive_member: bool = allow_recursive_component and called_index < functions.summaries.recursive.count and functions.summaries.recursive[called_index] and proof_functions_same_recursive_component(functions, function_index, called_index)
                 continue if recursive_member and proof_recursive_component_is_pure_candidate(functions, function_index)
                 return false
             return true
@@ -313,7 +323,7 @@ extend ElisaProof:
         # Compute declaration-local purity before the call-graph fixed point. This pass must cover
         # the complete table first: otherwise a mutually recursive pair would be classified based
         # on declaration order rather than on the properties of the entire component.
-        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&, report: ProofReport&) -> void:
+        def proof_mark_direct_pure_functions_pass(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, cursor: mutable usize&, mutable_globals: darray[sview]&, report: mutable ProofReport&) -> void:
             for declaration in declarations |file, functions, cursor, mutable_globals, report|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, effects, _, position):
@@ -321,12 +331,12 @@ extend ElisaProof:
                         # through that indexed table by name and line, so a bare name repeated
                         # in another module neither skips this row nor shifts later rows.
                         function_index: usize = proof_function_index_at_line(functions, name, position.line)
-                        continue if function_index >= functions.names.count
+                        continue if function_index >= functions.lookup.names.count
                         cursor <- cursor + 1
-                        if function_index < functions.direct_pure.count:
-                            functions.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report, false)
-                        if function_index < functions.deterministic.count:
-                            functions.deterministic[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, mutable_globals, report, true)
+                        if function_index < functions.summaries.direct_pure.count:
+                            functions.summaries.direct_pure[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, file.top_decls, mutable_globals, report, false)
+                        if function_index < functions.summaries.deterministic.count:
+                            functions.summaries.deterministic[function_index] <- proof_function_is_directly_pure(functions, function_index, parameters, effects, body, file.top_decls, mutable_globals, report, true)
                     Ast::Decl.Module(_, module_body, _):
                         proof_mark_direct_pure_functions_pass(file, module_body, functions, cursor, mutable_globals, report)
                     Ast::Decl.Scoped(scoped_body, _):
@@ -345,14 +355,14 @@ extend ElisaProof:
                         # through that indexed table by name and line, so a bare name repeated
                         # in another module neither skips this row nor shifts later rows.
                         function_index: usize = proof_function_index_at_line(functions, name, position.line)
-                        continue if function_index >= functions.names.count
+                        continue if function_index >= functions.lookup.names.count
                         cursor <- cursor + 1
-                        candidate: mutable bool = function_index < functions.direct_pure.count and functions.direct_pure[function_index]
+                        candidate: mutable bool = function_index < functions.summaries.direct_pure.count and functions.summaries.direct_pure[function_index]
                         recursive_allowed: bool = proof_recursive_purity_eligible(functions, function_index)
-                        candidate <- false if function_index < functions.recursive.count and functions.recursive[function_index] and not recursive_allowed
+                        candidate <- false if function_index < functions.summaries.recursive.count and functions.summaries.recursive[function_index] and not recursive_allowed
                         candidate <- false if not proof_function_calls_are_pure(functions, function_index, recursive_allowed)
-                        if candidate and function_index < functions.pure.count and not functions.pure[function_index]:
-                            functions.pure[function_index] <- true
+                        if candidate and function_index < functions.summaries.pure.count and not functions.summaries.pure[function_index]:
+                            functions.summaries.pure[function_index] <- true
                             changed <- true
                     Ast::Decl.Module(_, module_body, _):
                         proof_mark_pure_functions_pass(file, module_body, functions, cursor, changed)
@@ -361,24 +371,24 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, report: ProofReport&) -> void:
-            functions.direct_pure.clear()
-            functions.deterministic.clear()
-            for _ in 0..<functions.names.count |functions|:
-                functions.direct_pure.push(false)
-                functions.deterministic.push(false)
+        def proof_mark_pure_functions(file: Ast::File&, declarations: darray[Ast::Decl], functions: mutable ProofFunctionTable&, report: mutable ProofReport&) -> void:
+            functions.summaries.direct_pure.clear()
+            functions.summaries.deterministic.clear()
+            for _ in 0..<functions.lookup.names.count |functions|:
+                functions.summaries.direct_pure.push(false)
+                functions.summaries.deterministic.push(false)
             mutable_global_names: mutable darray[sview] = []
             for annotation in file.enum_annotations |mutable_global_names|:
                 if annotation.name == "__global_mutable" and not (any existing in mutable_global_names where existing == annotation.owner):
                     mutable_global_names.push(annotation.owner)
             direct_cursor: mutable usize = 0
             proof_mark_direct_pure_functions_pass(file, declarations, functions, direct_cursor, mutable_global_names, report)
-            functions.pure.clear()
-            for _ in 0..<functions.names.count |functions|:
-                functions.pure.push(false)
+            functions.summaries.pure.clear()
+            for _ in 0..<functions.lookup.names.count |functions|:
+                functions.summaries.pure.push(false)
             changed: mutable bool = true
             pass_index: mutable usize = 0
-            while changed and pass_index <= functions.names.count |functions, declarations, changed, pass_index|:
+            while changed and pass_index <= functions.lookup.names.count |functions, declarations, changed, pass_index|:
                 changed <- false
                 cursor: mutable usize = 0
                 proof_mark_pure_functions_pass(file, declarations, functions, cursor, changed)

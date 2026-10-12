@@ -196,39 +196,39 @@ extend ElisaProof:
         # Resolve a declaration by name and declaration line, for rows whose bare name repeats.
         def proof_function_index_at_line(functions: ProofFunctionTable&, name: sview, line: u32) -> usize:
             direct: usize = proof_function_index(functions, name)
-            return direct if direct < functions.names.count
-            return functions.names.count if not proof_function_name_may_repeat(functions, name)
-            found: mutable usize = functions.names.count
-            for index in 0..<functions.names.count |index, functions, name, line, found|:
-                continue if index >= functions.lines.count
-                if functions.names[index] == name and functions.lines[index] == line:
-                    return functions.names.count if found < functions.names.count
+            return direct if direct < functions.lookup.names.count
+            return functions.lookup.names.count if not proof_function_name_may_repeat(functions, name)
+            found: mutable usize = functions.lookup.names.count
+            for index in 0..<functions.lookup.names.count |index, functions, name, line, found|:
+                continue if index >= functions.lookup.lines.count
+                if functions.lookup.names[index] == name and functions.lookup.lines[index] == line:
+                    return functions.lookup.names.count if found < functions.lookup.names.count
                     found <- index
             return found
 
         def proof_function_index(functions: ProofFunctionTable&, name: sview) -> usize:
-            if functions.index_values.count > 0 and functions.index_values.count == functions.index_hashes.count and functions.index_values.count == functions.index_ambiguous.count:
+            if functions.lookup.index_values.count > 0 and functions.lookup.index_values.count == functions.lookup.index_hashes.count and functions.lookup.index_values.count == functions.lookup.index_ambiguous.count:
                 wanted_hash: u32 = proof_name_hash(name)
-                capacity: usize = functions.index_values.count
+                capacity: usize = functions.lookup.index_values.count
                 slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
                 while probes < capacity |probes, slot, wanted_hash, name, functions, capacity|:
-                    current: usize = functions.index_values[slot]
-                    return functions.names.count if current == functions.names.count
-                    return functions.names.count if current >= functions.names.count
-                    if functions.index_hashes[slot] == wanted_hash and functions.names[current] == name:
-                        return functions.names.count if functions.index_ambiguous[slot]
+                    current: usize = functions.lookup.index_values[slot]
+                    return functions.lookup.names.count if current == functions.lookup.names.count
+                    return functions.lookup.names.count if current >= functions.lookup.names.count
+                    if functions.lookup.index_hashes[slot] == wanted_hash and functions.lookup.names[current] == name:
+                        return functions.lookup.names.count if functions.lookup.index_ambiguous[slot]
                         return current
                     slot <- (slot + 1) % capacity
                     probes <- probes + 1
-                return functions.names.count
+                return functions.lookup.names.count
             index: mutable usize = 0
-            found: mutable usize = functions.names.count
+            found: mutable usize = functions.lookup.names.count
             wanted_hash: u32 = proof_name_hash(name)
-            while index < functions.names.count |index, functions, name|:
-                if index >= functions.name_hashes.count or functions.name_hashes[index] == wanted_hash:
-                    if functions.names[index] == name:
-                        return functions.names.count if found < functions.names.count
+            while index < functions.lookup.names.count |index, functions, name|:
+                if index >= functions.lookup.name_hashes.count or functions.lookup.name_hashes[index] == wanted_hash:
+                    if functions.lookup.names[index] == name:
+                        return functions.lookup.names.count if found < functions.lookup.names.count
                         found <- index
                 index <- index + 1
             return found
@@ -367,6 +367,41 @@ extend ElisaProof:
                 return index if report.structural.names[index] == wanted
             return report.structural.names.count
 
+        # A field-shaped callee can be a function-valued field, so its leaf is not enough to
+        # certify which function executes. Until structural checking shares the compiler's
+        # owner-aware method/callback resolver, these calls cannot contribute to a termination
+        # summary. Strip grouping because `(object.callback)(...)` has the same dispatch.
+        def proof_structural_call_callee_is_field(callee: Ast::Expr, report: mutable ProofReport&) -> bool:
+            match proof_strip_parens(callee):
+                Ast::Expr.Field(_, method, _):
+                    plain_callee: Ast::Expr = proof_strip_parens(callee)
+                    return false if proof_fact_call_shape_builtin_numeric_cast(report.fact_call_shapes, plain_callee, 0)
+                    return true if not proof_resource_pure_conversion(method)
+                    return true if report.fact_call_shapes.custom_cast_hook_present
+                    method_declarations: usize = proof_source_effect_name_count(report.source_effect_index.callable_names, method, &report.source_effect_index.implicit_effect_work)
+                    return true if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or method_declarations != 0
+                    return false
+                _:
+                    return false
+
+        # Structural summaries may rely only on a uniquely identified source callable or a
+        # compiler conversion whose shadowing/custom-cast guards are present in the report.
+        # An identifier with no unique declaration can be a formal/local function value whose
+        # target may re-enter the current function at the same measure.
+        def proof_structural_call_callee_is_unresolved(callee: Ast::Expr, report: mutable ProofReport&) -> bool:
+            match proof_strip_parens(callee):
+                Ast::Expr.Ident(callable_name, _):
+                    return false if proof_builtin_scalar_type_name(callable_name)
+                    callable_count: usize = proof_source_effect_name_count(report.source_effect_index.callable_names, callable_name, &report.source_effect_index.implicit_effect_work)
+                    return report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or callable_count != 1
+                Ast::Expr.Scope(_, _, _):
+                    return false if proof_callable_is_scoped(callee)
+                    return true
+                Ast::Expr.Field(_, _, _):
+                    return proof_structural_call_callee_is_field(callee, report)
+                _:
+                    return true
+
         # A local/formal with the same spelling as any source function can shadow a direct
         # callable leaf. The structural checker has no owner-aware local callable resolver, so
         # such functions fail closed instead of treating a callback as recursion.
@@ -401,6 +436,8 @@ extend ElisaProof:
                     called_name: sview = proof_callable_name(callee)
                     if proof_callable_is_scoped(callee):
                         proof_structural_termination_finding(report, position.line, name, "scoped calls are not structurally certified without source-resolved callee identity")
+                    elif proof_structural_call_callee_is_unresolved(callee, report):
+                        proof_structural_termination_finding(report, position.line, name, "indirect or unresolved calls may hide structural recursive edges")
                     own_index: usize = proof_structural_report_index(report, own_name)
                     called_index: usize = proof_structural_report_index(report, called_name)
                     direct_recursive: bool = called_name == own_name

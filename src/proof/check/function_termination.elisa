@@ -113,7 +113,7 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], report: mutable ProofReport&) -> void:
+        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], extern_contract_summary_complete: bool, reachable_extern_contract_unsafe: bool, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> void:
             decreases_clauses: darray[Ast::Expr] = proof_contracts(body, "decreases")
             components: mutable darray[Ast::Expr] = []
             proof_decreases_component_slice(decreases_clauses, &components)
@@ -140,6 +140,40 @@ extend ElisaProof:
                 for candidate in 0..<report.structural.names.count |candidate, report, own_index, has_mutual_structural_member|:
                     has_mutual_structural_member <- true if candidate != own_index and candidate < report.structural.members.count and report.structural.members[candidate] and proof_structural_report_same_component(report, own_index, candidate) and candidate < report.structural.subject_types.count and report.structural.subject_types[own_index] != "" and report.structural.subject_types[own_index] == report.structural.subject_types[candidate]
             finding_start: usize = report.findings.count
+            if not extern_contract_summary_complete:
+                proof_structural_termination_finding(report, declaration_line, function_name, "reachable callable extern contracts could not be classified within their validated bound")
+                return
+            proof_structural_termination_finding(report, declaration_line, function_name, "a reachable callable extern contract may hide recursive edges") if reachable_extern_contract_unsafe
+            proof_structural_termination_finding(report, declaration_line, function_name, "generated destructor calls in this structural function are not represented in the recursive call graph") if proof_source_function_has_drop_risk(function_name, parameters, body, report)
+            # Operator implementations and user-defined indexers are implicit calls and are
+            # absent from the current source call graph. Reject these paths unless a runtime
+            # index receiver is statically known to be a built-in container.
+            for parameter in parameters |parameter, report, function_name|:
+                if parameter.has_default:
+                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "overloaded operators in structural defaults may hide recursive calls") if proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, report, 0)
+                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "user-defined indexing in structural defaults may hide recursive calls") if proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
+            if proof_structural_typed_operator_statements_have_overload(body, parameters, report, 0):
+                proof_structural_termination_finding(report, 0, function_name, "overloaded operators in structural bodies may hide recursive calls")
+            if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, []):
+                proof_structural_termination_finding(report, 0, function_name, "user-defined indexing in structural bodies may hide recursive calls")
+            contract_count: usize = signature_lines.count
+            if contract_count != signature_kinds.count or contract_count != signature_contracts.count:
+                proof_structural_termination_finding(report, declaration_line, function_name, "the signature contract source snapshot is malformed")
+            else:
+                for contract_index in 0..<contract_count |contract_index, report, function_name, declaration_line, signature_lines, signature_kinds, signature_contracts, source_work|:
+                    kind: sview = signature_kinds[contract_index]
+                    if not proof_report_source_work_charge(1 + sview_len(kind), &source_work):
+                        proof_structural_termination_finding(report, declaration_line, function_name, "signature contract source work exceeded its validated bound")
+                        return
+                    continue if signature_lines[contract_index] != declaration_line
+                    continue if kind != "requires" and kind != "ensure"
+                    expression: Ast::Expr = signature_contracts[contract_index]
+                    if not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work):
+                        proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "signature contract source work exceeded its validated bound")
+                        return
+                    if proof_structural_typed_operator_expression_has_overload(expression, parameters, report, 0) or proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, []):
+                        proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "implicit operator or index dispatch in structural signature contracts may hide recursive calls")
+                    proof_structural_check_expression(expression, function_name, subject_position, parameters, destructurable, smaller, report, function_name)
             for parameter in parameters |parameter, report, function_name|:
                 proof_structural_termination_finding(report, 0, function_name, "a parameter shadows a source callable used by structural recursion") if proof_structural_name_shadows_function(report, parameter.name)
             # Defaults are evaluated at a call site before entering the function body. They do
@@ -165,11 +199,11 @@ extend ElisaProof:
                 report.structural.subject_types.clear()
                 report.structural.component_ids.clear()
                 report.structural.members.clear()
-                for index in 0..<functions.names.count |index, functions, report|:
-                    report.structural.names.push(functions.names[index])
-                    report.structural.subject_positions.push(functions.structural_subject_positions[index] if index < functions.structural_subject_positions.count else functions.param_counts[index])
-                    report.structural.subject_types.push(functions.structural_subject_types[index] if index < functions.structural_subject_types.count else "")
-                    report.structural.members.push(functions.structural[index] if index < functions.structural.count else false)
+                for index in 0..<functions.lookup.names.count |index, functions, report|:
+                    report.structural.names.push(functions.lookup.names[index])
+                    report.structural.subject_positions.push(functions.contracts.structural_subject_positions[index] if index < functions.contracts.structural_subject_positions.count else functions.parameters.param_counts[index])
+                    report.structural.subject_types.push(functions.contracts.structural_subject_types[index] if index < functions.contracts.structural_subject_types.count else "")
+                    report.structural.members.push(functions.contracts.structural[index] if index < functions.contracts.structural.count else false)
                     component: mutable usize = index
                     for candidate in 0..<index |candidate, functions, index, component|:
                         if proof_functions_same_recursive_component(functions, index, candidate):
@@ -178,9 +212,9 @@ extend ElisaProof:
                     report.structural.component_ids.push(component)
             for declaration in declarations |file, functions, report|:
                 match declaration:
-                    Ast::Decl.Func(name, parameters, _, body, _, _, _):
-                        function_index: usize = proof_function_index(functions, name)
-                        proof_check_structural_function(functions.enum_index, name, parameters, body, report) if function_index < functions.structural.count and functions.structural[function_index]
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
+                        function_index: usize = proof_function_index_at_line(functions, name, position.line)
+                        proof_check_structural_function(functions.type_indexes.enum_index, name, position.line, parameters, body, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count and functions.externs.reachable_extern_contract_unsafe[function_index], report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, functions.lookup.module_resolution_work_used, report) if function_index < functions.contracts.structural.count and functions.contracts.structural[function_index]
                     Ast::Decl.Module(_, module_body, _):
                         proof_check_structural_termination(file, module_body, functions, report, false)
                     Ast::Decl.Scoped(scoped_body, _):
@@ -192,7 +226,7 @@ extend ElisaProof:
         # graph. This is deliberately finite and name-based; ambiguous/unknown targets are not
         # treated as edges, while an unsupported expression marks its own function opaque below.
         def proof_function_reaches(functions: ProofFunctionTable&, source: usize, target: usize) -> bool:
-            return false if source >= functions.names.count or target >= functions.names.count
+            return false if source >= functions.lookup.names.count or target >= functions.lookup.names.count
             reachable: mutable darray[usize] = [source]
             cursor: mutable usize = 0
             while cursor < reachable.count |cursor, reachable, functions, target|:
@@ -200,19 +234,19 @@ extend ElisaProof:
                 # A malformed flat-table alignment must fail closed: if this node is the
                 # queried target, do not let missing graph metadata turn a possible self-edge
                 # into an admitted summary.
-                return true if current == target and (current >= functions.call_starts.count or current >= functions.call_counts.count)
-                return false if current >= functions.call_starts.count or current >= functions.call_counts.count
-                start: usize = functions.call_starts[current]
-                count: usize = functions.call_counts[current]
+                return true if current == target and (current >= functions.call_graph.call_starts.count or current >= functions.call_graph.call_counts.count)
+                return false if current >= functions.call_graph.call_starts.count or current >= functions.call_graph.call_counts.count
+                start: usize = functions.call_graph.call_starts[current]
+                count: usize = functions.call_graph.call_counts[current]
                 for offset in 0..<count |offset, start, functions, reachable, target|:
-                    return true if current == target and start + offset >= functions.all_calls.count
-                    continue if start + offset >= functions.all_calls.count
-                    called: sview = functions.all_calls[start + offset]
+                    return true if current == target and start + offset >= functions.call_graph.all_calls.count
+                    continue if start + offset >= functions.call_graph.all_calls.count
+                    called: sview = functions.call_graph.all_calls[start + offset]
                     if called == "__opaque_call__":
                         return true if current == target
                     else:
                         next: usize = proof_function_call_target(functions, start + offset)
-                        if next < functions.names.count:
+                        if next < functions.lookup.names.count:
                             return true if next == target
                             already_seen: bool = proof_usize_seen(reachable, next)
                             reachable.push(next) if not already_seen
@@ -220,33 +254,33 @@ extend ElisaProof:
             return false
 
         def proof_functions_same_recursive_component(functions: ProofFunctionTable&, source: usize, target: usize) -> bool:
-            return false if source >= functions.names.count or target >= functions.names.count
+            return false if source >= functions.lookup.names.count or target >= functions.lookup.names.count
             return true if source == target
-            return false if source >= functions.recursive.count or target >= functions.recursive.count
-            return false if not functions.recursive[source] or not functions.recursive[target]
-            if source < functions.recursive_component_ids.count and target < functions.recursive_component_ids.count:
-                return functions.recursive_component_ids[source] == functions.recursive_component_ids[target]
+            return false if source >= functions.summaries.recursive.count or target >= functions.summaries.recursive.count
+            return false if not functions.summaries.recursive[source] or not functions.summaries.recursive[target]
+            if source < functions.summaries.recursive_component_ids.count and target < functions.summaries.recursive_component_ids.count:
+                return functions.summaries.recursive_component_ids[source] == functions.summaries.recursive_component_ids[target]
             return proof_function_reaches(functions, source, target) and proof_function_reaches(functions, target, source)
 
         # Compute executable SCCs with iterative Kosaraju traversal. Summary scheduling and
         # structural recursion then use the stable component ids instead of re-running a full
         # transitive reachability search for every pair of functions.
         def proof_build_function_components(functions: mutable ProofFunctionTable&) -> void:
-            count: usize = functions.names.count
-            functions.recursive.clear()
-            functions.recursive_component_ids.clear()
+            count: usize = functions.lookup.names.count
+            functions.summaries.recursive.clear()
+            functions.summaries.recursive_component_ids.clear()
             return if count == 0
             reverse_counts: mutable darray[usize] = []
             reverse_counts.resize(count)
             self_edges: mutable darray[bool] = []
             self_edges.resize(count)
             for source in 0..<count |source, functions, reverse_counts, self_edges|:
-                start: usize = functions.call_starts[source] if source < functions.call_starts.count else functions.all_calls.count
-                edge_count: usize = functions.call_counts[source] if source < functions.call_counts.count else 0
-                valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                start: usize = functions.call_graph.call_starts[source] if source < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
+                edge_count: usize = functions.call_graph.call_counts[source] if source < functions.call_graph.call_counts.count else 0
+                valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
                 continue if not valid_range
                 for offset in 0..<edge_count |offset, source, start, functions, reverse_counts, self_edges|:
-                    called: sview = functions.all_calls[start + offset]
+                    called: sview = functions.call_graph.all_calls[start + offset]
                     next: usize = proof_function_call_target(functions, start + offset)
                     continue if next >= count
                     reverse_counts[next] <- reverse_counts[next] + 1
@@ -261,9 +295,9 @@ extend ElisaProof:
             reverse_write: mutable darray[usize] = []
             reverse_write.extend(reverse_starts)
             for source in 0..<count |source, functions, reverse_write, reverse_edges|:
-                start: usize = functions.call_starts[source] if source < functions.call_starts.count else functions.all_calls.count
-                edge_count: usize = functions.call_counts[source] if source < functions.call_counts.count else 0
-                valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                start: usize = functions.call_graph.call_starts[source] if source < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
+                edge_count: usize = functions.call_graph.call_counts[source] if source < functions.call_graph.call_counts.count else 0
+                valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
                 continue if not valid_range
                 for offset in 0..<edge_count |offset, source, start, functions, reverse_write, reverse_edges|:
                     next: usize = proof_function_call_target(functions, start + offset)
@@ -282,9 +316,9 @@ extend ElisaProof:
                 while stack_nodes.count > 0 |stack_nodes, stack_offsets, visited, order, functions|:
                     top: usize = stack_nodes.count - 1
                     current: usize = stack_nodes[top]
-                    start: usize = functions.call_starts[current] if current < functions.call_starts.count else functions.all_calls.count
-                    edge_count: usize = functions.call_counts[current] if current < functions.call_counts.count else 0
-                    valid_range: bool = start <= functions.all_calls.count and edge_count <= functions.all_calls.count - start
+                    start: usize = functions.call_graph.call_starts[current] if current < functions.call_graph.call_starts.count else functions.call_graph.all_calls.count
+                    edge_count: usize = functions.call_graph.call_counts[current] if current < functions.call_graph.call_counts.count else 0
+                    valid_range: bool = start <= functions.call_graph.all_calls.count and edge_count <= functions.call_graph.all_calls.count - start
                     if valid_range and stack_offsets[top] < edge_count:
                         offset: usize = stack_offsets[top]
                         stack_offsets[top] <- offset + 1
@@ -321,8 +355,8 @@ extend ElisaProof:
             for index in 0..<count |index, component_ids, component_sizes, count|:
                 component_sizes[component_ids[index]] <- component_sizes[component_ids[index]] + 1
             for index in 0..<count |index, component_ids, component_sizes, self_edges, functions|:
-                functions.recursive_component_ids.push(component_ids[index])
-                functions.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
+                functions.summaries.recursive_component_ids.push(component_ids[index])
+                functions.summaries.recursive.push(component_sizes[component_ids[index]] > 1 or self_edges[index])
 
         # Syntactic purity is intentionally a small total-function tier. It admits straight-line
         # value computation, pure conditionals, and only the finite built-in loops admitted by

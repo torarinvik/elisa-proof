@@ -1,0 +1,498 @@
+# Source-derived guards for cleanup and iterator calls missing from explicit call graphs.
+extend ElisaProof:
+    private:
+        const PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT: usize = 64
+
+        def proof_source_analysis_indexes_reset(report: mutable ProofReport&) -> void:
+            report.source_primitive_operator_mask <- PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            report.source_operator_protocol_mask <- 0
+            report.operator_impls.rows.clear()
+            report.operator_impls.hashes.clear()
+            report.operator_impls.bucket_heads.clear()
+            report.operator_impls.next_indices.clear()
+            report.operator_impls.valid <- false
+            report.source_effect_index.declared_types.clear()
+            report.source_effect_index.drop_hook_types.clear()
+            report.source_effect_index.alias_names.clear()
+            report.source_effect_index.alias_targets.clear()
+            report.source_effect_index.callable_names.clear()
+            report.source_effect_index.callable_return_types.clear()
+            report.source_effect_index.extern_contract_names.clear()
+            report.source_effect_index.extern_contract_lines.clear()
+            report.source_effect_index.extern_contract_unsafe.clear()
+            report.source_effect_index.extern_contract_hashes.clear()
+            report.source_effect_index.extern_contract_slots.clear()
+            report.source_effect_index.extern_contract_ambiguous.clear()
+            report.source_effect_index.extern_contract_index_valid <- false
+            report.source_effect_index.declaration_count <- 0
+            report.source_effect_index.implicit_effect_work <- 0
+
+        def proof_source_effect_name_count(names: darray[sview]&, wanted: sview, source_work: mutable usize&) -> usize:
+            if not proof_report_source_work_charge(sview_len(wanted), source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return 2
+            count: mutable usize = 0
+            for name in names |wanted, count, source_work|:
+                if not proof_report_source_work_charge(1 + sview_len(name), source_work):
+                    source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return 2
+                count <- count + 1 if name == wanted
+            return count
+
+        def proof_source_effect_add_unique(names: mutable darray[sview]&, name: sview, source_work: mutable usize&) -> bool:
+            return true if name == ""
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            name_count: usize = proof_source_effect_name_count(names, name, source_work)
+            return false if name_count > 1
+            return true if name_count == 1
+            names.push(name)
+            return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+        def proof_source_drop_index_collect(declarations: darray[Ast::Decl]&, declared_types: mutable darray[sview]&, drop_hook_types: mutable darray[sview]&, alias_names: mutable darray[sview]&, alias_targets: mutable darray[Ast::Expr]&, callable_names: mutable darray[sview]&, callable_return_types: mutable darray[Ast::Expr]&, declaration_count: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            for declaration in declarations |declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                declaration_count <- declaration_count + 1
+                match declaration:
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        declared_types.push(name)
+                    Ast::Decl.Alias(name, target, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        return false if not proof_replay_summary_expr_charge_with_work(target, source_work)
+                        alias_names.push(name)
+                        alias_targets.push(target)
+                    Ast::Decl.Func(name, parameters, return_type, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        callable_names.push(name)
+                        return_type_expression: mutable Ast::Expr = Ast::Expr.Invalid
+                        if return_type is declared:
+                            return_type_expression <- declared
+                            return false if not proof_replay_summary_expr_charge_with_work(declared, source_work)
+                        callable_return_types.push(return_type_expression)
+                        if name == "__drop__" and parameters.count == 1:
+                            match parameters[0].type_expression:
+                                Ast::Expr.Ident(type_name, _):
+                                    return false if not proof_report_source_work_charge(sview_len(type_name), source_work)
+                                    return false if not proof_source_effect_add_unique(drop_hook_types, type_name, source_work)
+                                _:
+                                    pass
+                    Ast::Decl.Extern(name, _, _, _, callable, return_type_name, _, _):
+                        if callable:
+                            return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                            callable_names.push(name)
+                            return_type_expression: Ast::Expr = Ast::Expr.Ident(return_type_name, Ast::pos_at_line(0)) if return_type_name != "" else Ast::Expr.Invalid
+                            callable_return_types.push(return_type_expression)
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_drop_index_collect(body, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_drop_index_alias_target(name: sview, alias_names: darray[sview]&, alias_targets: darray[Ast::Expr]&, source_work: mutable usize&) -> (count: usize, target: Ast::Expr):
+            selected: mutable Ast::Expr = Ast::Expr.Invalid
+            count: mutable usize = 0
+            if alias_names.count != alias_targets.count:
+                return (2, Ast::Expr.Invalid)
+            if not proof_report_source_work_charge(alias_names.count, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (2, Ast::Expr.Invalid)
+            for index in 0..<alias_names.count |index, alias_names, alias_targets, name, selected, count|:
+                if alias_names[index] == name:
+                    count <- count + 1
+                    selected <- alias_targets[index]
+            return (count, selected)
+
+        def proof_source_drop_index_type_may_drop(type_expression: Ast::Expr, declared_types: darray[sview]&, drop_hook_types: darray[sview]&, alias_names: darray[sview]&, alias_targets: darray[Ast::Expr]&, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            if not proof_report_source_work_charge(1, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return true
+            match type_expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "void" or proof_source_operator_guard_primitive(name)
+                    return true if proof_source_effect_name_count(drop_hook_types, name, source_work) > 0
+                    alias: (count: usize, target: Ast::Expr) = proof_source_drop_index_alias_target(name, alias_names, alias_targets, source_work)
+                    return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or alias.count > 1
+                    return proof_source_drop_index_type_may_drop(alias.target, declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1) if alias.count == 1
+                    return proof_source_effect_name_count(declared_types, name, source_work) != 1
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_source_drop_index_type_may_drop(inner, declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_source_drop_index_type_may_drop(inner, declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1)
+                Ast::Expr.Index(head, element, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if head_name == "view"
+                    return proof_source_drop_index_type_may_drop(element, declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1) if head_name == "darray"
+                    return true
+                Ast::Expr.IndexN(head, arguments, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if head_name == "view"
+                    return proof_source_drop_index_type_may_drop(arguments[0], declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1) if head_name == "array" and arguments.count == 2
+                    return proof_source_drop_index_type_may_drop(arguments[0], declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1) if head_name == "darray" and arguments.count == 1
+                    return true
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    for element in elements |declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth|:
+                        return true if proof_source_drop_index_type_may_drop(element, declared_types, drop_hook_types, alias_names, alias_targets, source_work, depth + 1)
+                    return false
+                _:
+                    return true
+
+        def proof_source_drop_index_expand_aliases(alias_names: darray[sview]&, alias_targets: darray[Ast::Expr]&, declared_types: darray[sview]&, drop_hook_types: mutable darray[sview]&, source_work: mutable usize&, changed: mutable bool&) -> bool:
+            return false if alias_names.count != alias_targets.count
+            for index in 0..<alias_names.count |index, alias_names, alias_targets, declared_types, drop_hook_types, source_work, changed|:
+                return false if not proof_report_source_work_charge(1 + sview_len(alias_names[index]), source_work)
+                continue if proof_source_effect_name_count(drop_hook_types, alias_names[index], source_work) > 0
+                if proof_source_drop_index_type_may_drop(alias_targets[index], declared_types, drop_hook_types, alias_names, alias_targets, source_work, 0):
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return false if not proof_source_effect_add_unique(drop_hook_types, alias_names[index], source_work)
+                    changed <- true
+            return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+
+        def proof_source_drop_index_expand_declarations(declarations: darray[Ast::Decl]&, declared_types: darray[sview]&, drop_hook_types: mutable darray[sview]&, alias_names: darray[sview]&, alias_targets: darray[Ast::Expr]&, source_work: mutable usize&, changed: mutable bool&, depth: usize) -> bool:
+            return false if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            for declaration in declarations |declared_types, drop_hook_types, alias_names, alias_targets, source_work, changed, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        continue if proof_source_effect_name_count(drop_hook_types, name, source_work) > 0
+                        for member in members |declared_types, drop_hook_types, alias_names, alias_targets, source_work, changed, name|:
+                            return false if not proof_report_source_work_charge(1 + sview_len(member.name), source_work)
+                            if proof_source_drop_index_type_may_drop(member.type_expression, declared_types, drop_hook_types, alias_names, alias_targets, source_work, 0):
+                                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                return false if not proof_source_effect_add_unique(drop_hook_types, name, source_work)
+                                changed <- true
+                                break
+                    Ast::Decl.Enum(name, variants, _, _, _):
+                        continue if proof_source_effect_name_count(drop_hook_types, name, source_work) > 0
+                        for variant in variants |declared_types, drop_hook_types, alias_names, alias_targets, source_work, changed, name|:
+                            return false if not proof_report_source_work_charge(1 + sview_len(variant.name), source_work)
+                            for field in variant.fields |declared_types, drop_hook_types, alias_names, alias_targets, source_work, changed, name|:
+                                return false if not proof_report_source_work_charge(1 + sview_len(field.name), source_work)
+                                if proof_source_drop_index_type_may_drop(field.type_expression, declared_types, drop_hook_types, alias_names, alias_targets, source_work, 0):
+                                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                    return false if not proof_source_effect_add_unique(drop_hook_types, name, source_work)
+                                    changed <- true
+                                    break
+                            break if proof_source_effect_name_count(drop_hook_types, name, source_work) > 0
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_drop_index_expand_declarations(body, declared_types, drop_hook_types, alias_names, alias_targets, source_work, changed, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_drop_type_index_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, declared_types: darray[sview], drop_hook_types: darray[sview], alias_names: darray[sview], alias_targets: darray[Ast::Expr], callable_names: darray[sview], callable_return_types: darray[Ast::Expr], declaration_count: usize):
+            declared_types: mutable darray[sview] = []
+            drop_hook_types: mutable darray[sview] = []
+            alias_names: mutable darray[sview] = []
+            alias_targets: mutable darray[Ast::Expr] = []
+            callable_names: mutable darray[sview] = []
+            callable_return_types: mutable darray[Ast::Expr] = []
+            declaration_count: mutable usize = 0
+            return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_source_drop_index_collect(declarations, &declared_types, &drop_hook_types, &alias_names, &alias_targets, &callable_names, &callable_return_types, &declaration_count, source_work, 0)
+            for annotation in annotations |declared_types, drop_hook_types, source_work|:
+                return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_report_source_work_charge(1 + sview_len(annotation.owner) + sview_len(annotation.name), source_work)
+                if annotation.name == "__extern_resource":
+                    declared_types.push(annotation.owner)
+                    return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_source_effect_add_unique(drop_hook_types, annotation.owner, source_work)
+            rounds: usize = declared_types.count + alias_names.count + 1
+            round: mutable usize = 0
+            changed: mutable bool = true
+            while changed and round <= rounds |declarations, declared_types, drop_hook_types, alias_names, alias_targets, source_work, round, changed|:
+                return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_report_source_work_charge(1, source_work)
+                changed <- false
+                return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_source_drop_index_expand_aliases(alias_names, alias_targets, declared_types, &drop_hook_types, source_work, &changed)
+                return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if not proof_source_drop_index_expand_declarations(declarations, declared_types, &drop_hook_types, alias_names, alias_targets, source_work, &changed, 0)
+                round <- round + 1
+            return (false, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, declared_types, drop_hook_types, alias_names, alias_targets, callable_names, callable_return_types, declaration_count)
+
+        def proof_source_effect_index_build(report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: (complete: bool, declared_types: darray[sview], drop_hook_types: darray[sview], alias_names: darray[sview], alias_targets: darray[Ast::Expr], callable_names: darray[sview], callable_return_types: darray[Ast::Expr], declaration_count: usize) = proof_source_drop_type_index_with_work(report.source_declarations, report.source_annotations, source_work)
+            return false if not index.complete
+            report.source_effect_index.declared_types <- index.declared_types
+            report.source_effect_index.drop_hook_types <- index.drop_hook_types
+            report.source_effect_index.alias_names <- index.alias_names
+            report.source_effect_index.alias_targets <- index.alias_targets
+            report.source_effect_index.callable_names <- index.callable_names
+            report.source_effect_index.callable_return_types <- index.callable_return_types
+            report.source_effect_index.declaration_count <- index.declaration_count
+            return true
+
+        def proof_source_implicit_effect_charge(report: mutable ProofReport&, amount: usize) -> bool:
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                return false
+            if not proof_report_source_work_charge(amount, &report.source_effect_index.implicit_effect_work):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return true
+
+        def proof_source_effect_name_present(report: mutable ProofReport&, names: darray[sview]&, wanted: sview) -> bool:
+            return proof_source_effect_name_count(names, wanted, &report.source_effect_index.implicit_effect_work) > 0
+
+        def proof_source_effect_type_may_drop(type_expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            return true if not proof_source_implicit_effect_charge(report, 1)
+            match type_expression:
+                Ast::Expr.Ident(name, _):
+                    return false if name == "void" or proof_source_operator_guard_primitive(name)
+                    return true if proof_source_effect_name_present(report, report.source_effect_index.drop_hook_types, name)
+                    alias_count: usize = proof_source_effect_name_count(report.source_effect_index.alias_names, name, &report.source_effect_index.implicit_effect_work)
+                    return true if alias_count > 1
+                    return false if alias_count == 1 or proof_source_effect_name_present(report, report.source_effect_index.declared_types, name)
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_source_effect_type_may_drop(inner, report, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return false if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_source_effect_type_may_drop(inner, report, depth + 1)
+                Ast::Expr.Index(head, element, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if head_name == "view"
+                    return proof_source_effect_type_may_drop(element, report, depth + 1) if head_name == "darray"
+                    return true
+                Ast::Expr.IndexN(head, arguments, _):
+                    head_name: sview = proof_ident_name(head)
+                    return false if head_name == "view"
+                    return proof_source_effect_type_may_drop(arguments[0], report, depth + 1) if head_name == "array" and arguments.count == 2
+                    return proof_source_effect_type_may_drop(arguments[0], report, depth + 1) if head_name == "darray" and arguments.count == 1
+                    return true
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _):
+                    for element in elements |report, depth|:
+                        return true if proof_source_effect_type_may_drop(element, report, depth + 1)
+                    return false
+                _:
+                    return true
+
+        def proof_source_callable_return_type(callable: sview, report: mutable ProofReport&, depth: usize) -> (known: bool, type_expression: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if callable == "" or depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            return (false, Ast::Expr.Invalid) if report.source_effect_index.callable_names.count != report.source_effect_index.callable_return_types.count
+            return (false, Ast::Expr.Invalid) if not proof_source_implicit_effect_charge(report, report.source_effect_index.callable_names.count)
+            selected: mutable Ast::Expr = Ast::Expr.Invalid
+            matches: mutable usize = 0
+            for index in 0..<report.source_effect_index.callable_names.count |index, report, callable, selected, matches|:
+                if report.source_effect_index.callable_names[index] == callable:
+                    matches <- matches + 1
+                    selected <- report.source_effect_index.callable_return_types[index]
+            return (false, Ast::Expr.Invalid) if matches != 1 or selected is Ast::Expr.Invalid or selected is Ast::Expr.Absent
+            return (true, selected)
+
+        def proof_source_call_is_primitive_conversion(callee: Ast::Expr) -> bool:
+            match callee:
+                Ast::Expr.Ident(name, _):
+                    return proof_source_operator_guard_primitive(name)
+                _:
+                    return false
+
+        # This exact dotted-call form is a loop pattern, not a function call. The compiler
+        # recognizes it only when at least one argument is a bare identifier.
+        def proof_source_expression_is_bare_loop_pattern(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(enum_name, _, _):
+                            match enum_name:
+                                Ast::Expr.Ident(_, _):
+                                    return false if arguments.count == 0
+                                    return false if not proof_source_implicit_effect_charge(report, 3)
+                                    for argument in arguments |report|:
+                                        return false if not proof_source_implicit_effect_charge(report, 1)
+                                        match argument:
+                                            Ast::Expr.Ident(_, _):
+                                                pass
+                                            _:
+                                                return false
+                                    return true
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_source_expression_type_may_drop(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Construct(type_expression, _, _):
+                    return proof_source_effect_type_may_drop(type_expression, report, depth + 1)
+                Ast::Expr.Call(callee, _, _, _):
+                    return false if proof_source_call_is_primitive_conversion(callee)
+                    callable: sview = proof_callable_name(callee)
+                    result: (known: bool, type_expression: Ast::Expr) = proof_source_callable_return_type(callable, report, depth + 1)
+                    return true if not result.known
+                    return proof_source_effect_type_may_drop(result.type_expression, report, depth + 1)
+                Ast::Expr.Ident(name, _):
+                    selected: mutable Ast::Expr = Ast::Expr.Invalid
+                    matches: mutable usize = 0
+                    return true if not proof_source_implicit_effect_charge(report, parameters.count)
+                    for parameter in parameters |name, selected, matches|:
+                        if parameter.name == name:
+                            selected <- parameter.type_expression
+                            matches <- matches + 1
+                    return false if matches == 0
+                    return true if matches != 1
+                    return proof_source_effect_type_may_drop(selected, report, depth + 1)
+                Ast::Expr.Field(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    # The type resolver is source-only and fail-closed. Charge for its worst-case
+                    # declaration and parameter scans before consulting it.
+                    return true if not proof_source_implicit_effect_charge(report, report.source_effect_index.declaration_count + parameters.count)
+                    value_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(expression, parameters, report, depth + 1, [])
+                    return true if not value_type.known
+                    return proof_source_effect_type_may_drop(value_type.type_expression, report, depth + 1)
+                Ast::Expr.Array(_, _) | Ast::Expr.Tuple(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Binary(_, _, _, _) | Ast::Expr.Slice(_, _, _, _) | Ast::Expr.If(_, _, _, _):
+                    return false
+                _:
+                    return true
+
+        def proof_source_expression_has_drop_risk(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            return true if not proof_source_implicit_effect_charge(report, 1)
+            match expression:
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_source_effect_type_may_drop(type_expression, report, depth + 1)
+                    for field in fields |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(field.value, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(receiver, _, _):
+                            return true if proof_source_expression_has_drop_risk(receiver, parameters, report, depth + 1)
+                        Ast::Expr.Scope(_, _, _):
+                            pass
+                        _:
+                            return true if proof_source_expression_has_drop_risk(callee, parameters, report, depth + 1)
+                    callable: sview = proof_callable_name(callee)
+                    if not proof_source_call_is_primitive_conversion(callee):
+                        return true if callable == ""
+                        result: (known: bool, type_expression: Ast::Expr) = proof_source_callable_return_type(callable, report, depth + 1)
+                        return true if not result.known or proof_source_effect_type_may_drop(result.type_expression, report, depth + 1)
+                    for argument in arguments |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(argument, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.Index(object, index, _):
+                    return false if proof_is_type_cast_index(object)
+                    return true if proof_source_expression_type_may_drop(expression, parameters, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(object, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(index, parameters, report, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if proof_is_type_cast_index(object)
+                    return true if proof_source_expression_type_may_drop(expression, parameters, report, depth + 1)
+                    return true if proof_source_expression_has_drop_risk(object, parameters, report, depth + 1)
+                    for argument in arguments |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(argument, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    return true if proof_source_expression_type_may_drop(expression, parameters, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(object, parameters, report, depth + 1)
+                Ast::Expr.Refinement(inner, predicate, _):
+                    return true if proof_source_expression_has_drop_risk(inner, parameters, report, depth + 1)
+                    return false if proof_source_expression_is_bare_loop_pattern(predicate, report)
+                    return proof_source_expression_has_drop_risk(predicate, parameters, report, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_source_expression_has_drop_risk(inner, parameters, report, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return proof_source_expression_has_drop_risk(left, parameters, report, depth + 1) if operator == TokenKind.Is or operator == TokenKind.As
+                    return proof_source_expression_has_drop_risk(left, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(right, parameters, report, depth + 1)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    return proof_source_expression_has_drop_risk(condition, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(then_value, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(else_value, parameters, report, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_source_expression_has_drop_risk(object, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(low, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(high, parameters, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(element, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(entry.key, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(entry.value, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_source_expression_has_drop_risk(base, parameters, report, depth + 1)
+                    for field in fields |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(field.value, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return true if proof_source_expression_type_may_drop(expression, parameters, report, depth + 1)
+                    return proof_source_expression_has_drop_risk(iterable, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(condition, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(body, parameters, report, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_source_expression_has_drop_risk(guarded, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(recovery, parameters, report, depth + 1)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return true if proof_source_expression_type_may_drop(scrutinee, parameters, report, depth + 1)
+                    for arm in arms |parameters, report, depth|:
+                        return true if proof_source_expression_has_drop_risk(arm.guard, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(arm.body, parameters, report, depth + 1)
+                    return false
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.RegionNew(_, _, _):
+                    return true
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_source_statements_have_drop_risk(statements, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(value, parameters, report, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return false
+                _:
+                    return true
+
+        def proof_source_statements_have_drop_risk(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return true if depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+            for statement in statements |parameters, report, depth|:
+                return true if not proof_source_implicit_effect_charge(report, 1)
+                match statement:
+                    Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_source_expression_has_drop_risk(expression, parameters, report, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        if value is returned:
+                            return true if proof_source_expression_has_drop_risk(returned, parameters, report, depth + 1)
+                    Ast::Stmt.Block(_, _, _, body, _):
+                        return true if proof_source_statements_have_drop_risk(body, parameters, report, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        if type_expression is not Ast::Expr.Absent and type_expression is not Ast::Expr.Invalid:
+                            return true if proof_source_effect_type_may_drop(type_expression, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(initializer, parameters, report, depth + 1)
+                    Ast::Stmt.Assign(target, _, initializer, _):
+                        return true if proof_source_expression_has_drop_risk(target, parameters, report, depth + 1) or proof_source_expression_has_drop_risk(initializer, parameters, report, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_source_expression_has_drop_risk(condition, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(then_body, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(else_body, parameters, report, depth + 1)
+                    Ast::Stmt.While(condition, body, _):
+                        return true if proof_source_expression_has_drop_risk(condition, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(body, parameters, report, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, body, _):
+                        predicates: mutable darray[Ast::Expr] = []
+                        base_iterable: mutable Ast::Expr = iterable
+                        refinement_depth: mutable usize = 0
+                        while refinement_depth < PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT |base_iterable, predicates, refinement_depth, report|:
+                            match base_iterable:
+                                Ast::Expr.Refinement(base, predicate, _):
+                                    return true if not proof_source_implicit_effect_charge(report, 1)
+                                    predicates.push(predicate)
+                                    base_iterable <- base
+                                    refinement_depth <- refinement_depth + 1
+                                _:
+                                    break
+                        return true if refinement_depth >= PROOF_IMPLICIT_EFFECT_AST_DEPTH_LIMIT
+                        return true if not proof_structural_builtin_iteration_source(base_iterable, parameters, report, 0, [])
+                        return true if proof_source_expression_type_may_drop(base_iterable, parameters, report, depth + 1)
+                        return true if proof_source_expression_has_drop_risk(base_iterable, parameters, report, depth + 1)
+                        predicate_index: mutable usize = predicates.count
+                        while predicate_index > 0 |predicate_index, predicates, parameters, report, depth|:
+                            predicate_index <- predicate_index - 1
+                            predicate: Ast::Expr = predicates[predicate_index]
+                            return true if not proof_source_expression_is_bare_loop_pattern(predicate, report) and proof_source_expression_has_drop_risk(predicate, parameters, report, depth + 1)
+                        return proof_source_statements_have_drop_risk(body, parameters, report, depth + 1)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_source_expression_type_may_drop(scrutinee, parameters, report, depth + 1)
+                        for arm in arms |parameters, report, depth|:
+                            return true if proof_source_expression_has_drop_risk(arm.guard, parameters, report, depth + 1) or proof_source_statements_have_drop_risk(arm.body, parameters, report, depth + 1)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_source_expression_has_drop_risk(expression, parameters, report, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return true
+            return false
+
+        def proof_source_function_has_drop_risk(function_name: sview, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], report: mutable ProofReport&) -> bool:
+            for parameter in parameters |report|:
+                # The compiler suppresses generated receiver cleanup inside `__drop__` itself.
+                # Defaults and body expressions still execute and remain subject to this audit.
+                return true if function_name != "__drop__" and proof_source_effect_type_may_drop(parameter.type_expression, report, 0)
+                return true if parameter.has_default and proof_source_expression_has_drop_risk(parameter.default_value, parameters, report, 0)
+            return proof_source_statements_have_drop_risk(body, parameters, report, 0)

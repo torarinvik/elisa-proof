@@ -1,0 +1,138 @@
+extend ElisaProof:
+    private:
+        const PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT: usize = 64
+
+        struct ProofStructuralOperatorBinding:
+            name: sview
+            type_name: sview
+
+        def proof_structural_operator_guard_add_binding(name: sview, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&) -> bool:
+            return false if name == ""
+            return false if not proof_source_index_work_charge(report, 1)
+            return false if not proof_source_index_work_charge(report, sview_len(name))
+            shadowed.push(ProofStructuralOperatorBinding{name: name, type_name: ""})
+            return true
+
+        # Scope-aware expression binding collection used by source admission visitors.
+        def proof_structural_operator_guard_collect_target_bindings(target: Ast::Expr, bindings: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match target:
+                Ast::Expr.Ident(name, _):
+                    return false if name == ""
+                    bindings.push(name)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_target_bindings(argument, &bindings, report, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_target_bindings(element, &bindings, report, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_target_bindings(field.value, &bindings, report, depth + 1)
+                _:
+                    pass
+            return true
+
+        def proof_structural_operator_guard_collect_expression_bindings(expression: Ast::Expr, bindings: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(left, &bindings, report, depth + 1)
+                    if operator == TokenKind.Is or operator == TokenKind.As:
+                        return proof_structural_operator_guard_collect_target_bindings(right, &bindings, report, depth + 1)
+                    return proof_structural_operator_guard_collect_expression_bindings(right, &bindings, report, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for child in Ast::effect_runtime_children(candidates, arguments) |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(child, &bindings, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(callee, &bindings, report, depth + 1)
+                    for argument in arguments |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(argument, &bindings, report, depth + 1)
+                Ast::Expr.Field(receiver, _, _) | Ast::Expr.Scope(receiver, _, _) | Ast::Expr.Paren(receiver, _) | Ast::Expr.Unary(_, receiver, _) | Ast::Expr.Move(receiver, _) | Ast::Expr.RegionNew(receiver, _, _):
+                    return proof_structural_operator_guard_collect_expression_bindings(receiver, &bindings, report, depth + 1)
+                Ast::Expr.Index(receiver, index, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(receiver, &bindings, report, depth + 1)
+                    return proof_structural_operator_guard_collect_expression_bindings(index, &bindings, report, depth + 1)
+                Ast::Expr.Slice(receiver, low, high, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(receiver, &bindings, report, depth + 1)
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(low, &bindings, report, depth + 1)
+                    return proof_structural_operator_guard_collect_expression_bindings(high, &bindings, report, depth + 1)
+                Ast::Expr.IndexN(receiver, arguments, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(receiver, &bindings, report, depth + 1)
+                    for argument in arguments |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(argument, &bindings, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(element, &bindings, report, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(entry.key, &bindings, report, depth + 1) or not proof_structural_operator_guard_collect_expression_bindings(entry.value, &bindings, report, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(field.value, &bindings, report, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(base, &bindings, report, depth + 1)
+                    for field in fields |bindings, report, depth|:
+                        return false if not proof_structural_operator_guard_collect_expression_bindings(field.value, &bindings, report, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(condition, &bindings, report, depth + 1)
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(then_expression, &bindings, report, depth + 1)
+                    return proof_structural_operator_guard_collect_expression_bindings(else_expression, &bindings, report, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_structural_operator_guard_collect_expression_bindings(base, &bindings, report, depth + 1)
+                    return proof_structural_operator_guard_collect_expression_bindings(predicate, &bindings, report, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, _, _, _):
+                    return proof_structural_operator_guard_collect_expression_bindings(iterable, &bindings, report, depth + 1)
+                Ast::Expr.Match(scrutinee, _, _) | Ast::Expr.Catch(scrutinee, _, _):
+                    return proof_structural_operator_guard_collect_expression_bindings(scrutinee, &bindings, report, depth + 1)
+                Ast::Expr.GetElse(guarded, _, _):
+                    return proof_structural_operator_guard_collect_expression_bindings(guarded, &bindings, report, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    pass
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        # Only a dotted variant call with bare identifier args has pattern-filter binders.
+        def proof_structural_operator_guard_collect_refinement_bindings(predicate: Ast::Expr, bindings: mutable darray[sview]&, report: mutable ProofReport&) -> bool:
+            match predicate:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(enum_name, _, _):
+                            match enum_name:
+                                Ast::Expr.Ident(_, _):
+                                    bare_pattern: mutable bool = arguments.count > 0
+                                    for argument in arguments |bare_pattern, report|:
+                                        return false if not proof_source_index_work_charge(report, 1)
+                                        match argument:
+                                            Ast::Expr.Ident(_, _):
+                                                pass
+                                            _:
+                                                bare_pattern <- false
+                                    if bare_pattern:
+                                        for argument in arguments |bindings, report|:
+                                            match argument:
+                                                Ast::Expr.Ident(name, _):
+                                                    return false if not proof_source_index_work_charge(report, sview_len(name))
+                                                    bindings.push(name)
+                                                _:
+                                                    return false
+                                        return true
+                                _:
+                                    pass
+                        _:
+                            pass
+                _:
+                    pass
+            proof_structural_operator_guard_collect_expression_bindings(predicate, &bindings, report, 0)
+
+        def proof_structural_operator_guard_add_expression_bindings(expression: Ast::Expr, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&) -> bool:
+            bindings: mutable darray[sview] = []
+            return false if not proof_structural_operator_guard_collect_expression_bindings(expression, &bindings, report, 0)
+            for binding in bindings |shadowed, report|:
+                return false if not proof_structural_operator_guard_add_binding(binding, &shadowed, report)
+            return true

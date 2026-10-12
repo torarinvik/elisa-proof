@@ -1,0 +1,556 @@
+# Source-derived runtime-index admission with branch-local refinement aliases.
+extend ElisaProof:
+    private:
+        # The parser rewrites non-variant `is TARGET as NAME` to an `is` binary whose RHS
+        # is only `Ident(NAME)`. The original target type is no longer present in report.source.
+        # Keep such names as unknown in the true branch; this prevents accidentally resolving
+        # a same-named outer parameter as the alias's type.
+        def proof_source_runtime_alias_name_contains(aliases: darray[sview], name: sview, report: mutable ProofReport&) -> bool:
+            return true if not proof_source_index_work_charge(report, sview_len(name))
+            for alias in aliases |name, report|:
+                return true if not proof_source_index_work_charge(report, 1)
+                return true if not proof_source_index_work_charge(report, sview_len(alias))
+                return true if alias == name
+            return false
+
+        def proof_source_runtime_alias_add(aliases: mutable darray[sview]&, name: sview, report: mutable ProofReport&) -> bool:
+            return false if name == ""
+            return false if not proof_source_index_work_charge(report, sview_len(name))
+            for alias in aliases |name, report|:
+                return false if not proof_source_index_work_charge(report, 1)
+                return false if not proof_source_index_work_charge(report, sview_len(alias))
+                return true if alias == name
+            aliases.push(name)
+            return true
+
+        # Only aliases on a conjunction's true path are available to the right operand and
+        # enclosing true branch. Disjunctions contribute only names present in both alternatives,
+        # matching the compiler's flow resolver.
+        def proof_source_is_target_aliases_add(target: Ast::Expr, aliases: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match target:
+                Ast::Expr.Ident(name, _):
+                    return proof_source_runtime_alias_add(aliases, name, report)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |aliases, report, depth|:
+                        return false if not proof_source_is_target_aliases_add(argument, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    for element in elements |aliases, report, depth|:
+                        return false if not proof_source_is_target_aliases_add(element, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |aliases, report, depth|:
+                        return false if not proof_source_is_target_aliases_add(field.value, aliases, report, depth + 1)
+                    return true
+                _:
+                    return true
+
+        def proof_source_condition_aliases_add(condition: Ast::Expr, aliases: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_condition_aliases_add(inner, aliases, report, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return false if not proof_source_condition_aliases_add(left, aliases, report, depth + 1)
+                    return proof_source_condition_aliases_add(right, aliases, report, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_aliases: mutable darray[sview] = []
+                    right_aliases: mutable darray[sview] = []
+                    return false if not proof_source_condition_aliases_add(left, &left_aliases, report, depth + 1)
+                    return false if not proof_source_condition_aliases_add(right, &right_aliases, report, depth + 1)
+                    for candidate in left_aliases |aliases, right_aliases, report|:
+                        if proof_source_runtime_alias_name_contains(right_aliases, candidate, report):
+                            return false if not proof_source_runtime_alias_add(aliases, candidate, report)
+                    return true
+                Ast::Expr.Binary(_, TokenKind.Is, right, position):
+                    return false if not proof_source_is_target_aliases_add(right, aliases, report, depth + 1)
+                    match right:
+                        Ast::Expr.Field(_, _, target_position):
+                            for annotation in report.source_annotations |aliases, report, position, target_position|:
+                                return false if not proof_source_index_work_charge(report, 1)
+                                return false if not proof_source_index_work_charge(report, sview_len(annotation.owner))
+                                return false if not proof_source_index_work_charge(report, sview_len(annotation.name))
+                                if annotation.name == "__is_variant_alias" and (annotation.line == position.line or annotation.line == target_position.line):
+                                    return false if annotation.owner == ""
+                                    return false if not proof_source_runtime_alias_add(aliases, annotation.owner, report)
+                        _:
+                            pass
+                    return true
+                Ast::Expr.Binary(_, TokenKind.As, right, _):
+                    return proof_source_is_target_aliases_add(right, aliases, report, depth + 1)
+                _:
+                    return true
+
+        # Collect the binders that the flow resolver records from a loop filter. It uses
+        # expression binding collection (union across binary operands), unlike a branch's
+        # truthy scope. A bare `Enum.Variant(value)` filter is a pattern only in the exact
+        # dotted-call/all-ident form recognized by the compiler.
+        def proof_source_bare_variant_filter_shape(condition: Ast::Expr, report: mutable ProofReport&) -> (complete: bool, matches: bool):
+            match condition:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _):
+                            return (true, false) if arguments.count == 0
+                            for argument in arguments |report|:
+                                return (false, false) if not proof_source_index_work_charge(report, 1)
+                                match argument:
+                                    Ast::Expr.Ident(_, _):
+                                        pass
+                                    _:
+                                        return (true, false)
+                            return (true, true)
+                        _:
+                            return (true, false)
+                _:
+                    return (true, false)
+
+        def proof_source_for_filter_aliases_add(condition: Ast::Expr, aliases: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_for_filter_aliases_add(inner, aliases, report, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_source_for_filter_aliases_add(left, aliases, report, depth + 1)
+                    if operator == TokenKind.Is or operator == TokenKind.As:
+                        return false if not proof_source_filter_pattern_target_supported(right, report, depth + 1)
+                        return false if not proof_source_is_target_aliases_add(right, aliases, report, depth + 1)
+                        return true
+                    return proof_source_for_filter_aliases_add(right, aliases, report, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    bare_pattern: (complete: bool, matches: bool) = proof_source_bare_variant_filter_shape(condition, report)
+                    return false if not bare_pattern.complete
+                    if bare_pattern.matches:
+                        return false if not proof_source_filter_pattern_target_supported(condition, report, depth + 1)
+                        return proof_source_is_target_aliases_add(condition, aliases, report, depth + 1)
+                    return false if not proof_source_for_filter_aliases_add(callee, aliases, report, depth + 1)
+                    for argument in arguments |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(argument, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _):
+                    return proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return false if not proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
+                    return proof_source_for_filter_aliases_add(index, aliases, report, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
+                    for argument in arguments |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(argument, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
+                    return false if not proof_source_for_filter_aliases_add(low, aliases, report, depth + 1)
+                    return proof_source_for_filter_aliases_add(high, aliases, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(element, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(entry.key, aliases, report, depth + 1)
+                        return false if not proof_source_for_filter_aliases_add(entry.value, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(field.value, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_source_for_filter_aliases_add(base, aliases, report, depth + 1)
+                    for field in fields |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(field.value, aliases, report, depth + 1)
+                    return true
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_source_for_filter_aliases_add(condition, aliases, report, depth + 1)
+                    return false if not proof_source_for_filter_aliases_add(then_expression, aliases, report, depth + 1)
+                    return proof_source_for_filter_aliases_add(else_expression, aliases, report, depth + 1)
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
+                    return true
+                _:
+                    return false
+
+        def proof_source_filter_pattern_target_supported(target: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match target:
+                Ast::Expr.Ident(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Absent:
+                    return true
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |report, depth|:
+                        return false if not proof_source_filter_pattern_target_supported(argument, report, depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    for element in elements |report, depth|:
+                        return false if not proof_source_filter_pattern_target_supported(element, report, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |report, depth|:
+                        return false if not proof_source_filter_pattern_target_supported(field.value, report, depth + 1)
+                    return true
+                _:
+                    return false
+
+        def proof_source_runtime_aliases_avoid_reserved_names(aliases: darray[sview], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&) -> bool:
+            for alias in aliases |parameters, report|:
+                return false if proof_source_parameter_name_shadow(parameters, alias, report)
+                return false if proof_source_name_is_type_or_callable(alias, report)
+            return true
+
+        def proof_source_loop_filter_aliases_add(filter_expression: Ast::Expr, aliases: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if proof_source_expression_has_unsafe_runtime_index(filter_expression, parameters, report, depth + 1, aliases)
+            filter_aliases: mutable darray[sview] = []
+            return false if not proof_source_for_filter_aliases_add(filter_expression, &filter_aliases, report, 0)
+            return false if not proof_source_runtime_aliases_avoid_reserved_names(filter_aliases, parameters, report)
+            for filter_alias in filter_aliases |aliases, report|:
+                return false if not proof_source_runtime_alias_add(&aliases, filter_alias, report)
+            return true
+
+        # Statement flow exports Is/As binders after expression statements and after a
+        # declaration/assignment RHS. Reuse the scope-aware collector shared with the typed
+        # operator guard so binders inside blocks, lambdas, matches, and comprehensions do not
+        # escape their local expression scope.
+        def proof_source_statement_expression_aliases_add(expression: Ast::Expr, aliases: mutable darray[sview]&, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+            expression_aliases: mutable darray[sview] = []
+            return false if not proof_structural_operator_guard_collect_expression_bindings(expression, &expression_aliases, report, depth)
+            return false if not proof_source_runtime_aliases_avoid_reserved_names(expression_aliases, parameters, report)
+            for alias in expression_aliases |aliases, report|:
+                return false if not proof_source_runtime_alias_add(&aliases, alias, report)
+            return true
+
+        def proof_source_assignment_target_aliases_add(target: Ast::Expr, aliases: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match target:
+                Ast::Expr.Ident(name, _):
+                    return proof_source_runtime_alias_add(aliases, name, report)
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_assignment_target_aliases_add(inner, aliases, report, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _):
+                    for element in elements |aliases, report, depth|:
+                        return false if not proof_source_assignment_target_aliases_add(element, aliases, report, depth + 1)
+                    return true
+                _:
+                    return true
+
+        def proof_source_condition_true_aliases(condition: Ast::Expr, inherited: darray[sview], report: mutable ProofReport&) -> (complete: bool, aliases: darray[sview]):
+            aliases: mutable darray[sview] = []
+            for alias in inherited |aliases, report|:
+                return (false, aliases) if not proof_source_runtime_alias_add(&aliases, alias, report)
+            complete: bool = proof_source_condition_aliases_add(condition, &aliases, report, 0)
+            return (complete, aliases)
+
+        # Compiler annotations preserve query binders that the compact comprehension node
+        # omits. Their association is line-based, so all binders on that line are conservatively
+        # treated as in scope. Any collision or malformed marker closes admission.
+        def proof_source_comprehension_aliases(variable: sview, position: Ast::Pos, inherited: darray[sview], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&) -> (complete: bool, aliases: darray[sview]):
+            aliases: mutable darray[sview] = []
+            return (false, aliases) if position.line == 0
+            return (false, aliases) if proof_source_parameter_name_shadow(parameters, variable, report)
+            return (false, aliases) if proof_source_name_is_type_or_callable(variable, report)
+            for alias in inherited |aliases, variable, parameters, report|:
+                return (false, aliases) if not proof_source_runtime_alias_add(&aliases, alias, report)
+            return (false, aliases) if not proof_source_runtime_alias_add(&aliases, variable, report)
+            for annotation in report.source_annotations |aliases, variable, parameters, report, position|:
+                return (false, aliases) if not proof_source_index_work_charge(report, 1)
+                return (false, aliases) if not proof_source_index_work_charge(report, sview_len(annotation.owner))
+                return (false, aliases) if not proof_source_index_work_charge(report, sview_len(annotation.name))
+                continue if annotation.name != "__query_binder" or annotation.line != position.line
+                return (false, aliases) if annotation.owner == "" or annotation.owner == variable
+                return (false, aliases) if proof_source_parameter_name_shadow(parameters, annotation.owner, report)
+                return (false, aliases) if proof_source_name_is_type_or_callable(annotation.owner, report)
+                return (false, aliases) if not proof_source_runtime_alias_add(&aliases, annotation.owner, report)
+            return (true, aliases)
+
+        # Recover only parameter types and syntactically built-in containers. This keeps each
+        # type lookup independent of whole-program alias/field scans. Unknown names, aliases,
+        # user-defined fields, and call results remain opaque.
+        def proof_structural_source_value_type(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview]) -> (known: bool, type_expression: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return (false, Ast::Expr.Invalid) if proof_source_runtime_alias_name_contains(aliases, name, report)
+                    selected: mutable Ast::Expr = Ast::Expr.Invalid
+                    matches: mutable usize = 0
+                    return (false, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, parameters.count)
+                    for parameter in parameters |name, selected, matches|:
+                        if parameter.name == name:
+                            selected <- parameter.type_expression
+                            matches <- matches + 1
+                    return (matches == 1, selected)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_source_value_type(inner, parameters, report, depth + 1, aliases)
+                Ast::Expr.Index(object, _, _):
+                    parent: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(object, parameters, report, depth + 1, aliases)
+                    return (false, Ast::Expr.Invalid) if not parent.known
+                    element: (known: bool, element: Ast::Expr) = proof_structural_builtin_container_element_type(parent.type_expression, report)
+                    return (element.known, element.element)
+                Ast::Expr.IndexN(object, arguments, _):
+                    parent: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(object, parameters, report, depth + 1, aliases)
+                    return (false, Ast::Expr.Invalid) if not parent.known or arguments.count == 0
+                    selected: mutable Ast::Expr = parent.type_expression
+                    for _argument in arguments |report, selected|:
+                        return (false, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+                        element: (known: bool, element: Ast::Expr) = proof_structural_builtin_container_element_type(selected, report)
+                        return (false, Ast::Expr.Invalid) if not element.known
+                        selected <- element.element
+                    return (true, selected)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_structural_builtin_container_element_type(type_expression: Ast::Expr, report: mutable ProofReport&) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_builtin_container_element_type(inner, report)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_structural_builtin_container_element_type(inner, report) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, position):
+                    return (true, Ast::Expr.Ident("char", position)) if name == "sview" or name == "cstr" or name == "dstr" or name == "str"
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Index(head, argument, _):
+                    head_name: sview = proof_ident_name(head)
+                    return (true, argument) if head_name == "darray" or head_name == "view"
+                    return (true, head) if proof_source_expression_is_int_literal(argument)
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.IndexN(head, arguments, _):
+                    head_name: sview = proof_ident_name(head)
+                    if head_name == "darray" or head_name == "view":
+                        return (true, arguments[0]) if arguments.count == 1
+                        return (false, Ast::Expr.Invalid)
+                    if head_name == "array":
+                        return (true, arguments[0]) if arguments.count == 2 and proof_source_expression_is_int_literal(arguments[1])
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_structural_builtin_index_receiver(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview]) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Array(_, _):
+                    return true
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_builtin_index_receiver(inner, parameters, report, depth + 1, aliases)
+                _:
+                    value_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(expression, parameters, report, depth + 1, aliases)
+                    return value_type.known and proof_structural_builtin_container_element_type(value_type.type_expression, report).known
+
+        # `for` and comprehension syntax can dispatch through an iterator protocol even when
+        # the iterable expression contains no explicit call. Admit only built-in ranges,
+        # array literals, and parameter values with a known built-in container type.
+        def proof_structural_builtin_iteration_source(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview]) -> bool:
+            return false if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Array(_, _):
+                    return true
+                Ast::Expr.Binary(_, operator, _, _):
+                    return operator == TokenKind.RangeLt or operator == TokenKind.RangeLe
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_builtin_iteration_source(inner, parameters, report, depth + 1, aliases)
+                _:
+                    value_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(expression, parameters, report, depth + 1, aliases)
+                    return value_type.known and proof_structural_builtin_container_element_type(value_type.type_expression, report).known
+
+        # Runtime indexing can invoke `__index__` or `__set_index__`. Allow it only when the
+        # receiver type resolves through a parameter to a built-in container; cast/size syntax
+        # has type arguments rather than a runtime lookup. A refinement alias is intentionally
+        # unknown here because the parser discarded its target type.
+        def proof_source_expression_has_unsafe_runtime_index(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview]) -> bool:
+            return true if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return true if not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Index(object, index, _):
+                    if proof_is_type_cast_index(object):
+                        return proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases)
+                    return true if not proof_structural_builtin_index_receiver(object, parameters, report, 0, aliases)
+                    return proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(index, parameters, report, depth + 1, aliases)
+                Ast::Expr.IndexN(object, arguments, _):
+                    if proof_is_type_cast_index(object):
+                        return proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases)
+                    return true if not proof_structural_builtin_index_receiver(object, parameters, report, 0, aliases)
+                    return true if proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases)
+                    for argument in arguments |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(argument, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Paren(object, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
+                    return proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases)
+                Ast::Expr.Binary(left, TokenKind.Is, _, _) | Ast::Expr.Binary(left, TokenKind.As, _, _):
+                    # The RHS is pattern/type syntax. Runtime indexing inside it is not an
+                    # operator executed by the source expression.
+                    return proof_source_expression_has_unsafe_runtime_index(left, parameters, report, depth + 1, aliases)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return true if proof_source_expression_has_unsafe_runtime_index(left, parameters, report, depth + 1, aliases)
+                    true_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(left, aliases, report)
+                    return true if not true_aliases.complete
+                    return proof_source_expression_has_unsafe_runtime_index(right, parameters, report, depth + 1, true_aliases.aliases)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return proof_source_expression_has_unsafe_runtime_index(left, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(right, parameters, report, depth + 1, aliases)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    callee_name: sview = when callee:
+                        Ast::Expr.Ident(name, _) -> name
+                        Ast::Expr.Index(head, _, _) | Ast::Expr.IndexN(head, _, _) -> proof_source_type_application_head_name(head)
+                        _ -> ""
+                    return true if callee_name != "" and proof_source_runtime_alias_name_contains(aliases, callee_name, report)
+                    if not proof_source_callable_type_application(callee, parameters, report):
+                        return true if proof_source_expression_has_unsafe_runtime_index(callee, parameters, report, depth + 1, aliases)
+                    for argument in arguments |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(argument, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_source_expression_has_unsafe_runtime_index(object, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(low, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(high, parameters, report, depth + 1, aliases)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, aliases)
+                    then_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, aliases, report)
+                    return true if not then_aliases.complete
+                    return proof_source_expression_has_unsafe_runtime_index(then_expression, parameters, report, depth + 1, then_aliases.aliases) or proof_source_expression_has_unsafe_runtime_index(else_expression, parameters, report, depth + 1, aliases)
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
+                    return true if not proof_structural_builtin_iteration_source(iterable, parameters, report, 0, aliases)
+                    return true if proof_source_expression_has_unsafe_runtime_index(iterable, parameters, report, depth + 1, aliases)
+                    comprehension_aliases: mutable (complete: bool, aliases: darray[sview]) = proof_source_comprehension_aliases(variable, position, aliases, parameters, report)
+                    return true if not comprehension_aliases.complete
+                    filter_test: mutable Ast::Expr = condition
+                    filter_guard: mutable Ast::Expr = Ast::Expr.Absent
+                    match condition:
+                        Ast::Expr.Binary(left, TokenKind.And, right, _):
+                            bare_pattern: (complete: bool, matches: bool) = proof_source_bare_variant_filter_shape(left, report)
+                            return true if not bare_pattern.complete
+                            is_pattern_test: mutable bool = bare_pattern.matches
+                            match left:
+                                Ast::Expr.Binary(_, TokenKind.Is, _, _):
+                                    is_pattern_test <- true
+                                _:
+                                    pass
+                            if is_pattern_test:
+                                filter_test <- left
+                                filter_guard <- right
+                        _:
+                            pass
+                    return true if not proof_source_loop_filter_aliases_add(filter_test, &comprehension_aliases.aliases, parameters, report, depth)
+                    return true if proof_source_expression_has_unsafe_runtime_index(filter_guard, parameters, report, depth + 1, comprehension_aliases.aliases)
+                    return proof_source_expression_has_unsafe_runtime_index(body, parameters, report, depth + 1, comprehension_aliases.aliases)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    return proof_source_expression_has_unsafe_runtime_index(guarded, parameters, report, depth + 1, aliases) or proof_source_statements_have_unsafe_runtime_index(recovery, parameters, report, depth + 1, aliases)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(element, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(entry.key, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(entry.value, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(field.value, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_source_expression_has_unsafe_runtime_index(base, parameters, report, depth + 1, aliases)
+                    for field in fields |parameters, report, depth, aliases|:
+                        return true if proof_source_expression_has_unsafe_runtime_index(field.value, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return true if proof_source_expression_has_unsafe_runtime_index(scrutinee, parameters, report, depth + 1, aliases)
+                    for arm in arms |parameters, report, depth, aliases|:
+                        return true if proof_source_pattern_shadows_parameter(arm.pattern, parameters, report, depth + 1) or proof_source_pattern_shadows_type_or_callable(arm.pattern, report, depth + 1)
+                        return true if proof_source_expression_has_unsafe_runtime_index(arm.guard, parameters, report, depth + 1, aliases)
+                        return true if proof_source_statements_have_unsafe_runtime_index(arm.body, parameters, report, depth + 1, aliases)
+                    return false
+                Ast::Expr.Lambda(_, _, _):
+                    # The lambda introduces a separate parameter scope that this source-only
+                    # value resolver does not model. Do not reuse the enclosing parameter types.
+                    return true
+                Ast::Expr.Block(statements, value, _, _):
+                    return proof_source_statements_have_unsafe_runtime_index(statements, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(value, parameters, report, depth + 1, aliases)
+                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
+                    return false
+                _:
+                    return true
+
+        def proof_source_statements_have_unsafe_runtime_index(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize, aliases: darray[sview]) -> bool:
+            return true if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            statement_aliases: mutable darray[sview] = aliases
+            for statement in statements |parameters, report, depth, statement_aliases|:
+                return true if not proof_source_index_work_charge(report, 1)
+                match statement:
+                    Ast::Stmt.Invalid:
+                        return true
+                    Ast::Stmt.Expr(expression, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, depth + 1, statement_aliases)
+                        return true if not proof_source_statement_expression_aliases_add(expression, &statement_aliases, parameters, report, depth + 1)
+                    Ast::Stmt.Return(value, _):
+                        return true if value is returned and proof_source_expression_has_unsafe_runtime_index(returned, parameters, report, depth + 1, statement_aliases)
+                    Ast::Stmt.Block(_, _, binding, body, _):
+                        return true if binding != "" and (proof_source_parameter_name_shadow(parameters, binding, report) or proof_source_name_is_type_or_callable(binding, report))
+                        block_aliases: mutable darray[sview] = statement_aliases
+                        return true if binding != "" and not proof_source_runtime_alias_add(&block_aliases, binding, report)
+                        return true if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, block_aliases)
+                    Ast::Stmt.VarDecl(name, _, initializer, _):
+                        return true if proof_source_parameter_name_shadow(parameters, name, report) or proof_source_name_is_type_or_callable(name, report)
+                        return true if proof_source_expression_has_unsafe_runtime_index(initializer, parameters, report, depth + 1, statement_aliases)
+                        return true if not proof_source_statement_expression_aliases_add(initializer, &statement_aliases, parameters, report, depth + 1)
+                        return true if not proof_source_runtime_alias_add(&statement_aliases, name, report)
+                    Ast::Stmt.Assign(target, operator, initializer, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(initializer, parameters, report, depth + 1, statement_aliases)
+                        return true if not proof_source_statement_expression_aliases_add(initializer, &statement_aliases, parameters, report, depth + 1)
+                        return true if operator == TokenKind.Assign and proof_source_fresh_assignment_shadows_parameter(target, parameters, report, depth + 1)
+                        return true if proof_source_expression_has_unsafe_runtime_index(target, parameters, report, depth + 1, statement_aliases)
+                        return true if operator == TokenKind.Assign and not proof_source_assignment_target_aliases_add(target, &statement_aliases, report, depth + 1)
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, statement_aliases)
+                        then_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)
+                        return true if not then_aliases.complete
+                        return true if proof_source_statements_have_unsafe_runtime_index(then_body, parameters, report, depth + 1, then_aliases.aliases)
+                        return true if proof_source_statements_have_unsafe_runtime_index(else_body, parameters, report, depth + 1, statement_aliases)
+                    Ast::Stmt.While(condition, body, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, statement_aliases)
+                        body_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)
+                        return true if not body_aliases.complete
+                        return true if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, body_aliases.aliases)
+                    Ast::Stmt.For(_, variables, iterable, body, _):
+                        for variable in variables |parameters, report|:
+                            return true if proof_source_parameter_name_shadow(parameters, variable, report) or proof_source_name_is_type_or_callable(variable, report)
+                        base_iterable: mutable Ast::Expr = iterable
+                        filter_predicates: mutable darray[Ast::Expr] = []
+                        refinement_depth: mutable usize = 0
+                        while refinement_depth < 2 |base_iterable, filter_predicates, refinement_depth, report|:
+                            match base_iterable:
+                                Ast::Expr.Refinement(base, predicate, _):
+                                    return true if not proof_source_index_work_charge(report, 1)
+                                    filter_predicates.push(predicate)
+                                    base_iterable <- base
+                                    refinement_depth <- refinement_depth + 1
+                                _:
+                                    break
+                        match base_iterable:
+                            Ast::Expr.Refinement(_, _, _):
+                                return true
+                            _:
+                                pass
+                        return true if not proof_structural_builtin_iteration_source(base_iterable, parameters, report, 0, statement_aliases)
+                        return true if proof_source_expression_has_unsafe_runtime_index(base_iterable, parameters, report, depth + 1, statement_aliases)
+                        body_aliases: mutable darray[sview] = statement_aliases
+                        for variable in variables |body_aliases, report|:
+                            return true if not proof_source_runtime_alias_add(&body_aliases, variable, report)
+                        if filter_predicates.count == 2:
+                            # The inner refinement is the filter and contributes binders.
+                            # The outer refinement is a guard: it sees those binders but its
+                            # own Is/As binders do not escape into the loop body.
+                            return true if not proof_source_loop_filter_aliases_add(filter_predicates[1], &body_aliases, parameters, report, depth)
+                            return true if proof_source_expression_has_unsafe_runtime_index(filter_predicates[0], parameters, report, depth + 1, body_aliases)
+                        if filter_predicates.count == 1:
+                            return true if not proof_source_loop_filter_aliases_add(filter_predicates[0], &body_aliases, parameters, report, depth)
+                        return true if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, depth + 1, body_aliases)
+                    Ast::Stmt.Match(scrutinee, arms, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(scrutinee, parameters, report, depth + 1, statement_aliases)
+                        for arm in arms |parameters, report, depth, statement_aliases|:
+                            return true if proof_source_pattern_shadows_parameter(arm.pattern, parameters, report, depth + 1) or proof_source_pattern_shadows_type_or_callable(arm.pattern, report, depth + 1)
+                            return true if proof_source_expression_has_unsafe_runtime_index(arm.guard, parameters, report, depth + 1, statement_aliases)
+                            return true if proof_source_statements_have_unsafe_runtime_index(arm.body, parameters, report, depth + 1, statement_aliases)
+                    Ast::Stmt.Contract(_, expression, _):
+                        return true if proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, depth + 1, statement_aliases)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    _:
+                        return true
+            return false

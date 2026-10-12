@@ -45,4 +45,20 @@ gaps = [(g["line"], g["name"]) for g in data["goals"] if g["replay_status"] == "
 assert gaps and all(name in failing for (_, name) in gaps), gaps
 assert {name for (_, name) in gaps} == {"shallow", "max_below_floor", "length_below_cap"}, gaps
 
+code, data = run("rejected_structural_indirect_callback.elisa")
+assert code == 1 and data["status"] == "failed", (code, data.get("status"))
+assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]
+assert data["replay"]["gaps"] == 0, data["replay"]
+assert data["trust"]["trusted_assumptions"] == [], data["trust"]
+callback_findings = [f for f in data["findings"]
+                     if f["kind"] == "structural-decreases-unproven" and f["name"] == "callback_bounce"]
+assert callback_findings, data["findings"]
+assert any(any(marker in finding["message"].lower()
+               for marker in ("callback", "indirect", "opaque callee"))
+           for finding in callback_findings), callback_findings
+declarations = {row["name"]: row for row in data["declaration_details"]
+                if row.get("kind") == "function"}
+for name in ("callback_bounce", "reenter_at_same_measure"):
+    assert name in declarations and not declarations[name]["verified"], declarations.get(name)
+
 print("adt library: lists, trees and token streams proved by structural induction, replayed; broken variants refused")

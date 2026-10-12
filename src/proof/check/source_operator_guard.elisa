@@ -37,7 +37,7 @@ extend ElisaProof:
                             return (false, false) if not proof_report_source_work_charge(sview_len(scope.owner), source_work)
                             continue if scope.owner != "__impl_scope" or scope.line != annotation.line
                             return (false, false) if not proof_report_source_work_charge(sview_len(scope.name), source_work)
-                            return (true, true) if scope.name == protocol
+                            return (true, true) if scope.name == protocol or (protocol == "Ord" and scope.name == "Less")
             return (true, false)
 
         def proof_source_primitive_operator_mask_with_work(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, mask: usize):
@@ -65,39 +65,44 @@ extend ElisaProof:
             mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG if negation.overloaded
             return (true, mask)
 
-        # The proof core already built the source operator rows under the shared budget. Derive
-        # the primitive mask from that flat list instead of repeating the source-side nested join.
-        def proof_source_primitive_operator_mask_from_index(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, mask: usize):
-            mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
-            return (false, mask) if not report.operator_impls.valid
-            for implementation in report.operator_impls.rows |implementation, report, mask, source_work|:
-                return (false, mask) if not proof_report_source_work_charge(1, source_work)
-                return (false, mask) if not proof_report_source_work_charge(sview_len(implementation.concrete), source_work)
-                return (false, mask) if not proof_report_source_work_charge(sview_len(implementation.protocol), source_work)
+        # Derive both masks from the already-built flat source index in one bounded pass.
+        # The primitive mask admits arithmetic normalization only for primitive overrides;
+        # the broad mask also records user-type implementations for implicit-call guards.
+        def proof_source_operator_masks_from_index(report: ProofReport&, source_work: mutable usize&) -> (complete: bool, primitive_mask: usize, protocol_mask: usize):
+            primitive_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            protocol_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            return (false, primitive_mask, protocol_mask) if not report.operator_impls.valid
+            for implementation in report.operator_impls.rows |implementation, report, primitive_mask, protocol_mask, source_work|:
+                return (false, primitive_mask, protocol_mask) if not proof_report_source_work_charge(1, source_work)
+                return (false, primitive_mask, protocol_mask) if not proof_report_source_work_charge(sview_len(implementation.concrete), source_work)
+                return (false, primitive_mask, protocol_mask) if not proof_report_source_work_charge(sview_len(implementation.protocol), source_work)
+                proof_source_operator_protocol_mask_add(&protocol_mask, implementation.protocol)
                 continue if not proof_source_operator_guard_primitive(implementation.concrete)
                 if implementation.protocol == "":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
-                    mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
                 if implementation.protocol == "Eq":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
                 if implementation.protocol == "Ord":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                if implementation.protocol == "Less":
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
                 if implementation.protocol == "Add":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
                 if implementation.protocol == "Sub":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
                 if implementation.protocol == "Mul":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
                 if implementation.protocol == "Div":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
                 if implementation.protocol == "Neg":
-                    mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
-            return (true, mask)
+                    primitive_mask <- primitive_mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+            return (true, primitive_mask, protocol_mask)
 
         def proof_source_primitive_operator_mask(annotations: darray[Ast::EnumAnnotation]&) -> usize:
             source_work: mutable usize = 0
@@ -123,6 +128,66 @@ extend ElisaProof:
             return (mask & PROOF_SOURCE_OPERATOR_NEGATION_FLAG) != 0 if protocol == "Neg"
             return false
 
+        # The typed structural guard handles the four operator protocols represented in its
+        # witness index. Built-in numeric compounds have no struct dispatch; `?=` remains
+        # unclassified because it has distinct semantics.
+        def proof_source_compound_assignment_protocol(operator: TokenKind) -> sview:
+            return when operator:
+                TokenKind.PlusEq -> "Add"
+                TokenKind.MinusEq -> "Sub"
+                TokenKind.StarEq -> "Mul"
+                TokenKind.SlashEq -> "Div"
+                TokenKind.PercentEq | TokenKind.CaretEq | TokenKind.PipeEq | TokenKind.AmpEq | TokenKind.LShiftEq | TokenKind.RShiftEq -> ""
+                TokenKind.QAssign -> "?"
+                TokenKind.Assign | TokenKind.LArrow -> ""
+                _ -> "?"
+
+        # Structural termination must account for implicit operator calls on user types as
+        # well as primitive overrides. This broader mask is used only to reject structural
+        # certificates whose call graph would omit a possible overloaded dispatch.
+        def proof_source_operator_protocol_mask_add(mask: mutable usize&, protocol: sview) -> void:
+            if protocol == "":
+                mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+                mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+            if protocol == "Eq":
+                mask <- mask | PROOF_SOURCE_OPERATOR_EQUALITY_FLAG
+            # Source ordering implementations use the `Less` protocol for `<`; the proof
+            # fragment groups all four comparison tokens under its broader `Ord` family.
+            if protocol == "Ord" or protocol == "Less":
+                mask <- mask | PROOF_SOURCE_OPERATOR_ORDERING_FLAG
+            if protocol == "Add":
+                mask <- mask | PROOF_SOURCE_OPERATOR_ADDITION_FLAG
+            if protocol == "Sub":
+                mask <- mask | PROOF_SOURCE_OPERATOR_SUBTRACTION_FLAG
+            if protocol == "Mul":
+                mask <- mask | PROOF_SOURCE_OPERATOR_MULTIPLICATION_FLAG
+            if protocol == "Div":
+                mask <- mask | PROOF_SOURCE_OPERATOR_DIVISION_FLAG
+            if protocol == "Neg":
+                mask <- mask | PROOF_SOURCE_OPERATOR_NEGATION_FLAG
+
+        # Replay rebuilds this from source annotations instead of trusting the producer's
+        # operator index or the cached report mask. Any recognized scope marker is enough to
+        # reject a matching structural operator; pairing it to a concrete marker would add a
+        # quadratic scan here and only make the replay less conservative on malformed metadata.
+        def proof_source_operator_protocol_mask_with_work(annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&) -> (complete: bool, mask: usize):
+            mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            for annotation in annotations |annotation, source_work, mask|:
+                return (false, mask) if not proof_report_source_work_charge(1, source_work)
+                return (false, mask) if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                if annotation.owner == "__ext_concrete":
+                    return (false, mask) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                    proof_source_operator_protocol_mask_add(&mask, "")
+                if annotation.owner == "__impl_scope":
+                    return (false, mask) if not proof_report_source_work_charge(sview_len(annotation.name), source_work)
+                    proof_source_operator_protocol_mask_add(&mask, annotation.name)
+            return (true, mask)
+
         def proof_source_statements_have_overloaded_operator(statements: darray[Ast::Stmt], operator_mask: usize, depth: usize) -> bool:
             return true if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
             for statement in statements |operator_mask, depth|:
@@ -135,7 +200,10 @@ extend ElisaProof:
                         return true if proof_source_statements_have_overloaded_operator(body, operator_mask, depth + 1)
                     Ast::Stmt.VarDecl(_, type_expression, value, _):
                         return true if proof_source_expression_has_overloaded_operator(type_expression, operator_mask, depth + 1) or proof_source_expression_has_overloaded_operator(value, operator_mask, depth + 1)
-                    Ast::Stmt.Assign(target, _, value, _):
+                    Ast::Stmt.Assign(target, assignment_operator, value, _):
+                        compound_protocol: sview = proof_source_compound_assignment_protocol(assignment_operator)
+                        return true if compound_protocol == "?"
+                        return true if compound_protocol != "" and proof_source_primitive_operator_mask_has(operator_mask, compound_protocol)
                         return true if proof_source_expression_has_overloaded_operator(target, operator_mask, depth + 1) or proof_source_expression_has_overloaded_operator(value, operator_mask, depth + 1)
                     Ast::Stmt.If(condition, then_body, else_body, _):
                         return true if proof_source_expression_has_overloaded_operator(condition, operator_mask, depth + 1)
@@ -159,6 +227,45 @@ extend ElisaProof:
                     _:
                         return true
             return false
+
+        # The operator classifier above is a full AST walk. Reserve the cost of its scan from
+        # the shared source-work meter before calling it on a whole function body.
+        def proof_source_operator_expression_work_charge(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_effect_index.implicit_effect_work
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            expression_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost(expression, &expression_cost, work, 0):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            if expression_cost > remaining / 2:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return proof_source_index_work_charge(report, expression_cost * 2)
+
+        def proof_source_operator_body_work_charge(statements: darray[Ast::Stmt]&, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_effect_index.implicit_effect_work
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            body_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_body(statements, &body_cost, work, 0):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            if body_cost > remaining / 2:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return proof_source_index_work_charge(report, body_cost * 2)
+
+        def proof_source_index_work_charge(report: mutable ProofReport&, amount: usize) -> bool:
+            return false if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if not proof_report_source_work_charge(amount, &report.source_effect_index.implicit_effect_work):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return true
 
         # Detect a source operator whose dispatch may differ from the proof kernel's built-in
         # interpretation. Logical connectives are intentionally not listed: they are proposition

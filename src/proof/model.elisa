@@ -2,9 +2,9 @@
 # elisa-compiler; this module only owns the proof report and the small symbolic state.
 include "./model/extern_signatures.elisa"
 include "./model/analysis_budgets.elisa"
+include "./model/source_effect_index.elisa"
 include "./model/frame_annotation_index.elisa"
 include "./model/function_index_types.elisa"
-include "./model/function_table_constructor.elisa"
 include "./model/fact_origin_snapshot.elisa"
 include "./model/fact_call_shape_snapshot.elisa"
 include "./model/linear_hint_index.elisa"
@@ -258,8 +258,12 @@ module ElisaProof:
             # Lookup-only cache derived from the compiler-owned annotations. It is valid only
             # after a complete ordered build; otherwise callers use the authoritative slow scan.
             source_primitive_operator_mask: mutable usize = PROOF_SOURCE_OPERATOR_MASK_EMPTY
+            # Source operator protocols that may dispatch through an implementation.
+            source_operator_protocol_mask: mutable usize = 0
             operator_impls: mutable ProofOperatorImplIndex = ProofOperatorImplIndex{}
             source_declarations: mutable darray[Ast::Decl] = []
+            # Source-derived destructor and callable facts; replay rebuilds this cache.
+            source_effect_index: mutable ProofSourceEffectIndex = ProofSourceEffectIndex{}
             # Signature contracts are held in compiler file side tables rather than in each
             # function declaration. Preserve them with the source snapshot so replay can rebuild
             # the same call graph used by structural mutual-recursion checking.
@@ -419,171 +423,12 @@ module ElisaProof:
             depth: usize
             whole: bool
 
-        # Function summaries are deliberately separate from lemma summaries. A lemma call is
-        # proof-only and preserves the caller's facts; an executable call may invalidate every
-        # caller fact unless a frame-condition tier proves preservation. Recursive SCCs are
-        # tracked separately; only edges within a recursive component with checked decreases
-        # measures may use an inductive summary.
-        struct ProofFunctionTable:
-            # Separate source signatures: never included in body/purity/SCC slots.
-            extern_signatures: mutable darray[ProofExternSignature]
-            # Exact-name index for extern declarations. Duplicate extern rows remain marked
-            # ambiguous; consumers use this only to fail closed on source-name collisions.
-            extern_index_hashes: mutable darray[u32]
-            extern_index_values: mutable darray[usize]
-            extern_index_ambiguous: mutable darray[bool]
-            # Cached selector/hook shadows remove repeated linear scans from numeric-cast
-            # classification. `numeric_cast_shadowed` is aligned with the reserved selector
-            # order in proof_numeric_cast_target_at.
-            numeric_cast_shadowed: mutable darray[bool]
-            custom_cast_hook_present: mutable bool
-            type_audit_index: mutable ProofTypeAuditIndex
-            enum_index: mutable ProofEnumIndex
-            frame_annotation_index: mutable ProofFrameAnnotationIndex
-            names: mutable darray[sview]
-            # Declaration lines and innermost owning module names are aligned with names. A
-            # qualified call `Module::name` whose bare name repeats resolves through them.
-            lines: mutable darray[u32]
-            owner_modules: mutable darray[sview]
-            # Exact parser-owned aliases shared by call checking and fact publication.
-            module_aliases: mutable ProofModuleAliasIndex
-            # The length of each row's declaration-path prefix that ends at its innermost module,
-            # 0 for a top-level function. Two rows share a module exactly when these prefixes
-            # are equal; a module name alone cannot tell apart two nested modules spelled alike.
-            module_prefixes: mutable darray[usize]
-            # Source paths are aligned with names. The scheduler retrieves each body from the
-            # authoritative source declaration tree without retaining a second function-AST copy.
-            declaration_path_starts: mutable darray[usize]
-            declaration_path_counts: mutable darray[usize]
-            all_declaration_path: mutable darray[usize]
-            name_hashes: mutable darray[u32]
-            index_hashes: mutable darray[u32]
-            index_values: mutable darray[usize]
-            # A slot is ambiguous only when this exact name appears more than once. Keeping
-            # this bit beside the retained first row avoids conflating hash collisions with
-            # duplicate declarations.
-            index_ambiguous: mutable darray[bool]
-            param_starts: mutable darray[usize]
-            param_counts: mutable darray[usize]
-            all_params: mutable darray[sview]
-            all_parameter_mutable: mutable darray[bool]
-            all_has_defaults: mutable darray[bool]
-            all_defaults: mutable darray[Ast::Expr]
-            # Whether each parameter's declared type is a reference. A local passed to such a
-            # parameter is implicitly referenced and may be written by the callee.
-            all_parameter_references: mutable darray[bool]
-            # Whether each parameter's declared reference type is mutable. A shared reference is
-            # read-only by Elisa's type system, which is what lets a call that hands over only
-            # shared references leave the caller's resource state untouched.
-            all_parameter_mutable_references: mutable darray[bool]
-            # Cached per-parameter type audit: floating-point rejection is a declaration property,
-            # and recomputing it for every scheduled summary made large imports quadratic.
-            all_parameter_may_contain_float: mutable darray[bool]
-            # Signed width of a parameter declared as a bare signed primitive, else zero.
-            all_parameter_signed_widths: mutable darray[i64]
-            # Whether the storage each parameter names -- the type with an outer reference
-            # stripped -- can hold a reference anywhere inside it, and the same for the return
-            # type as declared. A callee can only store a reference it was lent into a place whose
-            # type can hold one, so a lend to a callee whose every *other* parameter names such a
-            # place, and whose return does too, cannot outlive the call.
-            all_parameter_target_reference_free: mutable darray[bool]
-            # Region-polymorphic function metadata. Region parameters are source-level lifetime
-            # variables (`[@r]`), while all_param_regions records the explicit `@r` pin on each
-            # value parameter. These are metadata only; calls still need a replayed region map.
-            region_param_starts: mutable darray[usize]
-            region_param_counts: mutable darray[usize]
-            all_region_params: mutable darray[sview]
-            all_param_region_starts: mutable darray[usize]
-            all_param_regions: mutable darray[sview]
-            # Explicit local `name: T @region` pins preserved by the parser's side table. The
-            # resource checker uses these to model region-allocated values and views derived
-            # from them; source types alone do not retain the `@region` suffix.
-            local_region_binding_names: mutable darray[sview]
-            local_region_binding_regions: mutable darray[sview]
-            local_region_binding_lines: mutable darray[u32]
-            # Explicit `mutable name: T` local bindings. The parser records these as
-            # source-positioned enum annotations because VarDecl itself has no
-            # binding-mode field; resource analysis must import the marker rather
-            # than infer writability from a type expression.
-            mutable_local_names: mutable darray[sview]
-            mutable_local_offsets: mutable darray[u32]
-            # Loop-header accumulators (`|acc: T = init|`): typed immutable, assigned by the loop.
-            loop_accumulator_names: mutable darray[sview]
-            loop_accumulator_offsets: mutable darray[u32]
-            # The imported return shape tells a call that consumes a borrow and returns a plain
-            # value from one that propagates a reference. It is source metadata, never a proof:
-            # a borrow-carrying call still needs the callee's verified executable summary.
-            return_references: mutable darray[bool]
-            return_reference_free: mutable darray[bool]
-            return_mutable_references: mutable darray[bool]
-            return_reference_parameters: mutable darray[usize]
-            return_regions: mutable darray[sview]
-            # Exact by-value sview results select a shared-borrow rule, validated again by replay.
-            return_sviews: mutable darray[bool]
-            # Declared return types are retained for narrowly validated by-value region results.
-            # Their use is a producer aid only; replay checks the serialized type witness again.
-            return_types: mutable darray[Ast::Expr]
-            # Primitive return shape for witnessing verified total-pure calls; not proof evidence.
-            return_scalar: mutable darray[bool]
-            # A named-tuple return's field labels in element order, so `result.f` projects.
-            return_label_starts: mutable darray[usize]
-            return_label_counts: mutable darray[usize]
-            all_return_labels: mutable darray[sview]
-            requires_starts: mutable darray[usize]
-            requires_counts: mutable darray[usize]
-            all_requires: mutable darray[Ast::Expr]
-            ensure_starts: mutable darray[usize]
-            ensure_counts: mutable darray[usize]
-            all_ensures: mutable darray[Ast::Expr]
-            changes_starts: mutable darray[usize]
-            changes_counts: mutable darray[usize]
-            all_changes: mutable darray[ProofFramePlace]
-            preserves_starts: mutable darray[usize]
-            preserves_counts: mutable darray[usize]
-            all_preserves: mutable darray[ProofFramePlace]
-            decreases_starts: mutable darray[usize]
-            decreases_counts: mutable darray[usize]
-            all_decreases: mutable darray[Ast::Expr]
-            decreases_unbounded: mutable darray[bool]
-            structural: mutable darray[bool]
-            structural_subject_positions: mutable darray[usize]
-            structural_subject_types: mutable darray[sview]
-            call_starts: mutable darray[usize]
-            call_counts: mutable darray[usize]
-            all_calls: mutable darray[sview]
-            # Aligned with all_calls: the module qualifier the call was written with ("" for a
-            # bare call) and the row the call resolves to from its caller (names.count when
-            # unresolved). Bare names repeat across modules, so the graph reads the targets.
-            all_call_qualifiers: mutable darray[sview]
-            # Source callee AST aligned with all_calls, preserving exact scope paths for graph resolution.
-            all_call_callee_sources: mutable darray[Ast::Expr]
-            all_call_targets: mutable darray[usize]
-            # Shared checked-call resolver meter across graph, contract, and body lookup phases.
-            module_resolution_work_used: mutable usize
-            module_resolution_work_exhausted: mutable bool
-            # The row whose body is being checked, or names.count outside a scheduled function
-            # body. Unqualified calls resolve from this caller's module.
-            current_caller: mutable usize
-            recursive: mutable darray[bool]
-            recursive_component_ids: mutable darray[usize]
-            # Local purity is computed before the call-graph fixed point, so every member of a
-            # recursive component is checked against one declaration-local certificate.
-            direct_pure: mutable darray[bool]
-            pure: mutable darray[bool]
-            deterministic: mutable darray[bool]
-            # Declared `can[...]` rows. A function with no row is not the same as one with an
-            # empty row: the first says nothing, the second says it performs no declared effect.
-            effect_starts: mutable darray[usize]
-            effect_counts: mutable darray[usize]
-            all_effects: mutable darray[sview]
-            effects_declared: mutable darray[bool]
-            # Runtime summaries are available only after the callee's own proof converges.
-            verified: mutable darray[bool]
-            verification_reasons: mutable darray[sview]
 
         def proof_empty_report() -> ProofReport:
             return ProofReport{}
 
+include "./model/function_table_types.elisa"
+include "./model/function_table_constructor.elisa"
 
 include "./model/frame_producer.elisa"
 include "./model/report_recording.elisa"
