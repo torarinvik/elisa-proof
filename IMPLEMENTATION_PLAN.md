@@ -10345,3 +10345,93 @@ compiler source; (3) reduce the 42 ownership-binding and 21 ownership-flow postc
 positive and false-claim controls; (4) resolve proof replay region/retention and explicit-grant
 diagnostics on a reproducible source tree; (5) build the newest Stage1 and strict O2 proof product,
 then run source identity, replay, and mutable-global grant matrices. Keep timing skipped.
+
+
+### 23.27.116 Qualified SMT gains and refreshed compiler pins (2026-10-12)
+
+Elisa-core `main` now contains `de65ad3f` (pure string-result classifiers), `a391ff9d` (checked
+immutable-SView indexing), and `8070e39d` (remove a per-call temporary argument-slice copy). The
+string-classifier and checked-index changes passed a clean combined semantic suite; the isolated
+slice change passed the full semantic suite. A clean native Stage0 from `8070e39d` reports
+`vcs.modified=false`, has SHA-256
+`90548ad8d61aec68bdae2dbd5e451b4e5d22cbd1c6a13171eca8de80df3fba1c`, and is installed at both
+`~/.elisac/elisac-stage0` and `Elisa-core/compiler/bin/elisac`. The proof pins now name that Stage0
+and the newest committed Elisa-compiler snapshot `e1361c201`. Previous Stage0 binaries are retained
+under `/private/tmp`. No performance timing was taken; the slice change has correctness evidence but
+no measured speedup.
+
+Focused CLI controls on the integrated compiler accept the valid checked-SView suffix and string
+classifier examples and reject the wrong cross-group result. The larger copied WASM ABI classifier
+still has 60 unproven `classify` postconditions, so interprocedural tuple/classifier reasoning remains
+open and the smoke does not qualify that consumer.
+
+The strict O2 proof build on the refreshed `8070e39d`/`e1361c201` pair produces no proof executable.
+The `quantifiers_and_arena.elisa` loop indentation issue is repaired: the build now reports zero
+parser errors and zero missing explicit `Global.Read/Write` call grants. It still reports 57
+lifetime/retention diagnostics (50 in compiler `semantic_api`) and 135 unproven contract, invariant,
+or decreases obligations. The largest ensure clusters are `ownership_binding_lookup` (38),
+`ownership_binding_flow` (21), `parser_token_position` (18), and proof replay `resource_places` (15).
+The two remaining effectful replay-helper calls now carry explicit `can Global{Read,Write}` grants.
+These proof-source edits remain uncommitted with the broad active work.
+
+The dedicated `codex/global-mutable-grants` compiler branch is still unqualified; the strict build's
+zero missing call-grant diagnostics do not establish enforcement for reads and writes of variables
+declared `global mutable`. Preserve that branch until its canonical authority matrix passes with a
+fresh product from the newest compiler. Keep the dirty proof and compiler migrations intact, and
+remove only clean scratch worktrees whose source commits are integrated or reachable from `main`.
+
+**Next high-return order:** (1) qualify the direct and transitive mutable-global read/write matrix
+against the newest Stage0/Stage1 pair, including wrong-axis, function-value, and ungranted negative
+controls; (2) unblock the current compiler/proof build by resolving the 50 `semantic_api` retention
+diagnostics and the largest ownership-binding, parser-position, and replay obligations without
+weakening checks; (3) build a provenance-matched Stage1 and strict O2 proof executable, then run the
+source-identity and replay gates; (4) close the remaining `classify` tuple-contract proof gap; (5)
+resume paired performance measurements after correctness parity and the local-load gate. Timing was
+skipped for this integration pass, not removed from the optimization plan.
+
+
+### 23.27.117 Mutable-global authority is in main; fresh-product gate is blocked (2026-10-12)
+
+Elisa-compiler `main` already contains `e6b5a0c40` (`Enforce local Global grants across compiler
+sources`) and its follow-up authority work. Its current mutable-global smoke has the same 103 named
+cases as the older `codex/global-mutable-grants` candidate. Do not cherry-pick that stale branch over
+the current implementation. The current Stage1 binary is stale: its smoke reaches a severity check
+that the old product cannot satisfy.
+
+A fresh Stage1 attempt from committed compiler `main` (`e1361c201`) with Stage0 `8070e39d` stopped
+during compiler-source compilation, before producing a Stage1 artifact. The captured output has
+many region diagnostics and is being separated into actual fatal errors and warnings. Until the
+current source bootstraps, the 103-case authority matrix is not qualified. The zero missing
+`Global.Read/Write` call-grant diagnostics in the proof build cover explicit helper-call annotations;
+they do not establish enforcement for reads and writes to `global mutable` variables.
+
+**Next high-return order:** (1) identify and fix the fatal current-main self-host diagnostics without
+weakening region or authority checks; (2) build a provenance-matched Stage1 and run all 103
+mutable-global authority cases, including direct/transitive access, wrong-axis, function-value, and
+ungranted negatives; (3) restore the strict O2 proof build by resolving its lifetime/retention and
+largest ownership, parser-position, and replay obligations; (4) rerun source-identity and replay
+gates; (5) resume paired timing only after correctness parity and the load gate. Preserve the older
+authority branch until its remaining unique commits are confirmed superseded, then remove it.
+
+
+### 23.27.118 Exact mutable-global bootstrap result (2026-10-12)
+
+The current-main authority audit confirms that the October 11 Stage1 reporter passes the 103 named
+shell cases, but fails the newer Python severity assertion because its diagnostic protocol is stale.
+Treat this as historical behavior coverage only, not qualification of current main. The current
+`codex/global-mutable-grants` branch is 201 commits behind main; it was not imported.
+
+The fresh `e1361c201` Stage1 seed with clean Stage0 `8070e39d` stopped before producing a product.
+Captured log: `/private/tmp/elisa-main-global-grants-stage0.log` (13.6 MB). It reports 96 unproved
+postconditions, 54 lifetime/region rejections, 29 region-inference failures, 11 invalidated-view
+dependency errors, six other errors, and additional diagnostics. Representative failures include
+`codegen_try_lowering.elisa` and LLVM reference-versus-null comparisons. The compiler owner is
+separating fatal diagnostics from warnings; do not change authority semantics or claim the fresh
+matrix passed until this seed gate is clean.
+
+**Next high-return order:** (1) resolve the fatal seed diagnostics on committed compiler main using
+the exact `8070e39d` Stage0, preserving region and authority checks; (2) build a fresh Stage1 and pass
+the updated 103-case severity-aware authority matrix; (3) restore the proof strict O2 executable and
+source-identity/replay gates; (4) compare the old authority branch's remaining unique diff to main,
+then remove its worktree/ref if fully superseded; (5) run paired timing after correctness parity and
+the local-load gate.
