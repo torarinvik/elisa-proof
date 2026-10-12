@@ -7,13 +7,13 @@ extend ElisaProof:
             return expression if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, position):
-                    static_constant: bool = state.static_scope.count > 0 and proof_resource_lookup(state, name) >= state.binding_names.count and any candidate in state.static_names where candidate == name
+                    static_constant: bool = state.statics.static_scope.count > 0 and proof_resource_lookup(state, name) >= state.bindings.binding_names.count and any candidate in state.statics.static_names where candidate == name
                     if static_constant:
-                        qualifier: mutable Ast::Expr = Ast::Expr.Ident(state.static_scope[0], position)
-                        for index in 1..<state.static_scope.count |index, qualifier, state, position|:
-                            qualifier <- Ast::Expr.Scope(qualifier, state.static_scope[index], position)
+                        qualifier: mutable Ast::Expr = Ast::Expr.Ident(state.statics.static_scope[0], position)
+                        for index in 1..<state.statics.static_scope.count |index, qualifier, state, position|:
+                            qualifier <- Ast::Expr.Scope(qualifier, state.statics.static_scope[index], position)
                         return Ast::Expr.Scope(qualifier, name, position)
-                    root_constant: bool = proof_resource_lookup(state, name) >= state.binding_names.count and any candidate in state.static_root_names where candidate == name
+                    root_constant: bool = proof_resource_lookup(state, name) >= state.bindings.binding_names.count and any candidate in state.statics.static_root_names where candidate == name
                     return Ast::Expr.Scope(Ast::Expr.Absent, name, position) if root_constant
                     return expression
                 Ast::Expr.Paren(inner, position):
@@ -90,7 +90,7 @@ extend ElisaProof:
             node_start: usize = report.kernel.nodes.count
             child_start: usize = report.kernel.children.count
             fact_roots: mutable darray[usize] = []
-            for fact in state.facts |fact, report, fact_roots|:
+            for fact in state.evidence.facts |fact, report, fact_roots|:
                 if proof_kernel_expression_supported(fact):
                     encoded: (known: bool, root: usize) = proof_resource_encode_expression(fact, report)
                     if not encoded.known:
@@ -108,7 +108,7 @@ extend ElisaProof:
             start: usize = report.kernel.children.count
             report.kernel.children.extend(fact_roots)
             event: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-disjoint", "!=", left_root, right_root, goal_root, start, fact_roots.count, 0, "", "")
-            state.trace_events.push(event)
+            state.evidence.trace_events.push(event)
 
         def proof_resource_symbolic_indices_disjoint[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, left_root: usize, right_root: usize) -> bool can[Global.Read, Global.Write]:
             return false if proof_resource_index_is_closed(report, left_root) and proof_resource_index_is_closed(report, right_root)
@@ -117,7 +117,7 @@ extend ElisaProof:
             return false if not left.known or not right.known
             goal: Ast::Expr = Ast::Expr.Binary(left.expression, TokenKind.BangEq, right.expression, proof_resource_default_position())
             annotations: darray[Ast::EnumAnnotation] = []
-            proven: bool = (proof_goal(state.facts, goal, annotations) can Global{Read,Write})
+            proven: bool = (proof_goal(state.evidence.facts, goal, annotations) can Global{Read,Write})
             if proven:
                 proof_resource_record_disjoint(state, report, left_root, right_root)
                 return true
@@ -125,7 +125,7 @@ extend ElisaProof:
             # its exact orientation. Try the reverse proposition and emit that orientation when
             # it is the one established by the caller's facts (for example, `left != right`).
             reverse_goal: Ast::Expr = Ast::Expr.Binary(right.expression, TokenKind.BangEq, left.expression, proof_resource_default_position())
-            reverse_proven: bool = (proof_goal(state.facts, reverse_goal, annotations) can Global{Read,Write})
+            reverse_proven: bool = (proof_goal(state.evidence.facts, reverse_goal, annotations) can Global{Read,Write})
             proof_resource_record_disjoint(state, report, right_root, left_root) if reverse_proven
             return reverse_proven
 
@@ -479,13 +479,14 @@ extend ElisaProof:
             # resource made the call record a transition naming the collection as an actual, and
             # the kernel refuses that transition because the callee's formal is a by-value scalar.
             return false if proof_resource_expr_is_collection_extent(expression, state)
-            return false if proof_resource_is_scalar_reference_index_value(expression, state, report, state.function_name)
+            return false if proof_resource_is_scalar_reference_index_value(expression, state, report, state.context.function_name)
             borrowed: (known: bool, place: ProofResourcePlace) = proof_resource_borrow_place(expression, report)
             return true if borrowed.known
             match expression:
                 Ast::Expr.Ident(name, _):
                     slot: usize = proof_resource_lookup(state, name)
-                    return true if slot < state.binding_reference.count and state.binding_reference[slot]
+                    return true if slot < state.bindings.binding_names.count and (slot >= state.bindings.binding_type_marker_complete.count or not state.bindings.binding_type_marker_complete[slot])
+                    return true if slot < state.bindings.binding_reference.count and state.bindings.binding_reference[slot]
                     return proof_resource_binding_is_borrowable(state, slot)
                 Ast::Expr.Paren(inner, _):
                     return proof_resource_expr_carries_resource(inner, state, report)
@@ -535,7 +536,7 @@ extend ElisaProof:
                         _:
                             return false
                     slot: usize = proof_resource_lookup(state, root)
-                    return false if root == "" or slot >= state.formal_count or slot >= state.binding_reference.count or not state.binding_reference[slot]
+                    return false if root == "" or slot >= state.context.formal_count or slot >= state.bindings.binding_reference.count or not state.bindings.binding_reference[slot]
                     source_parameter: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations_with_work(report.source_declarations, function_name, root, 0, &report.source_effect_index.implicit_effect_work)
                     return false if source_parameter.count != 1 or report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     scalar_target: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(source_parameter.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)

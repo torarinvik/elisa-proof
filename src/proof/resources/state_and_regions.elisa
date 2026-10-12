@@ -18,7 +18,7 @@ extend ElisaProof:
             # Diagnostic precision only; widened places still conservatively deny access.
             exact: bool
 
-        struct ProofResourceState:
+        struct ProofResourceContext:
             function_name: mutable sview
             generic_declaration_line: mutable u32
             formal_count: mutable usize
@@ -26,11 +26,23 @@ extend ElisaProof:
             formal_parameter_types: mutable darray[Ast::Expr]
             # Expression recursion has its own per-snapshot bound, independent of statement work.
             expression_depth: mutable usize
+
+        def proof_resource_context_empty() -> ProofResourceContext:
+            return ProofResourceContext{
+                function_name: "",
+                generic_declaration_line: 0,
+                formal_count: 0,
+                formal_parameter_types: [],
+                expression_depth: 0,
+            }
+
+        struct ProofResourceBindings:
             binding_names: mutable darray[sview]
             # Locals from inferred first bindings; a later non-writable `=` shadows one.
             inferred_names: mutable darray[sview]
             binding_reference: mutable darray[bool]
             binding_mutable_reference: mutable darray[bool]
+            binding_type_marker_complete: mutable darray[bool]
             binding_writable: mutable darray[bool]
             binding_moved: mutable darray[bool]
             # A non-empty region label means the binding's value carries storage owned by that
@@ -61,12 +73,27 @@ extend ElisaProof:
             # collection's lifetime -- which is what lets a region-polymorphic function state a
             # bounds contract over its own parameter.
             binding_extent: mutable darray[bool]
+
+        def proof_resource_bindings_empty() -> ProofResourceBindings:
+            return ProofResourceBindings{
+                binding_names: [],
+                inferred_names: [],
+                binding_reference: [],
+                binding_mutable_reference: [],
+                binding_type_marker_complete: [],
+                binding_writable: [],
+                binding_moved: [],
+                binding_region: [],
+                binding_region_live: [],
+                binding_region_destroyed: [],
+                binding_region_owner: [],
+                binding_scalar: [],
+                binding_borrowable: [],
+                binding_extent: [],
+            }
+
+        struct ProofResourceRegions:
             active_regions: mutable darray[cstr]
-            # The function's module path and the immutable constants declared directly in it:
-            # what a bare, unbound name in a value operand can denote. See encode_value.
-            static_scope: mutable darray[sview]
-            static_names: mutable darray[sview]
-            static_root_names: mutable darray[sview]
             # Nested snapshots inherit these region identities. A child may not destroy an
             # inherited region and reopen the same spelling, because the parent would otherwise
             # continue with a different lifetime after the child joins.
@@ -78,10 +105,44 @@ extend ElisaProof:
             # the language carries a finer pointee-place witness, this shared borrow conservatively
             # conflicts with every write in @r for the duration of the function.
             region_wide_borrows: mutable darray[sview]
+
+        def proof_resource_regions_empty() -> ProofResourceRegions:
+            return ProofResourceRegions{
+                active_regions: [],
+                protected_regions: [],
+                external_regions: [],
+                region_wide_borrows: [],
+            }
+
+        struct ProofResourceStatics:
+            # The function's module path and the immutable constants declared directly in it:
+            # what a bare, unbound name in a value operand can denote. See encode_value.
+            static_scope: mutable darray[sview]
+            static_names: mutable darray[sview]
+            static_root_names: mutable darray[sview]
+
+        def proof_resource_statics_empty() -> ProofResourceStatics:
+            return ProofResourceStatics{
+                static_scope: [],
+                static_names: [],
+                static_root_names: [],
+            }
+
+        struct ProofResourceBorrows:
             borrow_target_slots: mutable darray[usize]
             borrow_target_places: mutable darray[ProofResourcePlace]
             borrow_mutable: mutable darray[bool]
             borrow_present: mutable darray[bool]
+
+        def proof_resource_borrows_empty() -> ProofResourceBorrows:
+            return ProofResourceBorrows{
+                borrow_target_slots: [],
+                borrow_target_places: [],
+                borrow_mutable: [],
+                borrow_present: [],
+            }
+
+        struct ProofResourceEvidence:
             # The resource pass receives a snapshot of the logical entry facts. It may use those
             # facts only for explicit symbolic-index separation; assignments and calls clear the
             # snapshot before it can become stale.
@@ -90,8 +151,30 @@ extend ElisaProof:
             # are wrapped in resource-scope nodes when their snapshots are closed.
             trace_events: mutable darray[usize]
 
+        def proof_resource_evidence_empty() -> ProofResourceEvidence:
+            return ProofResourceEvidence{
+                facts: [],
+                trace_events: [],
+            }
+
+        # Each component is copied into destination-owned storage by proof_resource_copy_into.
+        struct ProofResourceState:
+            context: mutable ProofResourceContext
+            bindings: mutable ProofResourceBindings
+            regions: mutable ProofResourceRegions
+            statics: mutable ProofResourceStatics
+            borrows: mutable ProofResourceBorrows
+            evidence: mutable ProofResourceEvidence
+
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{function_name: "", generic_declaration_line: 0, formal_count: 0, formal_parameter_types: [], expression_depth: 0, binding_names: [], inferred_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_destroyed: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], static_scope: [], static_names: [], static_root_names: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{
+                context: proof_resource_context_empty(),
+                bindings: proof_resource_bindings_empty(),
+                regions: proof_resource_regions_empty(),
+                statics: proof_resource_statics_empty(),
+                borrows: proof_resource_borrows_empty(),
+                evidence: proof_resource_evidence_empty(),
+            }
 
         def proof_resource_kernel_capacity(report: mutable ProofReport&, node_count: usize, child_count: usize, name: sview) -> bool:
             return false if report.kernel.budget_exhausted
@@ -108,41 +191,41 @@ extend ElisaProof:
             if event >= report.kernel.nodes.count:
                 proof_kernel_budget_note(report, name)
                 return
-            state.trace_events.push(event)
+            state.evidence.trace_events.push(event)
 
         def proof_resource_close_child[@parent, @child, @r](parent: mutable ProofResourceState& @parent, child: ProofResourceState& @child, report: mutable ProofReport& @r, join_moves: bool) -> void:
             return if report.kernel.budget_exhausted
             join_count: mutable usize = 0
             if join_moves:
-                for index in 0..<parent.binding_moved.count |index, parent, child, join_count|:
-                    join_count <- join_count + 1 if index < child.binding_moved.count and child.binding_moved[index] and not parent.binding_moved[index]
-            if not proof_resource_kernel_capacity(report, 1 + join_count, child.trace_events.count, ""):
+                for index in 0..<parent.bindings.binding_moved.count |index, parent, child, join_count|:
+                    join_count <- join_count + 1 if index < child.bindings.binding_moved.count and child.bindings.binding_moved[index] and not parent.bindings.binding_moved[index]
+            if not proof_resource_kernel_capacity(report, 1 + join_count, child.evidence.trace_events.count, ""):
                 proof_kernel_budget_note(report, "")
                 return
             start: usize = report.kernel.children.count
-            for event in child.trace_events |event, report|:
+            for event in child.evidence.trace_events |event, report|:
                 if event >= report.kernel.nodes.count:
                     proof_kernel_budget_note(report, "")
                     return
-            for event in child.trace_events |event, report|:
+            for event in child.evidence.trace_events |event, report|:
                 report.kernel.children.push(event)
-            scope_root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-scope", "", 0, 0, 0, start, child.trace_events.count, 0, "", "")
+            scope_root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-scope", "", 0, 0, 0, start, child.evidence.trace_events.count, 0, "", "")
             if scope_root >= report.kernel.nodes.count:
                 report.kernel.children <- report.kernel.children.truncate(start)
                 proof_kernel_budget_note(report, "")
                 return
-            parent.trace_events.push(scope_root)
+            parent.evidence.trace_events.push(scope_root)
             if join_moves:
-                for index in 0..<parent.binding_moved.count |index, parent, child|:
-                    if index < child.binding_moved.count and child.binding_moved[index] and not parent.binding_moved[index]:
-                        parent.binding_moved[index] <- true
+                for index in 0..<parent.bindings.binding_moved.count |index, parent, child|:
+                    if index < child.bindings.binding_moved.count and child.bindings.binding_moved[index] and not parent.bindings.binding_moved[index]:
+                        parent.bindings.binding_moved[index] <- true
                         # Carry the exact parent slot. Names can be shadowed, so replaying a join
                         # by name alone could mark the wrong binding as moved.
-                        join_root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-join-move", "", 0, 0, index, 0, 0, 0, parent.binding_names[index], "")
+                        join_root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-join-move", "", 0, 0, index, 0, 0, 0, parent.bindings.binding_names[index], "")
                         if join_root >= report.kernel.nodes.count:
                             proof_kernel_budget_note(report, "")
                             return
-                        parent.trace_events.push(join_root)
+                        parent.evidence.trace_events.push(join_root)
 
         def proof_resource_add_binding_traced[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, is_reference: bool, is_mutable_reference: bool, is_writable: bool, target_slot: usize, borrow_is_mutable: bool, source_name: sview, source_place: ProofResourcePlace, source_place_root: usize) -> void:
             proof_resource_add_binding(state, name, is_reference, is_mutable_reference, is_writable, target_slot, borrow_is_mutable, source_place)
@@ -159,24 +242,24 @@ extend ElisaProof:
         # allocation, so the trusted replay state carries the region label explicitly.
         def proof_resource_region_is_active(state: ProofResourceState&, region: sview) -> bool:
             return false if region == ""
-            index: mutable usize = state.active_regions.count
+            index: mutable usize = state.regions.active_regions.count
             while index > 0 |index, state, region|:
                 index <- index - 1
-                return true if string_view_eq(region, state.active_regions[index]) != 0
+                return true if string_view_eq(region, state.regions.active_regions[index]) != 0
             return false
 
         def proof_resource_region_is_external(state: ProofResourceState&, region: sview) -> bool:
-            return any external in state.external_regions where external == region
+            return any external in state.regions.external_regions where external == region
 
         def proof_resource_region_is_protected(state: ProofResourceState&, region: sview) -> bool:
-            return any protected in state.protected_regions where string_view_eq(region, protected) != 0
+            return any protected in state.regions.protected_regions where string_view_eq(region, protected) != 0
 
         # Mark the active region identities inherited by a child snapshot before its body is
         # checked. This is separate from external-region status: ordinary lexical regions are
         # also protected from child destruction, even when they have no live binding yet.
         def proof_resource_mark_scope_inherited(parent: ProofResourceState&, child: mutable ProofResourceState&) -> void:
-            for region in parent.active_regions |region, child|:
-                child.protected_regions.push(region) if not any prior in child.protected_regions where prior == region
+            for region in parent.regions.active_regions |region, child|:
+                child.regions.protected_regions.push(region) if not any prior in child.regions.protected_regions where prior == region
 
         # Attach the explicit `@r` lifetime of a formal reference parameter to both the source
         # state and its serialized bind node. Keeping it on the bind node lets independent replay
@@ -184,11 +267,11 @@ extend ElisaProof:
         def proof_resource_set_binding_region(state: mutable ProofResourceState&, report: mutable ProofReport&, name: sview, region: sview) -> void:
             return if name == "" or region == ""
             slot: usize = proof_resource_lookup(state, name)
-            return if slot >= state.binding_names.count
-            state.binding_region[slot] <- region
-            state.binding_region_live[slot] <- proof_resource_region_is_active(state, region)
-            return if state.trace_events.count == 0
-            event: usize = state.trace_events[state.trace_events.count - 1]
+            return if slot >= state.bindings.binding_names.count
+            state.bindings.binding_region[slot] <- region
+            state.bindings.binding_region_live[slot] <- proof_resource_region_is_active(state, region)
+            return if state.evidence.trace_events.count == 0
+            event: usize = state.evidence.trace_events[state.evidence.trace_events.count - 1]
             return if event >= report.kernel.nodes.count
             return if report.kernel.nodes[event].kind != "resource-bind"
             return if report.kernel.nodes[event].name != name
@@ -200,10 +283,10 @@ extend ElisaProof:
         def proof_resource_set_binding_borrowable(state: mutable ProofResourceState&, report: mutable ProofReport&, name: sview, borrowable: bool) -> void:
             return if name == "" or not borrowable
             slot: usize = proof_resource_lookup(state, name)
-            return if slot >= state.binding_names.count or slot >= state.binding_borrowable.count
-            state.binding_borrowable[slot] <- true
-            return if state.trace_events.count == 0
-            event: usize = state.trace_events[state.trace_events.count - 1]
+            return if slot >= state.bindings.binding_names.count or slot >= state.bindings.binding_borrowable.count
+            state.bindings.binding_borrowable[slot] <- true
+            return if state.evidence.trace_events.count == 0
+            event: usize = state.evidence.trace_events[state.evidence.trace_events.count - 1]
             return if event >= report.kernel.nodes.count or report.kernel.nodes[event].name != name
             kind: sview = report.kernel.nodes[event].kind
             return if kind != "resource-bind" and kind != "resource-region-alloc" and kind != "resource-region-bind"
@@ -212,68 +295,68 @@ extend ElisaProof:
             report.kernel.nodes[event].auxiliary <- report.kernel.nodes[event].auxiliary + PROOF_RESOURCE_BORROWABLE_FLAG if (report.kernel.nodes[event].auxiliary & PROOF_RESOURCE_BORROWABLE_FLAG) == 0
 
         def proof_resource_binding_region[@r](state: ProofResourceState& @r, slot: usize) -> sview @r:
-            return state.binding_region[slot] if slot < state.binding_region.count
+            return state.bindings.binding_region[slot] if slot < state.bindings.binding_region.count
             return ""
 
         def proof_resource_binding_region_is_live(state: ProofResourceState&, slot: usize) -> bool:
-            return slot < state.binding_region_live.count and state.binding_region_live[slot]
+            return slot < state.bindings.binding_region_live.count and state.bindings.binding_region_live[slot]
 
         def proof_resource_report_unavailable_region(state: ProofResourceState&, slot: usize, report: mutable ProofReport&, position: Ast::Pos, function_name: sview) -> void:
-            if slot < state.binding_region_destroyed.count and state.binding_region_destroyed[slot]:
+            if slot < state.bindings.binding_region_destroyed.count and state.bindings.binding_region_destroyed[slot]:
                 proof_resource_add_failing_obligation(report, "region-use-after-destroy", position, function_name, "a region-owned binding is accessed after its region was destroyed")
             else:
                 proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "the binding's backing-region lifetime was not established; destruction has not been demonstrated")
 
         def proof_resource_region_has_live_borrow(state: ProofResourceState&, region: sview) -> bool:
-            return true if any borrowed in state.region_wide_borrows where borrowed == region
-            for slot in 0..<state.borrow_present.count |slot, state, region|:
-                if state.borrow_present[slot]:
-                    return true if slot >= state.binding_region.count or slot >= state.binding_moved.count or slot >= state.borrow_target_slots.count
-                    if not state.binding_moved[slot] and state.binding_region[slot] == region:
-                        target_slot: usize = state.borrow_target_slots[slot]
-                        return true if target_slot >= state.binding_region.count or target_slot >= state.binding_region_live.count
-                        return true if state.binding_region[target_slot] == region and state.binding_region_live[target_slot]
+            return true if any borrowed in state.regions.region_wide_borrows where borrowed == region
+            for slot in 0..<state.borrows.borrow_present.count |slot, state, region|:
+                if state.borrows.borrow_present[slot]:
+                    return true if slot >= state.bindings.binding_region.count or slot >= state.bindings.binding_moved.count or slot >= state.borrows.borrow_target_slots.count
+                    if not state.bindings.binding_moved[slot] and state.bindings.binding_region[slot] == region:
+                        target_slot: usize = state.borrows.borrow_target_slots[slot]
+                        return true if target_slot >= state.bindings.binding_region.count or target_slot >= state.bindings.binding_region_live.count
+                        return true if state.bindings.binding_region[target_slot] == region and state.bindings.binding_region_live[target_slot]
             return false
 
         def proof_resource_invalidate_region_bindings(state: mutable ProofResourceState&, region: sview) -> void:
-            for index in 0..<state.binding_region.count |index, state, region|:
-                if index < state.binding_region_live.count and state.binding_region[index] == region:
-                    if state.binding_region_live[index] and index < state.binding_region_destroyed.count:
-                        state.binding_region_destroyed[index] <- true
-                    state.binding_region_live[index] <- false
+            for index in 0..<state.bindings.binding_region.count |index, state, region|:
+                if index < state.bindings.binding_region_live.count and state.bindings.binding_region[index] == region:
+                    if state.bindings.binding_region_live[index] and index < state.bindings.binding_region_destroyed.count:
+                        state.bindings.binding_region_destroyed[index] <- true
+                    state.bindings.binding_region_live[index] <- false
 
         # Close a named region in the same state in which it was opened. The compiler's flat
         # `region r(size)` form keeps the owner live across following statements, so its close
         # must be a real stack transition rather than the end of a synthetic child scope.
         def proof_resource_close_named_region[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.active_regions.count > 0 and string_view_eq(region, state.active_regions[state.active_regions.count - 1]) != 0
+            innermost: bool = region != "" and not proof_resource_region_is_external(state, region) and not proof_resource_region_is_protected(state, region) and state.regions.active_regions.count > 0 and string_view_eq(region, state.regions.active_regions[state.regions.active_regions.count - 1]) != 0
             live_borrow: bool = innermost and proof_resource_region_has_live_borrow(state, region)
             valid: bool = innermost and not live_borrow
             proof_resource_add_failing_obligation(report, "region-destroy-unsupported", position, function_name, "destroy must name the innermost active tracked region") if not innermost
             proof_resource_add_failing_obligation(report, "region-destroy-live-borrow", position, function_name, "a region cannot be destroyed while a borrowed view or reference to it is still live") if live_borrow
             if valid:
-                state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
+                state.regions.active_regions <- state.regions.active_regions.truncate(state.regions.active_regions.count - 1)
                 proof_resource_invalidate_region_bindings(state, region)
                 proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY)
 
         def proof_resource_add_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
+            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.context.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
             is_reference: bool = marker_summary.reference
             is_mutable_reference: bool = marker_summary.mutable_reference
             writable: bool = is_mutable_reference or marker_summary.mutable
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
-            valid: mutable bool = encoded_value.known
+            valid: mutable bool = encoded_value.known and marker_summary.complete
             valid <- proof_resource_region_is_active(state, region) if valid
             valid <- not operand_has_region if valid
             valid <- report.kernel.nodes[encoded].kind != "unsupported" if valid
             proof_resource_add_failing_obligation(report, "region-expression-unsupported", position, function_name, "region allocation operand contains a value whose lifetime is not summarized") if operand_has_region
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "region allocation requires an active lexical region and a kernel-replayable operand") if not valid and not operand_has_region
-            proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, proof_resource_empty_place())
-            state.binding_region[state.binding_region.count - 1] <- region
-            state.binding_region_live[state.binding_region_live.count - 1] <- valid
-            state.binding_region_owner[state.binding_region_owner.count - 1] <- valid
+            proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.bindings.binding_names.count, false, proof_resource_empty_place())
+            state.bindings.binding_region[state.bindings.binding_region.count - 1] <- region
+            state.bindings.binding_region_live[state.bindings.binding_region_live.count - 1] <- valid
+            state.bindings.binding_region_owner[state.bindings.binding_region_owner.count - 1] <- valid
             proof_resource_record_event(state, report, "resource-region-alloc", "", encoded, name, region, (PROOF_RESOURCE_WRITABLE_FLAG if writable else 0) + (PROOF_RESOURCE_REFERENCE_FLAG if is_reference else 0) + (PROOF_RESOURCE_MUTABLE_REFERENCE_FLAG if is_mutable_reference else 0)) if valid
 
         # A discarded `new[r] value` still performs a real allocation into @r. Keep it in the
@@ -304,7 +387,7 @@ extend ElisaProof:
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "a returned region allocation requires an active lifetime and a kernel-replayable operand") if not valid and not operand_has_region
             if valid:
                 proof_resource_record_event(state, report, "resource-region-return-alloc", "", encoded, "", region, 0)
-                event_root: usize = state.trace_events[state.trace_events.count - 1]
+                event_root: usize = state.evidence.trace_events[state.evidence.trace_events.count - 1]
                 return event_root
             node_count: usize = report.kernel.nodes.count
             return node_count
@@ -315,18 +398,18 @@ extend ElisaProof:
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
-            target_is_reference: bool = target_slot < state.binding_reference.count and state.binding_reference[target_slot]
+            target_is_reference: bool = target_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[target_slot]
             target_access: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(target, report)
             valid: mutable bool = encoded_value.known
             valid <- target_name != "" and not proof_resource_is_discard_target(target) and not operand_has_region if valid
             valid <- target_access.known if valid
-            valid <- target_slot < state.binding_names.count if valid
+            valid <- target_slot < state.bindings.binding_names.count if valid
             valid <- proof_resource_binding_is_writable(state, target_slot) if valid
-            valid <- target_slot < state.binding_moved.count if valid
-            valid <- not state.binding_moved[target_slot] if valid
-            valid <- target_slot < state.borrow_present.count if valid
-            valid <- not state.borrow_present[target_slot] if valid
-            valid <- not (proof_resource_has_borrow_overlap(state, report, target_access.place, state.binding_names.count) can Global{Read,Write}) if valid
+            valid <- target_slot < state.bindings.binding_moved.count if valid
+            valid <- not state.bindings.binding_moved[target_slot] if valid
+            valid <- target_slot < state.borrows.borrow_present.count if valid
+            valid <- not state.borrows.borrow_present[target_slot] if valid
+            valid <- not (proof_resource_has_borrow_overlap(state, report, target_access.place, state.bindings.binding_names.count) can Global{Read,Write}) if valid
             valid <- proof_resource_region_is_active(state, region) if valid
             valid <- target_is_reference if valid
             valid <- report.kernel.nodes[encoded].kind != "unsupported" if valid
@@ -334,14 +417,14 @@ extend ElisaProof:
             proof_resource_add_failing_obligation(report, "region-allocation-unsupported", position, function_name, "new[r] produces a region reference and requires a reference-bearing destination") if not target_is_reference
             proof_resource_add_failing_obligation(report, "region-store-escape", position, function_name, "a region allocation may be assigned only to a directly tracked live binding without an active borrow handle") if not valid and not operand_has_region and target_is_reference
             if valid:
-                state.binding_region[target_slot] <- region
-                state.binding_region_live[target_slot] <- true
-                state.binding_region_destroyed[target_slot] <- false
-                state.binding_region_owner[target_slot] <- true
+                state.bindings.binding_region[target_slot] <- region
+                state.bindings.binding_region_live[target_slot] <- true
+                state.bindings.binding_region_destroyed[target_slot] <- false
+                state.bindings.binding_region_owner[target_slot] <- true
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
         def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
-            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
+            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.context.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
             is_reference: bool = marker_summary.reference
             is_mutable_reference: bool = marker_summary.mutable_reference
             sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(source, functions)
@@ -352,15 +435,15 @@ extend ElisaProof:
             source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(source_place_expression, report)
             encoded: usize = proof_resource_encode_access_place(source_place_expression, report)
             source_slot: usize = proof_resource_lookup(state, source_place.place.root)
-            source_is_reference: bool = source_slot < state.binding_reference.count and state.binding_reference[source_slot]
-            source_is_mutable_reference: bool = source_slot < state.binding_mutable_reference.count and state.binding_mutable_reference[source_slot]
-            source_region_owner: bool = source_slot < state.binding_region_owner.count and state.binding_region_owner[source_slot]
+            source_is_reference: bool = source_slot < state.bindings.binding_reference.count and state.bindings.binding_reference[source_slot]
+            source_is_mutable_reference: bool = source_slot < state.bindings.binding_mutable_reference.count and state.bindings.binding_mutable_reference[source_slot]
+            source_region_owner: bool = source_slot < state.bindings.binding_region_owner.count and state.bindings.binding_region_owner[source_slot]
             source_moved: bool = proof_resource_binding_is_moved(state, source_slot)
             borrow_target_slot: mutable usize = source_slot
             borrow_target_place: mutable ProofResourcePlace = source_place.place
-            if is_borrowed_sview and source_slot < state.borrow_present.count and state.borrow_present[source_slot]:
-                borrow_target_slot <- state.borrow_target_slots[source_slot]
-                borrow_target_place <- state.borrow_target_places[source_slot]
+            if is_borrowed_sview and source_slot < state.borrows.borrow_present.count and state.borrows.borrow_present[source_slot]:
+                borrow_target_slot <- state.borrows.borrow_target_slots[source_slot]
+                borrow_target_place <- state.borrows.borrow_target_places[source_slot]
             view_type_root: mutable usize = 0
             view_type_valid: mutable bool = not is_borrowed_sview
             if is_borrowed_sview:
@@ -376,23 +459,23 @@ extend ElisaProof:
             # owner may be exposed once, but moving that owner is also forbidden while any live
             # borrow overlaps its place.
             mutable_reference_duplication: bool = source_is_reference and source_is_mutable_reference and not source_region_owner and not is_borrowed_sview
-            borrow_overlap_except: mutable usize = state.binding_names.count
-            if is_borrowed_sview and source_slot < state.borrow_present.count and state.borrow_present[source_slot]:
+            borrow_overlap_except: mutable usize = state.bindings.binding_names.count
+            if is_borrowed_sview and source_slot < state.borrows.borrow_present.count and state.borrows.borrow_present[source_slot]:
                 borrow_overlap_except <- source_slot
             sview_borrow_overlap: bool = is_borrowed_sview and (proof_resource_has_mutable_borrow_overlap(state, report, borrow_target_place, borrow_overlap_except) can Global{Read,Write})
-            owner_borrow_overlap: bool = source_region_owner and not is_borrowed_sview and (proof_resource_has_borrow_overlap(state, report, source_place.place, state.binding_names.count) can Global{Read,Write})
-            valid: bool = proof_resource_region_is_active(state, region) and source_place.known and source_place.place.whole and source_slot < state.binding_names.count and not source_moved and not mutable_reference_duplication and not sview_borrow_overlap and not owner_borrow_overlap and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel.nodes.count and (not is_borrowed_sview or view_type_valid and borrow_target_slot < state.binding_names.count and borrow_target_place.root != "") and (is_borrowed_sview or not is_reference and not source_is_reference or is_reference and source_is_reference) and (is_borrowed_sview or not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
+            owner_borrow_overlap: bool = source_region_owner and not is_borrowed_sview and (proof_resource_has_borrow_overlap(state, report, source_place.place, state.bindings.binding_names.count) can Global{Read,Write})
+            valid: bool = marker_summary.complete and proof_resource_region_is_active(state, region) and source_place.known and source_place.place.whole and source_slot < state.bindings.binding_names.count and not source_moved and not mutable_reference_duplication and not sview_borrow_overlap and not owner_borrow_overlap and proof_resource_binding_region(state, source_slot) == region and proof_resource_binding_region_is_live(state, source_slot) and encoded < report.kernel.nodes.count and (not is_borrowed_sview or view_type_valid and borrow_target_slot < state.bindings.binding_names.count and borrow_target_place.root != "") and (is_borrowed_sview or not is_reference and not source_is_reference or is_reference and source_is_reference) and (is_borrowed_sview or not is_reference or is_mutable_reference == source_is_mutable_reference or source_region_owner)
             proof_resource_add_failing_obligation(report, "region-alias-unsupported", position, function_name, "region value aliases require a live, unmoved whole-binding source with the same tracked region") if not valid
-            proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.binding_names.count, false, proof_resource_empty_place())
-            state.binding_region[state.binding_region.count - 1] <- region
-            state.binding_region_live[state.binding_region_live.count - 1] <- valid
-            state.binding_region_owner[state.binding_region_owner.count - 1] <- valid and source_region_owner and not is_borrowed_sview
+            proof_resource_add_binding(state, name, is_reference, is_mutable_reference, writable, state.bindings.binding_names.count, false, proof_resource_empty_place())
+            state.bindings.binding_region[state.bindings.binding_region.count - 1] <- region
+            state.bindings.binding_region_live[state.bindings.binding_region_live.count - 1] <- valid
+            state.bindings.binding_region_owner[state.bindings.binding_region_owner.count - 1] <- valid and source_region_owner and not is_borrowed_sview
             if valid and is_borrowed_sview:
-                new_slot: usize = state.binding_names.count - 1
-                state.borrow_target_slots[new_slot] <- borrow_target_slot
-                state.borrow_target_places[new_slot] <- borrow_target_place
-                state.borrow_mutable[new_slot] <- false
-                state.borrow_present[new_slot] <- true
+                new_slot: usize = state.bindings.binding_names.count - 1
+                state.borrows.borrow_target_slots[new_slot] <- borrow_target_slot
+                state.borrows.borrow_target_places[new_slot] <- borrow_target_place
+                state.borrows.borrow_mutable[new_slot] <- false
+                state.borrows.borrow_present[new_slot] <- true
             # The owner token is linear even though shared region references may otherwise be
             # copied. Transfer it to the new binding; borrowed/external references have no token
             # and therefore remain ordinary shared aliases.
@@ -406,9 +489,9 @@ extend ElisaProof:
             return if report.failed != failed_before
             # Local regions are implicitly released at function exit; record their close so
             # replay sees a balanced trace. Explicit `destroy r` already removed its entry.
-            while state.active_regions.count > 0 and not report.kernel.budget_exhausted |state, report, function_name, line|:
-                region: cstr = state.active_regions[state.active_regions.count - 1]
-                state.active_regions <- state.active_regions.truncate(state.active_regions.count - 1)
+            while state.regions.active_regions.count > 0 and not report.kernel.budget_exhausted |state, report, function_name, line|:
+                region: cstr = state.regions.active_regions[state.regions.active_regions.count - 1]
+                state.regions.active_regions <- state.regions.active_regions.truncate(state.regions.active_regions.count - 1)
                 region_view: mutable sview = ""
                 # Entries are copied into permanent arena storage before entering this array.
                 trusted Unsafe{PointerArithmetic,RawExtern}:
@@ -417,20 +500,20 @@ extend ElisaProof:
                     proof_resource_invalidate_region_bindings(state, region_view)
                     proof_resource_record_event(state, report, "resource-region-close", "", 0, region_view, "", 0)
             return if report.kernel.budget_exhausted
-            if not proof_resource_kernel_capacity(report, 1, state.trace_events.count, function_name):
+            if not proof_resource_kernel_capacity(report, 1, state.evidence.trace_events.count, function_name):
                 proof_kernel_budget_note(report, function_name)
                 return
             start: usize = report.kernel.children.count
-            for event in state.trace_events |event, report|:
+            for event in state.evidence.trace_events |event, report|:
                 if event >= report.kernel.nodes.count:
                     proof_kernel_budget_note(report, function_name)
                     return
-            for event in state.trace_events |event, report|:
+            for event in state.evidence.trace_events |event, report|:
                 report.kernel.children.push(event)
             # The parameter count is part of the certificate header. The replay kernel uses it
             # to distinguish formal external capabilities from body-local bindings when a caller
             # composes this trace into a resource-call transition.
-            root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-safety", "resource-v2", 0, 0, parameter_count, start, state.trace_events.count, 0, function_name, proof_resource_function_owner(functions, function_index))
+            root: usize = proof_kernel_add_node(&report.kernel.nodes, "resource-safety", "resource-v2", 0, 0, parameter_count, start, state.evidence.trace_events.count, 0, function_name, proof_resource_function_owner(functions, function_index))
             if root >= report.kernel.nodes.count:
                 report.kernel.children <- report.kernel.children.truncate(start)
                 proof_kernel_budget_note(report, function_name)
@@ -438,7 +521,7 @@ extend ElisaProof:
             proof_add_resource_goal_attempt(report, root, line, function_name)
 
         def proof_resource_binding_is_extent_bearing(state: ProofResourceState&, slot: usize) -> bool:
-            return slot < state.binding_extent.count and state.binding_extent[slot]
+            return slot < state.bindings.binding_extent.count and state.bindings.binding_extent[slot]
 
         # `x.count` on a binding whose declared type is a collection is that collection's element
         # count: a machine integer copied out of it, tied to no lifetime. Everything else about a
@@ -450,12 +533,18 @@ extend ElisaProof:
                     root: sview = proof_ident_name(object)
                     return false if root == ""
                     slot: usize = proof_resource_lookup(state, root)
-                    return slot < state.binding_names.count and proof_resource_binding_is_extent_bearing(state, slot)
+                    return slot < state.bindings.binding_names.count and proof_resource_binding_is_extent_bearing(state, slot)
                 _:
                     return false
 
         def proof_resource_empty_place() -> ProofResourcePlace:
-            return ProofResourcePlace{root: "", path_root: 0, depth: 0, whole: false, exact: false}
+            return ProofResourcePlace{
+                root: "",
+                path_root: 0,
+                depth: 0,
+                whole: false,
+                exact: false,
+            }
 
         # The old fixed three-field representation could silently widen a fourth segment into an
         # unrelated whole-root access. State-owned structural paths give the checker arbitrary
