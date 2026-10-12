@@ -10269,13 +10269,33 @@ SHA-256 is `e56672d1330e19cf35d1394ca84568560459ae185dbb32532bfc1404f0dadf64`. T
 installed at `~/.elisac/elisac-stage0` and the core compiler's `compiler/bin/elisac`; prior products
 were retained as backups. No timing was run.
 
-The latest compiler-source validation found a parser bootstrap failure on a parenthesized multiline
-`when` header in `wasm_typescript_type.ensure`. The initial grouped-header fix is now on core `main`
-as `ef36f76c`; its lexer, parser, and full semantic suites passed on the candidate. A later review
-found that a leading-dot float such as `.5` could be missed by the header lookahead. Treat this
-parser lane as incomplete until the follow-up adds that control and reruns all three suites. Rebuild
-Stage0 from the exact final clean `main` tree only after that follow-up is integrated, then retry the
-source and Stage1 checks.
+The grouped-header parser fix is now on core `main` as `ef36f76c` and `afc3c3d8`. The hardened
+candidate passed the full lexer, parser, and semantic suites, including nested headers, contextual
+`when`, record scrutinees, and leading-dot floats. A clean Stage0 built from the same source tree as
+core `main` reports `vcs.modified=false`; its SHA-256 is
+`cae3bf79b0bb129fe6d3324b4d3246f0aa53368d8015e0acb35dc7de5e40f101`. It is installed at
+`~/.elisac/elisac-stage0` and the core compiler's `compiler/bin/elisac`, with previous products
+retained as backups. No timing was run.
+
+The newest Stage0 removes the parser cascade in the broad dirty Elisa-compiler source. The remaining
+`check_uninitialized_zeroed.elisa` syntax error was an alias named `tail`, which is a reserved token;
+the local dirty-file edit uses `bucket_tail` and the isolated file then has zero parser diagnostics.
+The full `src/driver/elisac.elisa` check still exits with 584 primary errors, including 33
+region-inference failures and 244 unproven postconditions, but this broad checkout is in the middle
+of a caller migration and is not a clean qualification baseline. In particular, 103
+`check_zeroed_value_positions` diagnostics are stale positional arguments after
+`zeroed_type_expr_contains_nonnull_ref` gained an active-index parameter. The 39 errors in
+`check_uninitialized_zeroed` also include mutable-reference mismatches and missing index locals.
+Finish that migration without weakening proof checks, then rerun the source gate before treating
+the remaining diagnostics as regressions.
+
+The annotation-filter smoke also still fails under the newest Stage0 with 162 primary diagnostics,
+including 32 region-inference and 21 retention errors; its fixture also needs the current backend
+table API. Keep `069f01922` and `8acccf034` out of main until a current-compatible fixture passes.
+The valid grouped `when` CLI case now parses and compiles, while a general integer identity through
+`when` remains a separate SMT proof gap. The TaskGroup manual add/wait relation is unqualified; the
+consuming `pool_await` exception is present in the dirty compiler tree, but its O0/O2 controls are
+still pending.
 
 The annotation-filter fast paths (`069f01922`, `8acccf034`) remain outside main. Their source-level
 change is a no-op when the corresponding annotation table is empty, but the candidate smoke uses an
@@ -10285,10 +10305,14 @@ qualification against the newest compiler. Port the tests to current APIs and re
 bootstrap is restored. The separate TaskGroup/`pool_await` behavior also remains unqualified; keep
 the exact same-group submit/wait proof and the existing consuming-await controls intact.
 
-**Next high-return order:** (1) finish review and semantic validation of grouped-pattern parsing,
-then rebuild the clean newest Stage0/Stage1 pair; (2) fix and test `pool_await` admission for
-consuming awaits and exact TaskGroup membership; (3) resolve the current proof source region and
-effect diagnostics and produce strict O2; (4) requalify annotation-filter and caller-owned-table
-candidates against that same product; (5) run source-admission, replay, and `Global.Read`/
-`Global.Write` matrices. Remove only branches and worktrees whose changes are integrated or whose
-owners have released them. Keep timing skipped.
+The redundant grouped-parser candidate worktree and branch, plus the temporary annotation-smoke
+worktree, were removed after integration or inspection. Keep the remaining unique or dirty worktrees
+until their changes are qualified or their owners release them.
+
+**Next high-return order:** (1) finish the active-index caller migration in
+`check_zeroed_value_positions` and `check_uninitialized_zeroed`, then rerun the source gate on a
+reproducible tree; (2) qualify consuming `pool_await` and prove exact TaskGroup
+task-to-add-to-wait membership; (3) address the remaining verified region, retention, and contract
+failures until a fresh Stage1 and strict O2 proof build pass; (4) rerun the mutable-global
+`Global.Read`/`Global.Write` matrix on that exact product; (5) requalify annotation-filter and
+caller-owned-table candidates with current APIs and exact output parity. Keep timing skipped.
