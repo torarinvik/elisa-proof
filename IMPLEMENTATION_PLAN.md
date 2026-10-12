@@ -10270,10 +10270,12 @@ installed at `~/.elisac/elisac-stage0` and the core compiler's `compiler/bin/eli
 were retained as backups. No timing was run.
 
 The latest compiler-source validation found a parser bootstrap failure on a parenthesized multiline
-`when` header in `wasm_typescript_type.ensure`. An isolated core candidate now tracks grouped
-`when`/`match` header context; lexer and parser suites pass, while its full semantic suite and
-independent review are still in progress. Do not install or merge it until those gates pass, then
-rebuild Stage0 from the exact clean `main` tree and retry the source and Stage1 checks.
+`when` header in `wasm_typescript_type.ensure`. The initial grouped-header fix is now on core `main`
+as `ef36f76c`; its lexer, parser, and full semantic suites passed on the candidate. A later review
+found that a leading-dot float such as `.5` could be missed by the header lookahead. Treat this
+parser lane as incomplete until the follow-up adds that control and reruns all three suites. Rebuild
+Stage0 from the exact final clean `main` tree only after that follow-up is integrated, then retry the
+source and Stage1 checks.
 
 The annotation-filter fast paths (`069f01922`, `8acccf034`) remain outside main. Their source-level
 change is a no-op when the corresponding annotation table is empty, but the candidate smoke uses an
