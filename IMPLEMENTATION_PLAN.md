@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-12. **§23.27.113 is the live integration gate; its priority order supersedes §23.27.71.** Proof `main` still pins compiler `7e125178` until a fresh newest-Stage1 proof product qualifies. Elisa-core `main` now contains the classifier proof fix (`4a6fc6d7`, `c06e6e55`) and clean-install guard (`100f3232`); Elisa-compiler `main` contains the pure runtime-symbol union (`e1361c201`). The runtime-symbol source check and O2 equivalence control pass for all 98 registered names and five rejection cases; no timing was run. A strict O2 proof build using clean Stage0 `677fedbc` and compiler `e1361c201` still fails on ownership and region diagnostics. Proof commit `371dc721` binds the CLI source map to its caller arena and clears its three direct region-inference errors, but the full build remains red. The compiler table/filter candidate source check remains failing; the earlier named-field projection commit `76772032` is unsafe by itself. The revised projection work has reproduced two false-proof paths (reordered named fields and later argument mutation); the candidate is being corrected and is not yet qualified. The TaskGroup join path also has an uncommitted soundness gap: a submit must be proven added to the same group before wait. Keep timing skipped and integrate only changes with focused positive and negative correctness evidence.
+Status refreshed 2026-10-12. **§23.27.119 is the live integration gate and supersedes earlier priority summaries.** Local Elisa-core `main` is at `26c1106c`; a clean Stage0 from that commit passes `make test-prover` and is installed at `~/.elisac/elisac-stage0` (SHA-256 `f1b8ee6339ba2b646f93f25baca471522d25ea99a38081caba79b2411e7d5dc3`). The proof pins remain at Stage0 `8070e39d` and Elisa-compiler `e1361c201` because the current compiler has not produced a fresh Stage1 and the strict O2 proof executable/replay gates remain red. The compiler and proof checkouts contain active dirty migrations; they were not included in the core commit. Timing remains skipped. Prioritize a clean newest-compiler bootstrap, then the mutable-global authority matrix, then the strict proof/replay blockers; resume performance work only after correctness parity and the load gate.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -10435,3 +10435,40 @@ the updated 103-case severity-aware authority matrix; (3) restore the proof stri
 source-identity/replay gates; (4) compare the old authority branch's remaining unique diff to main,
 then remove its worktree/ref if fully superseded; (5) run paired timing after correctness parity and
 the local-load gate.
+
+
+### 23.27.119 Literal-result SMT extension and refreshed local Stage0 (2026-10-12)
+
+Elisa-core `main` now contains `26c1106c`, which extends the SMT string fragment to resolve
+literal fields from named tuple/struct return values and to carry immutable `sview` classifier facts
+through a restricted multi-return branch form. The projection refuses nonliteral captures, and the
+branch rule accepts only boolean returns, pure branch conditions, and `Abort.Panic`; declared and
+inferred permission uses outside that row cause the translator to decline. Positive and false-claim
+controls cover exact and wrong tuple fields, multiple classifier returns, write-capability refusal,
+and inferred `Memory.Write` refusal. `make test-prover` passes from a clean detached checkout at
+`26c1106c` (semantic 21.202s, SMT 0.247s).
+
+A clean Stage0 built from that commit reports `vcs.modified=false`, revision
+`26c1106ce381c75fdd53964e50e154af3893f436`, and SHA-256
+`f1b8ee6339ba2b646f93f25baca471522d25ea99a38081caba79b2411e7d5dc3`. It is installed at
+`~/.elisac/elisac-stage0` and `Elisa-core/compiler/bin/elisac`; the prior 8070e39d binary is
+preserved at `~/.elisac/elisac-stage0.pre-smt-string-26c1106-20261012`. The proof repository's
+`ELISA_STAGE0_REV` and `ELISA_COMPILER_REV` remain unchanged: the strict O2 proof executable,
+source-identity checks, and independent replay have not passed on the new pair. The broader compiler
+and proof migrations remain dirty and were not included in this commit. No performance timing was
+run; the user directed us to skip the pending run.
+
+The proof and compiler repositories contain active dirty migrations and distinct worktrees. The
+temporary clean validation worktree created for `26c1106c` was removed after the tests; unrelated
+worktrees and branches were left intact because they are not established as disposable or fully
+superseded.
+
+**Next high-return order:** (1) retry a clean Stage1/gen2 bootstrap from committed Elisa-compiler
+`e1361c201` using the exact clean Stage0 `26c1106c`, and isolate fatal diagnostics from warnings;
+(2) once Stage1 is provenance-matched, run the 103-case mutable-global authority matrix with direct,
+transitive, wrong-axis, function-value, and missing-grant negatives; (3) restore the strict O2 proof
+build by addressing the 50 `semantic_api` retention errors, remaining region errors, and the largest
+ownership-binding and replay obligations without weakening checks; (4) finish tuple/classifier
+contract proofs on a project-aware current-compiler run, including reordered-field and mutation
+controls; (5) resume paired timing only after correctness parity and the load gate. Keep the proof
+compiler pins unchanged until the new product passes the full proof and replay gates.
