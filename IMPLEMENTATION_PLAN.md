@@ -1,6 +1,6 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-12. **Current integration checkpoint: reconcile bootstrap source compatibility, then strict qualification.** Proof `main` is two local commits ahead of `origin/main`; Stage1 provenance validation and bounded seed-chain checks are committed, while broad proof/replay changes remain dirty and unqualified. Elisa-compiler `main` is `b8ebc0a6` (one local commit ahead of `origin/main`) with active edits; Core `main` and the installed Stage0 are now clean at `fa65ef625c4217cf54486821a6aa9348f5f04ec6` (`vcs.modified=false`). Focused Core runtime tests and `go test ./src/semantic -count=1` pass on that exact revision. The previously recorded clean seed of compiler `b8ebc0a6` against Core `c0835c29` parsed but failed before Stage1: its grant fix removed 14 of 18 explicit `Global.Read/Write` diagnostics, with four remaining in `check_borrow_after_move.elisa`; 1,322 non-warning diagnostics remained across 107 files. A fresh isolated build of the current dirty compiler snapshot also hit parser errors in modified `easm_text_scan.elisa` and `easm_verify_provenance.elisa`. The candidate owner-resolution smoke at `8d7cfca` fails under the newest Stage0 on four borrow-escape diagnostics in `src/backend/codegen_stmt_blocks_exprs.elisa:155`; it remains unmerged. No current Stage1 product was emitted. The installed compiler Stage1 is provenance v1 and the current strict verifier requires v5; the proof manifest also names stale source/product identities. Timing is explicitly skipped. Highest-return order: establish a compatible newest bootstrap pair and fix current parser/source integration failures; clear genuine remaining global-grant and lifetime failures without weakening safety; produce a provenance-matched Stage1; then qualify strict O2 proof, source-authenticated recursion, independent replay, and direct/transitive global-authority controls. Merge only correctness-qualified source changes; preserve dirty or provenance-bearing worktrees until their owners confirm they are obsolete.
+Status refreshed 2026-10-12. **Current integration checkpoint: restore a clean newest-compiler bootstrap before trusting proof results.** Proof `main` is `1eab52bf` and matches `origin/main`; active source changes remain uncommitted in proof/checking, resource, and arithmetic modules. The proof compiler pin remains `b8ebc0a6`, while compiler `main` and `origin/main` are `20f0a3ac`; current Core `main` and Stage0 are clean at `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. A clean detached seed of compiler `20f0a3ac` against that Stage0 failed before producing Stage1, with 69 argument-5 local-reference escape diagnostics in `semantic_api.elisa` and 20 missing `Global` grant diagnostics in `elisacore_std/arena.elisa`; the exact log is `/tmp/elisa-stage1-qualified-20f0a3ac.log`. The newly integrated compiler batch passes `git diff --check`, but the PGS semantic runtime control has not run under a matching Stage1. The latest Core Stage0 AST parser accepts 12 of 16 currently changed proof Elisa files; four report `expected IDENT, got mutable` at named tuple fields. Reduce those examples against the language grammar and the newest Stage1 before classifying them as proof-source defects or compiler parity gaps. A stale installed Stage1 exists, but it does not match the current compiler/proof source identities. Performance timing remains skipped. Highest-return order: fix the clean Stage1 seed blockers and resolve the four syntax-parity cases without weakening lifetime or effect checks; produce a provenance-matched Stage1 and update pins only from that artifact; then run targeted proof/replay gates on the exact current source, followed by strict O2 and independent replay qualification. Preserve active dirty work and provenance-bearing worktrees; merge only correctness-qualified source changes.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -11722,14 +11722,15 @@ constraint.
 
 ### 23.27.202 Bound equality propagation to its fixed point (2026-10-12)
 
-Name-equality bound propagation now stops after a full pass makes no interval changes, and its
-round cap uses the number of collected equality edges. The edge cap covers a reversed alias chain
-inside one conjunction; the old root-fact cap could stop before distant aliases received a bound.
-Static review confirmed a remaining resource gap: the safety-analysis caller does not charge this
-closure and its linear bound lookups to the shared proof budget, so these changes improve common
-case runtime and alias closure but do not provide a worst-case work bound. `git diff --check`,
-`scripts/check_source_length.py`, and the trailing-whitespace scan pass. No parse, build, test, or
-replay was run under the static-only constraint.
+Producer and independent replay now close identifier-equality bounds by visiting each alias
+component and merging its strongest lower and upper bounds once. This removes the producer's
+round-by-round edge × bound scans and replay's fact-count-dependent round cap, which could stop
+before a long conjunction's alias chain reached the initially bounded name. Integer adjacency lists
+make component/reachability walks linear in vertices and edges; array-backed endpoint interning and
+bound lookups keep each closure quadratic in equality count. The producer and replay name
+reachability queries no longer repeat linear membership scans. All four helpers still need shared
+proof-budget accounting. The source freeze prevents parser, build, runtime test, and replay
+qualification. `git diff --check` and `scripts/check_source_length.py` pass.
 
 ### 23.27.203 Index resource marker type declarations (2026-10-12)
 
@@ -11746,8 +11747,24 @@ constraint.
 Goal search now computes the safe-premise subset and the all-safe result in one pass, reusing that
 subset if it needs to weaken the fact frame. Signed safety bounds are derived from a copy of the
 already collected and equality-closed base bounds, avoiding a second marker scan and equality
-closure while keeping signed-only inferences out of the unsigned guard. The standalone refusal
+closure while keeping signed-only inferences out of the unsigned guard. The safety list pass also
+shares one scalar-witness index between base-bound and equality collection. The standalone refusal
 diagnostic retains early exit. Static review found the refactor semantics-preserving. The shared
 work-budget gap remains: all safety-context construction still needs direct metering with
 exhaustion propagation rather than a coarse cubic preflight. Static checks pass; no parse, build,
 test, or replay was run under the static-only constraint.
+
+### 23.27.205 Prove PyModule scalar type-name partitions (2026-10-12)
+
+The compiler now uses match-backed classifiers for text, float, signed-integer, and unsigned-integer
+type names in PyModule default validation and scalar emission. The source-linked proof checks each
+classifier's exact closed set, pairwise disjointness, and that the four groups plus `bool` equal the
+hashable-type policy. Positive and rejected claims are in
+`../Elisa-compiler/test/proofs/pymodule_default_scalar_type_policy.elisa` and its `_rejected.elisa`
+companion; `check_pymodule_default_scalar_type_policy.py` pins the source and proof formulas. The
+proof runner is registered as `scripts/test.d/05-04f-pymodule-default-scalar-type-policy.sh`.
+Python AST, shell syntax, and whitespace checks pass. The checker reaches the strict provenance gate,
+which still rejects the installed proof executable because its manifest records a different and
+dirty proof source revision. Pinned Stage1 qualification also remains pending: the latest observed
+seed exited on arena effect-grant diagnostics from a snapshot taken before later grant edits. The
+new universal claims have not been replayed against a current qualified product.
