@@ -10316,3 +10316,32 @@ task-to-add-to-wait membership; (3) address the remaining verified region, reten
 failures until a fresh Stage1 and strict O2 proof build pass; (4) rerun the mutable-global
 `Global.Read`/`Global.Write` matrix on that exact product; (5) requalify annotation-filter and
 caller-owned-table candidates with current APIs and exact output parity. Keep timing skipped.
+
+
+### 23.27.115 Newest-Stage0 strict proof gate and explicit replay grants (2026-10-12)
+
+A strict O2 build used the newly installed clean Stage0 (SHA-256
+`cae3bf79b0bb129fe6d3324b4d3246f0aa53368d8015e0acb35dc7de5e40f101`) and an immutable
+Elisa-compiler `e1361c201` snapshot. Temporary environment overrides supplied the exact Stage0
+revision and compiler snapshot; the repository pins and existing proof executable were untouched.
+The build produced no proof executable. Its first pass reported 59 region-inference diagnostics,
+56 reference-retention diagnostics, five missing explicit `Global.Read/Write` grants, and 122
+unproven postconditions. The largest postcondition clusters were `ownership_binding_lookup` (42),
+`ownership_binding_flow` (21), `parser_token_position` (18), and proof replay `resource_places` (15).
+Fifty of the retention diagnostics came from the pinned compiler's `semantic_api` sources.
+
+Five proof replay wrappers already declared `Global.Read/Write` but omitted the local grant on calls
+to their effectful helpers. Explicit grants were added at those call expressions. The rerun reports
+zero missing-Global diagnostics, then stops on 233 parser diagnostics in the current dirty
+`quantifiers_and_arena.elisa` work-budget migration, beginning at its conditional named argument
+`remaining: remaining - 1`. That file was not changed for the grant fix. Treat this as a dirty-source
+integration blocker; do not attribute it to the grants or claim a successful build. The five grant
+edits also remain uncommitted with the surrounding proof work until the same source snapshot passes
+the full strict check.
+
+**Next high-return order:** (1) isolate the `quantifiers_and_arena` parser failure with its active
+work-budget change and rerun the strict build; (2) finish the active-index caller migration in the
+compiler source; (3) reduce the 42 ownership-binding and 21 ownership-flow postconditions with
+positive and false-claim controls; (4) resolve proof replay region/retention and explicit-grant
+diagnostics on a reproducible source tree; (5) build the newest Stage1 and strict O2 proof product,
+then run source identity, replay, and mutable-global grant matrices. Keep timing skipped.
