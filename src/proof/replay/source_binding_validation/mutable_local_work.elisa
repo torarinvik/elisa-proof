@@ -1,0 +1,91 @@
+# Bounded AST and trace charging shared by mutable-local source replay.
+extend ElisaProof:
+    private:
+        def proof_replay_mutable_local_statement_work_charge(statement: Ast::Stmt, work: mutable usize&, depth: usize) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or depth >= 96
+            cost: mutable usize = 1
+            match statement:
+                Ast::Stmt.VarDecl(name, type_expression, value, _):
+                    return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + sview_len(name)
+                    return false if not proof_replay_summary_expr_cost(type_expression, &cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
+                Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
+                    return false if not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
+                Ast::Stmt.Assign(target, _, value, _):
+                    return false if not proof_replay_summary_expr_cost(target, &cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
+                Ast::Stmt.If(condition, yes, no, _):
+                    return false if not proof_replay_summary_expr_cost(condition, &cost, work, depth + 1)
+                    return false if not proof_replay_mutable_local_body_work_charge(yes, work, depth + 1) or not proof_replay_mutable_local_body_work_charge(no, work, depth + 1)
+                Ast::Stmt.While(condition, nested, _):
+                    return false if not proof_replay_summary_expr_cost(condition, &cost, work, depth + 1)
+                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
+                Ast::Stmt.For(_, variables, iterable, nested, _):
+                    return false if variables.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + variables.count
+                    for variable in variables |variable, cost, work|:
+                        return false if sview_len(variable) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + sview_len(variable)
+                    return false if not proof_replay_summary_expr_cost(iterable, &cost, work, depth + 1)
+                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
+                Ast::Stmt.Match(value, arms, _):
+                    return false if not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
+                    return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + arms.count
+                    for arm in arms |cost, work|:
+                        pattern_names: mutable darray[sview] = []
+                        pattern_work: mutable usize = work + cost
+                        return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
+                        cost <- pattern_work - work
+                        return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + pattern_names.count
+                        for pattern_name in pattern_names |pattern_name, cost, work|:
+                            return false if sview_len(pattern_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                            cost <- cost + sview_len(pattern_name)
+                        return false if not proof_replay_summary_expr_cost(arm.guard, &cost, work, depth + 1)
+                        return false if not proof_replay_mutable_local_body_work_charge(arm.body, work, depth + 1)
+                Ast::Stmt.Block(_, clause, binding, nested, _):
+                    return false if clause.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + clause.count
+                    return false if sview_len(binding) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + sview_len(binding)
+                    for word in clause |cost, work|:
+                        return false if sview_len(word) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                        cost <- cost + sview_len(word)
+                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
+                Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                    pass
+                _:
+                    return false
+            return false if cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + cost
+            return true
+
+        def proof_replay_mutable_local_body_work_charge(body: darray[Ast::Stmt]&, work: mutable usize&, depth: usize) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or depth >= 96
+            for statement in body |work, depth|:
+                return false if not proof_replay_mutable_local_statement_work_charge(statement, work, depth)
+            return true
+
+        def proof_replay_mutable_local_trace_work_charge(report: ProofReport&, work: mutable usize&, repetitions: usize) -> bool:
+            cost: mutable usize = report.traces.records.count
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for candidate in report.traces.records |cost, report|:
+                return false if not proof_replay_summary_expr_cost(candidate.expression, &cost, work, 0)
+                return false if sview_len(candidate.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                cost <- cost + sview_len(candidate.name)
+                return false if sview_len(candidate.kind) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                cost <- cost + sview_len(candidate.kind)
+                return false if sview_len(candidate.dependency) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                cost <- cost + sview_len(candidate.dependency)
+                return false if candidate.summary_bindings_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                cost <- cost + candidate.summary_bindings_count
+                return false if candidate.summary_bindings_start > report.traces.summary_names.count or candidate.summary_bindings_count > report.traces.summary_names.count - candidate.summary_bindings_start
+                return false if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
+                for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, cost, work|:
+                    binding: usize = candidate.summary_bindings_start + offset
+                    return false if sview_len(report.traces.summary_names[binding]) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
+                    cost <- cost + sview_len(report.traces.summary_names[binding])
+                    return false if not proof_replay_summary_expr_cost(report.traces.summary_values[binding], &cost, work, 0)
+            return false if repetitions != 0 and cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / repetitions
+            work <- work + cost * repetitions
+            return true

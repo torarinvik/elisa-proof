@@ -210,6 +210,62 @@ def cstr_identifier_pattern_control(value: cstr) -> i64:
             return 0
 '''
 
+CHAR_PATTERN_CONTROL = '''
+def char_pattern_identifier_control(value: char) -> i64:
+    ensure result == 0
+    match value:
+        'A':
+            assert value == 'A' by:
+                assert value == 'A'
+            return 0
+        _:
+            return 0
+
+def char_pattern_digit_control(value: char) -> i64:
+    ensure result == 0
+    match value:
+        '0':
+            assert value == '0' by:
+                assert value == '0'
+            return 0
+        _:
+            return 0
+'''
+
+# Generic binders can reuse lowercase names such as `sview`. The spelling alone must not
+# authenticate the runtime representation used by a string-pattern fact.
+GENERIC_BUILTIN_TYPE_NAME_SHADOW = '''
+def generic_sview_type_parameter[sview](value: sview) -> i64:
+    ensure result == 0
+    match value:
+        "ready":
+            assert value == "ready" by:
+                assert value == "ready"
+            return 0
+        _:
+            return 0
+
+def generic_cstr_type_parameter[cstr](value: cstr) -> i64:
+    ensure result == 0
+    match value:
+        "ready":
+            assert value == "ready" by:
+                assert value == "ready"
+            return 0
+        _:
+            return 0
+
+def generic_char_type_parameter[char](value: char) -> i64:
+    ensure result == 0
+    match value:
+        'A':
+            assert value == 'A' by:
+                assert value == 'A'
+            return 0
+        _:
+            return 0
+'''
+
 GROUPED_STRING_PATTERN_CONTROL = '''
 def sview_identifier_or_pattern_control(value: sview) -> i64:
     ensure result == 0
@@ -237,7 +293,7 @@ with tempfile.TemporaryDirectory() as folder:
     path.write_text('\n'.join(PATTERN_COLLISIONS.values()))
 
     control_path = Path(folder) / 'string-pattern-control.elisa'
-    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL)
+    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL)
     control = run([BINARY, '--json', str(control_path)], 'pattern positive controls')
     control_report = json.loads(control.stdout)
     assert control.returncode == 0 and control_report['status'] == 'proved', control_report
@@ -264,6 +320,25 @@ with tempfile.TemporaryDirectory() as folder:
         assert any(row['name'] == name and row['proved']
                    for row in focused_control_report['functions']), (name, focused_control_report['functions'])
 
+    for name in ('char_pattern_identifier_control', 'char_pattern_digit_control'):
+        pattern_goals = [goal for goal in control_report['goals']
+                         if goal['name'] == name
+                         and goal['goal'].get('kind') == 'binary'
+                         and goal['goal'].get('operator') == '=='
+                         and goal['goal'].get('left', {}).get('kind') == 'ident'
+                         and goal['goal'].get('left', {}).get('name') == 'value'
+                         and goal['goal'].get('right', {}).get('kind') == 'char']
+        assert (len(pattern_goals) == 1 and pattern_goals[0]['proven']
+                and pattern_goals[0]['replay_status'] == 'replayed'), (
+                    name, pattern_goals, control_report['goals'])
+
+        focused_control = run([BINARY, '--function-json', name, str(control_path)],
+                              f'focused character pattern positive control {name}')
+        focused_control_report = json.loads(focused_control.stdout)
+        assert focused_control.returncode == 0 and focused_control_report['status'] == 'proved', (name, focused_control_report)
+        assert any(row['name'] == name and row['proved']
+                   for row in focused_control_report['functions']), (name, focused_control_report['functions'])
+
     for name in ('sview_identifier_or_pattern_control', 'cstr_identifier_or_pattern_control'):
         pattern_goals = [goal for goal in control_report['goals']
                          if goal['name'] == name and goal['proven']
@@ -275,6 +350,28 @@ with tempfile.TemporaryDirectory() as folder:
         assert focused_control.returncode == 0 and focused_control_report['status'] == 'proved', (name, focused_control_report)
         assert any(row['name'] == name and row['proved']
                    for row in focused_control_report['functions']), (name, focused_control_report['functions'])
+
+    generic_path = Path(folder) / 'generic-type-name-shadow.elisa'
+    generic_path.write_text(GENERIC_BUILTIN_TYPE_NAME_SHADOW)
+    for name in ('generic_sview_type_parameter', 'generic_cstr_type_parameter', 'generic_char_type_parameter'):
+        generic_run = run([BINARY, '--function-json', name, str(generic_path)],
+                          f'generic builtin-name pattern shadow {name}')
+        generic_report = json.loads(generic_run.stdout)
+        assert generic_run.returncode != 0 and generic_report['status'] != 'proved', generic_report
+        assert generic_report['source']['admissible'] is True, generic_report['source']
+        assert generic_report['summary']['semantic_errors'] == 0, generic_report['semantic_diagnostics']
+        assert generic_report['replay']['gaps'] == 0, generic_report['replay']
+        assert generic_report['replay']['certificates'] == generic_report['replay']['replayed'], generic_report['replay']
+        assert not generic_report['trust']['trusted_assumptions'], generic_report['trust']
+        generic_pattern_goals = [goal for goal in generic_report['goals']
+                                 if goal['goal'].get('kind') == 'binary'
+                                 and goal['goal'].get('operator') == '=='
+                                 and goal['goal'].get('left', {}).get('kind') == 'ident'
+                                 and goal['goal'].get('left', {}).get('name') == 'value'
+                                 and ((name == 'generic_char_type_parameter' and goal['goal'].get('right', {}).get('kind') == 'char')
+                                      or (name != 'generic_char_type_parameter' and goal['goal'].get('right') == {'kind': 'string', 'text': 'ready'}))]
+        assert len(generic_pattern_goals) == 1 and not generic_pattern_goals[0]['proven'], (
+            name, generic_pattern_goals, generic_report['goals'])
 
     report_run = run([BINARY, '--json', str(path)], 'pattern collision report')
     report = json.loads(report_run.stdout)
@@ -332,4 +429,4 @@ with tempfile.TemporaryDirectory() as folder:
         assert any(goal['name'] == name and not goal['proven']
                    for goal in focused_report['goals']), (name, focused_report['goals'])
 
-print('pattern literals: single and grouped identifier sview/cstr controls prove; ambiguous strings and fixed-width integer witnesses fail closed')
+print('pattern literals: sview/cstr/char controls prove; generic type-name shadow, ambiguous strings and fixed-width integer witnesses fail closed')

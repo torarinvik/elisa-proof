@@ -202,40 +202,6 @@ extend ElisaProof:
             return true if name == "bool" or name == "char"
             return false
 
-        # 1 means a primitive scalar type, 0 means it is not one, and -1 means alias resolution
-        # is ambiguous or too deep. A failed resolution is never reported as scalar. References
-        # are excluded rather than followed: `&T` compares by address, and reading that as the
-        # pointee's equality would need a separate argument.
-        def proof_scalar_type_kind(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
-            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return 1 if proof_scalar_primitive_type_name(name)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return -1 if alias.count > 1
-                    return proof_scalar_type_kind(alias.target, declarations, depth + 1) if alias.count == 1
-                    # A `const enum` is an integer-backed value; its `==` is the integer compare.
-                    # A plain enum is a tagged union and is deliberately not a scalar here.
-                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
-                    return -1 if const_enums > 1
-                    return 1 if const_enums == 1
-                    return 0
-                Ast::Expr.Paren(inner, _):
-                    return proof_scalar_type_kind(inner, declarations, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    # A predicate restricts inhabitants; the underlying operators are unchanged.
-                    return proof_scalar_type_kind(base, declarations, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_scalar_type_kind(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return 0
-                Ast::Expr.Scope(_, name, _):
-                    # A bare-name search cannot establish a qualified alias's owner.
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return -1 if alias.count > 0
-                    return 0
-                _:
-                    return 0
-
         # The per-import audit index is built once from the complete declaration tree. Preserve
         # the linear walk's ambiguity and incompleteness behavior while following only the exact
         # hash bucket; the hash selects candidates and never substitutes for name equality.
@@ -270,46 +236,117 @@ extend ElisaProof:
             return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry < index.entries.count
             return (count, target)
 
-        def proof_scalar_type_kind_index(expression: Ast::Expr, declarations: darray[Ast::Decl]&, index: ProofTypeAuditIndex, depth: usize) -> i64:
+        # Report-backed indexed queries charge the input spelling and every bucket probe. The
+        # prebuilt index keeps lookup proportional to the bounded collision chain without letting
+        # repeated queries evade the caller's aggregate source-work budget.
+        def proof_find_type_alias_index_with_work(index: ProofTypeAuditIndex, name: sview, source_work: mutable usize&) -> (count: usize, target: Ast::Expr, type_count: usize, root_alias_count: usize, root_type_count: usize):
+            empty_target: Ast::Expr = Ast::Expr.Absent
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if not index.complete or index.entries.count != index.next_indices.count
+            capacity: usize = proof_index_capacity(index.entries.count)
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if index.bucket_heads.count != capacity
+            return (0, empty_target, 0, 0, 0) if index.entries.count == 0
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if not proof_type_audit_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
+            entry: mutable usize = index.bucket_heads[slot]
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if entry > index.entries.count
+            steps: mutable usize = 0
+            count: mutable usize = 0
+            type_count: mutable usize = 0
+            root_alias_count: mutable usize = 0
+            root_type_count: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Absent
+            while entry < index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, type_count, root_alias_count, root_type_count, target, source_work|:
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if not proof_type_audit_work_charge(1, source_work)
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if entry >= index.next_indices.count
+                row: ProofTypeAuditDeclaration = index.entries[entry]
+                if row.name_hash == hash:
+                    row_name: sview = proof_type_audit_declaration_name(row.declaration)
+                    return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if row_name == ""
+                    return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if not proof_type_audit_work_charge(sview_len(row_name) + sview_len(name), source_work)
+                    if row_name == name:
+                        type_count <- type_count + 1
+                        root_type_count <- root_type_count + 1 if row.root_level
+                        match row.declaration:
+                            Ast::Decl.Alias(alias_name, alias_target, _):
+                                count <- count + 1
+                                root_alias_count <- root_alias_count + 1 if row.root_level
+                                target <- alias_target if row.root_level
+                            _:
+                                pass
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if count > 1
+                next_entry: usize = index.next_indices[entry]
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if next_entry > index.entries.count
+                entry <- next_entry
+                steps <- steps + 1
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT) if entry < index.entries.count
+            return (count, target, type_count, root_alias_count, root_type_count)
+
+        # The enum index is built once per source import. Keep scalar classification on its
+        # collision-safe bucket instead of rescanning every declaration for each type query.
+        def proof_count_enums_index_with_work(index: ProofEnumIndex, name: sview, source_work: mutable usize&) -> (count: usize, const_count: usize, root_count: usize, root_const_count: usize):
+            return (2, 2, 2, 2) if not index.complete or index.names.count != index.name_hashes.count or index.names.count != index.const_enums.count or index.names.count != index.declarations.count or index.names.count != index.root_level.count or index.names.count != index.next_indices.count
+            capacity: usize = proof_index_capacity(index.names.count)
+            return (2, 2, 2, 2) if index.bucket_heads.count != capacity
+            return (0, 0, 0, 0) if index.names.count == 0
+            return (2, 2, 2, 2) if not proof_type_audit_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: mutable usize = index.bucket_heads[slot]
+            return (2, 2, 2, 2) if entry > index.names.count
+            steps: mutable usize = 0
+            count: mutable usize = 0
+            const_count: mutable usize = 0
+            root_count: mutable usize = 0
+            root_const_count: mutable usize = 0
+            while entry < index.names.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, const_count, root_count, root_const_count, source_work|:
+                return (2, 2, 2, 2) if not proof_type_audit_work_charge(1, source_work)
+                return (2, 2, 2, 2) if entry >= index.next_indices.count
+                if index.name_hashes[entry] == hash:
+                    return (2, 2, 2, 2) if not proof_type_audit_work_charge(sview_len(index.names[entry]) + sview_len(name), source_work)
+                    if index.names[entry] == name:
+                        count <- count + 1
+                        const_count <- const_count + 1 if index.const_enums[entry]
+                        if index.root_level[entry]:
+                            root_count <- root_count + 1
+                            root_const_count <- root_const_count + 1 if index.const_enums[entry]
+                next_entry: usize = index.next_indices[entry]
+                return (2, 2, 2, 2) if next_entry > index.names.count
+                entry <- next_entry
+                steps <- steps + 1
+            return (2, 2, 2, 2) if entry < index.names.count
+            return (count, const_count, root_count, root_const_count)
+
+        def proof_scalar_type_kind_index(expression: Ast::Expr, index: ProofTypeAuditIndex, enum_index: ProofEnumIndex, depth: usize, source_work: mutable usize&) -> i64:
+            return -1 if not proof_type_audit_work_charge(1, source_work)
             return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not index.complete
             match expression:
                 Ast::Expr.Ident(name, _):
-                    return 1 if proof_scalar_primitive_type_name(name)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
-                    return -1 if alias.count > 1
-                    return proof_scalar_type_kind_index(alias.target, declarations, index, depth + 1) if alias.count == 1
-                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
-                    return -1 if const_enums > 1
-                    return 1 if const_enums == 1
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr, type_count: usize, root_alias_count: usize, root_type_count: usize) = proof_find_type_alias_index_with_work(index, name, source_work)
+                    enums: (count: usize, const_count: usize, root_count: usize, root_const_count: usize) = proof_count_enums_index_with_work(enum_index, name, source_work)
+                    if proof_scalar_primitive_type_name(name):
+                        return -1 if alias.type_count > 0 or enums.count > 0
+                        return 1
+                    return -1 if alias.count != alias.root_alias_count or alias.type_count != alias.root_type_count
+                    return -1 if enums.count != enums.root_count or enums.const_count != enums.root_const_count
+                    return -1 if alias.root_alias_count > 1 or alias.root_type_count > 1
+                    return -1 if enums.root_count > 1 or (alias.root_type_count > 0 and enums.root_count > 0)
+                    return proof_scalar_type_kind_index(alias.target, index, enum_index, depth + 1, source_work) if alias.root_alias_count == 1
+                    return 0 if alias.root_type_count == 1
+                    return 1 if enums.root_count == 1 and enums.root_const_count == 1
                     return 0
                 Ast::Expr.Paren(inner, _):
-                    return proof_scalar_type_kind_index(inner, declarations, index, depth + 1)
+                    return proof_scalar_type_kind_index(inner, index, enum_index, depth + 1, source_work)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_scalar_type_kind_index(base, declarations, index, depth + 1)
+                    return proof_scalar_type_kind_index(base, index, enum_index, depth + 1, source_work)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_scalar_type_kind_index(inner, declarations, index, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_scalar_type_kind_index(inner, index, enum_index, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return 0
-                Ast::Expr.Scope(_, name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
-                    return -1 if alias.count > 0
-                    return 0
+                Ast::Expr.Scope(_, _, _):
+                    return -1
                 _:
                     return 0
-
-        def proof_count_const_enums(declarations: darray[Ast::Decl]&, name: sview, depth: usize) -> usize:
-            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            count: mutable usize = 0
-            for declaration in declarations |name, depth, count|:
-                match declaration:
-                    Ast::Decl.Enum(enum_name, _, is_const, _, _):
-                        count <- count + 1 if enum_name == name and is_const
-                    Ast::Decl.Module(_, body, _):
-                        count <- count + proof_count_const_enums(body, name, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        count <- count + proof_count_const_enums(body, name, depth + 1)
-                    _:
-                        pass
-            return count
 
         # The declared type of one field of a named struct. The count reports how many struct
         # declarations answer to the name; anything but exactly one is refused by the caller.
@@ -374,17 +411,10 @@ extend ElisaProof:
                 Ast::Expr.Unary(operator, inner, _):
                     return proof_type_head_name(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return ""
-                Ast::Expr.Scope(_, name, _):
-                    # A qualified struct spelling resolves to its leaf, the same convention the
-                    # proof tables use for a qualified call. The leaf is not assumed unique here:
-                    # every reader of this name searches the declarations by it and refuses a
-                    # count other than one, so an ambiguous leaf loses the witness rather than
-                    # picking a struct. An alias is resolved only when the leaf names exactly one.
-                    return "" if proof_scalar_primitive_type_name(name)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return "" if alias.count > 1
-                    return proof_type_head_name(alias.target, declarations, depth + 1) if alias.count == 1
-                    return name
+                Ast::Expr.Scope(_, _, _):
+                    # Without owner-qualified type lookup, a leaf name could select an unrelated
+                    # declaration. Do not expose a head for this type.
+                    return ""
                 _:
                     return ""
 
@@ -403,59 +433,70 @@ extend ElisaProof:
         # that; so does one that returns a by-value `darray[darray[usize]&]` holding it; while
         # storing into a plain field is refused by the region checker. So neither "returns no
         # reference" nor "has one reference parameter" is enough on its own, and the type test is.
-        def proof_type_is_reference_free(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_type_is_reference_free_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_type_is_reference_free(inner, declarations, annotations, depth + 1)
+                    return proof_type_is_reference_free_with_work(inner, declarations, annotations, depth + 1, source_work)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_type_is_reference_free(base, declarations, annotations, depth + 1)
+                    return proof_type_is_reference_free_with_work(base, declarations, annotations, depth + 1, source_work)
                 Ast::Expr.Unary(operator, inner, _):
                     # `&` and `lmut` are references. `mutable` and the storage qualifiers are modes
                     # on a by-value binding and change nothing about what the type can hold.
                     return false if operator != TokenKind.Mutable and operator != TokenKind.Static and operator != TokenKind.Heap and operator != TokenKind.Stack and operator != TokenKind.Tail
-                    return proof_type_is_reference_free(inner, declarations, annotations, depth + 1)
+                    return proof_type_is_reference_free_with_work(inner, declarations, annotations, depth + 1, source_work)
                 Ast::Expr.Tuple(elements, _):
-                    for element in elements |declarations, annotations, depth|:
-                        return false if not proof_type_is_reference_free(element, declarations, annotations, depth + 1)
+                    for element in elements |declarations, annotations, depth, source_work|:
+                        return false if not proof_type_is_reference_free_with_work(element, declarations, annotations, depth + 1, source_work)
                     return true
                 Ast::Expr.Index(head, argument, _):
+                    return false if not (head is Ast::Expr.Ident(_, _))
                     head_name: sview = proof_ident_name(head)
-                    return proof_type_is_reference_free(argument, declarations, annotations, depth + 1) if head_name == "darray" or head_name == "view" or head_name == "set"
+                    if head_name == "darray" or head_name == "view" or head_name == "set":
+                        return false if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                        return proof_type_is_reference_free_with_work(argument, declarations, annotations, depth + 1, source_work)
                     # `u8[CAP]`: over a scalar head the shorthand is always a fixed array whatever
                     # the extent spells (`proof_fixed_array_primitive_head`), so it holds scalars.
-                    return true if proof_fixed_array_primitive_head(head_name)
-                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(argument, declarations)
-                    return extent.known and proof_type_is_reference_free(head, declarations, annotations, depth + 1)
+                    if proof_fixed_array_primitive_head(head_name):
+                        return true if not proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(argument, declarations, source_work, 0)
+                    return extent.known and proof_type_is_reference_free_with_work(head, declarations, annotations, depth + 1, source_work)
                 Ast::Expr.IndexN(head, arguments, _):
+                    return false if not (head is Ast::Expr.Ident(_, _))
                     return false if proof_ident_name(head) != "array" or arguments.count != 2
+                    return false if proof_builtin_type_name_shadowed_with_work(declarations, "array", source_work)
                     match arguments[1]:
                         Ast::Expr.IntLit(_, _):
-                            return proof_type_is_reference_free(arguments[0], declarations, annotations, depth + 1)
+                            return proof_type_is_reference_free_with_work(arguments[0], declarations, annotations, depth + 1, source_work)
                         _:
                             return false
                 Ast::Expr.Ident(name, _):
-                    return true if proof_scalar_primitive_type_name(name)
-                    return true if name == "sview" or name == "void" or name == "f32" or name == "f64"
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    return false if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    if proof_scalar_primitive_type_name(name) or name == "sview" or name == "void" or name == "f32" or name == "f64":
+                        return false if proof_builtin_type_name_shadowed_with_work(declarations, name, source_work)
+                        return true
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
                     return false if alias.count > 1
-                    return proof_type_is_reference_free(alias.target, declarations, annotations, depth + 1) if alias.count == 1
-                    const_enums: usize = proof_count_const_enums(declarations, name, 0)
-                    return false if const_enums > 1
-                    return true if const_enums == 1
-                    return proof_named_aggregate_is_reference_free(name, declarations, annotations, depth + 1)
-                Ast::Expr.Scope(_, name, _):
-                    # A qualified name is resolved by its last segment, the way every other type
-                    # helper here resolves one. A bare-name search cannot establish a qualified
-                    # alias's owner, so any alias match at all makes the answer unknown.
-                    scoped_alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return false if scoped_alias.count > 0
-                    scoped_enums: usize = proof_count_const_enums(declarations, name, 0)
-                    return false if scoped_enums > 1
-                    return true if scoped_enums == 1
-                    return proof_named_aggregate_is_reference_free(name, declarations, annotations, depth + 1)
+                    return false if alias.count == 1 and proof_type_alias_root_count_with_work(declarations, name, 0, source_work) != 1
+                    return false if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_type_is_reference_free_with_work(alias.target, declarations, annotations, depth + 1, source_work) if alias.count == 1
+                    aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                    return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if aggregates.enums + aggregates.const_enums + aggregates.structs > 0:
+                        root_aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_root_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return false if root_aggregates.enums != aggregates.enums or root_aggregates.const_enums != aggregates.const_enums or root_aggregates.structs != aggregates.structs
+                    return true if aggregates.enums == 0 and aggregates.const_enums == 1 and aggregates.structs == 0
+                    return proof_named_aggregate_is_reference_free(name, declarations, annotations, depth + 1, source_work)
+                Ast::Expr.Scope(_, _, _):
+                    # The current source indexes do not retain the full owner path for type
+                    # declarations. Resolving by leaf name can select an unrelated aggregate.
+                    return false
                 _:
                     return false
+
+        def proof_type_is_reference_free(expression: Ast::Expr, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
+            source_work: mutable usize = 0
+            return proof_type_is_reference_free_with_work(expression, declarations, annotations, depth, &source_work)
 
         # The storage a declared type names: the type with one outer reference removed, seen
         # through parentheses, refinements and the storage qualifiers. A by-value type is returned
@@ -473,77 +514,69 @@ extend ElisaProof:
                 _:
                     return expression
 
-        # A struct holds no reference when every field's declared type holds none. A name that
-        # resolves to no struct, or to more than one, holds one as far as this is concerned.
-        def proof_struct_is_reference_free(struct_name: sview, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            return false if struct_name == ""
-            members: mutable darray[Ast::StructMember] = []
-            return false if proof_struct_members(declarations, struct_name, 0, &members) != 1
-            for member in members |member, members, declarations, annotations, depth|:
-                field: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type(members, member.name)
-                return false if not proof_type_is_reference_free(field.type_expression, declarations, annotations, depth + 1)
-            return true
-
         # `proof_type_is_reference_free` answers whether a value can STORE references in its
         # elements/fields; a `view[T]` has no such storage but is itself a borrowed window into
         # external storage. Local call-stability needs the stronger property: no path through the
         # value may reach borrowed storage. Unknown or ambiguous type shapes fail closed.
-        def proof_type_contains_borrowed_view(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_type_contains_borrowed_view_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Ident(name, _):
+                    return true if not proof_type_audit_work_charge(sview_len(name), source_work)
                     return true if name == "sview"
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
                     return true if alias.count > 1
-                    return proof_type_contains_borrowed_view(alias.target, declarations, depth + 1) if alias.count == 1
-                    return false if proof_scalar_primitive_type_name(name) or name == "void" or name == "f32" or name == "f64"
-                    enum_count: usize = proof_count_const_enums(declarations, name, 0)
-                    return false if enum_count == 1
-                    return true if enum_count > 1
-                    return proof_struct_contains_borrowed_view(name, declarations, depth + 1)
-                Ast::Expr.Scope(_, name, _):
-                    return true if name == "sview"
-                    # Bare-name alias search cannot prove which module owns a qualified alias.
-                    return true if proof_find_type_alias(declarations, name, 0).count > 0
-                    enum_count: usize = proof_count_const_enums(declarations, name, 0)
-                    return false if enum_count == 1
-                    return true if enum_count > 1
-                    return proof_struct_contains_borrowed_view(name, declarations, depth + 1)
+                    return true if alias.count == 1 and proof_type_alias_root_count_with_work(declarations, name, 0, source_work) != 1
+                    return true if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_type_contains_borrowed_view_with_work(alias.target, declarations, depth + 1, source_work) if alias.count == 1
+                    if proof_scalar_primitive_type_name(name) or name == "void" or name == "f32" or name == "f64":
+                        return proof_builtin_type_name_shadowed_with_work(declarations, name, source_work)
+                    aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                    return true if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    if aggregates.enums + aggregates.const_enums + aggregates.structs > 0:
+                        root_aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_root_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return true if root_aggregates.enums != aggregates.enums or root_aggregates.const_enums != aggregates.const_enums or root_aggregates.structs != aggregates.structs
+                    return false if aggregates.enums == 0 and aggregates.const_enums == 1 and aggregates.structs == 0
+                    return true if aggregates.enums + aggregates.const_enums + aggregates.structs > 1
+                    return proof_struct_contains_borrowed_view(name, declarations, depth + 1, source_work)
+                Ast::Expr.Scope(_, _, _):
+                    # No qualified-owner index exists yet; an unscoped leaf lookup could inspect
+                    # a different module's struct and incorrectly prove storage lifetime.
+                    return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_type_contains_borrowed_view(inner, declarations, depth + 1)
+                    return proof_type_contains_borrowed_view_with_work(inner, declarations, depth + 1, source_work)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_type_contains_borrowed_view(base, declarations, depth + 1)
+                    return proof_type_contains_borrowed_view_with_work(base, declarations, depth + 1, source_work)
                 Ast::Expr.Unary(operator, inner, _):
                     return true if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
-                    return proof_type_contains_borrowed_view(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_type_contains_borrowed_view_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return true
                 Ast::Expr.Tuple(elements, _):
-                    for element in elements |declarations, depth|:
-                        return true if proof_type_contains_borrowed_view(element, declarations, depth + 1)
+                    for element in elements |declarations, depth, source_work|:
+                        return true if proof_type_contains_borrowed_view_with_work(element, declarations, depth + 1, source_work)
                     return false
                 Ast::Expr.Index(head, argument, _):
+                    return true if not (head is Ast::Expr.Ident(_, _))
                     head_name: sview = proof_ident_name(head)
                     return true if head_name == "view"
-                    return proof_type_contains_borrowed_view(argument, declarations, depth + 1) if head_name == "darray" or head_name == "set"
-                    return false if proof_fixed_array_primitive_head(head_name)
-                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(argument, declarations)
-                    return not extent.known or proof_type_contains_borrowed_view(head, declarations, depth + 1)
+                    if head_name == "darray" or head_name == "set":
+                        return true if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                        return proof_type_contains_borrowed_view_with_work(argument, declarations, depth + 1, source_work)
+                    if proof_fixed_array_primitive_head(head_name):
+                        return false if not proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(argument, declarations, source_work, 0)
+                    return not extent.known or proof_type_contains_borrowed_view_with_work(head, declarations, depth + 1, source_work)
                 Ast::Expr.IndexN(head, arguments, _):
+                    return true if not (head is Ast::Expr.Ident(_, _))
                     return true if proof_ident_name(head) != "array" or arguments.count != 2
+                    return true if proof_builtin_type_name_shadowed_with_work(declarations, "array", source_work)
                     match arguments[1]:
                         Ast::Expr.IntLit(_, _):
-                            return proof_type_contains_borrowed_view(arguments[0], declarations, depth + 1)
+                            return proof_type_contains_borrowed_view_with_work(arguments[0], declarations, depth + 1, source_work)
                         _:
                             return true
                 _:
                     return true
-
-        def proof_struct_contains_borrowed_view(struct_name: sview, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or struct_name == ""
-            members: mutable darray[Ast::StructMember] = []
-            return true if proof_struct_members(declarations, struct_name, 0, &members) != 1
-            for member in members |member, members, declarations, depth|:
-                field: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type(members, member.name)
-                return true if proof_type_contains_borrowed_view(field.type_expression, declarations, depth + 1)
-            return false
+        def proof_type_contains_borrowed_view(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> bool:
+            source_work: mutable usize = 0
+            return proof_type_contains_borrowed_view_with_work(expression, declarations, depth, &source_work)

@@ -1,0 +1,112 @@
+# Rewriting and source checks for contracts that carry threaded reference results.
+extend ElisaProof:
+    private:
+        # `p[0]` or a bare `p`: the referent of a scalar reference place, or "".
+        def proof_replay_thread_place(expression: Ast::Expr) -> sview:
+            match expression:
+                Ast::Expr.Index(object, index, _):
+                    match index:
+                        Ast::Expr.IntLit(offset, _):
+                            return proof_ident_name(object) if offset == 0
+                            return ""
+                        _:
+                            return ""
+                Ast::Expr.Ident(name, _):
+                    return name
+                _:
+                    return ""
+
+        # Read each threaded parameter's place as its exit symbol (or as the parameter, the entry
+        # value, when `pre`), and `old(place)` as the parameter. Any other mention is invalid.
+        def proof_replay_thread_rewrite(expression: Ast::Expr, parameters: darray[sview]&, symbols: darray[sview]&, pre: bool, valid: mutable bool&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            mentioned: mutable bool = false
+            for parameter in parameters |expression, mentioned|:
+                mentioned <- true if proof_expr_mentions_name(expression, parameter)
+            return expression if not mentioned
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
+                valid <- false
+                return expression
+            place: sview = proof_replay_thread_place(expression)
+            for index in 0..<parameters.count |index, parameters, symbols, place, pre, expression|:
+                if parameters[index] == place and index < symbols.count:
+                    return Ast::Expr.Ident(place, Ast::expr_pos(expression)) if pre
+                    return Ast::Expr.Ident(symbols[index], Ast::expr_pos(expression))
+            match expression:
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    if proof_ident_name(callee) == "old":
+                        if not pre and arguments.count == 1:
+                            entry: sview = proof_replay_thread_place(arguments[0])
+                            return Ast::Expr.Ident(entry, position) if entry != "" and (any parameter in parameters where parameter == entry)
+                        valid <- false
+                        return expression
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten, parameters, symbols, pre, valid, depth|:
+                        rewritten.push(proof_replay_thread_rewrite(argument, parameters, symbols, pre, valid, depth + 1))
+                    return Ast::Expr.Call(proof_replay_thread_rewrite(callee, parameters, symbols, pre, valid, depth + 1), rewritten, argument_names, position)
+                Ast::Expr.Paren(inner, position):
+                    return Ast::Expr.Paren(proof_replay_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.Unary(operator, inner, position):
+                    return Ast::Expr.Unary(operator, proof_replay_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.Binary(left, operator, right, position):
+                    return Ast::Expr.Binary(proof_replay_thread_rewrite(left, parameters, symbols, pre, valid, depth + 1), operator, proof_replay_thread_rewrite(right, parameters, symbols, pre, valid, depth + 1), position)
+                Ast::Expr.If(condition, then_expression, else_expression, position):
+                    return Ast::Expr.If(proof_replay_thread_rewrite(condition, parameters, symbols, pre, valid, depth + 1), proof_replay_thread_rewrite(then_expression, parameters, symbols, pre, valid, depth + 1), proof_replay_thread_rewrite(else_expression, parameters, symbols, pre, valid, depth + 1), position)
+                _:
+                    valid <- false
+                    return expression
+
+        def proof_replay_thread_contract(expression: Ast::Expr, threading: ProofReplayThreading&, pre: bool) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            return expression if threading.symbols.count == 0
+            valid: mutable bool = true
+            rewritten: Ast::Expr = proof_replay_thread_rewrite(expression, threading.parameters, threading.symbols, pre, &valid, 0)
+            return rewritten if valid
+            return Ast::Expr.Invalid
+
+        # The source call of a statement that may thread `local_name`: `f(.., &x, ..)` or `x <- f(..)`.
+        def proof_replay_thread_statement_call(statement: Ast::Stmt, local_name: sview) -> Ast::Expr:
+            match statement:
+                Ast::Stmt.Expr(expression, _):
+                    return proof_strip_parens(expression)
+                Ast::Stmt.Assign(target, operator, value, _):
+                    return Ast::Expr.Invalid if operator != TokenKind.LArrow or proof_ident_name(target) != local_name
+                    return proof_strip_parens(value)
+                _:
+                    return Ast::Expr.Invalid
+
+        # Like a resymbolized self-update, a call that threads `local_name` leaves the local's own
+        # symbol denoting the value it had: its new value is the call's exit symbol. Only a summary
+        # of that very call whose threading validates names the local.
+        def proof_replay_thread_call_resymbolized(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview) -> bool:
+            source_work: mutable usize = 0
+            return proof_replay_thread_call_resymbolized_with_work(report, owner, statement, local_name, &source_work)
+
+        def proof_replay_thread_call_resymbolized_with_work(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_mutable_local_statement_work_charge(statement, source_work, 0)
+            call: Ast::Expr = proof_replay_thread_statement_call(statement, local_name)
+            callee_name: mutable sview = ""
+            arguments: mutable darray[Ast::Expr] = []
+            match call:
+                Ast::Expr.Call(callee, call_arguments, _, _):
+                    callee_name <- proof_callable_name(callee)
+                    arguments.extend(call_arguments)
+                _:
+                    return false
+            return false if callee_name == ""
+            return false if not proof_replay_summary_expr_charge_with_work(call, source_work)
+            return false if not proof_replay_mutable_local_trace_work_charge(report, source_work, 1)
+            line: u32 = Ast::expr_pos(call).line
+            for candidate in report.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line, source_work|:
+                continue if candidate.kind != "function-summary" or candidate.name != owner or candidate.line != line or candidate.dependency != callee_name
+                continue if proof_replay_trace_owner_source_position_line_for_trace_with_work(report, candidate, source_work) != report.replay_owner_line
+                return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + report.executables.summaries.count
+                for summary in report.executables.summaries |summary, candidate, report, call, arguments, local_name, source_work|:
+                    return false if sview_len(summary.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                    source_work <- source_work + sview_len(summary.name)
+                    continue if summary.name != candidate.dependency or (candidate.owner_line != 0 and summary.line != candidate.owner_line)
+                    continue if not summary.verified
+                    threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, candidate, summary, call, source_work)
+                    continue if not threading.valid
+                    for slot in threading.slots |slot, arguments, local_name|:
+                        return true if slot < arguments.count and proof_replay_thread_argument_local(arguments[slot]) == local_name
+            return false

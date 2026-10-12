@@ -1,0 +1,556 @@
+# Bounded transparent type-alias expansion for source-derived builtin conversions.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT: usize = 64
+
+        def proof_source_conversion_name_index_build(names: darray[sview]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            hashes.clear()
+            values.clear()
+            counts.clear()
+            name_count: usize = names.count
+            return true if name_count == 0
+            capacity: usize = proof_name_index_capacity(name_count)
+            return false if capacity == 0
+            return false if not proof_report_source_work_charge(capacity, source_work) or not proof_report_source_work_charge(name_count, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, name_count|:
+                values[slot] <- name_count
+                counts[slot] <- 0
+            for row in 0..<name_count |row, names, hashes, values, counts, name_count, capacity, source_work|:
+                name: sview = names[row]
+                return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, names, hashes, values, counts, name_count, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == name_count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    if current < name_count and hashes[slot] == hash:
+                        current_name: sview = names[current]
+                        return false if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, name_count, source_work)
+            return cluster_status.complete and cluster_status.bounded
+
+        def proof_source_conversion_generic_line_index_build(report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: mutable ProofSourceEffectIndex& = &report.source_effect_index
+            source_valid: bool = report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count
+            count: usize = report.source_generic_param_lines.count
+            if source_valid and count == 0:
+                return index.generic_param_line_index_hashes.count == 0 and index.generic_param_line_index_values.count == 0 and index.generic_param_line_index_counts.count == 0
+            if source_valid and index.generic_param_line_index_valid:
+                expected_capacity: usize = proof_name_index_capacity(count)
+                return expected_capacity != 0 and index.generic_param_line_index_hashes.count == expected_capacity and index.generic_param_line_index_values.count == expected_capacity and index.generic_param_line_index_counts.count == expected_capacity
+            index.generic_param_line_index_valid <- false
+            index.generic_param_line_index_hashes.clear()
+            index.generic_param_line_index_values.clear()
+            index.generic_param_line_index_counts.clear()
+            return true if not source_valid
+            return true if count == 0
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0
+            return false if not proof_report_source_work_charge(capacity, source_work) or not proof_report_source_work_charge(count, source_work)
+            index.generic_param_line_index_hashes.resize(capacity)
+            index.generic_param_line_index_values.resize(capacity)
+            index.generic_param_line_index_counts.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.generic_param_line_index_values[slot] <- count
+                index.generic_param_line_index_counts[slot] <- 0
+            for row in 0..<count |row, report, index, capacity, count, source_work|:
+                name: sview = report.source_generic_param_names[row]
+                line: u32 = report.source_generic_param_lines[row]
+                return false if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                hash: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, report, index, capacity, count, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = index.generic_param_line_index_values[slot]
+                    if current == count:
+                        index.generic_param_line_index_hashes[slot] <- hash
+                        index.generic_param_line_index_values[slot] <- row
+                        index.generic_param_line_index_counts[slot] <- 1
+                        placed <- true
+                        break
+                    if current < count and index.generic_param_line_index_hashes[slot] == hash:
+                        current_name: sview = report.source_generic_param_names[current]
+                        return false if not proof_report_source_work_charge(1 + sview_len(current_name), source_work)
+                        if report.source_generic_param_lines[current] == line and current_name == name:
+                            index.generic_param_line_index_counts[slot] <- index.generic_param_line_index_counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.generic_param_line_index_values, count, source_work)
+            index.generic_param_line_index_valid <- cluster_status.complete and cluster_status.bounded
+            return index.generic_param_line_index_valid
+
+        # Build the persistent generic indexes once, before drop fixed-point expansion. Later
+        # conversion and replay consumers reuse them after constant-time shape checks.
+        def proof_source_conversion_generic_indexes_build(report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: mutable ProofSourceEffectIndex& = &report.source_effect_index
+            source_valid: bool = report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count
+            count: usize = report.source_generic_param_lines.count
+            if not source_valid:
+                index.generic_param_names.clear()
+                index.generic_param_index_hashes.clear()
+                index.generic_param_index_values.clear()
+                index.generic_param_index_counts.clear()
+                index.generic_param_index_valid <- false
+                index.generic_param_encoded_line_present <- false
+                index.generic_param_line_index_hashes.clear()
+                index.generic_param_line_index_values.clear()
+                index.generic_param_line_index_counts.clear()
+                index.generic_param_line_index_valid <- false
+                return true
+            if index.generic_param_index_valid:
+                name_count: usize = index.generic_param_names.count
+                name_capacity: usize = proof_name_index_capacity(name_count)
+                line_capacity: usize = proof_name_index_capacity(count)
+                name_shape_valid: bool = index.generic_param_index_hashes.count == index.generic_param_index_values.count and index.generic_param_index_hashes.count == index.generic_param_index_counts.count
+                name_shape_valid <- name_shape_valid and ((name_count == 0 and index.generic_param_index_hashes.count == 0) or (name_count > 0 and name_capacity != 0 and index.generic_param_index_hashes.count == name_capacity))
+                line_shape_valid: bool = count == 0 and index.generic_param_line_index_hashes.count == 0 and index.generic_param_line_index_values.count == 0 and index.generic_param_line_index_counts.count == 0
+                line_shape_valid <- line_shape_valid or (count > 0 and line_capacity != 0 and index.generic_param_line_index_valid and index.generic_param_line_index_hashes.count == line_capacity and index.generic_param_line_index_values.count == line_capacity and index.generic_param_line_index_counts.count == line_capacity)
+                return true if name_shape_valid and line_shape_valid
+            index.generic_param_names.clear()
+            index.generic_param_index_hashes.clear()
+            index.generic_param_index_values.clear()
+            index.generic_param_index_counts.clear()
+            index.generic_param_index_valid <- false
+            index.generic_param_encoded_line_present <- false
+            for row in 0..<count |row, report, index, source_work|:
+                name: sview = report.source_generic_param_names[row]
+                return false if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+                if report.source_generic_param_lines[row] < 2147483648:
+                    index.generic_param_names.push(name)
+                else:
+                    index.generic_param_encoded_line_present <- true
+            return false if not proof_source_conversion_name_index_build(index.generic_param_names, &index.generic_param_index_hashes, &index.generic_param_index_values, &index.generic_param_index_counts, source_work)
+            index.generic_param_index_valid <- true
+            return proof_source_conversion_generic_line_index_build(report, source_work)
+
+        def proof_source_conversion_hash_text(value: sview, hash: mutable i64&, work: mutable usize&) -> bool:
+            return false if not proof_report_source_work_charge(sview_len(value), work)
+            for index in 0..<sview_len(value) |index, value, hash, work|:
+                hash <- ((hash ^ sview_at(value, index).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return true
+
+        def proof_source_conversion_hash_scope_path(expression: Ast::Expr, hash: mutable i64&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
+            match expression:
+                Ast::Expr.Ident(root, _):
+                    return proof_source_conversion_hash_text(root, hash, work)
+                Ast::Expr.Scope(parent, member, _):
+                    return false if not proof_source_conversion_hash_scope_path(parent, hash, work, depth + 1)
+                    return false if not proof_report_source_work_charge(2, work)
+                    hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+                    hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+                    return proof_source_conversion_hash_text(member, hash, work)
+                _:
+                    return false
+
+        def proof_source_conversion_scope_key_hash(owner: sview, name: sview, work: mutable usize&) -> (complete: bool, hash: u32):
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            return (false, 0) if not proof_source_conversion_hash_text(owner, &hash, work)
+            return (false, 0) if not proof_report_source_work_charge(2, work)
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return (false, 0) if not proof_source_conversion_hash_text(name, &hash, work)
+            return (true, hash.u32())
+
+        def proof_source_conversion_scope_expression_key_hash(owner: Ast::Expr, name: sview, work: mutable usize&) -> (complete: bool, hash: u32):
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            return (false, 0) if not proof_source_conversion_hash_scope_path(owner, &hash, work, 0)
+            return (false, 0) if not proof_report_source_work_charge(2, work)
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ 58) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return (false, 0) if not proof_source_conversion_hash_text(name, &hash, work)
+            return (true, hash.u32())
+
+        def proof_source_conversion_scope_matches_owner(head: Ast::Expr, owner: sview, end: usize, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or not proof_report_source_work_charge(1, work)
+            match head:
+                Ast::Expr.Ident(root, _):
+                    return false if sview_len(root) != end or not proof_report_source_work_charge(end, work)
+                    for index in 0..<end |index, root, owner, work|:
+                        return false if sview_at(root, index) != sview_at(owner, index)
+                    return true
+                Ast::Expr.Scope(parent, member, _):
+                    length: usize = sview_len(member)
+                    return false if end < length + 2 or not proof_report_source_work_charge(length + 2, work)
+                    start: usize = end - length
+                    return false if sview_at(owner, start - 1) != 58 or sview_at(owner, start - 2) != 58
+                    for index in 0..<length |index, member, owner, start|:
+                        return false if sview_at(owner, start + index) != sview_at(member, index)
+                    return proof_source_conversion_scope_matches_owner(parent, owner, start - 2, work, depth + 1)
+                _:
+                    return false
+
+        def proof_source_conversion_scoped_index_build(names: darray[sview]&, owners: darray[sview]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            hashes.clear()
+            values.clear()
+            counts.clear()
+            name_count: usize = names.count
+            return false if owners.count != name_count
+            return true if name_count == 0
+            capacity: usize = proof_name_index_capacity(name_count)
+            return false if capacity == 0
+            return false if not proof_report_source_work_charge(capacity, source_work) or not proof_report_source_work_charge(name_count, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, name_count|:
+                values[slot] <- name_count
+                counts[slot] <- 0
+            for row in 0..<name_count |row, names, owners, hashes, values, counts, name_count, capacity, source_work|:
+                key: (complete: bool, hash: u32) = proof_source_conversion_scope_key_hash(owners[row], names[row], source_work)
+                return false if not key.complete
+                slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, key, row, names, owners, hashes, values, counts, name_count, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == name_count:
+                        hashes[slot] <- key.hash
+                        values[slot] <- row
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    if hashes[slot] == key.hash and current < name_count:
+                        owner_length: usize = sview_len(owners[current])
+                        name_length: usize = sview_len(names[current])
+                        return false if not proof_report_source_work_charge(owner_length + name_length + sview_len(owners[row]) + sview_len(names[row]), source_work)
+                        if owners[current] == owners[row] and names[current] == names[row]:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, name_count, source_work)
+            return cluster_status.complete and cluster_status.bounded
+
+        def proof_source_conversion_alias_formal_index_build(annotations: darray[Ast::EnumAnnotation]&, formals: mutable darray[Ast::EnumAnnotation]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            formals.clear()
+            hashes.clear()
+            values.clear()
+            counts.clear()
+            for annotation in annotations |formals, source_work|:
+                return false if not proof_report_source_work_charge(1 + sview_len(annotation.owner) + sview_len(annotation.name), source_work)
+                formals.push(annotation) if annotation.owner == "__alias_owner"
+            count: usize = formals.count
+            return true if count == 0
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0 or not proof_report_source_work_charge(capacity, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, count|:
+                values[slot] <- count
+                counts[slot] <- 0
+            for row in 0..<count |row, formals, hashes, values, counts, count, capacity, source_work|:
+                annotation: Ast::EnumAnnotation = formals[row]
+                return false if not proof_report_source_work_charge(1 + sview_len(annotation.name), source_work)
+                hash: u32 = proof_expr_shape_mix(proof_name_hash(annotation.name), annotation.line.i64())
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, formals, hashes, values, counts, count, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    if current < count and hashes[slot] == hash:
+                        existing: Ast::EnumAnnotation = formals[current]
+                        return false if not proof_report_source_work_charge(1 + sview_len(existing.name) + sview_len(annotation.name), source_work)
+                        if existing.line == annotation.line and existing.name == annotation.name:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, count, source_work)
+            return cluster.complete and cluster.bounded
+
+        def proof_source_conversion_alias_has_formals(name: sview, line: u32, formals: darray[Ast::EnumAnnotation]&, hashes: darray[u32]&, values: darray[usize]&, counts: darray[usize]&, source_work: mutable usize&) -> (complete: bool, found: bool):
+            count: usize = formals.count
+            return (false, false) if hashes.count != values.count or hashes.count != counts.count
+            return (true, false) if count == 0 and hashes.count == 0
+            expected_capacity: usize = proof_name_index_capacity(count)
+            return (false, false) if count == 0 or expected_capacity == 0 or hashes.count != expected_capacity
+            return (false, false) if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+            hash: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
+            slot: mutable usize = (hash.i64() % hashes.count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes.count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, name, line, formals, hashes, values, counts, count, source_work|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                current: usize = values[slot]
+                return (true, false) if current == count
+                return (false, false) if current > count
+                if hashes[slot] == hash:
+                    annotation: Ast::EnumAnnotation = formals[current]
+                    return (false, false) if not proof_report_source_work_charge(1 + sview_len(annotation.name), source_work)
+                    if annotation.line == line and annotation.name == name:
+                        return (false, false) if counts[slot] == 0
+                        return (true, true)
+                slot <- (slot + 1) % hashes.count
+                probes <- probes + 1
+            return (false, false)
+
+        def proof_source_conversion_owner_rows_collect(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, formals: darray[Ast::EnumAnnotation]&, formal_hashes: darray[u32]&, formal_values: darray[usize]&, formal_counts: darray[usize]&, alias_lines: mutable darray[u32]&, alias_owners: mutable darray[sview]&, alias_has_formals: mutable darray[bool]&, declared_type_owners: mutable darray[sview]&, owner: sview, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            for declaration in declarations |annotations, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_owners, alias_has_formals, declared_type_owners, owner, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(owner), source_work)
+                        declared_type_owners.push(owner)
+                    Ast::Decl.Alias(alias_name, _, position):
+                        return false if not proof_report_source_work_charge(sview_len(owner), source_work)
+                        has_formals: (complete: bool, found: bool) = proof_source_conversion_alias_has_formals(alias_name, position.line, formals, formal_hashes, formal_values, formal_counts, source_work)
+                        return false if not has_formals.complete
+                        alias_lines.push(position.line)
+                        alias_owners.push(owner)
+                        alias_has_formals.push(has_formals.found)
+                    Ast::Decl.Module(module_name, body, _):
+                        return false if not proof_report_source_work_charge(sview_len(module_name), source_work)
+                        return false if not proof_source_conversion_owner_rows_collect(body, annotations, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_owners, alias_has_formals, declared_type_owners, module_name, source_work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_conversion_owner_rows_collect(body, annotations, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_owners, alias_has_formals, declared_type_owners, owner, source_work, depth + 1)
+                    _:
+                        pass
+            if depth == 0:
+                # The drop/type collector appends extern-resource type names after all AST
+                # declarations. They have no declaration path in the source tree, so retain
+                # their existing root-level name semantics in the parallel owner table.
+                for annotation in annotations |declared_type_owners, source_work|:
+                    return false if not proof_report_source_work_charge(1 + sview_len(annotation.name), source_work)
+                    if annotation.name == "__extern_resource":
+                        return false if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
+                        declared_type_owners.push("")
+            return true
+
+        def proof_source_conversion_root_alias_visibility_scan(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_work: mutable usize&, depth: usize) -> (complete: bool, safe: bool):
+            return (false, false) if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            safe: mutable bool = true
+            for declaration in declarations |annotations, source_work, depth, safe|:
+                return (false, false) if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Import(_, _):
+                        safe <- false
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        nested: (complete: bool, safe: bool) = proof_source_conversion_root_alias_visibility_scan(body, annotations, source_work, depth + 1)
+                        return (false, false) if not nested.complete
+                        safe <- false if not nested.safe
+                    _:
+                        pass
+            if depth == 0:
+                for annotation in annotations |source_work, safe|:
+                    return (false, false) if not proof_report_source_work_charge(1 + sview_len(annotation.owner) + sview_len(annotation.name), source_work)
+                    safe <- false if annotation.owner == "__from_src" or annotation.owner == "__from_member" or annotation.name == "__using" or annotation.name == "__using_member" or annotation.name == "__using_alias" or annotation.name == "__using_alias_target"
+            return (true, safe)
+
+        # Resource marker classification asks whether a source type name is a unique alias,
+        # nominal type, or ambiguous declaration. Flatten that exact AST view once so repeated
+        # marker queries use the bounded hash index rather than rescanning all declarations.
+        def proof_source_conversion_marker_type_rows_collect(declarations: darray[Ast::Decl]&, names: mutable darray[sview]&, targets: mutable darray[Ast::Expr]&, is_alias: mutable darray[bool]&, nested_scope: mutable darray[bool]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
+            for declaration in declarations |names, targets, is_alias, nested_scope, source_work, depth|:
+                return false if not proof_report_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Alias(name, target, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        names.push(name)
+                        targets.push(target)
+                        is_alias.push(true)
+                        nested_scope.push(depth > 0)
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                        names.push(name)
+                        targets.push(Ast::Expr.Absent)
+                        is_alias.push(false)
+                        nested_scope.push(depth > 0)
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return false if not proof_source_conversion_marker_type_rows_collect(body, names, targets, is_alias, nested_scope, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            return true
+
+        def proof_source_conversion_indexes_build(report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: mutable ProofSourceEffectIndex& = &report.source_effect_index
+            return false if not proof_source_conversion_generic_indexes_build(report, source_work)
+            index.resource_marker_type_index_valid <- false
+            index.resource_marker_type_names.clear()
+            index.resource_marker_type_targets.clear()
+            index.resource_marker_type_is_alias.clear()
+            index.resource_marker_type_nested_scope.clear()
+            index.resource_marker_type_index_hashes.clear()
+            index.resource_marker_type_index_values.clear()
+            index.resource_marker_type_index_counts.clear()
+            marker_rows_complete: bool = proof_source_conversion_marker_type_rows_collect(report.source_declarations, &index.resource_marker_type_names, &index.resource_marker_type_targets, &index.resource_marker_type_is_alias, &index.resource_marker_type_nested_scope, source_work, 0)
+            if marker_rows_complete:
+                return false if index.resource_marker_type_names.count != index.resource_marker_type_targets.count or index.resource_marker_type_names.count != index.resource_marker_type_is_alias.count or index.resource_marker_type_names.count != index.resource_marker_type_nested_scope.count
+                return false if not proof_source_conversion_name_index_build(index.resource_marker_type_names, &index.resource_marker_type_index_hashes, &index.resource_marker_type_index_values, &index.resource_marker_type_index_counts, source_work)
+                index.resource_marker_type_index_valid <- true
+            else:
+                # A malformed or excessively nested AST only disables this classifier. Do not
+                # let an unused marker index poison unrelated source-effect facts.
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            alias_index_reusable: bool = index.alias_index_valid
+            index.alias_index_valid <- false
+            index.alias_scope_index_valid <- false
+            index.declared_type_index_valid <- false
+            index.declared_type_scope_index_valid <- false
+            index.alias_has_formals.clear()
+            return false if index.alias_names.count != index.alias_targets.count
+            index.alias_lines.clear()
+            index.alias_owners.clear()
+            index.declared_type_owners.clear()
+            alias_formals: mutable darray[Ast::EnumAnnotation] = []
+            formal_hashes: mutable darray[u32] = []
+            formal_values: mutable darray[usize] = []
+            formal_counts: mutable darray[usize] = []
+            return false if not proof_source_conversion_alias_formal_index_build(report.source_annotations, &alias_formals, &formal_hashes, &formal_values, &formal_counts, source_work)
+            return false if not proof_source_conversion_owner_rows_collect(report.source_declarations, report.source_annotations, alias_formals, formal_hashes, formal_values, formal_counts, &index.alias_lines, &index.alias_owners, &index.alias_has_formals, &index.declared_type_owners, "", source_work, 0)
+            return false if index.alias_lines.count != index.alias_names.count or index.alias_owners.count != index.alias_names.count or index.alias_has_formals.count != index.alias_names.count or index.declared_type_owners.count != index.declared_types.count
+            if alias_index_reusable:
+                alias_capacity: usize = proof_name_index_capacity(index.alias_names.count)
+                return false if (index.alias_names.count > 0 and alias_capacity == 0) or index.alias_index_hashes.count != alias_capacity or index.alias_index_values.count != alias_capacity or index.alias_index_counts.count != alias_capacity
+            else:
+                return false if not proof_source_conversion_name_index_build(index.alias_names, &index.alias_index_hashes, &index.alias_index_values, &index.alias_index_counts, source_work)
+            return false if not proof_source_conversion_name_index_build(index.declared_types, &index.declared_type_index_hashes, &index.declared_type_index_values, &index.declared_type_index_counts, source_work)
+            return false if not proof_source_conversion_scoped_index_build(index.alias_names, index.alias_owners, &index.alias_scope_index_hashes, &index.alias_scope_index_values, &index.alias_scope_index_counts, source_work)
+            return false if not proof_source_conversion_scoped_index_build(index.declared_types, index.declared_type_owners, &index.declared_type_scope_index_hashes, &index.declared_type_scope_index_values, &index.declared_type_scope_index_counts, source_work)
+            index.alias_index_valid <- true
+            index.alias_scope_index_valid <- true
+            index.declared_type_index_valid <- true
+            index.declared_type_scope_index_valid <- true
+            return true
+
+        def proof_source_conversion_generic_line_lookup(name: sview, declaration_line: u32, report: mutable ProofReport&) -> (complete: bool, count: usize):
+            index: ProofSourceEffectIndex& = report.source_effect_index
+            count: usize = report.source_generic_param_lines.count
+            return (false, 0) if not report.source_generic_params_valid or count != report.source_generic_param_names.count
+            hashes_count: usize = index.generic_param_line_index_hashes.count
+            return (false, 0) if hashes_count != index.generic_param_line_index_values.count or hashes_count != index.generic_param_line_index_counts.count
+            return (true, 0) if count == 0 and hashes_count == 0
+            expected_capacity: usize = proof_name_index_capacity(count)
+            return (false, 0) if count == 0 or expected_capacity == 0 or hashes_count != expected_capacity or not index.generic_param_line_index_valid
+            return (false, 0) if not proof_source_index_work_charge(report, 1 + sview_len(name))
+            wanted_hash: u32 = proof_expr_shape_mix(proof_name_hash(name), declaration_line.i64())
+            slot: mutable usize = (wanted_hash.i64() % hashes_count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes_count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, declaration_line, report, index, count, hashes_count|:
+                return (false, 0) if not proof_source_index_work_charge(report, 1)
+                current: usize = index.generic_param_line_index_values[slot]
+                return (true, 0) if current == count
+                return (false, 0) if current > count
+                if index.generic_param_line_index_hashes[slot] == wanted_hash:
+                    current_name: sview = report.source_generic_param_names[current]
+                    return (false, 0) if not proof_source_index_work_charge(report, 1 + sview_len(current_name))
+                    if report.source_generic_param_lines[current] == declaration_line and current_name == name:
+                        return (false, 0) if index.generic_param_line_index_counts[slot] == 0
+                        return (true, index.generic_param_line_index_counts[slot])
+                slot <- (slot + 1) % hashes_count
+                probes <- probes + 1
+            return (false, 0)
+
+        def proof_source_conversion_generic_name(name: sview, declaration_line: u32, report: mutable ProofReport&) -> (complete: bool, count: usize):
+            index: ProofSourceEffectIndex& = report.source_effect_index
+            return (false, 0) if not report.source_generic_params_valid or report.source_generic_param_lines.count != report.source_generic_param_names.count
+            if declaration_line != 0:
+                return proof_source_conversion_generic_line_lookup(name, declaration_line, report)
+            # Callers without a declaration owner use a conservative file-wide binder check.
+            # The global name index excludes encoded generic-bound rows. A precomputed flag
+            # records whether any such row makes an ownerless query ambiguous, avoiding a full
+            # side-table scan on every alias expansion.
+            return (false, 0) if index.generic_param_encoded_line_present
+            lookup: (complete: bool, count: usize, row: usize) = proof_source_conversion_name_lookup(name, index.generic_param_names, index.generic_param_index_hashes, index.generic_param_index_values, index.generic_param_index_counts, index.generic_param_index_valid, report)
+            return (lookup.complete, lookup.count)
+
+        def proof_source_conversion_scope_root_name(head: Ast::Expr, report: mutable ProofReport&, depth: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT or not proof_source_index_work_charge(report, 1)
+            match head:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if not proof_source_index_work_charge(report, sview_len(name))
+                    return (true, name)
+                Ast::Expr.Scope(parent, _, _):
+                    return proof_source_conversion_scope_root_name(parent, report, depth + 1)
+                _:
+                    return (true, "")
+
+        def proof_source_conversion_name_lookup(name: sview, names: darray[sview]&, hashes: darray[u32]&, values: darray[usize]&, counts: darray[usize]&, valid: bool, report: mutable ProofReport&) -> (complete: bool, count: usize, row: usize):
+            name_count: usize = names.count
+            return (false, 2, name_count) if not valid
+            return (false, 2, name_count) if hashes.count != values.count or hashes.count != counts.count
+            return (true, 0, name_count) if name_count == 0 and hashes.count == 0
+            expected_capacity: usize = proof_name_index_capacity(name_count)
+            return (false, 2, name_count) if name_count == 0 or expected_capacity == 0 or hashes.count != expected_capacity
+            return (false, 2, name_count) if not proof_source_index_work_charge(report, sview_len(name))
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % hashes.count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes.count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, names, hashes, values, counts, name_count, report|:
+                return (false, 2, name_count) if not proof_source_index_work_charge(report, 1)
+                current: usize = values[slot]
+                return (true, 0, name_count) if current == name_count
+                return (false, 2, name_count) if current > name_count
+                if hashes[slot] == wanted_hash:
+                    current_name: sview = names[current]
+                    return (false, 2, name_count) if not proof_source_index_work_charge(report, sview_len(current_name))
+                    if current_name == name:
+                        return (false, 2, name_count) if counts[slot] == 0
+                        return (true, counts[slot], current)
+                slot <- (slot + 1) % hashes.count
+                probes <- probes + 1
+            return (false, 2, name_count)
+
+        def proof_source_conversion_name_lookup_work(name: sview, names: darray[sview]&, hashes: darray[u32]&, values: darray[usize]&, counts: darray[usize]&, source_work: mutable usize&) -> (complete: bool, count: usize, row: usize):
+            name_count: usize = names.count
+            return (false, 2, name_count) if hashes.count != values.count or hashes.count != counts.count
+            return (true, 0, name_count) if name_count == 0 and hashes.count == 0
+            expected_capacity: usize = proof_name_index_capacity(name_count)
+            return (false, 2, name_count) if name_count == 0 or expected_capacity == 0 or hashes.count != expected_capacity
+            return (false, 2, name_count) if not proof_report_source_work_charge(sview_len(name), source_work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % hashes.count.i64()).usize()
+            probes: mutable usize = 0
+            while probes < hashes.count and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, names, hashes, values, counts, name_count, source_work|:
+                return (false, 2, name_count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = values[slot]
+                return (true, 0, name_count) if current == name_count
+                return (false, 2, name_count) if current > name_count
+                if hashes[slot] == wanted_hash:
+                    current_name: sview = names[current]
+                    return (false, 2, name_count) if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                    if current_name == name:
+                        return (false, 2, name_count) if counts[slot] == 0
+                        return (true, counts[slot], current)
+                slot <- (slot + 1) % hashes.count
+                probes <- probes + 1
+            return (false, 2, name_count)

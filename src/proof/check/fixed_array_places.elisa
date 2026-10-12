@@ -15,17 +15,6 @@ extend ElisaProof:
         def proof_fixed_array_primitive_head(head: sview) -> bool:
             return head == "i8" or head == "i16" or head == "i32" or head == "i64" or head == "int" or head == "isize" or head == "u8" or head == "u16" or head == "u32" or head == "u64" or head == "usize" or head == "uintptr" or head == "f32" or head == "f64" or head == "bool" or head == "char"
 
-        # A uniquely declared record is also a concrete fixed-array element.
-        # Alias collisions and ambiguous record names never grant this shape.
-        def proof_fixed_array_source_head(expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> bool:
-            head: sview = proof_ident_name(expression)
-            return true if proof_fixed_array_primitive_head(head)
-            return false if head == ""
-            aliases: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, head, 0)
-            return false if aliases.count != 0
-            members: mutable darray[Ast::StructMember] = []
-            return proof_struct_members(declarations, head, 0, &members) == 1
-
         # Metered twin used while projecting source types into the proof kernel. The ordinary
         # checker helper above remains available to its existing per-function callers; this
         # variant counts every declaration and every spelling comparison before deciding that a
@@ -75,6 +64,204 @@ extend ElisaProof:
             return false if not proof_fixed_array_source_shape_counts(declarations, head, source_work, &alias_count, &struct_count, 0)
             return alias_count == 0 and struct_count == 1
 
+        def proof_fixed_array_alias_target_with_work(declarations: darray[Ast::Decl]&, wanted: sview, count: mutable usize&, target: mutable Ast::Expr&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |wanted, count, target, source_work, depth|:
+                return false if not proof_fixed_array_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Alias(name, value, _):
+                        return false if not proof_fixed_array_source_work_charge(sview_len(wanted), source_work)
+                        return false if not proof_fixed_array_source_work_charge(sview_len(name), source_work)
+                        if name == wanted:
+                            count <- count + 1
+                            target <- value
+                            return true if count > 1
+                    Ast::Decl.Module(_, body, _):
+                        return false if not proof_fixed_array_alias_target_with_work(body, wanted, count, target, source_work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_fixed_array_alias_target_with_work(body, wanted, count, target, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        # The collector's type-head resolver mirrors proof_type_head_name while charging each
+        # alias census. This avoids an unmetered whole-source scan before the field walk begins.
+        def proof_fixed_array_type_head_name_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return "" if not proof_fixed_array_source_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    for comparison in 0..<14 |comparison, name, source_work|:
+                        return "" if not proof_fixed_array_source_work_charge(sview_len(name), source_work)
+                    return "" if proof_scalar_primitive_type_name(name)
+                    aliases: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Invalid
+                    return "" if not proof_fixed_array_alias_target_with_work(declarations, name, &aliases, &target, source_work, 0)
+                    return "" if aliases > 1
+                    return proof_fixed_array_type_head_name_with_work(target, declarations, source_work, depth + 1) if aliases == 1
+                    return name
+                Ast::Expr.Scope(_, name, _):
+                    for comparison in 0..<14 |comparison, name, source_work|:
+                        return "" if not proof_fixed_array_source_work_charge(sview_len(name), source_work)
+                    return "" if proof_scalar_primitive_type_name(name)
+                    aliases: mutable usize = 0
+                    target: mutable Ast::Expr = Ast::Expr.Invalid
+                    return "" if not proof_fixed_array_alias_target_with_work(declarations, name, &aliases, &target, source_work, 0)
+                    # The AST retains the qualified spelling, but this declaration snapshot has
+                    # no owner for a leaf-only alias result. A same-named alias in another module
+                    # must not rewrite this type; keep qualified aliases opaque until ownership is
+                    # available, while a globally unique struct leaf can still be checked below.
+                    return "" if aliases > 0
+                    return name
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_fixed_array_type_head_name_with_work(inner, declarations, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_fixed_array_type_head_name_with_work(inner, declarations, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                _:
+                    pass
+            return ""
+
+        def proof_fixed_array_shape_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, extents: mutable darray[i64]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT
+            return false if not proof_fixed_array_source_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_fixed_array_shape_with_work(operand, declarations, extents, source_work, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_fixed_array_shape_with_work(inner, declarations, extents, source_work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    head: sview = proof_head_name(object)
+                    return false if not proof_fixed_array_source_work_charge(sview_len(head), source_work)
+                    return false if head != "array" or arguments.count != 2
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(arguments[1], declarations, source_work, 0)
+                    return false if not extent.known
+                    extents.push(extent.value)
+                    nested: mutable darray[i64] = []
+                    nested_is_shape: bool = proof_fixed_array_shape_with_work(arguments[0], declarations, &nested, source_work, depth + 1)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    extents.extend(nested) if nested_is_shape
+                    return true
+                Ast::Expr.Index(object, extent_expression, _):
+                    return false if not proof_fixed_array_source_head_with_work(object, declarations, source_work)
+                    extent: (known: bool, value: i64) = proof_fixed_extent_constant_with_work(extent_expression, declarations, source_work, 0)
+                    return false if not extent.known
+                    extents.push(extent.value)
+                    return true
+                _:
+                    return false
+
+        def proof_collect_fixed_extent_names_with_work(expression: Ast::Expr, names: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT
+            return false if not proof_fixed_array_source_work_charge(1, source_work)
+            extent: mutable Ast::Expr = Ast::Expr.Invalid
+            match expression:
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_collect_fixed_extent_names_with_work(operand, names, source_work, depth + 1)
+                Ast::Expr.Paren(inner, _):
+                    return proof_collect_fixed_extent_names_with_work(inner, names, source_work, depth + 1)
+                Ast::Expr.IndexN(_, arguments, _):
+                    if arguments.count == 2:
+                        return false if not proof_collect_fixed_extent_names_with_work(arguments[0], names, source_work, depth + 1)
+                        extent <- arguments[1]
+                Ast::Expr.Index(_, extent_expression, _):
+                    extent <- extent_expression
+                _:
+                    pass
+            match extent:
+                Ast::Expr.Scope(_, constant_name, _):
+                    found: mutable bool = false
+                    for existing in names |existing, constant_name, source_work, found|:
+                        return false if not proof_fixed_array_source_work_charge(1, source_work)
+                        return false if not proof_fixed_array_source_work_charge(sview_len(existing), source_work)
+                        return false if not proof_fixed_array_source_work_charge(sview_len(constant_name), source_work)
+                        found <- true if existing == constant_name
+                    names.push(constant_name) if not found
+                _:
+                    pass
+            return true
+
+        # Collect one uniquely named struct's members under the same meter as type resolution.
+        # Returning `complete = false` or a declaration count other than one admits no fields.
+        def proof_fixed_array_struct_members_with_work(declarations: darray[Ast::Decl]&, struct_name: sview, members: mutable darray[Ast::StructMember]&, source_work: mutable usize&, depth: usize) -> (complete: bool, count: usize):
+            return (false, 2) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |struct_name, members, source_work, depth, count|:
+                return (false, 2) if not proof_fixed_array_source_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Struct(name, struct_members, _, _, _, _, _):
+                        return (false, 2) if not proof_fixed_array_source_work_charge(sview_len(name), source_work)
+                        return (false, 2) if not proof_fixed_array_source_work_charge(sview_len(struct_name), source_work)
+                        if name == struct_name:
+                            count <- count + 1
+                            return (true, 2) if count > 1
+                            for member in struct_members |members, source_work|:
+                                return (false, 2) if not proof_fixed_array_source_work_charge(1, source_work)
+                                return (false, 2) if not proof_fixed_array_source_work_charge(sview_len(member.name), source_work)
+                                members.push(member)
+                    Ast::Decl.Module(_, body, _):
+                        nested: (complete: bool, count: usize) = proof_fixed_array_struct_members_with_work(body, struct_name, members, source_work, depth + 1)
+                        return (false, 2) if not nested.complete
+                        count <- count + nested.count
+                        return (true, 2) if count > 1
+                    Ast::Decl.Scoped(body, _):
+                        nested: (complete: bool, count: usize) = proof_fixed_array_struct_members_with_work(body, struct_name, members, source_work, depth + 1)
+                        return (false, 2) if not nested.complete
+                        count <- count + nested.count
+                        return (true, 2) if count > 1
+                    _:
+                        pass
+            return (true, count)
+
+        # A reverse, metered open-addressed pass marks the last occurrence of each field name.
+        # The prior field-type helper also selected the last repeated name; retaining only that
+        # row preserves its meaning while avoiding one linear member scan per declaration.
+        def proof_fixed_array_latest_members_with_work(members: darray[Ast::StructMember]&, latest: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            latest.clear()
+            member_count: usize = members.count
+            if member_count == 0:
+                return true
+            capacity: usize = proof_name_index_capacity(member_count)
+            return false if capacity == 0
+            return false if not proof_fixed_array_source_work_charge(capacity * 3, source_work)
+            return false if not proof_fixed_array_source_work_charge(member_count * 2, source_work)
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            hashes.resize(capacity)
+            values.resize(capacity)
+            latest.resize(member_count)
+            for row in 0..<member_count |row, latest|:
+                latest[row] <- false
+            for slot in 0..<capacity |slot, values, member_count|:
+                values[slot] <- member_count
+            row: mutable usize = member_count
+            while row > 0 |row, members, latest, hashes, values, capacity, member_count, source_work|:
+                row <- row - 1
+                name: sview = members[row].name
+                return false if not proof_fixed_array_source_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, name, members, latest, hashes, values, capacity, member_count, source_work, placed|:
+                    return false if not proof_fixed_array_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == member_count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        latest[row] <- true
+                        placed <- true
+                        break
+                    if hashes[slot] == hash:
+                        current_name: sview = members[current].name
+                        return false if not proof_fixed_array_source_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            return true
+
         def proof_fixed_extent_integer_type(expression: Ast::Expr) -> bool:
             match expression:
                 Ast::Expr.Absent:
@@ -83,57 +270,6 @@ extend ElisaProof:
                     return name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "int" or name == "isize" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize"
                 _:
                     return false
-
-        # Count every constant `constant_name` declared directly in a module named
-        # `module_name`, anywhere in the file, and keep the value of the last one when it is an
-        # immutable integer constant with a non-negative literal initializer (else -1). Nested
-        # modules, static-if branches and impl bodies are all searched, so two candidates for
-        # one spelling leave the extent unresolved instead of choosing one.
-        def proof_fixed_extent_find_constant(declarations: darray[Ast::Decl]&, module_name: sview, constant_name: sview, inside: bool, matches: mutable usize&, value: mutable i64&, depth: usize) -> void:
-            if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT:
-                matches <- matches + 2
-                return
-            for declaration in declarations |module_name, constant_name, inside, matches, value, depth|:
-                match declaration:
-                    Ast::Decl.Const(name, type_expression, initializer, is_mutable, _):
-                        if inside and name == constant_name:
-                            matches <- matches + 1
-                            value <- -1
-                            if not is_mutable and proof_fixed_extent_integer_type(type_expression):
-                                match initializer:
-                                    Ast::Expr.IntLit(literal, _):
-                                        value <- literal if literal >= 0
-                                    _:
-                                        pass
-                    Ast::Decl.Module(name, body, _):
-                        proof_fixed_extent_find_constant(body, module_name, constant_name, proof_qualified_segment_matches(name, module_name), matches, value, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        proof_fixed_extent_find_constant(body, module_name, constant_name, inside, matches, value, depth + 1)
-                    _:
-                        pass
-
-        # An extent is a literal, or a qualified `Module::NAME` that names exactly one immutable
-        # integer constant with a non-negative literal value. A bare identifier stays unresolved:
-        # it may be a generic parameter, which lives only in the parser's side tables.
-        def proof_fixed_extent_constant(expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> (known: bool, value: i64):
-            match expression:
-                Ast::Expr.IntLit(literal, _):
-                    return (true, literal) if literal >= 0
-                    return (false, 0)
-                Ast::Expr.Paren(inner, _):
-                    return proof_fixed_extent_constant(inner, declarations)
-                Ast::Expr.Scope(base, constant_name, _):
-                    module_name: sview = proof_head_name(base)
-                    return (false, 0) if module_name == ""
-                    matches: mutable usize = 0
-                    value: mutable i64 = -1
-                    proof_fixed_extent_find_constant(declarations, module_name, constant_name, false, &matches, &value, 0)
-                    return (true, value) if matches == 1 and value >= 0
-                    return (false, 0)
-                _:
-                    literal: (known: bool, value: i64) = proof_constant_int(expression)
-                    return literal if literal.known and literal.value >= 0
-                    return (false, 0)
 
         def proof_fixed_extent_find_constant_with_work(declarations: darray[Ast::Decl]&, module_name: sview, constant_name: sview, inside: bool, matches: mutable usize&, value: mutable i64&, source_work: mutable usize&, depth: usize) -> bool:
             if depth >= PROOF_FIXED_EXTENT_SEARCH_DEPTH_LIMIT:
@@ -276,9 +412,9 @@ extend ElisaProof:
                     pass
 
         # The outermost extent of a declared fixed-array type, or -1 for any other type.
-        def proof_local_fixed_extent(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&) -> i64:
+        def proof_local_fixed_extent_with_work(type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> i64:
             shape: mutable darray[i64] = []
-            return -1 if not proof_fixed_array_shape(type_expression, declarations, &shape) or shape.count == 0
+            return -1 if not proof_fixed_array_shape_with_work(type_expression, declarations, &shape, source_work, 0) or shape.count == 0
             shape[0]
 
         # A place spelled by an index object matches a collected place when both are the same
@@ -298,27 +434,44 @@ extend ElisaProof:
                 _:
                     return false
 
-        # Collect the fixed-array places rooted at `root`: the root itself when its declared
-        # type is a fixed array (one entry per dimension, outermost first), otherwise each field
-        # of a uniquely declared struct, recursively to a fixed depth. Every visited place costs
-        # one unit of the per-function budget, so a wide or deep record ends the walk early.
-        def proof_collect_fixed_array_places(root: Ast::Expr, type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, places: mutable darray[Ast::Expr]&, extents: mutable darray[i64]&, constant_names: mutable darray[sview]&, depth: usize, budget: mutable usize&) -> void:
+        # Collect fixed-array places under two independent limits: `budget` caps emitted places,
+        # while `source_work` charges every source/declaration/member scan used to derive them.
+        def proof_collect_fixed_array_places_with_work(root: Ast::Expr, type_expression: Ast::Expr, declarations: darray[Ast::Decl]&, places: mutable darray[Ast::Expr]&, extents: mutable darray[i64]&, constant_names: mutable darray[sview]&, depth: usize, budget: mutable usize&, source_work: mutable usize&) -> void:
             return if depth >= PROOF_FIXED_PLACE_DEPTH_LIMIT or budget == 0
+            return if not proof_fixed_array_source_work_charge(1, source_work)
             budget <- budget - 1
             shape: mutable darray[i64] = []
-            if proof_fixed_array_shape(type_expression, declarations, &shape):
+            if proof_fixed_array_shape_with_work(type_expression, declarations, &shape, source_work, 0):
+                new_names: mutable darray[sview] = []
+                return if not proof_collect_fixed_extent_names_with_work(type_expression, &new_names, source_work, 0)
+                return if shape.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+                return if not proof_fixed_array_source_work_charge(shape.count * 2, source_work)
+                for new_name in new_names |new_name, constant_names, source_work|:
+                    found: mutable bool = false
+                    for existing in constant_names |existing, new_name, source_work, found|:
+                        return if not proof_fixed_array_source_work_charge(1, source_work)
+                        return if not proof_fixed_array_source_work_charge(sview_len(existing), source_work)
+                        return if not proof_fixed_array_source_work_charge(sview_len(new_name), source_work)
+                        found <- true if existing == new_name
+                    constant_names.push(new_name) if not found
                 for extent in shape |places, extents, root|:
                     places.push(root)
                     extents.push(extent)
-                proof_collect_fixed_extent_names(type_expression, constant_names, 0)
                 return
-            struct_name: sview = proof_type_head_name(type_expression, declarations, 0)
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            struct_name: sview = proof_fixed_array_type_head_name_with_work(type_expression, declarations, source_work, 0)
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return if struct_name == ""
-            field_names: mutable darray[sview] = []
-            return if proof_struct_field_names(declarations, struct_name, 0, &field_names) != 1
+            members: mutable darray[Ast::StructMember] = []
+            member_scan: (complete: bool, count: usize) = proof_fixed_array_struct_members_with_work(declarations, struct_name, &members, source_work, 0)
+            return if not member_scan.complete or member_scan.count != 1
+            latest: mutable darray[bool] = []
+            return if not proof_fixed_array_latest_members_with_work(members, &latest, source_work)
             position: Ast::Pos = Ast::expr_pos(root)
-            for field_name in field_names |root, declarations, places, extents, constant_names, depth, budget, struct_name, position|:
+            for index in 0..<members.count |index, root, declarations, places, extents, constant_names, depth, budget, source_work, members, latest, position|:
                 return if budget == 0
-                field: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, struct_name, field_name, 0)
-                continue if field.count != 1
-                proof_collect_fixed_array_places(Ast::Expr.Field(root, field_name, position), field.type_expression, declarations, places, extents, constant_names, depth + 1, budget)
+                return if not proof_fixed_array_source_work_charge(1, source_work)
+                continue if index >= latest.count or not latest[index]
+                field: Ast::StructMember = members[index]
+                return if not proof_fixed_array_source_work_charge(sview_len(field.name), source_work)
+                proof_collect_fixed_array_places_with_work(Ast::Expr.Field(root, field.name, position), field.type_expression, declarations, places, extents, constant_names, depth + 1, budget, source_work)

@@ -177,6 +177,28 @@ def scalar_shorthand_marker(package, theorem, member):
     return found[0]
 
 
+def scalar_field_marker(package, theorem, enum_name, member):
+    nodes = package["kernel"]["nodes"]
+    children = package["kernel"]["children"]
+    found = []
+    for hypothesis in theorem["hypotheses"]:
+        call = nodes[hypothesis]
+        if call["kind"] != "call" or nodes[call["left"]]["name"] != "__elisa_primitive_scalar_type":
+            continue
+        arguments = [children[index] for index in
+                     range(call["children_start"], call["children_start"] + call["children_count"])]
+        if len(arguments) != 1 or nodes[arguments[0]]["kind"] != "call_arg":
+            continue
+        term = nodes[arguments[0]]["left"]
+        if nodes[term]["kind"] != "field" or nodes[term]["name"] != member:
+            continue
+        enum_type = nodes[nodes[term]["left"]]
+        if enum_type["kind"] == "ident" and enum_type["name"] == enum_name:
+            found.append((hypothesis, term))
+    assert len(found) == 1, (theorem["name"], enum_name, member, found)
+    return found[0]
+
+
 def transplant_scalar_marker(donor, marker, recipient):
     """Copy a one-argument shorthand scalar marker into another package's graph."""
     source_nodes = donor["kernel"]["nodes"]
@@ -268,6 +290,30 @@ def shorthand_congruence(left: CongruenceOption, right: CongruenceOption) -> boo
     scalar_shorthand_marker(congruence_package, congruence_claim, "None")
     package_replay(congruence_package, scratch, "shorthand-congruence-package")
     print("positive: unique const-enum shorthand congruence replayed")
+
+    # Qualified enum fields have their own source-bound scalar witness form. Exercise
+    # independent report replay with a nontrivial symmetry proof that consumes that form.
+    field_source = scratch / "qualified-field-symmetry.elisa"
+    field_source.write_text("""const enum QualifiedFieldOption of i64:
+    None = 0
+    Some = 1
+
+def qualified_field_symmetry(option: QualifiedFieldOption) -> bool:
+    requires option == QualifiedFieldOption.None
+    ensure QualifiedFieldOption.None == option
+    return true
+""")
+    field_report_run, field_report = run_json([str(PROOF), "--json", str(field_source)])
+    assert field_report_run.returncode == 0 and field_report["status"] == "proved", field_report
+    assert field_report["replay"]["gaps"] == 0 and field_report["replay"]["certificates"] == field_report["replay"]["replayed"]
+    assert any(goal["name"] == "qualified_field_symmetry" and goal["proven"]
+               and goal["replay_status"] == "replayed" for goal in field_report["goals"])
+    _, field_package = run_json([str(PROOF), "--package", str(field_source)])
+    field_claim = next(theorem for theorem in field_package["theorems"]
+                       if theorem["name"] == "qualified_field_symmetry" and theorem["rule"] == "goal")
+    scalar_field_marker(field_package, field_claim, "QualifiedFieldOption", "None")
+    package_replay(field_package, scratch, "qualified-field-symmetry-package")
+    print("positive: qualified const-enum field scalar witness replayed")
 
     # Isolate the owner-bound claims as portable positive controls. Later paired
     # marker mutations preserve the claim and report replay's actual verdict without

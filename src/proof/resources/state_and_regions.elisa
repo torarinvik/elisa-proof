@@ -20,6 +20,7 @@ extend ElisaProof:
 
         struct ProofResourceState:
             function_name: mutable sview
+            generic_declaration_line: mutable u32
             formal_count: mutable usize
             # Formal types stay fixed through branch snapshots, avoiding repeated source scans.
             formal_parameter_types: mutable darray[Ast::Expr]
@@ -90,7 +91,7 @@ extend ElisaProof:
             trace_events: mutable darray[usize]
 
         def proof_resource_empty() -> ProofResourceState:
-            return ProofResourceState{function_name: "", formal_count: 0, formal_parameter_types: [], expression_depth: 0, binding_names: [], inferred_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_destroyed: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], static_scope: [], static_names: [], static_root_names: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
+            return ProofResourceState{function_name: "", generic_declaration_line: 0, formal_count: 0, formal_parameter_types: [], expression_depth: 0, binding_names: [], inferred_names: [], binding_reference: [], binding_mutable_reference: [], binding_writable: [], binding_moved: [], binding_region: [], binding_region_live: [], binding_region_destroyed: [], binding_region_owner: [], binding_scalar: [], binding_borrowable: [], binding_extent: [], active_regions: [], static_scope: [], static_names: [], static_root_names: [], protected_regions: [], external_regions: [], region_wide_borrows: [], borrow_target_slots: [], borrow_target_places: [], borrow_mutable: [], borrow_present: [], facts: [], trace_events: []}
 
         def proof_resource_kernel_capacity(report: mutable ProofReport&, node_count: usize, child_count: usize, name: sview) -> bool:
             return false if report.kernel.budget_exhausted
@@ -256,9 +257,10 @@ extend ElisaProof:
                 proof_resource_record_event(state, report, "resource-region-close", "", 0, region, "", PROOF_RESOURCE_EXPLICIT_REGION_DESTROY)
 
         def proof_resource_add_region_allocation[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, operand: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview) -> void:
-            is_reference: bool = proof_resource_is_reference_type(type_expression)
-            is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
-            writable: bool = is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
+            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
+            is_reference: bool = marker_summary.reference
+            is_mutable_reference: bool = marker_summary.mutable_reference
+            writable: bool = is_mutable_reference or marker_summary.mutable
             encoded_value: (known: bool, root: usize) = proof_resource_encode_value(operand, state, report)
             encoded: usize = encoded_value.root
             operand_has_region: bool = proof_resource_expr_contains_region_value(operand, state)
@@ -339,11 +341,12 @@ extend ElisaProof:
                 proof_resource_record_event(state, report, "resource-region-rebind-alloc", "", encoded, target_name, region, 0)
 
         def proof_resource_add_region_binding[@s, @r](state: mutable ProofResourceState& @s, report: mutable ProofReport& @r, name: sview, type_expression: Ast::Expr, source: Ast::Expr, region: sview, position: Ast::Pos, function_name: sview, functions: ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
-            is_reference: bool = proof_resource_is_reference_type(type_expression)
-            is_mutable_reference: bool = is_reference and proof_resource_is_mutable_reference_type(type_expression)
+            marker_summary: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, state.generic_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
+            is_reference: bool = marker_summary.reference
+            is_mutable_reference: bool = marker_summary.mutable_reference
             sview_conversion: (known: bool, receiver: Ast::Expr) = proof_resource_builtin_sview_conversion(source, functions)
-            is_borrowed_sview: bool = proof_resource_type_may_contain_sview(type_expression, functions.type_indexes.type_audit_index) or sview_conversion.known
-            writable: bool = is_mutable_reference or proof_resource_type_has_marker(type_expression, TokenKind.Mutable)
+            is_borrowed_sview: bool = proof_resource_type_may_contain_sview(type_expression, functions.type_indexes.type_audit_index, &report.source_effect_index.implicit_effect_work) or sview_conversion.known
+            writable: bool = is_mutable_reference or marker_summary.mutable
             source_place_expression: mutable Ast::Expr = source
             source_place_expression <- sview_conversion.receiver if sview_conversion.known
             source_place: (known: bool, place: ProofResourcePlace) = proof_resource_access_place(source_place_expression, report)
@@ -362,7 +365,7 @@ extend ElisaProof:
             view_type_valid: mutable bool = not is_borrowed_sview
             if is_borrowed_sview:
                 view_type_expression: mutable Ast::Expr = type_expression
-                if sview_conversion.known and not proof_resource_type_may_contain_sview(type_expression, functions.type_indexes.type_audit_index):
+                if sview_conversion.known and not proof_resource_type_may_contain_sview(type_expression, functions.type_indexes.type_audit_index, &report.source_effect_index.implicit_effect_work):
                     view_type_expression <- Ast::Expr.Ident("sview", position)
                 encoded_type: (known: bool, root: usize) = proof_resource_encode_expression(view_type_expression, report)
                 view_type_root <- encoded_type.root
@@ -433,68 +436,6 @@ extend ElisaProof:
                 proof_kernel_budget_note(report, function_name)
                 return
             proof_add_resource_goal_attempt(report, root, line, function_name)
-
-        # Type markers are nested unary AST nodes in the compiler AST. Keep this helper local to
-        # the proof system: importing the compiler's predicate here would make its implementation
-        # an unrecorded trusted premise for proof-state transitions.
-        def proof_resource_type_has_marker(expression: Ast::Expr, marker: TokenKind) -> bool:
-            match expression:
-                Ast::Expr.Unary(operator, operand, _):
-                    return true if operator == marker
-                    return proof_resource_type_has_marker(operand, marker)
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_has_marker(inner, marker)
-                _:
-                    return false
-
-        def proof_resource_is_reference_type(expression: Ast::Expr) -> bool:
-            return proof_resource_type_has_marker(expression, TokenKind.Ampersand) or proof_resource_type_has_marker(expression, TokenKind.Lmut)
-
-        def proof_resource_is_mutable_reference_type(expression: Ast::Expr) -> bool:
-            return proof_resource_type_has_marker(expression, TokenKind.Mutable) or proof_resource_type_has_marker(expression, TokenKind.Lmut)
-
-        # Bare scalar primitive spellings only. Aliases, refinements, and wrappers are not
-        # guessed; an unrecognized type keeps the conservative region-propagating behavior.
-        def proof_resource_type_is_scalar(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint" or name == "bool" or name == "char" or name == "f32" or name == "f64"
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_is_scalar(inner)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_resource_type_is_scalar(inner) if operator == TokenKind.Mutable
-                    return false
-                _:
-                    return false
-
-        def proof_resource_binding_is_scalar(state: ProofResourceState&, slot: usize) -> bool:
-            return slot < state.binding_scalar.count and state.binding_scalar[slot]
-
-        def proof_resource_binding_is_borrowable(state: ProofResourceState&, slot: usize) -> bool:
-            return slot < state.binding_borrowable.count and state.binding_borrowable[slot]
-
-        # A declared collection type: `darray[T]`, `view[T]` and `array[T, N]`, under any number
-        # of reference and storage markers. A type alias is not resolved here, so an aliased
-        # collection simply keeps the conservative answer.
-        def proof_resource_type_is_collection(expression: Ast::Expr) -> bool:
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_is_collection(inner)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_resource_type_is_collection(inner) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return false
-                Ast::Expr.Index(head, _, _):
-                    head_name: sview = proof_ident_name(head)
-                    return head_name == "darray" or head_name == "view"
-                Ast::Expr.IndexN(head, arguments, _):
-                    return false if proof_ident_name(head) != "array" or arguments.count != 2
-                    match arguments[1]:
-                        Ast::Expr.IntLit(_, _):
-                            return true
-                        _:
-                            return false
-                _:
-                    return false
 
         def proof_resource_binding_is_extent_bearing(state: ProofResourceState&, slot: usize) -> bool:
             return slot < state.binding_extent.count and state.binding_extent[slot]

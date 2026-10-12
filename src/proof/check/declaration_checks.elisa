@@ -3,90 +3,90 @@ extend ElisaProof:
         const PROOF_TYPE_AUDIT_DEPTH_LIMIT: usize = 64
         const PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT: usize = 2
 
-        # Type expressions are small trees, but the imported compiler can contain thousands of
-        # aliases and structs.  Collect the names in one bounded walk instead of rescanning the
-        # whole expression once for every declaration in the file.  `unknown` is deliberately
-        # sticky: a future AST form or a depth-exhausted term remains conservative and is treated
-        # as potentially floating by the caller.
-        def proof_type_name_add(names: mutable darray[sview]&, name: sview) -> void:
-            return if name == ""
-            return if any existing in names where existing == name
-            names.push(name)
+        def proof_type_audit_charge_work(amount: usize, source_work: mutable usize&) -> bool:
+            if not proof_replay_source_work_charge(amount, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            true
 
-        def proof_collect_type_names(expression: Ast::Expr, names: mutable darray[sview]&, unknown: mutable bool&, depth: usize) -> void:
-            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
-                unknown <- true
-                return
+        # Name de-duplication is quadratic in the number of distinct names, so charge every
+        # length-aware comparison as well as the AST nodes visited by the collector.
+        def proof_type_name_add(names: mutable darray[sview]&, name: sview, source_work: mutable usize&) -> bool:
+            return true if name == ""
+            return false if not proof_type_audit_charge_work(sview_len(name), source_work)
+            for existing in names |name, source_work|:
+                return false if not proof_type_audit_charge_work(sview_len(existing) + sview_len(name), source_work)
+                return true if existing == name
+            names.push(name)
+            true
+
+        def proof_type_scope_path_charge(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_charge_work(1, source_work)
             match expression:
-                Ast::Expr.IntLit(_, _):
-                    pass
-                Ast::Expr.BoolLit(_, _):
-                    pass
-                Ast::Expr.FloatLit(_, _):
-                    unknown <- true
-                Ast::Expr.StringLit(_, _):
-                    pass
-                Ast::Expr.CharLit(_, _):
-                    pass
                 Ast::Expr.Ident(name, _):
-                    proof_type_name_add(names, name)
+                    return proof_type_audit_charge_work(sview_len(name), source_work)
+                Ast::Expr.Scope(base, name, _):
+                    return false if not proof_type_audit_charge_work(sview_len(name), source_work)
+                    return proof_type_scope_path_charge(base, source_work, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    proof_collect_type_names(inner, names, unknown, depth + 1)
-                Ast::Expr.Unary(_, operand, _):
-                    proof_collect_type_names(operand, names, unknown, depth + 1)
-                Ast::Expr.Binary(left, _, right, _):
-                    proof_collect_type_names(left, names, unknown, depth + 1)
-                    proof_collect_type_names(right, names, unknown, depth + 1)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    proof_collect_type_names(callee, names, unknown, depth + 1)
-                    for argument in arguments |names, unknown, depth|:
-                        proof_collect_type_names(argument, names, unknown, depth + 1)
-                Ast::Expr.Field(object, _, _):
-                    proof_collect_type_names(object, names, unknown, depth + 1)
-                Ast::Expr.Scope(base, scoped_name, _):
-                    proof_type_name_add(names, scoped_name)
-                    proof_collect_type_names(base, names, unknown, depth + 1)
-                Ast::Expr.Index(object, index, _):
-                    proof_collect_type_names(object, names, unknown, depth + 1)
-                    proof_collect_type_names(index, names, unknown, depth + 1)
-                Ast::Expr.Slice(object, low, high, _):
-                    proof_collect_type_names(object, names, unknown, depth + 1)
-                    proof_collect_type_names(low, names, unknown, depth + 1)
-                    proof_collect_type_names(high, names, unknown, depth + 1)
-                Ast::Expr.IndexN(object, arguments, _):
-                    proof_collect_type_names(object, names, unknown, depth + 1)
-                    for argument in arguments |names, unknown, depth|:
-                        proof_collect_type_names(argument, names, unknown, depth + 1)
-                Ast::Expr.Move(operand, _):
-                    proof_collect_type_names(operand, names, unknown, depth + 1)
-                Ast::Expr.RegionNew(operand, _, _):
-                    proof_collect_type_names(operand, names, unknown, depth + 1)
-                Ast::Expr.Array(elements, _):
-                    for element in elements |names, unknown, depth|:
-                        proof_collect_type_names(element, names, unknown, depth + 1)
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements |names, unknown, depth|:
-                        proof_collect_type_names(element, names, unknown, depth + 1)
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements |names, unknown, depth|:
-                        proof_collect_type_names(element, names, unknown, depth + 1)
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |names, unknown, depth|:
-                        proof_collect_type_names(entry.key, names, unknown, depth + 1)
-                        proof_collect_type_names(entry.value, names, unknown, depth + 1)
-                Ast::Expr.Construct(type_name, fields, _):
-                    proof_collect_type_names(type_name, names, unknown, depth + 1)
-                    for field in fields |names, unknown, depth|:
-                        proof_collect_type_names(field.value, names, unknown, depth + 1)
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    proof_collect_type_names(base, names, unknown, depth + 1)
-                    for field in fields |names, unknown, depth|:
-                        proof_collect_type_names(field.value, names, unknown, depth + 1)
-                Ast::Expr.Refinement(base, predicate, _):
-                    proof_collect_type_names(base, names, unknown, depth + 1)
-                    proof_collect_type_names(predicate, names, unknown, depth + 1)
+                    return proof_type_scope_path_charge(inner, source_work, depth + 1)
                 _:
-                    unknown <- true
+                    return false
+
+        # Type expressions can be wide even when their recursive depth is small. Stop at the
+        # first unknown form or exhausted source budget; the caller treats either as potentially
+        # floating, and an over-budget counter makes the overall report incomplete.
+        def proof_collect_type_names(expression: Ast::Expr, names: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_charge_work(1, source_work)
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return true
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.Ident(name, _):
+                    return proof_type_name_add(names, name, source_work)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _):
+                    return proof_collect_type_names(inner, names, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_collect_type_names(left, names, source_work, depth + 1)
+                    return proof_collect_type_names(right, names, source_work, depth + 1)
+                Ast::Expr.Call(head, arguments, _, _) | Ast::Expr.IndexN(head, arguments, _):
+                    return false if not proof_collect_type_names(head, names, source_work, depth + 1)
+                    for argument in arguments |names, source_work, depth|:
+                        return false if not proof_collect_type_names(argument, names, source_work, depth + 1)
+                    return true
+                Ast::Expr.Scope(base, scoped_name, _):
+                    # The leaf names the qualified type; module-path segments are not type references.
+                    return false if not proof_type_scope_path_charge(base, source_work, depth + 1)
+                    return proof_type_name_add(names, scoped_name, source_work)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_collect_type_names(object, names, source_work, depth + 1)
+                    return false if not proof_collect_type_names(low, names, source_work, depth + 1)
+                    return proof_collect_type_names(high, names, source_work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, source_work, depth|:
+                        return false if not proof_collect_type_names(element, names, source_work, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, source_work, depth|:
+                        return false if not proof_collect_type_names(entry.key, names, source_work, depth + 1)
+                        return false if not proof_collect_type_names(entry.value, names, source_work, depth + 1)
+                    return true
+                Ast::Expr.Construct(type_name, fields, _):
+                    return false if not proof_collect_type_names(type_name, names, source_work, depth + 1)
+                    for field in fields |names, source_work, depth|:
+                        return false if not proof_collect_type_names(field.value, names, source_work, depth + 1)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_collect_type_names(base, names, source_work, depth + 1)
+                    for field in fields |names, source_work, depth|:
+                        return false if not proof_collect_type_names(field.value, names, source_work, depth + 1)
+                    return true
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_collect_type_names(base, names, source_work, depth + 1)
+                    return proof_collect_type_names(predicate, names, source_work, depth + 1)
+                _:
+                    return false
 
         def proof_type_audit_declaration_name(declaration: Ast::Decl) -> sview:
             match declaration:
@@ -97,13 +97,7 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_type_audit_charge_work(amount: usize, source_work: mutable usize&) -> bool:
-            if not proof_replay_source_work_charge(amount, source_work):
-                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                return false
-            true
-
-        def proof_type_audit_collect_declarations(declarations: darray[Ast::Decl]&, index: mutable ProofTypeAuditIndex&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_type_audit_collect_declarations(declarations: darray[Ast::Decl]&, index: mutable ProofTypeAuditIndex&, source_work: mutable usize&, depth: usize, root_level: bool) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             for declaration in declarations |index, source_work, depth|:
                 return false if not proof_type_audit_charge_work(1, source_work)
@@ -111,22 +105,24 @@ extend ElisaProof:
                     Ast::Decl.Alias(name, _, _):
                         return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
                         return false if not proof_type_audit_charge_work(sview_len(name), source_work)
-                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
+                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name), root_level: root_level})
                     Ast::Decl.Struct(name, _, _, _, _, _, _):
                         return false if index.entries.count >= ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
                         return false if not proof_type_audit_charge_work(sview_len(name), source_work)
-                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name)})
+                        index.entries <- index.entries.push(ProofTypeAuditDeclaration{declaration: declaration, name_hash: proof_name_hash(name), root_level: root_level})
                     Ast::Decl.Module(_, body, _):
-                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1)
+                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1, false)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1)
+                        return false if not proof_type_audit_collect_declarations(&body, index, source_work, depth + 1, root_level)
+                    Ast::Decl.Invalid:
+                        return false
                     _:
                         pass
             return true
 
         def proof_type_audit_index(declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> ProofTypeAuditIndex can[Memory.Allocate, Abort.Panic]:
             index: mutable ProofTypeAuditIndex = ProofTypeAuditIndex{entries: [], bucket_heads: [], next_indices: [], complete: false}
-            return index if not proof_type_audit_collect_declarations(declarations, &index, source_work, 0)
+            return index if not proof_type_audit_collect_declarations(declarations, &index, source_work, 0, true)
             count: usize = index.entries.count
             capacity: usize = proof_index_capacity(count)
             if capacity == 0:
@@ -153,68 +149,135 @@ extend ElisaProof:
             return index
 
         # Alias spelling must not hide a floating parameter from the proof-language gate.
-        # Search every exact-name match in the import's collision-safe declaration index;
-        # cycles, unknown AST forms, and incomplete indexes remain conservatively unsupported.
-        def proof_type_may_contain_float_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, visited: mutable darray[sview]&) -> bool:
+        # Search every exact-name match in the collision-safe declaration index, charging the
+        # expression walk, visited-name comparisons, and index probes to the shared source budget.
+        def proof_type_may_contain_float_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, enum_index: ProofEnumIndex, depth: usize, visited: mutable darray[sview]&, source_work: mutable usize&) -> bool:
             return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return true if index.entries.count != index.next_indices.count or index.bucket_heads.count != proof_index_capacity(index.entries.count)
+            return true if not enum_index.complete or enum_index.names.count != enum_index.name_hashes.count or enum_index.names.count != enum_index.const_enums.count or enum_index.names.count != enum_index.declarations.count or enum_index.names.count != enum_index.next_indices.count
+            return true if enum_index.bucket_heads.count != proof_index_capacity(enum_index.names.count)
             type_names: mutable darray[sview] = []
-            unknown: mutable bool = false
-            proof_collect_type_names(expression, &type_names, &unknown, 0)
-            return true if unknown
-            return true if any referenced in type_names where referenced in {"f16", "f32", "f64", "float"}
-            return false if index.bucket_heads.count == 0
-            for referenced in type_names |referenced, index, depth, visited|:
-                continue if any seen in visited where seen == referenced
-                hash: u32 = proof_name_hash(referenced)
-                slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
-                entry: mutable usize = index.bucket_heads[slot]
+            return true if not proof_collect_type_names(expression, &type_names, source_work, 0)
+            for referenced in type_names |source_work|:
+                return true if not proof_type_audit_charge_work(1 + sview_len(referenced), source_work)
+                return true if referenced in {"f16", "f32", "f64", "float"}
+            for referenced in type_names |referenced, index, enum_index, depth, visited, source_work|:
+                already_visited: mutable bool = false
+                for seen in visited |referenced, source_work, already_visited|:
+                    return true if not proof_type_audit_charge_work(1 + sview_len(seen) + sview_len(referenced), source_work)
+                    already_visited <- true if seen == referenced
+                continue if already_visited
+                return true if not proof_type_audit_charge_work(sview_len(referenced), source_work)
+                type_hash: u32 = proof_name_hash(referenced)
+                type_entry: mutable usize = index.entries.count
+                type_matches: mutable usize = 0
+                if index.bucket_heads.count > 0:
+                    type_slot: usize = (type_hash.i64() % index.bucket_heads.count.i64()).usize()
+                    type_cursor: mutable usize = index.bucket_heads[type_slot]
+                    type_steps: mutable usize = 0
+                    return true if type_cursor > index.entries.count
+                    while type_cursor < index.entries.count and type_steps < PROOF_INDEX_MAX_CHAIN |type_cursor, type_steps, type_hash, referenced, index, type_entry, type_matches, source_work|:
+                        return true if not proof_type_audit_charge_work(1, source_work)
+                        return true if type_cursor >= index.next_indices.count
+                        audit_entry: ProofTypeAuditDeclaration = index.entries[type_cursor]
+                        if audit_entry.name_hash == type_hash:
+                            entry_name: sview = proof_type_audit_declaration_name(audit_entry.declaration)
+                            return true if entry_name == "" or not proof_type_audit_charge_work(sview_len(entry_name) + sview_len(referenced), source_work)
+                            if entry_name == referenced:
+                                type_matches <- type_matches + 1
+                                return true if type_matches > 1
+                                type_entry <- type_cursor
+                        next_entry: usize = index.next_indices[type_cursor]
+                        return true if next_entry > index.entries.count
+                        type_cursor <- next_entry
+                        type_steps <- type_steps + 1
+                    return true if type_cursor < index.entries.count
+
+                enum_hash: u32 = proof_name_hash(referenced)
+                enum_entry: mutable usize = enum_index.names.count
+                enum_matches: mutable usize = 0
+                if enum_index.bucket_heads.count > 0:
+                    enum_slot: usize = (enum_hash.i64() % enum_index.bucket_heads.count.i64()).usize()
+                    enum_cursor: mutable usize = enum_index.bucket_heads[enum_slot]
+                    enum_steps: mutable usize = 0
+                    return true if enum_cursor > enum_index.names.count
+                    while enum_cursor < enum_index.names.count and enum_steps < PROOF_INDEX_MAX_CHAIN |enum_cursor, enum_steps, enum_hash, referenced, enum_index, enum_entry, enum_matches, source_work|:
+                        return true if not proof_type_audit_charge_work(1, source_work)
+                        return true if enum_cursor >= enum_index.next_indices.count or enum_cursor >= enum_index.declarations.count
+                        if enum_index.name_hashes[enum_cursor] == enum_hash:
+                            enum_name: sview = enum_index.names[enum_cursor]
+                            return true if not proof_type_audit_charge_work(sview_len(enum_name) + sview_len(referenced), source_work)
+                            if enum_name == referenced:
+                                enum_matches <- enum_matches + 1
+                                return true if enum_matches > 1
+                                enum_entry <- enum_cursor
+                        next_entry: usize = enum_index.next_indices[enum_cursor]
+                        return true if next_entry > enum_index.names.count
+                        enum_cursor <- next_entry
+                        enum_steps <- enum_steps + 1
+                    return true if enum_cursor < enum_index.names.count
+
+                return true if type_matches + enum_matches > 1
                 visited_count: usize = visited.count
+                return true if not proof_type_audit_charge_work(1, source_work)
                 visited.push(referenced)
-                while entry < index.entries.count |entry, referenced, hash, index, depth, visited|:
-                    audit_entry: ProofTypeAuditDeclaration = index.entries[entry]
-                    declaration: Ast::Decl = audit_entry.declaration
-                    if audit_entry.name_hash == hash and proof_type_audit_declaration_name(declaration) == referenced:
-                        match declaration:
-                            Ast::Decl.Alias(_, target, _):
-                                if proof_type_may_contain_float_depth(target, index, depth + 1, visited):
+                if type_matches == 1:
+                    type_declaration: Ast::Decl = index.entries[type_entry].declaration
+                    match type_declaration:
+                        Ast::Decl.Alias(_, target, _):
+                            if proof_type_may_contain_float_depth(target, index, enum_index, depth + 1, visited, source_work):
+                                return true
+                        Ast::Decl.Struct(_, fields, _, _, _, _, _):
+                            for field in fields |index, enum_index, depth, visited, source_work|:
+                                return true if not proof_type_audit_charge_work(1, source_work)
+                                if proof_type_may_contain_float_depth(field.type_expression, index, enum_index, depth + 1, visited, source_work):
                                     return true
-                            Ast::Decl.Struct(_, fields, _, _, _, _, _):
-                                for field in fields |index, depth, visited|:
-                                    if proof_type_may_contain_float_depth(field.type_expression, index, depth + 1, visited):
+                        _:
+                            return true
+                if enum_matches == 1:
+                    enum_declaration: Ast::Decl = enum_index.declarations[enum_entry]
+                    match enum_declaration:
+                        Ast::Decl.Enum(declared_name, variants, _, _, _):
+                            return true if not proof_type_audit_work_charge(sview_len(declared_name) + sview_len(referenced), source_work) or declared_name != referenced
+                            for variant in variants |index, enum_index, depth, visited, source_work|:
+                                return true if not proof_type_audit_charge_work(1, source_work)
+                                for field in variant.fields |index, enum_index, depth, visited, source_work|:
+                                    return true if not proof_type_audit_charge_work(1, source_work)
+                                    if proof_type_may_contain_float_depth(field.type_expression, index, enum_index, depth + 1, visited, source_work):
                                         return true
-                            _:
-                                pass
-                    entry <- index.next_indices[entry]
+                        _:
+                            return true
                 visited.resize(visited_count)
             return false
 
-        def proof_type_may_contain_float(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
+        def proof_type_may_contain_float(expression: Ast::Expr, index: ProofTypeAuditIndex, enum_index: ProofEnumIndex, source_work: mutable usize&) -> bool:
             visited: mutable darray[sview] = []
-            return proof_type_may_contain_float_depth(expression, index, 0, visited)
+            return proof_type_may_contain_float_depth(expression, index, enum_index, 0, visited, source_work)
 
-        def proof_add_qualified_enum_member_body_witnesses(body: darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
+        def proof_add_qualified_enum_member_body_witnesses(body: darray[Ast::Stmt]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, owner: sview, caller_module: sview, module_aliases: ProofModuleAliasIndex&, depth: usize) -> void:
             return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for statement in body |facts, report, line, owner, depth|:
+            for statement in body |facts, report, line, owner, caller_module, module_aliases, depth|:
+                return if not proof_type_audit_work_charge(1, &report.source_effect_index.implicit_effect_work)
                 match statement:
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            proof_add_qualified_enum_member_witnesses(returned, facts, report, line, owner, 0)
+                            proof_add_qualified_enum_member_witnesses(returned, facts, report, line, owner, caller_module, module_aliases, 0)
                     Ast::Stmt.VarDecl(_, _, initializer, _):
-                        proof_add_qualified_enum_member_witnesses(initializer, facts, report, line, owner, 0)
+                        proof_add_qualified_enum_member_witnesses(initializer, facts, report, line, owner, caller_module, module_aliases, 0)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, 0)
-                        proof_add_qualified_enum_member_body_witnesses(then_body, facts, report, line, owner, depth + 1)
-                        proof_add_qualified_enum_member_body_witnesses(else_body, facts, report, line, owner, depth + 1)
+                        proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, caller_module, module_aliases, 0)
+                        proof_add_qualified_enum_member_body_witnesses(then_body, facts, report, line, owner, caller_module, module_aliases, depth + 1)
+                        proof_add_qualified_enum_member_body_witnesses(else_body, facts, report, line, owner, caller_module, module_aliases, depth + 1)
                     Ast::Stmt.While(condition, while_body, _):
-                        proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, 0)
-                        proof_add_qualified_enum_member_body_witnesses(while_body, facts, report, line, owner, depth + 1)
+                        proof_add_qualified_enum_member_witnesses(condition, facts, report, line, owner, caller_module, module_aliases, 0)
+                        proof_add_qualified_enum_member_body_witnesses(while_body, facts, report, line, owner, caller_module, module_aliases, depth + 1)
                     Ast::Stmt.For(_, _, iterable, for_body, _):
-                        proof_add_qualified_enum_member_witnesses(iterable, facts, report, line, owner, 0)
-                        proof_add_qualified_enum_member_body_witnesses(for_body, facts, report, line, owner, depth + 1)
+                        proof_add_qualified_enum_member_witnesses(iterable, facts, report, line, owner, caller_module, module_aliases, 0)
+                        proof_add_qualified_enum_member_body_witnesses(for_body, facts, report, line, owner, caller_module, module_aliases, depth + 1)
                     Ast::Stmt.Assign(_, _, assigned, _):
-                        proof_add_qualified_enum_member_witnesses(assigned, facts, report, line, owner, 0)
+                        proof_add_qualified_enum_member_witnesses(assigned, facts, report, line, owner, caller_module, module_aliases, 0)
                     Ast::Stmt.Expr(expression, _) | Ast::Stmt.Contract(_, expression, _):
-                        proof_add_qualified_enum_member_witnesses(expression, facts, report, line, owner, 0)
+                        proof_add_qualified_enum_member_witnesses(expression, facts, report, line, owner, caller_module, module_aliases, 0)
                     _:
                         pass
 
@@ -224,29 +287,49 @@ extend ElisaProof:
             # would make even x == x an unsound theorem. Stop before publishing obligations
             # that a source-bound tactic could otherwise repair under the wrong semantics.
             function_index: usize = proof_function_index_at_line(functions, function_name, position.line)
+            caller_scope: darray[sview] = proof_global_constant_scope_with_module([], functions.lookup.owner_modules[function_index]) if function_index < functions.lookup.owner_modules.count else []
+            caller_module: sview = functions.lookup.owner_modules[function_index] if function_index < functions.lookup.owner_modules.count else ""
+            caller_declaration_line: u32 = position.line if function_index < functions.lookup.owner_modules.count else 0
             report.current_return_signed_width <- 0
             can Global.Write:
                 proof_float_mode <- false
+            # Source functions enter this checker through the direct API as well as the
+            # structural-purity and termination passes. Reject operator dispatch that the
+            # proof model cannot represent before publishing any obligations; in particular,
+            # semantic analysis permits Named compound targets as possible overloads even
+            # though the backend has no compound-operator dispatch path.
+            unsupported_default_operator: mutable bool = proof_structural_typed_operator_defaults_have_overload(parameters, position.line, report)
+            unsupported_default_index: mutable bool = false
+            for parameter in parameters |report, unsupported_default_index|:
+                unsupported_default_index <- true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
+            if unsupported_default_operator or unsupported_default_index or proof_structural_typed_operator_statements_have_overload(body, parameters, position.line, report, 0) or proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, []):
+                report.proof_obligation(false)
+                proof_add_finding(report, "source-operator-unsupported", position.line, function_name, "function body contains operator or indexing dispatch that is not modeled by source proof admission")
+                return
             if return_type is declared_return_type:
-                report.current_return_unsigned_width <- proof_unsigned_type_width_index(declared_return_type, functions.type_indexes.type_audit_index, 0)
-                report.current_return_signed_width <- proof_signed_type_width_index(declared_return_type, functions.type_indexes.type_audit_index, 0)
+                return_has_generic: bool = proof_resource_type_mentions_owner_generic_with_work(declared_return_type, position.line, report.source_generic_param_lines, report.source_generic_param_names, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work, 0)
+                report.current_return_unsigned_width <- 0 if return_has_generic
+                report.current_return_unsigned_width <- proof_unsigned_type_width_index_with_work(declared_return_type, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work) if not return_has_generic
+                report.current_return_signed_width <- 0 if return_has_generic
+                report.current_return_signed_width <- proof_signed_type_width_index_with_work(declared_return_type, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work) if not return_has_generic
             if report.current_return_unsigned_width < 0:
                 report.proof_obligation(false)
                 proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "return numeric type alias cannot be resolved uniquely")
                 report.current_return_unsigned_width <- 0
                 return
-            parameter_start: usize = functions.parameters.param_starts[function_index] if function_index < functions.parameters.param_starts.count else functions.parameters.all_parameter_may_contain_float.count
+            parameter_start: usize = functions.parameters.metadata.param_starts[function_index] if function_index < functions.parameters.metadata.param_starts.count else functions.parameters.metadata.all_parameter_may_contain_float.count
             parameter_slot: mutable usize = 0
             for parameter in parameters |report, function_index, functions, parameter_start, parameter_slot, function_name, position|:
-                if proof_unsigned_type_width_index(parameter.type_expression, functions.type_indexes.type_audit_index, 0) < 0:
+                parameter_has_generic: bool = proof_resource_type_mentions_owner_generic_with_work(parameter.type_expression, position.line, report.source_generic_param_lines, report.source_generic_param_names, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work, 0)
+                if not parameter_has_generic and proof_unsigned_type_width_index_with_work(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work) < 0:
                     report.proof_obligation(false)
                     proof_add_finding(report, "contract-expression-unsupported", position.line, function_name, "parameter numeric type alias cannot be resolved uniquely")
                     return
                 contains_float: mutable bool = false
-                if function_index < functions.parameters.param_starts.count and parameter_start + parameter_slot < functions.parameters.all_parameter_may_contain_float.count:
-                    contains_float <- functions.parameters.all_parameter_may_contain_float[parameter_start + parameter_slot]
+                if function_index < functions.parameters.metadata.param_starts.count and parameter_start + parameter_slot < functions.parameters.metadata.all_parameter_may_contain_float.count:
+                    contains_float <- functions.parameters.metadata.all_parameter_may_contain_float[parameter_start + parameter_slot]
                 else:
-                    contains_float <- proof_type_may_contain_float(parameter.type_expression, functions.type_indexes.type_audit_index)
+                    contains_float <- proof_type_may_contain_float(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, &report.source_effect_index.implicit_effect_work)
                 # Floating parameters switch the function to syntactic fact containment
                 # (see proof_float_mode); no arithmetic, ordering or rewriting rule applies.
                 if contains_float:
@@ -264,7 +347,24 @@ extend ElisaProof:
             postconditions.extend(signature_ensures)
             for index in 0..<postconditions.count |index, postconditions, file, functions, function_index|:
                 postconditions[index] <- proof_qualify_function_enum_contract(file, functions, function_index, postconditions[index])
-            postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls)) if postconditions.count == 0
+                if functions.lookup.module_resolution_work_exhausted:
+                    proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "qualified source rewriting exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return
+            postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls, &report.source_effect_index.implicit_effect_work)) if postconditions.count == 0
+            if proof_structural_typed_operator_contracts_have_overload(signature_requires, parameters, position.line, report) or proof_structural_typed_operator_contracts_have_overload(signature_ensures, parameters, position.line, report):
+                report.proof_obligation(false)
+                proof_add_finding(report, "source-operator-unsupported", position.line, function_name, "signature contract contains operator dispatch that is not modeled by source proof admission")
+                return
+            for contract in signature_requires |parameters, report|:
+                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, []):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "source-operator-unsupported", Ast::expr_pos(contract).line, function_name, "signature contract contains indexing dispatch that is not modeled by source proof admission")
+                    return
+            for contract in signature_ensures |parameters, report|:
+                if proof_source_expression_has_unsafe_runtime_index(contract, parameters, report, 0, []):
+                    report.proof_obligation(false)
+                    proof_add_finding(report, "source-operator-unsupported", Ast::expr_pos(contract).line, function_name, "signature contract contains indexing dispatch that is not modeled by source proof admission")
+                    return
             contract_caller_names: mutable darray[sview] = []
             for parameter in parameters |contract_caller_names|:
                 contract_caller_names.push(parameter.name)
@@ -308,14 +408,14 @@ extend ElisaProof:
                 values.push(Ast::Expr.Ident(parameter.name, position))
                 frame_parameters.push(parameter.name)
                 fixed_before: usize = fixed_names.count
-                proof_collect_fixed_array_places(Ast::Expr.Ident(parameter.name, position), parameter.type_expression, report.source_declarations, &fixed_names, &fixed_extents, &extent_constants, 0, &fixed_budget)
+                proof_collect_fixed_array_places_with_work(Ast::Expr.Ident(parameter.name, position), parameter.type_expression, report.source_declarations, &fixed_names, &fixed_extents, &extent_constants, 0, &fixed_budget, &report.source_effect_index.implicit_effect_work)
                 # A reference to a single scalar is a one-element place, so `x[0]` reads and writes it.
-                scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(parameter.type_expression, report.source_declarations, 0)
+                scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(parameter.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
                 if fixed_names.count == fixed_before and scalar_reference.known:
                     fixed_names.push(Ast::Expr.Ident(parameter.name, position))
                     fixed_extents.push(1)
             old_values: mutable darray[Ast::Expr] = proof_copy_exprs(values)
-            proof_initialize_old_parameter_values(parameters, &old_values, report.source_declarations, position)
+            proof_initialize_old_parameter_values_with_work(parameters, &old_values, report.source_declarations, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, position, &report.source_effect_index.implicit_effect_work)
             changes: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "changes")
             preserves: mutable darray[ProofFramePlace] = proof_frame_body_places(body, "preserves")
             header_changes: mutable darray[ProofFramePlace] = []
@@ -341,7 +441,7 @@ extend ElisaProof:
             report.value_thread_site <- false
             report.scalar_witness_facts <- 0
             for postcondition in postconditions |facts, report, position, function_name|:
-                proof_add_qualified_enum_member_witnesses(postcondition, facts, report, position.line, function_name, 0)
+                proof_add_qualified_enum_member_witnesses(postcondition, facts, report, position.line, function_name, caller_module, functions.lookup.module_aliases, 0)
             report.budgets.frame_call_steps <- 0
             report.budgets.frame_call_reported <- false
             report.budgets.resource_steps <- 0
@@ -376,7 +476,7 @@ extend ElisaProof:
             proof_seed_closed_record_entry(body, parameters, names, frame_parameters, &old_values, functions, report, function_name, position)
             report.escaping_names.clear()
             proof_collect_aliased_names(body, functions, &report.escaping_names, not frame_has_mutable_global, report.value_collection_names)
-            proof_record_shared_borrows(parameters, frame_has_mutable_global, report)
+            proof_record_shared_borrows(parameters, position.line, frame_has_mutable_global, report)
             report.local_extent_names.clear()
             report.value_binding_names.clear()
             report.reference_local_names.clear()
@@ -385,38 +485,44 @@ extend ElisaProof:
             # reaches external storage, which an unrelated callee may mutate through another
             # path. Such a root must not justify call-stable field/count facts.
             for parameter in parameters |report|:
-                local_value: bool = not proof_resource_is_reference_type(parameter.type_expression) and proof_type_is_reference_free(parameter.type_expression, report.source_declarations, report.source_annotations, 0) and not proof_type_contains_borrowed_view(parameter.type_expression, report.source_declarations, 0)
-                plain_value: bool = not proof_resource_is_reference_type(parameter.type_expression) and proof_value_binding_type(parameter.type_expression, report, 0)
+                parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameter.type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, position.line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work)
+                parameter_has_generic: bool = proof_resource_type_mentions_owner_generic_with_work(parameter.type_expression, position.line, report.source_generic_param_lines, report.source_generic_param_names, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work, 0)
+                local_value: bool = not parameter_has_generic and not parameter_markers.reference and proof_type_is_reference_free_with_work(parameter.type_expression, report.source_declarations, report.source_annotations, 0, &report.source_effect_index.implicit_effect_work) and not proof_type_contains_borrowed_view_with_work(parameter.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
+                plain_value: bool = not parameter_has_generic and not parameter_markers.reference and proof_value_binding_type(parameter.type_expression, report, 0)
                 report.local_extent_names.push(parameter.name) if local_value or plain_value
                 report.value_binding_names.push(parameter.name) if plain_value
-            for parameter in parameters |facts, report, function_name, position|:
-                proof_add_required_reference_parameter_fact(facts, report, parameter, function_name, position)
-                unsigned_width: i64 = proof_unsigned_type_width_index(parameter.type_expression, functions.type_indexes.type_audit_index, 0)
+            for parameter in parameters |facts, report, function_name, position, caller_scope, caller_declaration_line|:
+                parameter_has_generic: bool = proof_resource_type_mentions_owner_generic_with_work(parameter.type_expression, position.line, report.source_generic_param_lines, report.source_generic_param_names, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &report.source_effect_index.implicit_effect_work, 0)
+                proof_add_required_reference_parameter_fact(facts, report, parameter, function_name, position, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index)
+                unsigned_width: i64 = 0 if parameter_has_generic else proof_unsigned_type_width_index_with_work(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work)
                 proof_add_unsigned_binding_facts(facts, report, parameter.name, unsigned_width, position.line, function_name, position) if unsigned_width > 0
-                signed_width: i64 = proof_signed_type_width_index(parameter.type_expression, functions.type_indexes.type_audit_index, 0)
+                signed_width: i64 = 0 if parameter_has_generic else proof_signed_type_width_index_with_work(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work)
                 proof_add_type_bound_fact(facts, report, proof_signed_type_marker(Ast::Expr.Ident(parameter.name, position), signed_width, position), position.line, function_name) if signed_width > 0
                 proof_add_signed_upper_bound_fact(facts, report, parameter.name, signed_width, position.line, function_name, position)
-                proof_add_primitive_operator_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position)
+                proof_add_primitive_operator_witnesses_in_scope_with_aliases(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line)
                 # An unsigned width marker already witnesses a primitive scalar type, so only the
                 # remaining scalar parameters need the narrower marker. Congruence consumes it to
                 # establish that this name's operators cannot be a user protocol implementation.
-                scalar_kind: i64 = proof_scalar_type_kind_index(parameter.type_expression, report.source_declarations, functions.type_indexes.type_audit_index, 0)
+                scalar_kind: i64 = 0 if parameter_has_generic else proof_scalar_type_kind_index(parameter.type_expression, functions.type_indexes.type_audit_index, functions.type_indexes.enum_index, 0, &report.source_effect_index.implicit_effect_work)
                 proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(parameter.name, position), position.line, function_name) if scalar_kind == 1 and unsigned_width <= 0
                 # A unique zero-payload const-enum parameter supplies precise owner context for
                 # shorthand values. The producer records only globally unambiguous variants;
                 # replay checks the same member and owner identity in its source type environment.
-                enum_owner: sview = proof_type_head_name(parameter.type_expression, report.source_declarations, 0)
-                if scalar_kind == 1 and enum_owner != "" and not proof_scalar_primitive_type_name(enum_owner):
-                    enum_counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_owner, 0)
+                enum_owner: sview = proof_type_head_name_with_work(parameter.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
+                if report.source_effect_index.implicit_effect_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and scalar_kind == 1 and enum_owner != "" and not proof_scalar_primitive_type_name(enum_owner):
+                    enum_counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(report.source_declarations, enum_owner, 0, &report.source_effect_index.implicit_effect_work)
                     if enum_counts.enums == 0 and enum_counts.const_enums == 1 and enum_counts.structs == 0:
                         shorthand_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
-                        proof_add_const_enum_shorthand_witnesses(report.source_declarations, report.source_declarations, enum_owner, facts, report, position.line, function_name, position, &shorthand_budget, 0)
+                        proof_add_const_enum_shorthand_witnesses(report.source_declarations, report.source_declarations, enum_owner, facts, report, position.line, function_name, position, &shorthand_budget, 0, &report.source_effect_index.implicit_effect_work)
                 witness_budget: mutable usize = PROOF_SCALAR_WITNESS_BUDGET
-                (proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, &witness_budget, 0) can Global.Read) if scalar_kind != 1
+                (proof_add_scalar_witnesses(facts, report, Ast::Expr.Ident(parameter.name, position), parameter.type_expression, position.line, function_name, position, caller_scope, caller_module, functions.lookup.module_aliases, caller_declaration_line, &witness_budget, 0) can Global.Read) if scalar_kind != 1
             checked_body: mutable darray[Ast::Stmt] = []
             checked_body.extend(body)
             checked_body <- proof_qualify_function_enum_body(file, functions, function_index, checked_body, 0)
-            proof_add_qualified_enum_member_body_witnesses(checked_body, facts, report, position.line, function_name, 0)
+            if functions.lookup.module_resolution_work_exhausted:
+                proof_add_budget_finding(report, "resource-analysis-budget", position.line, function_name, "qualified source rewriting exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
+            proof_add_qualified_enum_member_body_witnesses(checked_body, facts, report, position.line, function_name, caller_module, functions.lookup.module_aliases, 0)
             facts_before_constants: usize = facts.count
             proof_import_global_constant_facts(file, function_name, parameters, body, extent_constants, &names, &values, &facts, report, position, functions.type_indexes.type_audit_index)
             proof_import_global_mutable_array_facts(file, function_name, parameters, body, &fixed_names, &fixed_extents, &facts, report, position)

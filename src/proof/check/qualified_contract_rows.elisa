@@ -1,0 +1,72 @@
+# Re-resolve each function's own contract expressions in its declaration scope.
+extend ElisaProof:
+    private:
+        # Qualify every table row's own requires and ensures from that row, so a caller in
+        # another module that instantiates the contract never re-resolves a bare name from
+        # its own module.
+        def proof_qualify_repeated_contract_rows(file: Ast::File&, functions: mutable ProofFunctionTable&) -> void:
+            for row in 0..<functions.lookup.names.count |row, functions|:
+                return if functions.lookup.module_resolution_work_exhausted
+                bounds: (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize) = proof_qualified_own_rows(functions, row)
+                if bounds.requires_start > functions.contracts.obligations.all_requires.count or bounds.requires_count > functions.contracts.obligations.all_requires.count - bounds.requires_start or bounds.ensures_start > functions.contracts.obligations.all_ensures.count or bounds.ensures_count > functions.contracts.obligations.all_ensures.count - bounds.ensures_start:
+                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.lookup.module_resolution_work_exhausted <- true
+                    return
+                if not proof_replay_deterministic_declaration_scan_charge(file.top_decls, functions.lookup.module_resolution_work_used, 0):
+                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.lookup.module_resolution_work_exhausted <- true
+                    return
+                scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
+                module_scope: mutable darray[sview] = []
+                shadowed: mutable darray[sview] = []
+                if row >= functions.parameters.metadata.param_starts.count or row >= functions.parameters.metadata.param_counts.count:
+                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.lookup.module_resolution_work_exhausted <- true
+                    return
+                param_start: usize = functions.parameters.metadata.param_starts[row]
+                param_count: usize = functions.parameters.metadata.param_counts[row]
+                if param_start > functions.parameters.metadata.all_params.count or param_count > functions.parameters.metadata.all_params.count - param_start:
+                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    functions.lookup.module_resolution_work_exhausted <- true
+                    return
+                for parameter_offset in 0..<param_count |parameter_offset, functions, param_start, shadowed|:
+                    parameter_name: sview = functions.parameters.metadata.all_params[param_start + parameter_offset]
+                    if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(parameter_name)):
+                        functions.lookup.module_resolution_work_exhausted <- true
+                        return
+                    shadowed.push(parameter_name)
+                if scope_declarations.known:
+                    path_start: usize = functions.lookup.declaration_path_starts[row]
+                    for depth in 0..<functions.lookup.declaration_path_counts[row] - 1 |depth, module_scope, functions, path_start, file|:
+                        declaration_index: usize = functions.lookup.all_declaration_path[path_start + depth]
+                        declarations_at: mutable darray[Ast::Decl] = file.top_decls
+                        for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
+                            prior_index: usize = functions.lookup.all_declaration_path[path_start + prior]
+                            match declarations_at[prior_index]:
+                                Ast::Decl.Module(_, body, _):
+                                    declarations_at <- body
+                                Ast::Decl.Scoped(body, _):
+                                    declarations_at <- body
+                                _:
+                                    pass
+                        match declarations_at[declaration_index]:
+                            Ast::Decl.Module(module_name, _, _):
+                                module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
+                            _:
+                                pass
+                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
+                    source_expression: Ast::Expr = functions.contracts.obligations.all_requires[bounds.requires_start + offset]
+                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.lookup.module_resolution_work_used):
+                        functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.lookup.module_resolution_work_exhausted <- true
+                        return
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
+                    functions.contracts.obligations.all_requires[bounds.requires_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, shadowed, file.enum_annotations, 0) if scope_declarations.known
+                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
+                    source_expression: Ast::Expr = functions.contracts.obligations.all_ensures[bounds.ensures_start + offset]
+                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.lookup.module_resolution_work_used):
+                        functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        functions.lookup.module_resolution_work_exhausted <- true
+                        return
+                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
+                    functions.contracts.obligations.all_ensures[bounds.ensures_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, shadowed, file.enum_annotations, 0) if scope_declarations.known

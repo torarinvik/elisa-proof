@@ -120,9 +120,21 @@ extend ElisaProof:
                     requires_count: usize = lemmas.requires_counts[lemma_index]
                     for requires_index in 0..<requires_count |requires_ok, facts, parameter_names, argument_values, lemmas, requires_start|:
                         required: Ast::Expr = proof_substitute(lemmas.all_requires[requires_start + requires_index], parameter_names, argument_values)
-                        goal_id: usize = report.goal_attempts.count
+                        require_attempt_start: usize = report.goal_attempts.count
                         required_proven: bool = (proof_certify_goal(facts, required, report, position.line, name, annotations) can Global{Read,Write})
-                        require_goal_ids.push(goal_id) if goal_id < report.goal_attempts.count
+                        if report.goal_attempts.count <= require_attempt_start:
+                            required_proven <- false
+                        else:
+                            goal_id: usize = report.goal_attempts.count - 1
+                            report.goal_attempts[goal_id].source_call_position <- position
+                            require_goal_ids.push(goal_id)
+                            if not report.goal_attempts[goal_id].proven or not report.goal_attempts[goal_id].has_certificate:
+                                required_proven <- false
+                            else:
+                                if report.goal_attempts[goal_id].certificate_index >= report.certificates.count:
+                                    required_proven <- false
+                                else:
+                                    report.certificates[report.goal_attempts[goal_id].certificate_index].source_call_position <- position
                         report.proof_obligation(required_proven)
                         requires_ok <- false if not required_proven
                         proof_add_latest_goal_finding(report, "lemma-requires-unproven", position.line, name, "lemma precondition is not established at the call") if not required_proven
@@ -188,7 +200,7 @@ extend ElisaProof:
                             report.proof_obligation(false)
                             proof_add_finding(report, "lemma-result-unbound", position.line, name, "returning lemma ensure cannot be used without a result binding")
                             return false
-                        proof_add_lemma_summary_fact(facts, report, functions, proof_substitute(ensure_expression, parameter_names, argument_values), position.line, name, lemma_name, parameter_names, argument_values, require_goal_ids, ensure_index)
+                        proof_add_lemma_summary_fact(facts, report, functions, proof_substitute(ensure_expression, parameter_names, argument_values), position.line, name, lemma_name, parameter_names, argument_values, require_goal_ids, ensure_index, position)
                     return true
                 _:
                     return false
@@ -367,41 +379,6 @@ extend ElisaProof:
                 return index if report.structural.names[index] == wanted
             return report.structural.names.count
 
-        # A field-shaped callee can be a function-valued field, so its leaf is not enough to
-        # certify which function executes. Until structural checking shares the compiler's
-        # owner-aware method/callback resolver, these calls cannot contribute to a termination
-        # summary. Strip grouping because `(object.callback)(...)` has the same dispatch.
-        def proof_structural_call_callee_is_field(callee: Ast::Expr, report: mutable ProofReport&) -> bool:
-            match proof_strip_parens(callee):
-                Ast::Expr.Field(_, method, _):
-                    plain_callee: Ast::Expr = proof_strip_parens(callee)
-                    return false if proof_fact_call_shape_builtin_numeric_cast(report.fact_call_shapes, plain_callee, 0)
-                    return true if not proof_resource_pure_conversion(method)
-                    return true if report.fact_call_shapes.custom_cast_hook_present
-                    method_declarations: usize = proof_source_effect_name_count(report.source_effect_index.callable_names, method, &report.source_effect_index.implicit_effect_work)
-                    return true if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or method_declarations != 0
-                    return false
-                _:
-                    return false
-
-        # Structural summaries may rely only on a uniquely identified source callable or a
-        # compiler conversion whose shadowing/custom-cast guards are present in the report.
-        # An identifier with no unique declaration can be a formal/local function value whose
-        # target may re-enter the current function at the same measure.
-        def proof_structural_call_callee_is_unresolved(callee: Ast::Expr, report: mutable ProofReport&) -> bool:
-            match proof_strip_parens(callee):
-                Ast::Expr.Ident(callable_name, _):
-                    return false if proof_builtin_scalar_type_name(callable_name)
-                    callable_count: usize = proof_source_effect_name_count(report.source_effect_index.callable_names, callable_name, &report.source_effect_index.implicit_effect_work)
-                    return report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or callable_count != 1
-                Ast::Expr.Scope(_, _, _):
-                    return false if proof_callable_is_scoped(callee)
-                    return true
-                Ast::Expr.Field(_, _, _):
-                    return proof_structural_call_callee_is_field(callee, report)
-                _:
-                    return true
-
         # A local/formal with the same spelling as any source function can shadow a direct
         # callable leaf. The structural checker has no owner-aware local callable resolver, so
         # such functions fail closed instead of treating a callback as recursion.
@@ -436,8 +413,6 @@ extend ElisaProof:
                     called_name: sview = proof_callable_name(callee)
                     if proof_callable_is_scoped(callee):
                         proof_structural_termination_finding(report, position.line, name, "scoped calls are not structurally certified without source-resolved callee identity")
-                    elif proof_structural_call_callee_is_unresolved(callee, report):
-                        proof_structural_termination_finding(report, position.line, name, "indirect or unresolved calls may hide structural recursive edges")
                     own_index: usize = proof_structural_report_index(report, own_name)
                     called_index: usize = proof_structural_report_index(report, called_name)
                     direct_recursive: bool = called_name == own_name

@@ -3,98 +3,221 @@ extend ElisaProof:
         # Keep the proof-side ABI classifier exact. Aliases and unresolved qualified types
         # remain conservative in the aggregate scanner below, but only this exact source type
         # is admitted as the current first-class string-view return shape.
-        def proof_resource_type_is_sview(expression: Ast::Expr) -> bool:
+        def proof_resource_type_is_sview_depth(expression: Ast::Expr, depth: usize) -> bool:
+            requires depth <= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            decreases PROOF_TYPE_AUDIT_DEPTH_LIMIT - depth
+            # This exact ABI-shape check is intentionally conservative for deeply nested types.
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Ident(name, _):
                     return name == "sview"
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_is_sview(inner)
+                    return proof_resource_type_is_sview_depth(inner, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_resource_type_is_sview(base)
+                    return proof_resource_type_is_sview_depth(base, depth + 1)
                 _:
                     return false
+
+        def proof_resource_type_is_sview(expression: Ast::Expr) -> bool:
+            return proof_resource_type_is_sview_depth(expression, 0)
 
         # Fast classification for a value whose entire type is an sview (possibly through an
         # alias). Aggregate-field traversal is more expensive and is reserved for region-bound
         # storage and source paths that actually carry a tracked lifetime.
-        def proof_resource_type_may_be_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize) -> bool:
+        def proof_resource_alias_target_with_work(index: ProofTypeAuditIndex, name: sview, source_work: mutable usize&) -> (count: usize, target: Ast::Expr):
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if not index.complete or index.entries.count != index.next_indices.count
+            if index.entries.count == 0:
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if index.bucket_heads.count != 0
+                return (0, Ast::Expr.Absent)
+            capacity: usize = proof_index_capacity(index.entries.count)
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if capacity == 0 or index.bucket_heads.count != capacity
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: mutable usize = index.bucket_heads[slot]
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry > index.entries.count
+            steps: mutable usize = 0
+            count: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Absent
+            while entry < index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, target, source_work|:
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry >= index.next_indices.count or not proof_type_audit_work_charge(1, source_work)
+                row: ProofTypeAuditDeclaration = index.entries[entry]
+                if row.name_hash == hash:
+                    match row.declaration:
+                        Ast::Decl.Alias(alias_name, alias_target, _):
+                            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(alias_name) + sview_len(name), source_work)
+                            if alias_name == name:
+                                count <- count + 1
+                                target <- alias_target
+                        _:
+                            pass
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if count > 1
+                next_entry: usize = index.next_indices[entry]
+                return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if next_entry > index.entries.count
+                entry <- next_entry
+                steps <- steps + 1
+            return (PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT, Ast::Expr.Invalid) if entry < index.entries.count
+            return (count, target)
+
+        def proof_resource_type_may_be_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, source_work: mutable usize&) -> bool:
+            # Qualifiers and parentheses can be arbitrarily nested without reaching an Ident or
+            # Scope arm, so enforce the recursion bound at entry and treat exhaustion as unknown.
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Absent:
                     return false
                 Ast::Expr.Invalid:
                     return false
                 Ast::Expr.Ident(name, _):
+                    return true if not proof_type_audit_work_charge(sview_len(name), source_work)
                     return true if name == "sview"
-                    return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
+                    alias: (count: usize, target: Ast::Expr) = proof_resource_alias_target_with_work(index, name, source_work)
+                    return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return true if alias.count > 1
-                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1) if alias.count == 1
+                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1, source_work) if alias.count == 1
                     return false
                 Ast::Expr.Scope(_, name, _):
-                    return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
+                    return true if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_resource_alias_target_with_work(index, name, source_work)
+                    return true if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return true if alias.count > 1
-                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1) if alias.count == 1
+                    return proof_resource_type_may_be_sview_depth(alias.target, index, depth + 1, source_work) if alias.count == 1
                     return false
                 Ast::Expr.Paren(inner, _):
-                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1)
+                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1, source_work)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_resource_type_may_be_sview_depth(base, index, depth + 1)
+                    return proof_resource_type_may_be_sview_depth(base, index, depth + 1, source_work)
                 Ast::Expr.Unary(_, inner, _):
-                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1)
+                    return proof_resource_type_may_be_sview_depth(inner, index, depth + 1, source_work)
                 _:
                     return false
 
-        def proof_resource_type_may_be_sview(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
-            return proof_resource_type_may_be_sview_depth(expression, index, 0)
+        def proof_resource_type_may_be_sview(expression: Ast::Expr, index: ProofTypeAuditIndex, source_work: mutable usize&) -> bool:
+            return proof_resource_type_may_be_sview_depth(expression, index, 0, source_work)
 
         # Region-tracked aggregates must not hide a view borrow. Follow aliases and named
         # aggregate fields through the import index. Unknown, ambiguous, or excessively
         # recursive type shapes are treated as possibly view-bearing and rejected by the exact
         # kernel type witness rather than being mistaken for owned region values.
-        def proof_resource_type_may_contain_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, visited: mutable darray[sview]&) -> bool:
+        def proof_resource_type_names_collect_with_work(expression: Ast::Expr, names: mutable darray[sview]&, unknown: mutable bool&, depth: usize, source_work: mutable usize&) -> bool:
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work):
+                unknown <- true
+                return false
             match expression:
-                Ast::Expr.Absent:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _):
+                    pass
+                Ast::Expr.FloatLit(_, _):
+                    unknown <- true
+                Ast::Expr.Ident(name, _):
+                    if name != "":
+                        return false if not proof_type_audit_work_charge(sview_len(name), source_work)
+                        names.push(name)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_resource_type_names_collect_with_work(inner, names, unknown, depth + 1, source_work)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_resource_type_names_collect_with_work(left, names, unknown, depth + 1, source_work)
+                    return proof_resource_type_names_collect_with_work(right, names, unknown, depth + 1, source_work)
+                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.IndexN(callee, arguments, _):
+                    return false if not proof_resource_type_names_collect_with_work(callee, names, unknown, depth + 1, source_work)
+                    for argument in arguments |names, unknown, depth, source_work|:
+                        return false if not proof_resource_type_names_collect_with_work(argument, names, unknown, depth + 1, source_work)
+                Ast::Expr.Field(object, _, _):
+                    return proof_resource_type_names_collect_with_work(object, names, unknown, depth + 1, source_work)
+                Ast::Expr.Scope(base, scoped_name, _):
+                    if scoped_name != "":
+                        return false if not proof_type_audit_work_charge(sview_len(scoped_name), source_work)
+                        names.push(scoped_name)
+                    return proof_resource_type_names_collect_with_work(base, names, unknown, depth + 1, source_work)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_resource_type_names_collect_with_work(object, names, unknown, depth + 1, source_work)
+                    return false if not proof_resource_type_names_collect_with_work(low, names, unknown, depth + 1, source_work)
+                    return proof_resource_type_names_collect_with_work(high, names, unknown, depth + 1, source_work)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, unknown, depth, source_work|:
+                        return false if not proof_resource_type_names_collect_with_work(element, names, unknown, depth + 1, source_work)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, unknown, depth, source_work|:
+                        return false if not proof_resource_type_names_collect_with_work(entry.key, names, unknown, depth + 1, source_work)
+                        return false if not proof_resource_type_names_collect_with_work(entry.value, names, unknown, depth + 1, source_work)
+                Ast::Expr.Construct(type_name, fields, _):
+                    return false if not proof_resource_type_names_collect_with_work(type_name, names, unknown, depth + 1, source_work)
+                    for field in fields |names, unknown, depth, source_work|:
+                        return false if not proof_resource_type_names_collect_with_work(field.value, names, unknown, depth + 1, source_work)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_resource_type_names_collect_with_work(base, names, unknown, depth + 1, source_work)
+                    for field in fields |names, unknown, depth, source_work|:
+                        return false if not proof_resource_type_names_collect_with_work(field.value, names, unknown, depth + 1, source_work)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_resource_type_names_collect_with_work(base, names, unknown, depth + 1, source_work)
+                    return proof_resource_type_names_collect_with_work(predicate, names, unknown, depth + 1, source_work)
+                _:
+                    unknown <- true
                     return false
-                Ast::Expr.Invalid:
+            return true
+
+        # `visited` is a query-local bitmap indexed by type-index row. Keep it set after a row
+        # finishes: a completed declaration has the same transitive sview answer wherever it is
+        # reached, so shared struct/alias subgraphs are expanded only once per query.
+        def proof_resource_type_may_contain_sview_depth(expression: Ast::Expr, index: ProofTypeAuditIndex, depth: usize, visited: mutable darray[bool]&, source_work: mutable usize&) -> bool:
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.Invalid:
                     return false
                 _:
                     pass
-            return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            return true if not index.complete or depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             type_names: mutable darray[sview] = []
             unknown: mutable bool = false
-            proof_collect_type_names(expression, &type_names, &unknown, 0)
-            return true if unknown
-            return true if any referenced in type_names where referenced == "sview"
+            return true if not proof_resource_type_names_collect_with_work(expression, &type_names, &unknown, 0, source_work)
+            return true if unknown or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return false if type_names.count == 0
-            return true if index.entries.count > 0 and index.bucket_heads.count == 0
-            for referenced in type_names |referenced, index, depth, visited|:
-                continue if any seen in visited where seen == referenced
+            for referenced in type_names |referenced, index, depth, visited, source_work|:
+                return true if not proof_type_audit_work_charge(1 + sview_len(referenced), source_work)
+                return true if referenced == "sview"
+                continue if index.entries.count == 0
                 hash: u32 = proof_name_hash(referenced)
-                slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize() if index.bucket_heads.count > 0 else 0
-                entry: mutable usize = index.bucket_heads[slot] if slot < index.bucket_heads.count else index.entries.count
+                slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
+                entry: mutable usize = index.bucket_heads[slot]
+                return true if entry > index.entries.count
+                steps: mutable usize = 0
                 declaration_count: mutable usize = 0
-                visited_count: usize = visited.count
-                visited.push(referenced)
-                while entry < index.entries.count |entry, referenced, hash, index, depth, visited, declaration_count|:
-                    return true if entry >= index.next_indices.count
+                while entry < index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, referenced, hash, index, depth, visited, source_work, declaration_count|:
+                    return true if entry >= index.next_indices.count or not proof_type_audit_work_charge(1, source_work)
                     row: ProofTypeAuditDeclaration = index.entries[entry]
                     declaration: Ast::Decl = row.declaration
-                    if row.name_hash == hash and proof_type_audit_declaration_name(declaration) == referenced:
-                        declaration_count <- declaration_count + 1
-                        match declaration:
-                            Ast::Decl.Alias(_, target, _):
-                                return true if proof_resource_type_may_contain_sview_depth(target, index, depth + 1, visited)
-                            Ast::Decl.Struct(_, fields, _, _, _, _, _):
-                                for field in fields |index, depth, visited|:
-                                    return true if proof_resource_type_may_contain_sview_depth(field.type_expression, index, depth + 1, visited)
-                            _:
-                                pass
-                    entry <- index.next_indices[entry]
-                return true if declaration_count > 1
-                visited.resize(visited_count)
+                    if row.name_hash == hash:
+                        declaration_name: sview = proof_type_audit_declaration_name(declaration)
+                        return true if not proof_type_audit_work_charge(sview_len(declaration_name) + sview_len(referenced), source_work)
+                        if declaration_name == referenced:
+                            declaration_count <- declaration_count + 1
+                            return true if declaration_count > 1
+                            if not visited[entry]:
+                                visited[entry] <- true
+                                match declaration:
+                                    Ast::Decl.Alias(_, target, _):
+                                        return true if proof_resource_type_may_contain_sview_depth(target, index, depth + 1, visited, source_work)
+                                    Ast::Decl.Struct(_, fields, _, _, _, _, _):
+                                        for field in fields |index, depth, visited, source_work|:
+                                            return true if not proof_type_audit_work_charge(1 + sview_len(field.name), source_work)
+                                            return true if proof_resource_type_may_contain_sview_depth(field.type_expression, index, depth + 1, visited, source_work)
+                                    _:
+                                        pass
+                    next_entry: usize = index.next_indices[entry]
+                    return true if next_entry > index.entries.count
+                    entry <- next_entry
+                    steps <- steps + 1
+                return true if entry < index.entries.count
             return false
 
-        def proof_resource_type_may_contain_sview(expression: Ast::Expr, index: ProofTypeAuditIndex) -> bool:
-            visited: mutable darray[sview] = []
-            return proof_resource_type_may_contain_sview_depth(expression, index, 0, &visited)
+        def proof_resource_type_may_contain_sview(expression: Ast::Expr, index: ProofTypeAuditIndex, source_work: mutable usize&) -> bool:
+            return true if not index.complete or index.entries.count != index.next_indices.count
+            if index.entries.count == 0:
+                return true if index.bucket_heads.count != 0
+            else:
+                capacity: usize = proof_index_capacity(index.entries.count)
+                return true if capacity == 0 or index.bucket_heads.count != capacity
+            return true if not proof_type_audit_work_charge(index.entries.count, source_work)
+            visited: mutable darray[bool] = []
+            visited.resize(index.entries.count)
+            for row in 0..<visited.count |row, visited|:
+                visited[row] <- false
+            return proof_resource_type_may_contain_sview_depth(expression, index, 0, &visited, source_work)

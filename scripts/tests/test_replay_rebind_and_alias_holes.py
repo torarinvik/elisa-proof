@@ -12,7 +12,8 @@ accepted.
   exhausting the stack.
 - A summary restated over a local is accepted only at the exact binding statement whose value
   is that call, and only while no write (later assignment, branch or loop) can intervene before
-  the consuming certificate.
+  the consuming certificate. `#line` remapping cannot hide such a write or make a live alias
+  appear to precede its own binding.
 """
 
 from pathlib import Path
@@ -65,6 +66,32 @@ SOURCE_TEXT = (
     "        j <- j + 1\n"  # 34
     "        y <- idu(2)\n"  # 35
     "    return y\n"  # 36
+    "\n"
+    "#line 38 remapped.elisa\n"
+    "def line_remap_rebound() -> u64:\n"
+    "    y: mutable u64 = idu(5)\n"
+    "#line 200 remapped.elisa\n"
+    "    y <- idu(7)\n"
+    "#line 60 remapped.elisa\n"
+    "    return y\n"
+    "#line 50 remapped.elisa\n"
+    "def line_remap_live() -> u64:\n"
+    "    y: u64 = idu(9)\n"
+    "#line 2 remapped.elisa\n"
+    "    return y\n"
+    "#line 70 loop-sites.elisa\n"
+    "def line_remap_loop_sites(n: u64) -> bool:\n"
+    "    i: mutable u64 = 0\n"
+    "    j: mutable u64 = 0\n"
+    "#line 90 loop-sites.elisa\n"
+    "    while i < n |i, n|:\n"
+    "        invariant i <= n\n"
+    "        i <- i + 1\n"
+    "#line 90 loop-sites.elisa\n"
+    "    while j < n |j, n|:\n"
+    "        invariant j <= n\n"
+    "        j <- j + 1\n"
+    "    return true\n"
 )
 
 HARNESS = r'''include "../../Elisa-compiler/elisacore_std/elisacore_runtime_prelude.elisa"
@@ -103,6 +130,78 @@ extend ElisaProof:
             report.replay_owner_line <- owner_line
             report.trace_owner_line <- consumer_line
             report.trace_consumer_certificate_index <- certificate
+
+        # Two loop facts may have the same logical line after `#line`; replay must still bind
+        # a fact to the physical condition or invariant site of the selected loop.
+        def test_holes_loop_context_source_site_collision() -> bool:
+            first_position: Ast::Pos = Ast::Pos{line: 90, column: 5, offset: 100, end_line: 90, end_column: 15, end_offset: 110}
+            second_position: Ast::Pos = Ast::Pos{line: 90, column: 5, offset: 200, end_line: 90, end_column: 15, end_offset: 210}
+            first_condition: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("i", first_position), TokenKind.Lt, Ast::Expr.Ident("n", first_position), first_position)
+            second_condition: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident("i", second_position), TokenKind.Lt, Ast::Expr.Ident("n", second_position), second_position)
+            return proof_replay_call_source_position_equal(first_condition, first_condition) and not proof_replay_call_source_position_equal(first_condition, second_condition)
+
+        def test_holes_loop_site_collision(report: ProofReport&) -> bool:
+            body: mutable darray[Ast::Stmt] = []
+            return false if not test_holes_body(report, "line_remap_loop_sites", 70, &body)
+            conditions: mutable darray[Ast::Expr] = []
+            invariants: mutable darray[Ast::Expr] = []
+            for statement in body |conditions, invariants|:
+                match statement:
+                    Ast::Stmt.While(condition, loop_body, _):
+                        conditions.push(condition)
+                        for loop_statement in loop_body |invariants|:
+                            match loop_statement:
+                                Ast::Stmt.Contract(kind, expression, _):
+                                    invariants.push(expression) if kind == "invariant"
+                                _:
+                                    pass
+                    _:
+                        pass
+            return false if conditions.count != 2 or invariants.count != 2
+            consumer_position: Ast::Pos = Ast::expr_pos(invariants[1])
+            selected_extent: mutable u32 = 4294967295
+            selected_condition: mutable Ast::Expr = Ast::Expr.Invalid
+            selected_invariants: mutable darray[Ast::Expr] = []
+            loops: mutable usize = 0
+            declarations: mutable usize = 0
+            local: mutable sview = ""
+            local_type: mutable Ast::Expr = Ast::Expr.Invalid
+            call: mutable Ast::Expr = Ast::Expr.Invalid
+            source_work: mutable usize = 0
+            scan: (complete: bool, last_offset: u32) = proof_replay_result_symbol_preservation_loop_site_with_work(body, consumer_position, Ast::expr_pos(invariants[0]), &selected_extent, &selected_condition, &selected_invariants, &loops, &declarations, &local, &local_type, &call, 0, &source_work)
+            return false if not scan.complete or loops != 1 or selected_invariants.count != 1
+            return false if not proof_replay_call_source_position_equal(selected_condition, conditions[1])
+            return false if not proof_replay_call_source_position_equal(selected_invariants[0], invariants[1])
+            return false if proof_replay_call_source_position_equal(conditions[0], selected_condition)
+            return false if proof_replay_call_source_position_equal(invariants[0], selected_invariants[0])
+            forged_condition: Ast::Expr = Ast::Expr.Invalid
+            match selected_condition:
+                Ast::Expr.Binary(left, _, right, position):
+                    forged_condition <- Ast::Expr.Binary(left, TokenKind.Gt, right, position)
+                _:
+                    return false
+            condition_trace: mutable ProofFactTrace = ProofFactTrace{expression: forged_condition, kernel_expression: 0, kind: "loop-condition", line: 90, name: "line_remap_loop_sites", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 70}
+            formula_work: mutable usize = 0
+            return false if proof_replay_local_binding_context_fact_matches_selected_loop(report, condition_trace, selected_condition, selected_invariants, &formula_work)
+            condition_trace <- test_holes_trace_with(condition_trace, selected_condition, condition_trace.summary_bindings_start)
+            formula_work <- 0
+            return false if not proof_replay_local_binding_context_fact_matches_selected_loop(report, condition_trace, selected_condition, selected_invariants, &formula_work)
+            forged_invariant: Ast::Expr = Ast::Expr.Invalid
+            match selected_invariants[0]:
+                Ast::Expr.Binary(left, _, right, position):
+                    forged_invariant <- Ast::Expr.Binary(left, TokenKind.Lt, right, position)
+                _:
+                    return false
+            invariant_trace: mutable ProofFactTrace = ProofFactTrace{expression: forged_invariant, kernel_expression: 0, kind: "loop-invariant", line: 90, name: "line_remap_loop_sites", dependency: "", premises_start: 0, premises_count: 0, kernel_premises_start: 0, kernel_premises_count: 0, summary_bindings_start: 0, summary_bindings_count: 0, summary_requires_start: 0, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 70}
+            formula_work <- 0
+            return false if proof_replay_local_binding_context_fact_matches_selected_loop(report, invariant_trace, selected_condition, selected_invariants, &formula_work)
+            invariant_trace <- test_holes_trace_with(invariant_trace, selected_invariants[0], invariant_trace.summary_bindings_start)
+            formula_work <- 0
+            return false if not proof_replay_local_binding_context_fact_matches_selected_loop(report, invariant_trace, selected_condition, selected_invariants, &formula_work)
+            formula_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 1
+            return false if proof_replay_local_binding_context_fact_matches_selected_loop(report, invariant_trace, selected_condition, selected_invariants, &formula_work)
+            return false if formula_work != PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            true
 
         # One plus the index of the first certificate of `owner` at `line`; 0 when none.
         def test_holes_certificate(report: ProofReport&, owner: sview, line: u32) -> usize:
@@ -180,6 +279,29 @@ extend ElisaProof:
         def test_holes_alias_accepted(report: mutable ProofReport&, owner_line: u32, consumer_line: u32, trace: ProofFactTrace, summary: ProofExecutableSummary) -> bool:
             test_holes_context(report, owner_line, consumer_line, 0)
             return proof_replay_summary_source_call(report, trace, summary).known
+
+        def test_holes_remapped_alias_live(report: mutable ProofReport&, owner: sview, owner_line: u32, binding_line: u32, consumer_line: u32, check_result_symbol_gate: bool) -> bool:
+            direct_index: usize = test_holes_summary_trace(report, owner, binding_line, "idu")
+            return false if direct_index >= report.traces.records.count
+            binding: (known: bool, position: Ast::Pos) = test_holes_statement_position(report, owner, owner_line, binding_line)
+            consumer: (known: bool, position: Ast::Pos) = test_holes_return_position(report, owner, owner_line, consumer_line, "y")
+            return false if not binding.known or not consumer.known
+            direct: ProofFactTrace = report.traces.records[direct_index]
+            return false if direct.summary_bindings_count < 2 or direct.summary_bindings_start > report.traces.summary_values.count or direct.summary_bindings_count > report.traces.summary_values.count - direct.summary_bindings_start
+            call: Ast::Expr = report.traces.summary_values[direct.summary_bindings_start + 1]
+            match call:
+                Ast::Expr.Call(_, _, _, _):
+                    pass
+                _:
+                    return false
+            test_holes_context(report, owner_line, consumer_line, 0)
+            source_work: mutable usize = 0
+            alias_live: bool = proof_replay_summary_local_alias_valid_at_with_work(report, owner, "y", binding.position, call, consumer.position, &source_work)
+            return alias_live if not check_result_symbol_gate
+            certificate_goal: Ast::Expr = Ast::Expr.Ident("y", consumer.position)
+            report.certificates.push(ProofGoalCertificate{goal: certificate_goal, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: consumer_line, name: owner, rule: "goal", replayed: false})
+            report.trace_consumer_certificate_index <- report.certificates.count
+            return proof_replay_result_symbol_source_available_with_work(report, direct, binding.position, "y", call, &source_work)
 
         def test_holes_write_at(body: darray[Ast::Stmt]&, line: u32, position: mutable Ast::Pos&, found: mutable bool&, depth: usize) -> void:
             return if depth >= 32
@@ -276,6 +398,8 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
     source: mutable darray[u8] = []
     report: mutable ProofReport = proof_empty_report()
     (test_holes_check(text, &source, &report) can Global{Read,Write})
+    return 37 if not test_holes_loop_context_source_site_collision()
+    return 38 if not test_holes_loop_site_collision(&report)
     forged: mutable i64 = 0
     stop: mutable i64 = 0
 
@@ -348,6 +472,14 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
         stop <- test_holes_forged(test_holes_alias_accepted(&report, 30, 34, looped.trace, idu.summary), 32, &forged)
         return stop if stop != 0
 
+        # `#line` can make a later byte-stream write appear after its consumer by displayed
+        # line. The byte-offset check must reject that stale alias, while accepting a live local
+        # whose consumer line was remapped to a smaller number.
+        return 33 if test_holes_remapped_alias_live(&report, "line_remap_rebound", 38, 39, 60, false)
+        return 34 if test_holes_remapped_alias_live(&report, "line_remap_rebound", 38, 39, 60, true)
+        return 35 if not test_holes_remapped_alias_live(&report, "line_remap_live", 50, 51, 2, false)
+        return 36 if not test_holes_remapped_alias_live(&report, "line_remap_live", 50, 51, 2, true)
+
     if HOLES_MODE != 1:
         # A result value spelled over the rebind symbol re-enters the literal comparison;
         # replay must answer instead of recursing until the stack is gone.
@@ -405,7 +537,7 @@ def main() -> None:
             return
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
 
-    print("replay rebind/alias holes: colliding or misplaced literal rebinds, a cyclic rebind summary, and stale, misattributed, branch-only or loop-rewritten local summaries fail; honest bindings replay")
+    print("replay rebind/alias holes: colliding or misplaced literal rebinds, a cyclic rebind summary, stale or misattributed local summaries, and #line-remapped writes fail; honest aliases replay")
 
 
 if __name__ == "__main__":

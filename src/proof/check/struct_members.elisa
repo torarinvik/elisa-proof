@@ -23,6 +23,49 @@ extend ElisaProof:
                         pass
             return count
 
+        def proof_type_audit_work_charge(amount: usize, source_work: mutable usize&) -> bool:
+            if not proof_replay_source_work_charge(amount, source_work):
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            true
+
+        # Report-backed consumers use this variant so wide declaration trees and structs are
+        # charged before their members are copied. A saturated walk returns the ambiguous count.
+        def proof_struct_members_with_work(declarations: darray[Ast::Decl]&, struct_name: sview, depth: usize, members: mutable darray[Ast::StructMember]&, source_work: mutable usize&) -> usize:
+            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            for declaration in declarations |struct_name, depth, members, source_work, count|:
+                return 2 if not proof_type_audit_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Struct(name, struct_members, _, _, _, _, _):
+                        return 2 if not proof_type_audit_work_charge(sview_len(struct_name), source_work)
+                        return 2 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in struct_members |members, source_work|:
+                                return 2 if not proof_type_audit_work_charge(1, source_work)
+                                return 2 if not proof_type_audit_work_charge(sview_len(member.name), source_work)
+                                members.push(member)
+                    Ast::Decl.Module(_, body, _):
+                        nested: usize = proof_struct_members_with_work(body, struct_name, depth + 1, members, source_work)
+                        return nested if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        count <- count + nested
+                    Ast::Decl.Scoped(body, _):
+                        nested: usize = proof_struct_members_with_work(body, struct_name, depth + 1, members, source_work)
+                        return nested if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        count <- count + nested
+                    Ast::Decl.Invalid:
+                        return 2
+                    _:
+                        pass
+            return count
+
+        def proof_struct_members_with_report(declarations: darray[Ast::Decl]&, struct_name: sview, depth: usize, members: mutable darray[Ast::StructMember]&, report: mutable ProofReport&) -> usize:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            count: usize = proof_struct_members_with_work(declarations, struct_name, depth, members, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return count
+
         # `proof_struct_field_type` of a struct whose members, from `proof_struct_members` with a
         # count of one, are `members`: the last member of the name, else Invalid. A found type is
         # returned as it is, so the common answer builds no term.
@@ -32,6 +75,77 @@ extend ElisaProof:
                 found <- index if members[index].name == field_name
             return (1, members[found].type_expression) if found < members.count
             return (1, Ast::Expr.Invalid)
+
+        def proof_struct_member_type_with_work(members: darray[Ast::StructMember]&, field_name: sview, source_work: mutable usize&) -> (count: usize, type_expression: Ast::Expr):
+            found: mutable usize = members.count
+            for index in 0..<members.count |index, members, field_name, found, source_work|:
+                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(1, source_work)
+                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(field_name), source_work)
+                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(members[index].name), source_work)
+                if members[index].name == field_name:
+                    found <- index
+            return (1, members[found].type_expression) if found < members.count
+            return (1, Ast::Expr.Invalid)
+
+        # Mark the last member row for each spelling and map each input row to that last row.
+        # Field-type lookup historically picked the last duplicate, but callers that walked every
+        # member repeated that lookup for every row, making a wide struct quadratic. Reverse
+        # insertion preserves the row-to-last-row behavior and bounds probing and source work.
+        def proof_struct_member_latest_rows_with_work(members: darray[Ast::StructMember]&, latest: mutable darray[bool]&, last_rows: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            latest.clear()
+            last_rows.clear()
+            member_count: usize = members.count
+            return true if member_count == 0
+            capacity: usize = proof_name_index_capacity(member_count)
+            return false if capacity == 0
+            return false if not proof_type_audit_work_charge(capacity * 2 + member_count * 3, source_work)
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            hashes.resize(capacity)
+            values.resize(capacity)
+            latest.resize(member_count)
+            last_rows.resize(member_count)
+            for row in 0..<member_count |row, latest, last_rows|:
+                latest[row] <- false
+                last_rows[row] <- member_count
+            for slot in 0..<capacity |slot, values, member_count|:
+                values[slot] <- member_count
+            row: mutable usize = member_count
+            while row > 0 |row, members, latest, last_rows, hashes, values, capacity, member_count, source_work|:
+                row <- row - 1
+                name: sview = members[row].name
+                return false if not proof_type_audit_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, row, name, members, latest, hashes, values, capacity, member_count, source_work, placed|:
+                    return false if not proof_type_audit_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == member_count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        latest[row] <- true
+                        last_rows[row] <- row
+                        placed <- true
+                        break
+                    if hashes[slot] == hash:
+                        current_name: sview = members[current].name
+                        return false if not proof_type_audit_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            last_rows[row] <- current
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            return true
+
+        def proof_struct_member_type_with_report(members: darray[Ast::StructMember]&, field_name: sview, report: mutable ProofReport&) -> (count: usize, type_expression: Ast::Expr):
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            field: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type_with_work(members, field_name, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return field
 
         # Which declarations answer to a struct name, and the declared type of one of its fields;
         # a caller reads the type only when the count is exactly one. That case is answered from

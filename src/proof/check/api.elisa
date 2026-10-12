@@ -22,8 +22,12 @@ extend ElisaProof:
             report.proven <- 0
             report.failed <- 0
             report.source_annotations.clear()
+            report.source_annotation_args.clear()
             proof_source_analysis_indexes_reset(report)
             report.source_declarations.clear()
+            report.source_generic_param_lines.clear()
+            report.source_generic_param_names.clear()
+            report.source_generic_params_valid <- false
             report.source_signature_contract_lines.clear()
             report.source_signature_contract_kinds.clear()
             report.source_signature_contracts.clear()
@@ -225,21 +229,8 @@ extend ElisaProof:
         def proof_check_core(file: Ast::File&, report: mutable ProofReport&, focus_function: sview) -> void:
             report.focused_function <- focus_function
             name_index_work: mutable usize = 0
-            # Contract quantifier syntax is erased from the AST and recovered through this
-            # compiler-owned side table. Preserve the exact source annotations in the report so
-            # a source-bound tactic store cannot substitute script-supplied quantifier kinds.
-            report.source_annotations.clear()
-            for annotation in file.enum_annotations |report|:
-                if not proof_report_source_work_charge(1, name_index_work) or not proof_report_source_work_charge(sview_len(annotation.owner), name_index_work) or not proof_report_source_work_charge(sview_len(annotation.name), name_index_work):
-                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source annotation snapshot exceeded its validated work bound", "annotation-snapshot-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                    return
-                report.source_annotations.push(annotation)
-            report.assert_hole_positions.clear()
-            for hole in file.assert_hole_positions |report|:
-                if not proof_report_source_work_charge(1, name_index_work):
-                    proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source assertion-hole snapshot exceeded its validated work bound", "assert-hole-snapshot-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                    return
-                report.assert_hole_positions.push(hole)
+            if not proof_report_snapshot_source_metadata(file, report, &name_index_work):
+                return
             operator_index_status: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_operator_impl_index(report, &name_index_work)
             if not operator_index_status.complete:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "operator-implementation index could not be built within its validated bounds", operator_index_status.reason, operator_index_status.observed, operator_index_status.limit)
@@ -292,7 +283,7 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "local binding metadata collection exceeded its validated work bound", "local-binding-metadata-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
             declaration_path: mutable darray[usize] = []
-            proof_collect_functions(file, file.top_decls, lemmas, &functions, &declaration_path, "", 0, &name_index_work)
+            proof_collect_functions(file, file.top_decls, lemmas, &functions, report.source_effect_index, &declaration_path, "", 0, &name_index_work)
             if name_index_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function collection could not classify lemma names within its validated work bound", "lemma-name-lookup-work", name_index_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
@@ -349,8 +340,14 @@ extend ElisaProof:
                 return
             (proof_compute_verified_lemmas(file, file.top_decls, &lemmas, functions, report) can Global{Read,Write})
             (proof_compute_verified_functions(file, file.top_decls, lemmas, &functions, report, focus_function) can Global{Read,Write})
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source function proof analysis exceeded its shared work bound", "source-implicit-effect-work", report.source_effect_index.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             name_index_work <- functions.lookup.module_resolution_work_used
             proof_record_declarations(file, file.top_decls, lemmas, functions, report, &name_index_work)
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "source declaration reporting exceeded its shared work bound", "source-implicit-effect-work", report.source_effect_index.implicit_effect_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return
             if functions.lookup.module_resolution_work_exhausted:
                 proof_add_budget_finding(report, "resource-analysis-budget", 0, "", "function call resolution exceeded its shared source-work bound", "module-call-resolution-work", functions.lookup.module_resolution_work_used, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                 return
@@ -399,11 +396,13 @@ extend ElisaProof:
         # scheduler, but spend the bounded proof arena only on the requested function and its
         # transitive executable callees. Unselected functions never gain verified summaries.
         def proof_check_focused_with_semantic_diagnostics(file: Ast::File&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, focus_function: sview) -> void:
+            source_literal_ensures: darray[(name: sview, contract_line: u32, contract_value: i64, returned_value: i64, returned_parameter: sview, result_on_left: bool, equality_postcondition: bool)] = proof_source_literal_ensure_inventory(file.top_decls)
+            source_assert_by_goals: darray[(name: sview, attempt_line: u32, goal_line: u32, goal_offset: u32, expected_value: bool, source_goal: Ast::Expr, supported: bool)] = proof_source_assert_by_inventory(file.top_decls)
             ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
             if ready:
                 (proof_check_core(file, report, focus_function) can Global{Read,Write})
-                if not proof_report_focused_source_literal_ensures_bound(report):
-                    proof_add_finding(report, "source-obligation-inventory", 0, focus_function, "a supported focused source postcondition has no distinct source-bound proof attempt")
+                if not proof_api_focused_source_inventory_consistent(source_literal_ensures, source_assert_by_goals, report):
+                    proof_add_finding(report, "source-obligation-inventory", 0, focus_function, "a focused source obligation has no distinct source-bound proof attempt")
 
     private:
         # Source-analysis entry point. It performs the check itself against the same
@@ -554,7 +553,11 @@ extend ElisaProof:
 
         # Compatibility warnings do not discharge permission obligations.
         def proof_semantic_diagnostic_requires_permission(kind: Semantic::DiagnosticKind) -> bool:
-            return kind == Semantic::DiagnosticKind.UngrantedPanic or kind == Semantic::DiagnosticKind.UngrantedEffectCall or kind == Semantic::DiagnosticKind.UngrantedPointerCast or kind == Semantic::DiagnosticKind.UngrantedBufferReinterpret or kind == Semantic::DiagnosticKind.UncheckedIndexUngranted or kind == Semantic::DiagnosticKind.MutableAliasUngranted or kind == Semantic::DiagnosticKind.UngrantedParallelFor
+            effect_permission: bool = kind == Semantic::DiagnosticKind.UngrantedPanic or kind == Semantic::DiagnosticKind.UngrantedEffectCall
+            pointer_permission: bool = kind == Semantic::DiagnosticKind.UngrantedPointerCast or kind == Semantic::DiagnosticKind.UngrantedBufferReinterpret or kind == Semantic::DiagnosticKind.PointerArithmeticUngranted
+            reference_permission: bool = kind == Semantic::DiagnosticKind.UncheckedIndexUngranted or kind == Semantic::DiagnosticKind.MutableAliasUngranted or kind == Semantic::DiagnosticKind.UngrantedParallelFor
+            global_permission: bool = kind == Semantic::DiagnosticKind.MutableGlobalUngranted or kind == Semantic::DiagnosticKind.MutableGlobalPermissionUngranted or kind == Semantic::DiagnosticKind.MutableGlobalCallUngranted
+            return effect_permission or pointer_permission or reference_permission or global_permission
 
         def proof_prepare_semantic_source_checked(file: Ast::File&, report: mutable ProofReport&, source_types: Semantic::SymbolTable&) -> bool:
             for diagnostic in source_types.diagnostics:
@@ -565,7 +568,7 @@ extend ElisaProof:
                     return false
                 if proof_semantic_diagnostic_requires_permission(diagnostic.kind):
                     proof_reset_report(report)
-                    proof_add_finding(report, "semantic-permission-ungranted", diagnostic.line, "", "a required panic, effect, pointer, buffer, index, alias or parallel permission is missing; verification was skipped")
+                    proof_add_finding(report, "semantic-permission-ungranted", diagnostic.line, "", "a required panic, effect, pointer, buffer, pointer-arithmetic, index, alias, global or parallel permission is missing; verification was skipped")
                     return false
                 match diagnostic.kind:
                     Semantic::DiagnosticKind.ExpressionAnalysisDepthExceeded:

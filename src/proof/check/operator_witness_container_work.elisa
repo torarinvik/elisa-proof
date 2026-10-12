@@ -1,0 +1,225 @@
+extend ElisaProof:
+    private:
+        # Report-backed counterpart for witness derivation. Alias discovery, fixed-array head
+        # checks, and non-literal extents all share the source-work counter so a wide declaration
+        # tree cannot make repeated container classification unbounded.
+        def proof_container_element_type_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> (known: bool, element: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_container_element_type_with_work(inner, declarations, depth + 1, source_work)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_container_element_type_with_work(base, declarations, depth + 1, source_work)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_container_element_type_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return (false, Ast::Expr.Invalid) if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_container_element_type_with_work(alias.target, declarations, depth + 1, source_work) if alias.count == 1
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Index(head, argument, _):
+                    return (false, Ast::Expr.Invalid) if not (match head: Ast::Expr.Ident(_, _) => true; _ => false)
+                    head_name: sview = proof_ident_name(head)
+                    return (false, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(head_name), source_work)
+                    if head_name == "darray" or head_name == "view":
+                        return (false, Ast::Expr.Invalid) if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                        return (true, argument)
+                    match argument:
+                        Ast::Expr.IntLit(_, _):
+                            return (true, head)
+                        _:
+                            return (true, head) if proof_fixed_array_source_head_with_work(head, declarations, source_work) and proof_fixed_extent_constant_with_work(argument, declarations, source_work, 0).known
+                            return (false, Ast::Expr.Invalid)
+                Ast::Expr.IndexN(head, arguments, _):
+                    return (false, Ast::Expr.Invalid) if not (match head: Ast::Expr.Ident(_, _) => true; _ => false)
+                    head_name: sview = proof_ident_name(head)
+                    return (false, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(head_name), source_work)
+                    if head_name == "darray" or head_name == "view":
+                        return (false, Ast::Expr.Invalid) if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                        return (false, Ast::Expr.Invalid) if arguments.count != 1
+                        return (true, arguments[0])
+                    return (false, Ast::Expr.Invalid) if head_name != "array" or arguments.count != 2
+                    return (false, Ast::Expr.Invalid) if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                    match arguments[1]:
+                        Ast::Expr.IntLit(_, _):
+                            return (true, arguments[0])
+                        _:
+                            return (true, arguments[0]) if proof_fixed_extent_constant_with_work(arguments[1], declarations, source_work, 0).known
+                            return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_scalar_type_kind_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    if proof_scalar_primitive_type_name(name):
+                        return -1 if alias.count != 0
+                        aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return -1 if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or aggregates.enums != 0 or aggregates.const_enums != 0 or aggregates.structs != 0
+                        return 1
+                    return -1 if alias.count > 1
+                    if alias.count == 1:
+                        return -1 if proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                        return proof_scalar_type_kind_with_work(alias.target, declarations, depth + 1, source_work)
+                    aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                    return -1 if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return -1 if aggregates.enums != 0 or aggregates.structs != 0 or aggregates.const_enums > 1
+                    return 1 if aggregates.const_enums == 1
+                    return 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_scalar_type_kind_with_work(inner, declarations, depth + 1, source_work)
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_scalar_type_kind_with_work(base, declarations, depth + 1, source_work)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_scalar_type_kind_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return -1 if alias.count > 0
+                    return 0
+                _:
+                    return 0
+
+        # Report-backed scalar-reference classification shares the source-work budget with
+        # alias resolution and pointee classification. Scoped aliases remain unresolved until
+        # type lookup carries declaration ownership.
+        def proof_scalar_reference_target_type_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> (known: bool, target: Ast::Expr):
+            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_scalar_reference_target_type_with_work(inner, declarations, depth + 1, source_work)
+                Ast::Expr.Ident(name, _):
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return (false, Ast::Expr.Invalid) if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_scalar_reference_target_type_with_work(alias.target, declarations, depth + 1, source_work) if alias.count == 1
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_scalar_reference_target_type_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    if operator == TokenKind.Ampersand or operator == TokenKind.Lmut:
+                        return (false, Ast::Expr.Invalid) if proof_scalar_type_kind_with_work(inner, declarations, 0, source_work) != 1
+                        return (false, Ast::Expr.Invalid) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        return (true, inner)
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_unsigned_type_width_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_unsigned_type_width_with_work(base, declarations, depth + 1, source_work)
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_type_width_with_work(inner, declarations, depth + 1, source_work)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_unsigned_type_width_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return -1 if alias.count > 1
+                    primitive: i64 = proof_unsigned_primitive_width(expression)
+                    if primitive > 0:
+                        return -1 if alias.count != 0
+                        aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return -1 if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or aggregates.enums != 0 or aggregates.const_enums != 0 or aggregates.structs != 0
+                        return primitive
+                    return -1 if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_unsigned_type_width_with_work(alias.target, declarations, depth + 1, source_work) if alias.count == 1
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return -1 if alias.count > 0
+                _:
+                    pass
+            return 0
+
+        def proof_signed_type_width_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> i64:
+            return -1 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Refinement(base, _, _):
+                    return proof_signed_type_width_with_work(base, declarations, depth + 1, source_work)
+                Ast::Expr.Paren(inner, _):
+                    return proof_signed_type_width_with_work(inner, declarations, depth + 1, source_work)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_signed_type_width_with_work(inner, declarations, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0
+                Ast::Expr.Ident(name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return -1 if alias.count > 1
+                    primitive: i64 = proof_signed_primitive_width(expression)
+                    if primitive > 0:
+                        return -1 if alias.count != 0
+                        aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return -1 if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or aggregates.enums != 0 or aggregates.const_enums != 0 or aggregates.structs != 0
+                        return primitive
+                    return -1 if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return proof_signed_type_width_with_work(alias.target, declarations, depth + 1, source_work) if alias.count == 1
+                Ast::Expr.Scope(_, name, _):
+                    return -1 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return -1 if alias.count > 0
+                _:
+                    pass
+            return 0
+
+        # Return the top element type plus its distance and width when the nested container leaf
+        # is an admitted scalar. Each level uses the same metered classifier.
+        def proof_container_scalar_profile_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> (known: bool, element: Ast::Expr, scalar_depth: i64, unsigned_width: i64):
+            return (false, Ast::Expr.Invalid, 0, 0) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            container: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(expression, declarations, depth, source_work)
+            return (false, Ast::Expr.Invalid, 0, 0) if not container.known
+            scalar_kind: i64 = proof_scalar_type_kind_with_work(container.element, declarations, 0, source_work)
+            if scalar_kind == 1:
+                width: i64 = proof_unsigned_type_width_with_work(container.element, declarations, 0, source_work)
+                return (true, container.element, 1, width)
+            nested: (known: bool, element: Ast::Expr, scalar_depth: i64, unsigned_width: i64) = proof_container_scalar_profile_with_work(container.element, declarations, depth + 1, source_work)
+            return (true, container.element, nested.scalar_depth + 1, nested.unsigned_width) if nested.known and nested.scalar_depth > 0
+            return (true, container.element, 0, 0)
+
+
+        def proof_container_struct_element_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> (known: bool, element: Ast::Expr, depth: i64):
+            return (false, Ast::Expr.Invalid, 0) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            container: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(expression, declarations, depth, source_work)
+            return (false, Ast::Expr.Invalid, 0) if not container.known
+            return (true, container.element, 1) if proof_type_head_name_with_work(container.element, declarations, 0, source_work) != ""
+            nested: (known: bool, element: Ast::Expr, depth: i64) = proof_container_struct_element_with_work(container.element, declarations, depth + 1, source_work)
+            return (true, nested.element, nested.depth + 1) if nested.known
+            return (false, Ast::Expr.Invalid, 0)
+
+        def proof_builtin_operator_type_name_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> sview can[Global.Read]:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return "" if not proof_type_audit_work_charge(sview_len(name), source_work)
+                    if name == "sview" or name == "cstr" or name == "dstr":
+                        return "" if proof_builtin_type_name_shadowed_with_work(declarations, name, source_work)
+                        return name
+                    if (proof_float_mode can Global.Read) and (name == "f64" or name == "f32"):
+                        return "" if proof_builtin_type_name_shadowed_with_work(declarations, name, source_work)
+                        return name
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(declarations, name, 0, source_work)
+                    return "" if alias.count == 1 and proof_unscoped_alias_aggregate_collision_with_work(declarations, name, source_work)
+                    return (proof_builtin_operator_type_name_with_work(alias.target, declarations, depth + 1, source_work) can Global.Read) if alias.count == 1
+                    return ""
+                Ast::Expr.Index(head, _, _):
+                    head_name: sview = proof_ident_name(head)
+                    return "" if not proof_type_audit_work_charge(sview_len(head_name), source_work)
+                    if head_name == "cstr":
+                        return "" if proof_builtin_type_name_shadowed_with_work(declarations, head_name, source_work)
+                        return "cstr"
+                    return ""
+                Ast::Expr.Paren(inner, _):
+                    return (proof_builtin_operator_type_name_with_work(inner, declarations, depth + 1, source_work) can Global.Read)
+                Ast::Expr.Refinement(base, _, _):
+                    return (proof_builtin_operator_type_name_with_work(base, declarations, depth + 1, source_work) can Global.Read)
+                Ast::Expr.Unary(operator, inner, _):
+                    return (proof_builtin_operator_type_name_with_work(inner, declarations, depth + 1, source_work) can Global.Read) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return ""

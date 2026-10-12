@@ -334,49 +334,41 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_local_binding_context_fact_matches(report: ProofReport&, context_trace: ProofFactTrace, condition: Ast::Expr, loop_body: darray[Ast::Stmt]&, owner: sview, consumer_line: u32) -> bool:
-            return false if context_trace.name != owner or context_trace.line != consumer_line
-            if context_trace.kind == "loop-condition":
-                return proof_replay_loop_context_constant_expression(report, context_trace, condition, context_trace.expression, 0)
-            return false if context_trace.kind != "loop-invariant"
-            matches: mutable usize = 0
-            for statement in loop_body |report, context_trace, matches|:
-                match statement:
-                    Ast::Stmt.Contract(kind, expression, _):
-                        matches <- matches + 1 if kind == "invariant" and proof_replay_loop_context_constant_expression(report, context_trace, expression, context_trace.expression, 0)
-                    _:
-                        pass
-            return matches == 1
+        # Select the unique innermost loop that contains the source-authenticated consumer.
+        # The result-symbol walker also collects only direct invariants from that loop body.
+        def proof_replay_local_binding_context_loop_select(body: darray[Ast::Stmt]&, consumer: Ast::Pos, report: ProofReport&, loop_line: mutable u32&, condition: mutable Ast::Expr&, invariants: mutable darray[Ast::Expr]&, source_work: mutable usize&) -> bool:
+            return false if consumer.offset == 0
+            selected_extent: mutable u32 = 4294967295
+            selected_loop_line: mutable u32 = 0
+            loops: mutable usize = 0
+            declarations: mutable usize = 0
+            local: mutable sview = ""
+            local_type: mutable Ast::Expr = Ast::Expr.Invalid
+            call: mutable Ast::Expr = Ast::Expr.Invalid
+            dummy_position: Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            scan: (complete: bool, last_offset: u32) = proof_replay_result_symbol_preservation_loop_site_with_work(body, consumer, dummy_position, &selected_extent, &selected_loop_line, &condition, &invariants, &loops, &declarations, &local, &local_type, &call, 0, source_work)
+            loop_line <- selected_loop_line if scan.complete and loops == 1
+            return scan.complete and loops == 1
 
-        # Loop facts are boundary facts too: their tags and line numbers are not enough to make a
-        # local-binding witness live. Reconstruct the exact unique source loop and require its
-        # guard and invariant expressions before treating a certificate as a preservation context.
-        def proof_replay_local_binding_context_fact_source(report: ProofReport&, context_trace: ProofFactTrace, consumer_line: u32) -> bool:
-            return false if context_trace.kind != "loop-condition" and context_trace.kind != "loop-invariant"
-            return false if context_trace.name == "" or consumer_line == 0 or context_trace.line != consumer_line
-            function_body: mutable darray[Ast::Stmt] = []
-            owner_matches: mutable usize = 0
-            proof_replay_local_binding_find_owner(report.source_declarations, context_trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
-            return false if owner_matches != 1
-            source_loops: mutable usize = 0
-            for statement in function_body |consumer_line, context_trace, source_loops|:
-                match statement:
-                    Ast::Stmt.While(condition, loop_body, position):
-                        continue if position.line != consumer_line
-                        if proof_replay_local_binding_context_fact_matches(report, context_trace, condition, loop_body, context_trace.name, consumer_line):
-                            source_loops <- source_loops + 1
-                    Ast::Stmt.Expr(Ast::Expr.Block(block_statements, _, captures, block_position), _):
-                        continue if captures.count == 0 or block_statements.count != 1 or block_position.line != consumer_line
-                        match block_statements[0]:
-                            Ast::Stmt.While(condition, loop_body, position):
-                                continue if position.line != block_position.line or position.line != consumer_line
-                                if proof_replay_local_binding_context_fact_matches(report, context_trace, condition, loop_body, context_trace.name, consumer_line):
-                                    source_loops <- source_loops + 1
-                            _:
-                                pass
-                    _:
-                        pass
-            return source_loops == 1
+        # Bind a context fact to that selected loop's exact source expression. Consumer offsets
+        # select the loop; the already source-validated fact must also carry its header's unique
+        # logical line, which rejects a same-spelling fact from another loop.
+        def proof_replay_local_binding_context_fact_matches_selected_loop(report: ProofReport&, context_trace: ProofFactTrace, loop_line: u32, condition: Ast::Expr, invariants: darray[Ast::Expr]&, source_work: mutable usize&) -> bool:
+            # The loop-fact source validator resolves a fact by its diagnostic logical line and
+            # rejects ambiguous lines. Tie that verified row to the exact consumer-selected loop
+            # so an identical formula from a shadowed loop cannot lend its binding to this loop.
+            return false if context_trace.name == "" or loop_line == 0 or context_trace.line != loop_line
+            if context_trace.kind == "loop-condition":
+                return false if condition is Ast::Expr.Invalid
+                # The source loop itself is selected by its authenticated consumer span. The
+                # instantiated fact can have a replacement's position (for example, a mutable
+                # boolean resymbolized at loop entry), so its root position is not the origin site.
+                # Formula shape and any global-constant substitution are checked below.
+                return proof_replay_loop_context_constant_expression(report, context_trace, condition, context_trace.expression, 0, source_work)
+            return false if context_trace.kind != "loop-invariant"
+            for expression in invariants |expression, report, context_trace, source_work|:
+                return true if proof_replay_loop_context_constant_expression(report, context_trace, expression, context_trace.expression, 0, source_work)
+            return false
 
         def proof_replay_local_binding_loop_source(report: ProofReport&, trace: ProofFactTrace, target: sview, source_value: Ast::Expr, consumer_line: u32, require_rebind: bool) -> bool:
             return false if consumer_line == 0 or target == ""
@@ -471,6 +463,10 @@ extend ElisaProof:
             return proof_replay_local_binding_fact_live_with_work(report, trace, &work)
 
         def proof_replay_local_binding_fact_live_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_local_binding_fact_live_with_cache(report, trace, source_work, &cache)
+
+        def proof_replay_local_binding_fact_live_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             owner_line: mutable u32 = report.replay_owner_line
             owner_line <- 0 if owner_line == 4294967295
             source_start: usize = source_work
@@ -495,24 +491,24 @@ extend ElisaProof:
             return false if not proof_replay_local_binding_trace_work_charge(report, trace.name, source_work, repeat_count)
             return false if repeated_source_work > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / repeat_count
             source_work <- source_work + repeated_source_work * repeat_count
-            return proof_replay_local_binding_fact_live_unmetered(report, trace, source_work)
+            return proof_replay_local_binding_fact_live_unmetered(report, trace, source_work, cache)
 
-        def proof_replay_local_binding_fact_live_unmetered(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+        def proof_replay_local_binding_fact_live_unmetered(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
-            return true if proof_replay_call_result_binding_valid_with_work(report, trace, source_work)
+            return true if proof_replay_call_result_binding_valid_with_cache(report, trace, source_work, cache)
             return certificate.line == trace.line if proof_replay_literal_call_argument_binding_valid_with_work(report, trace, source_work)
             return true if proof_replay_entry_count_binding_with_work(report, trace, source_work)
             return true if proof_replay_local_binding_immutable_declaration_source_with_work(report, trace, source_work)
-            return true if proof_replay_value_block_capture_write(report, trace)
-            return true if proof_replay_local_binding_widening_cast_declaration_source(report, trace)
+            return true if proof_replay_value_block_capture_write(report, trace, source_work)
+            return true if proof_replay_local_binding_widening_cast_declaration_source(report, trace, source_work)
             return proof_replay_local_binding_result_symbol_source_with_work(report, trace, source_work) if proof_replay_is_result_symbol_binding(trace)
             # A typed returned constant is consumed by its own return's certificates.
             return certificate.line == trace.line if proof_replay_local_binding_typed_return_source_with_work(report, trace, source_work)
             # A literal-argument definition is consumed by its own call's certificates.
-            return certificate.line == trace.line if proof_replay_local_binding_literal_call_argument_source_with_work(report, trace, source_work)
-            return true if proof_replay_local_binding_typed_return_constant_source(report, trace)
+            return certificate.line == trace.line if proof_replay_local_binding_literal_call_argument_source_with_cache(report, trace, source_work, cache)
+            return true if proof_replay_local_binding_typed_return_constant_source_with_work(report, trace, source_work)
             return true if proof_replay_captured_loop_entry_source(report, trace)
             return true if proof_replay_mutable_for_entry_source(report, trace)
             return true if proof_replay_for_identity_update_source(report, trace)
@@ -527,16 +523,29 @@ extend ElisaProof:
             range_context: mutable bool = false
             return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
-            for index in 0..<certificate.facts_count |index, certificate, report, trace, source_guard_context, source_invariant_context, range_context|:
+            if certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + certificate.facts_count
+            selected_loop_valid: mutable bool = false
+            selected_loop_line: mutable u32 = 0
+            selected_condition: mutable Ast::Expr = Ast::Expr.Invalid
+            selected_invariants: mutable darray[Ast::Expr] = []
+            owner_body: mutable darray[Ast::Stmt] = []
+            return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &owner_body, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            if proof_replay_mutable_local_consumer_position_with_work(report, trace, owner_body, &consumer_position, source_work):
+                selected_loop_valid <- proof_replay_local_binding_context_loop_select(owner_body, consumer_position, report, &selected_loop_line, &selected_condition, &selected_invariants, source_work)
+            for index in 0..<certificate.facts_count |index, certificate, report, trace, source_guard_context, source_invariant_context, range_context, selected_loop_valid, selected_condition, selected_invariants, source_work|:
                 trace_index: usize = report.traces.origin_indices[certificate.facts_start + index]
                 continue if trace_index >= report.traces.records.count
                 candidate: ProofFactTrace = report.traces.records[trace_index]
-                if candidate.name == trace.name and candidate.line == report.trace_owner_line:
-                    if candidate.kind == "loop-condition" and proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line):
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, source_work)
+                if candidate.name == trace.name:
+                    if candidate.kind == "loop-condition" and selected_loop_valid and proof_replay_local_binding_context_fact_matches_selected_loop(report, candidate, selected_loop_line, selected_condition, selected_invariants, source_work):
                         source_guard_context <- true
-                    if candidate.kind == "loop-invariant" and proof_replay_local_binding_context_fact_source(report, candidate, report.trace_owner_line):
+                    if candidate.kind == "loop-invariant" and selected_loop_valid and proof_replay_local_binding_context_fact_matches_selected_loop(report, candidate, selected_loop_line, selected_condition, selected_invariants, source_work):
                         source_invariant_context <- true
-                    range_context <- true if candidate.kind == "loop-range"
+                    range_context <- true if candidate.kind == "loop-range" and candidate.line == report.trace_owner_line
             preservation_context <- source_guard_context and source_invariant_context
             # A `for` iteration binds its binder by a loop-range fact at the header. A pre-loop
             # binding may be read at the header only by a positively identified entry check
@@ -572,11 +581,15 @@ extend ElisaProof:
             return proof_replay_local_binding_source_valid_with_work(report, trace, &work)
 
         def proof_replay_local_binding_source_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_local_binding_source_valid_with_cache(report, trace, source_work, &cache)
+
+        def proof_replay_local_binding_source_valid_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             replay_owner_line: u32 = report.replay_owner_line
             trace_owner_line: u32 = report.trace_owner_line
             return false if trace.name == "" or replay_owner_line == 0 or trace_owner_line == 0
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.EqEq, _, _):
-                    return proof_replay_local_binding_fact_live_with_work(report, trace, source_work)
+                    return proof_replay_local_binding_fact_live_with_cache(report, trace, source_work, cache)
                 _:
                     return false

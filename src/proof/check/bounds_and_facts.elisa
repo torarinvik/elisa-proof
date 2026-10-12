@@ -2,33 +2,6 @@ extend ElisaProof:
     private:
         const PROOF_UNSIGNED_RANGE_BOUND_MAX_WIDTH: i64 = ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS
         const PROOF_MAX_PATH_COMPONENTS: usize = 8
-        def proof_fixed_array_shape(expression: Ast::Expr, declarations: darray[Ast::Decl]&, extents: mutable darray[i64]&) -> bool:
-            match expression:
-                Ast::Expr.Unary(_, operand, _):
-                    return proof_fixed_array_shape(operand, declarations, extents)
-                Ast::Expr.Paren(inner, _):
-                    return proof_fixed_array_shape(inner, declarations, extents)
-                Ast::Expr.IndexN(object, arguments, _):
-                    head: sview = proof_head_name(object)
-                    return false if head != "array" or arguments.count != 2
-                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(arguments[1], declarations)
-                    return false if not extent.known or extent.value < 0
-                    extents.push(extent.value)
-                    nested: mutable darray[i64] = []
-                    proof_fixed_array_shape(arguments[0], declarations, &nested)
-                    extents.extend(nested)
-                    return true
-                Ast::Expr.Index(object, extent_expression, _):
-                    # Shorthand storage requires a concrete primitive or unique record head.
-                    # Arbitrary generic `T[N]` syntax grants no storage bound.
-                    return false if not proof_fixed_array_source_head(object, declarations)
-                    extent: (known: bool, value: i64) = proof_fixed_extent_constant(extent_expression, declarations)
-                    return false if not extent.known or extent.value < 0
-                    extents.push(extent.value)
-                    return true
-                _:
-                    return false
-
         # The ordinary index path uses the first dimension of a collected place: a parameter,
         # or a field chain rooted at one (fixed_array_places.elisa). Calls and arbitrary paths
         # are excluded until their storage identity and aliasing are modeled.
@@ -257,16 +230,20 @@ extend ElisaProof:
             return start <= total and count <= total - start
 
         def proof_declaration_has_enum(index: ProofEnumIndex, wanted: sview) -> bool:
-            return false if not index.complete or index.bucket_heads.count == 0 or index.names.count != index.name_hashes.count or index.names.count != index.next_indices.count or wanted == ""
+            return false if not index.complete or index.bucket_heads.count == 0 or index.names.count != index.name_hashes.count or index.names.count != index.next_indices.count or index.names.count != index.root_level.count or wanted == ""
             hash: u32 = proof_name_hash(wanted)
             slot: usize = (hash.i64() % index.bucket_heads.count.i64()).usize()
             entry: mutable usize = index.bucket_heads[slot]
             steps: mutable usize = 0
+            total_matches: mutable usize = 0
+            root_matches: mutable usize = 0
             while entry < index.names.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, hash, wanted, index|:
-                return true if index.name_hashes[entry] == hash and index.names[entry] == wanted
+                if index.name_hashes[entry] == hash and index.names[entry] == wanted:
+                    total_matches <- total_matches + 1
+                    root_matches <- root_matches + 1 if index.root_level[entry]
                 entry <- index.next_indices[entry]
                 steps <- steps + 1
-            return false
+            return entry == index.names.count and total_matches == 1 and root_matches == 1
 
         def proof_ranking_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
@@ -507,7 +484,7 @@ extend ElisaProof:
             report.kernel.fact_trace_premises.extend(kernel_premises)
             report.traces.records <- report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded_expression.root, kind: kind, line: line, name: name, dependency: "", premises_start: premises_start, premises_count: premises.count, kernel_premises_start: kernel_premises_start, kernel_premises_count: premises.count, summary_bindings_start: report.traces.summary_names.count, summary_bindings_count: 0, summary_requires_start: report.traces.summary_require_goal_ids.count, summary_requires_count: 0, summary_ensure_index: 0, owner_line: 0})
 
-        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize, has_call_old: bool, call_old_value: Ast::Expr, dependency_line: u32) -> void:
+        def proof_add_function_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, result_value: Ast::Expr, require_goal_ids: darray[usize]&, ensure_index: usize, has_call_old: bool, call_old_value: Ast::Expr, dependency_line: u32, source_call_position: Ast::Pos) -> void:
             return if proof_expression_has_fresh_runtime_value(expression, functions, 0) or not proof_contract_calls_are_pure(expression, functions)
             for argument in argument_values:
                 if proof_expr_has_call(argument):
@@ -549,6 +526,6 @@ extend ElisaProof:
                 report.traces.summary_values.push(Ast::Expr.Ident(symbol, Ast::pos_at_line(line)))
             requires_start: usize = report.traces.summary_require_goal_ids.count
             report.traces.summary_require_goal_ids.extend(require_goal_ids)
-            report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.traces.premises.count, premises_count: 0, kernel_premises_start: report.kernel.fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: binding_count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: dependency_line})
+            report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "function-summary", line: line, name: name, dependency: dependency, premises_start: report.traces.premises.count, premises_count: 0, kernel_premises_start: report.kernel.fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: binding_count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: dependency_line, source_call_position: source_call_position})
 
 include "./bounds_and_facts_integrated_helpers.elisa"

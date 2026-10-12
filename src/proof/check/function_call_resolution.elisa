@@ -92,24 +92,28 @@ extend ElisaProof:
         # makes the call opaque for every graph consumer. This deliberately errs on the safe side
         # for qualified calls too because extern signatures do not retain module ownership.
         def proof_function_extern_name_collision_bounded(functions: ProofFunctionTable&, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, collision: bool):
-            return (true, false) if functions.externs.extern_signatures.count == 0
+            extern_count: usize = functions.externs.extern_signatures.count
             capacity: usize = functions.externs.extern_index_values.count
-            return (false, false) if capacity == 0 or capacity != functions.externs.extern_index_hashes.count or capacity != functions.externs.extern_index_ambiguous.count
+            expected_capacity: usize = proof_name_index_capacity(extern_count)
+            return (false, false) if (extern_count > 0 and capacity == 0) or capacity != functions.externs.extern_index_hashes.count or capacity != functions.externs.extern_index_ambiguous.count or capacity != functions.externs.extern_index_callable.count or capacity != expected_capacity
+            return (true, false) if extern_count == 0
             wanted_hash: u32 = proof_name_hash(name)
             slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, wanted_hash, name, functions, capacity, work, limit|:
+            while probes < capacity |probes, slot, wanted_hash, name, functions, capacity, extern_count, work, limit|:
                 return (false, false) if not proof_function_graph_charge(1 + sview_len(name), work, limit)
                 current: usize = functions.externs.extern_index_values[slot]
-                return (true, false) if current == functions.externs.extern_signatures.count
-                return (false, false) if current > functions.externs.extern_signatures.count
+                return (true, false) if current == extern_count
+                return (false, false) if current > extern_count
                 if functions.externs.extern_index_hashes[slot] == wanted_hash:
                     current_name: sview = functions.externs.extern_signatures[current].name
                     return (false, false) if not proof_function_graph_charge(sview_len(current_name), work, limit)
                     if current_name == name:
                         # Duplicate names are ambiguous even when the first row is non-callable:
-                        # another row may be the native overload selected at the callsite.
-                        return (true, true) if functions.externs.extern_index_ambiguous[slot]
+                        # consult the index's aggregate bit so a callable duplicate cannot be
+                        # hidden by a non-callable first row, while duplicate non-callables do
+                        # not become a false collision.
+                        return (true, functions.externs.extern_index_callable[slot]) if functions.externs.extern_index_ambiguous[slot]
                         return (true, functions.externs.extern_signatures[current].callable)
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
@@ -145,19 +149,133 @@ extend ElisaProof:
         # compiler conversions that are independently recognized by the resource checker,
         # are not shadowed by a source declaration, and fit the shared resolution budget.
         def proof_function_call_name_is_declared_bounded(functions: ProofFunctionTable&, name: sview, work: mutable usize&, limit: usize) -> (complete: bool, declared: bool):
-            for candidate in functions.lookup.names |candidate, name, work, limit|:
-                return (false, true) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(candidate), work, limit)
-                return (true, true) if candidate == name
-            for signature in functions.externs.extern_signatures |signature, name, work, limit|:
-                return (false, true) if not proof_function_graph_charge(1 + sview_len(name) + sview_len(signature.name), work, limit)
-                return (true, true) if signature.name == name
-            return (true, false)
+            function_count: usize = functions.lookup.names.count
+            function_declared: mutable bool = false
+            if function_count > 0:
+                capacity: usize = functions.lookup.index_values.count
+                return (false, true) if capacity == 0 or capacity != functions.lookup.index_hashes.count or capacity != functions.lookup.index_ambiguous.count or capacity != proof_name_index_capacity(function_count)
+                return (false, true) if not proof_function_graph_charge(sview_len(name), work, limit)
+                wanted_hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                while probes < capacity |probes, slot, wanted_hash, name, functions, capacity, function_count, work, limit, function_declared|:
+                    return (false, true) if not proof_function_graph_charge(1, work, limit)
+                    current: usize = functions.lookup.index_values[slot]
+                    return (false, true) if current > function_count
+                    break if current == function_count
+                    if functions.lookup.index_hashes[slot] == wanted_hash:
+                        return (false, true) if current >= function_count
+                        candidate: sview = functions.lookup.names[current]
+                        return (false, true) if not proof_function_graph_charge(sview_len(candidate), work, limit)
+                        if candidate == name:
+                            function_declared <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, true) if probes >= capacity
+            return (true, true) if function_declared
+            return (false, true) if functions.externs.extern_signatures.count > 0 and (functions.externs.extern_index_values.count == 0 or functions.externs.extern_index_values.count != functions.externs.extern_index_hashes.count or functions.externs.extern_index_values.count != functions.externs.extern_index_ambiguous.count or functions.externs.extern_index_values.count != functions.externs.extern_index_callable.count or functions.externs.extern_index_values.count != proof_name_index_capacity(functions.externs.extern_signatures.count))
+            extern_count: usize = functions.externs.extern_signatures.count
+            return (true, false) if extern_count == 0
+            return (false, true) if not proof_function_graph_charge(sview_len(name), work, limit)
+            wanted_hash: u32 = proof_name_hash(name)
+            capacity: usize = functions.externs.extern_index_values.count
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, name, functions, capacity, extern_count, work, limit|:
+                return (false, true) if not proof_function_graph_charge(1, work, limit)
+                current: usize = functions.externs.extern_index_values[slot]
+                return (false, true) if current > extern_count
+                return (true, false) if current == extern_count
+                if functions.externs.extern_index_hashes[slot] == wanted_hash:
+                    return (false, true) if current >= extern_count
+                    candidate: sview = functions.externs.extern_signatures[current].name
+                    return (false, true) if not proof_function_graph_charge(sview_len(candidate), work, limit)
+                    if candidate == name:
+                        # Preserve the compiler's declaration-shadow rule: any exact
+                        # extern spelling blocks this intrinsic conversion.
+                        return (true, true)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, true)
+
+        def proof_function_conversion_receiver_root_name(receiver: Ast::Expr, depth: usize, work: mutable usize&, limit: usize) -> (complete: bool, name: sview):
+            return (false, "") if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or not proof_function_graph_charge(1, work, limit)
+            match receiver:
+                Ast::Expr.Ident(name, _):
+                    return (false, "") if not proof_function_graph_charge(sview_len(name), work, limit)
+                    return (true, name)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_function_conversion_receiver_root_name(inner, depth + 1, work, limit)
+                Ast::Expr.Index(object, _, _) | Ast::Expr.IndexN(object, _, _):
+                    return proof_function_conversion_receiver_root_name(object, depth + 1, work, limit)
+                _:
+                    return (true, "")
+
+        # Conversion typing follows a formal only while that formal is the active
+        # receiver binding. Reconstruct local binders at the call offset so a same-named
+        # local record cannot inherit the formal's builtin conversion type.
+        def proof_function_conversion_receiver_shadowed(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, functions: ProofFunctionTable&, caller: usize, receiver: Ast::Expr, call_position: Ast::Pos, work: mutable usize&, limit: usize) -> (complete: bool, shadowed: bool):
+            root: (complete: bool, name: sview) = proof_function_conversion_receiver_root_name(receiver, 0, work, limit)
+            return (false, true) if not root.complete
+            return (true, true) if root.name == ""
+            call_offset: u32 = call_position.offset
+            return (false, true) if snapshot.signature_contract_starts.count != snapshot.function_names.count or snapshot.signature_contract_counts.count != snapshot.function_names.count or caller >= snapshot.function_names.count
+            contract_start: usize = snapshot.signature_contract_starts[caller]
+            contract_count: usize = snapshot.signature_contract_counts[caller]
+            return (false, true) if contract_start > snapshot.all_signature_contracts.count or contract_count > snapshot.all_signature_contracts.count - contract_start
+            contract_matches: mutable usize = 0
+            contract_shadowed: mutable bool = false
+            contract_located: mutable bool = false
+            for index in 0..<contract_count |index, contract_start, snapshot, call_offset, contract_matches, contract_shadowed, contract_located, report, root|:
+                expression: Ast::Expr = snapshot.all_signature_contracts[contract_start + index]
+                state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, expression, call_offset)
+                return (false, true) if not state.valid
+                continue if not state.contains
+                contract_matches <- contract_matches + 1
+                return (false, true) if contract_matches > 1
+                return (false, true) if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, expression, root.name, call_offset, &contract_shadowed, &contract_located, 0, true)
+            if contract_matches > 0:
+                return (true, not contract_located or contract_matches != 1 or contract_shadowed)
+
+            body: (known: bool, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt]) = proof_fact_call_shape_function_body(report, snapshot, caller)
+            return (false, true) if not body.known
+            body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body.body, call_offset)
+            return (false, true) if not body_state.valid
+            if body_state.contains:
+                shadowed: mutable bool = false
+                located: mutable bool = false
+                return (false, true) if not proof_fact_call_shape_local_shadow_body_at(report, snapshot, body.body, root.name, call_offset, &shadowed, &located, 0, true)
+                return (true, not located or shadowed)
+
+            # Defaults are executable in the caller's lexical context too. Search only
+            # this declaration's bounded parameter slice and fail closed on ambiguous spans.
+            return (false, true) if caller >= functions.parameters.metadata.param_starts.count or caller >= functions.parameters.metadata.param_counts.count
+            return (false, true) if functions.parameters.metadata.all_defaults.count != functions.parameters.metadata.all_has_defaults.count or functions.parameters.metadata.all_defaults.count != functions.parameters.metadata.all_params.count
+            param_start: usize = functions.parameters.metadata.param_starts[caller]
+            param_count: usize = functions.parameters.metadata.param_counts[caller]
+            return (false, true) if param_start > functions.parameters.metadata.all_defaults.count or param_count > functions.parameters.metadata.all_defaults.count - param_start
+            matches: mutable usize = 0
+            shadowed: mutable bool = false
+            located: mutable bool = false
+            for offset in 0..<param_count |offset, param_start, functions, snapshot, call_offset, matches, shadowed, located, report, root, work, limit|:
+                slot: usize = param_start + offset
+                return (false, true) if not proof_function_graph_charge(1, work, limit)
+                continue if not functions.parameters.metadata.all_has_defaults[slot]
+                expression: Ast::Expr = functions.parameters.metadata.all_defaults[slot]
+                state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, expression, call_offset)
+                return (false, true) if not state.valid
+                continue if not state.contains
+                matches <- matches + 1
+                return (false, true) if matches > 1
+                return (false, true) if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, expression, root.name, call_offset, &shadowed, &located, 0, true)
+            return (true, not located or matches != 1 or shadowed)
 
         # An empty graph name is reserved for a small set of intrinsic conversions. Every
         # other call whose callee cannot be resolved as a named declaration is made opaque.
-        def proof_function_unclassified_call_is_intrinsic(functions: ProofFunctionTable&, expression: Ast::Expr, work: mutable usize&, limit: usize) -> (complete: bool, intrinsic: bool):
+        def proof_function_unclassified_call_is_intrinsic(functions: ProofFunctionTable&, snapshot: mutable ProofFactCallShapeSnapshot&, caller: usize, expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, work: mutable usize&, limit: usize) -> (complete: bool, intrinsic: bool):
             match expression:
-                Ast::Expr.Call(callee, arguments, argument_names, _):
+                Ast::Expr.Call(callee, arguments, argument_names, position):
                     if argument_names.count != 0 and argument_names.count != arguments.count:
                         return (true, false)
                     for label in argument_names |label, work, limit|:
@@ -170,19 +288,25 @@ extend ElisaProof:
                         return (true, arguments.count == 1) if proof_builtin_scalar_type_name(scalar_name)
                     return (true, false) if arguments.count != 0
                     match plain_callee:
-                        Ast::Expr.Field(_, method, _):
+                        Ast::Expr.Field(receiver, method, _):
+                            return (false, false) if caller >= functions.lookup.lines.count
+                            declaration_line: u32 = functions.lookup.lines[caller]
                             return (true, false) if not proof_resource_pure_conversion(method)
                             return (false, false) if not proof_function_graph_charge(1 + sview_len(method), work, limit)
+                            receiver_shadow: (complete: bool, shadowed: bool) = proof_function_conversion_receiver_shadowed(report, snapshot, functions, caller, receiver, position, work, limit)
+                            return (false, false) if not receiver_shadow.complete
+                            return (true, false) if receiver_shadow.shadowed
                             numeric: (known: bool, receiver: Ast::Expr) = proof_runtime_builtin_numeric_cast(plain_callee, 0, functions)
                             if numeric.known:
-                                return (true, true)
+                                return (true, proof_structural_field_conversion_type_supported(method, numeric.receiver, parameters, declaration_line, report))
+                            return (true, proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report)) if method == "as_sview"
                             return (true, false) if proof_expr_numeric_cast_target(method)
                             # The non-numeric conversions use the same no-shadowing rule as
                             # method builtins. A custom cast hook also makes dispatch opaque.
                             return (true, false) if functions.externs.custom_cast_hook_present
                             declaration: (complete: bool, declared: bool) = proof_function_call_name_is_declared_bounded(functions, method, work, limit)
                             return (false, false) if not declaration.complete
-                            return (true, not declaration.declared)
+                            return (true, not declaration.declared and proof_structural_field_conversion_type_supported(method, receiver, parameters, declaration_line, report))
                         _:
                             return (true, false)
                 _:
@@ -193,36 +317,36 @@ extend ElisaProof:
         # so a plain global helper call in a default keeps its summary, while an earlier formal
         # or nested default-expression binder that shadows it remains opaque.
         def proof_function_default_call_shadow(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, functions: ProofFunctionTable&, caller: usize, callee: Ast::Expr, call_position: Ast::Pos, work: mutable usize&, limit: usize) -> (complete: bool, is_default: bool, shadowed: bool):
-            if caller >= functions.parameters.param_starts.count or caller >= functions.parameters.param_counts.count:
+            if caller >= functions.parameters.metadata.param_starts.count or caller >= functions.parameters.metadata.param_counts.count:
                 return (false, false, false)
-            return (false, false, false) if functions.parameters.all_defaults.count != functions.parameters.all_has_defaults.count or functions.parameters.all_defaults.count != functions.parameters.all_params.count
-            param_start: usize = functions.parameters.param_starts[caller]
-            param_count: usize = functions.parameters.param_counts[caller]
-            return (false, false, false) if param_start > functions.parameters.all_defaults.count or param_count > functions.parameters.all_defaults.count - param_start
-            default_slot: mutable usize = functions.parameters.all_defaults.count
+            return (false, false, false) if functions.parameters.metadata.all_defaults.count != functions.parameters.metadata.all_has_defaults.count or functions.parameters.metadata.all_defaults.count != functions.parameters.metadata.all_params.count
+            param_start: usize = functions.parameters.metadata.param_starts[caller]
+            param_count: usize = functions.parameters.metadata.param_counts[caller]
+            return (false, false, false) if param_start > functions.parameters.metadata.all_defaults.count or param_count > functions.parameters.metadata.all_defaults.count - param_start
+            default_slot: mutable usize = functions.parameters.metadata.all_defaults.count
             for offset in 0..<param_count |offset, param_start, functions, call_position, default_slot, work, limit|:
                 slot: usize = param_start + offset
                 return (false, false, false) if not proof_function_graph_charge(1, work, limit)
-                continue if not functions.parameters.all_has_defaults[slot]
-                default_position: Ast::Pos = Ast::expr_pos(functions.parameters.all_defaults[slot])
+                continue if not functions.parameters.metadata.all_has_defaults[slot]
+                default_position: Ast::Pos = Ast::expr_pos(functions.parameters.metadata.all_defaults[slot])
                 span: (valid: bool, contains: bool) = proof_fact_call_shape_source_span_contains(default_position, call_position.offset)
                 return (false, false, false) if not span.valid
                 if span.contains:
-                    return (false, false, false) if default_slot < functions.parameters.all_defaults.count
+                    return (false, false, false) if default_slot < functions.parameters.metadata.all_defaults.count
                     default_slot <- slot
-            return (true, false, false) if default_slot == functions.parameters.all_defaults.count
+            return (true, false, false) if default_slot == functions.parameters.metadata.all_defaults.count
             local_name: sview = proof_function_local_callee_base_name(callee, 0)
             return (true, true, true) if local_name == ""
             shadowed: mutable bool = false
             prior_count: usize = default_slot - param_start
             for offset in 0..<prior_count |offset, param_start, functions, local_name, shadowed, work, limit|:
                 slot: usize = param_start + offset
-                prior_name: sview = functions.parameters.all_params[slot]
+                prior_name: sview = functions.parameters.metadata.all_params[slot]
                 return (false, true, false) if not proof_function_graph_charge(1 + sview_len(local_name) + sview_len(prior_name), work, limit)
                 shadowed <- true if prior_name == local_name
             return (true, true, true) if shadowed
             located: mutable bool = false
-            if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, functions.parameters.all_defaults[default_slot], local_name, call_position.offset, &shadowed, &located, 0) or not located:
+            if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, functions.parameters.metadata.all_defaults[default_slot], local_name, call_position.offset, &shadowed, &located, 0) or not located:
                 return (true, true, true)
             return (true, true, shadowed)
 
@@ -230,25 +354,38 @@ extend ElisaProof:
         def proof_resolve_function_call_targets(report: mutable ProofReport&, functions: mutable ProofFunctionTable&, source_work: mutable usize&) -> (complete: bool, reason: sview, observed: usize, limit: usize):
             functions.call_graph.current_caller <- functions.lookup.names.count
             functions.call_graph.all_call_targets.clear()
+            functions.call_graph.direct_unresolved_calls.clear()
+            functions.call_graph.direct_unresolved_calls.resize(functions.lookup.names.count)
             return (false, "call-graph-callee-source-table", functions.call_graph.all_call_callee_sources.count, functions.call_graph.all_calls.count) if functions.call_graph.all_call_callee_sources.count != functions.call_graph.all_calls.count
             shadow_snapshot: mutable ProofFactCallShapeSnapshot& = &report.fact_call_shapes
             return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not proof_function_graph_charge(functions.call_graph.all_calls.count, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             for _ in 0..<functions.call_graph.all_calls.count |functions|:
                 functions.call_graph.all_call_targets.push(functions.lookup.names.count)
             for caller in 0..<functions.lookup.names.count |caller, functions, source_work, report, shadow_snapshot|:
+                source_parameters: mutable darray[Ast::ParamDecl] = []
+                source_parameters_loaded: mutable bool = false
                 continue if caller >= functions.call_graph.call_starts.count or caller >= functions.call_graph.call_counts.count
                 start: usize = functions.call_graph.call_starts[caller]
                 count: usize = functions.call_graph.call_counts[caller]
                 continue if start > functions.call_graph.all_calls.count or count > functions.call_graph.all_calls.count - start
-                for offset in 0..<count |offset, start, caller, functions, source_work, report, shadow_snapshot|:
+                for offset in 0..<count |offset, start, caller, functions, source_work, report, shadow_snapshot, source_parameters, source_parameters_loaded|:
                     called: sview = functions.call_graph.all_calls[start + offset]
-                    continue if called == "__opaque_call__"
+                    if called == "__opaque_call__":
+                        functions.call_graph.direct_unresolved_calls[caller] <- true
+                        continue
                     source: Ast::Expr = functions.call_graph.all_call_callee_sources[start + offset]
                     return (false, "call-graph-callee-source", start + offset, functions.call_graph.all_calls.count) if source is Ast::Expr.Invalid
                     if called == "":
-                        intrinsic: (complete: bool, intrinsic: bool) = proof_function_unclassified_call_is_intrinsic(functions, source, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        if not source_parameters_loaded:
+                            caller_source: (known: bool, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt]) = proof_fact_call_shape_function_body(report, shadow_snapshot, caller)
+                            return (false, "call-graph-caller-source", caller, functions.lookup.names.count) if not caller_source.known
+                            source_parameters.extend(caller_source.parameters)
+                            source_parameters_loaded <- true
+                        intrinsic: (complete: bool, intrinsic: bool) = proof_function_unclassified_call_is_intrinsic(functions, shadow_snapshot, caller, source, source_parameters, report, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                         return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not intrinsic.complete
-                        functions.call_graph.all_calls[start + offset] <- "__opaque_call__" if not intrinsic.intrinsic
+                        if not intrinsic.intrinsic:
+                            functions.call_graph.all_calls[start + offset] <- "__opaque_call__"
+                            functions.call_graph.direct_unresolved_calls[caller] <- true
                         continue
                     source_position: Ast::Pos = Ast::expr_pos(source)
                     default_shadow: (complete: bool, is_default: bool, shadowed: bool) = proof_function_default_call_shadow(report, shadow_snapshot, functions, caller, source, source_position, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
@@ -259,10 +396,20 @@ extend ElisaProof:
                         # purity, termination or effects of a same-spelled global declaration.
                         # Keep the edge opaque for every graph consumer.
                         functions.call_graph.all_calls[start + offset] <- "__opaque_call__"
+                        functions.call_graph.direct_unresolved_calls[caller] <- true
                         continue
                     resolved: (complete: bool, row: usize) = proof_function_index_for_callee_with_work(functions, caller, source, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return (false, "call-graph-resolution-work", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT) if not resolved.complete
                     functions.call_graph.all_call_targets[start + offset] <- resolved.row
+                    # A field call may resolve by leaf name for general call-graph consumers,
+                    # but structural recursion cannot rely on that name alone: the receiver
+                    # may hold a callback with a hidden edge back into the recursive component.
+                    # Keep the ordinary edge intact while recording this separate hazard.
+                    match proof_strip_parens(source):
+                        Ast::Expr.Field(_, _, _):
+                            functions.call_graph.direct_unresolved_calls[caller] <- true
+                        _:
+                            pass
             resolved_work: usize = source_work
             functions.lookup.module_resolution_work_used <- resolved_work
             return (true, "", source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)

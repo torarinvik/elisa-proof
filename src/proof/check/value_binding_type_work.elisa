@@ -1,0 +1,81 @@
+# Bounded frame-value classification for report-backed binding ownership.
+extend ElisaProof:
+    private:
+        def proof_enum_payloads_plain_with_work(declarations: darray[Ast::Decl]&, name: sview, report: ProofReport&, visiting: mutable darray[sview]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            for declaration in declarations |name, report, visiting, depth, source_work|:
+                return false if not proof_type_audit_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        return false if not proof_type_audit_work_charge(sview_len(enum_name) + sview_len(name), source_work)
+                        if enum_name == name and not is_const:
+                            for variant in variants |name, report, visiting, depth, source_work|:
+                                return false if not proof_type_audit_work_charge(1, source_work)
+                                for field in variant.fields |name, report, visiting, depth, source_work|:
+                                    return false if not proof_type_audit_work_charge(1, source_work)
+                                    return false if not proof_plain_value_type_with_work(field, report, visiting, depth + 1, source_work)
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return false if not proof_enum_payloads_plain_with_work(body, name, report, visiting, depth + 1, source_work)
+                    _:
+                        pass
+            return true
+
+        def proof_plain_named_type_with_work(name: sview, report: ProofReport&, visiting: mutable darray[sview]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or name == ""
+            return false if not proof_type_audit_work_charge(1 + sview_len(name), source_work)
+            if proof_scalar_primitive_type_name(name) or name == "f32" or name == "f64":
+                aliases: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(report.source_declarations, name, 0, source_work)
+                aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(report.source_declarations, name, 0, source_work)
+                return source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and aliases.count == 0 and aggregates.enums == 0 and aggregates.const_enums == 0 and aggregates.structs == 0
+            for open_name in visiting |name, source_work|:
+                return false if not proof_type_audit_work_charge(sview_len(open_name) + sview_len(name), source_work)
+                return true if open_name == name
+            alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(report.source_declarations, name, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or alias.count != 0
+            root_counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_root_named_aggregates_with_work(report.source_declarations, name, 0, source_work)
+            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(report.source_declarations, name, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if counts.enums != root_counts.enums or counts.const_enums != root_counts.const_enums or counts.structs != root_counts.structs
+            return counts.enums == 0 and counts.structs == 0 if counts.const_enums == 1
+            return false if counts.const_enums != 0
+            if counts.structs == 1 and counts.enums == 0:
+                members: mutable darray[Ast::StructMember] = []
+                return false if proof_struct_members_with_work(report.source_declarations, name, 0, &members, source_work) != 1
+                latest: mutable darray[bool] = []
+                last_rows: mutable darray[usize] = []
+                return false if not proof_struct_member_latest_rows_with_work(members, &latest, &last_rows, source_work)
+                for row in 0..<members.count |row, members, latest, report, visiting, depth, source_work|:
+                    continue if not latest[row]
+                    return false if not proof_plain_value_type_with_work(members[row].type_expression, report, visiting, depth + 1, source_work)
+                return true
+            return false if counts.enums != 1 or counts.structs != 0
+            in_hierarchy: bool = proof_enum_in_hierarchy_with_work(report.source_annotations, name, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or in_hierarchy
+            mark: usize = visiting.count
+            return false if not proof_type_audit_work_charge(sview_len(name), source_work)
+            visiting.push(name)
+            plain: bool = proof_enum_payloads_plain_with_work(report.source_declarations, name, report, visiting, depth + 1, source_work)
+            visiting.resize(mark)
+            return plain
+
+        def proof_plain_value_type_with_work(expression: Ast::Expr, report: ProofReport&, visiting: mutable darray[sview]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_plain_value_type_with_work(inner, report, visiting, depth + 1, source_work)
+                Ast::Expr.Ident(name, _):
+                    return proof_plain_named_type_with_work(name, report, visiting, depth + 1, source_work)
+                Ast::Expr.Scope(_, name, _):
+                    return false
+                _:
+                    return false
+
+        def proof_value_binding_type_with_work(expression: Ast::Expr, report: ProofReport&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            match expression:
+                Ast::Expr.Unary(operator, inner, _):
+                    return operator == TokenKind.Mutable and proof_value_binding_type_with_work(inner, report, depth + 1, source_work)
+                _:
+                    pass
+            visiting: mutable darray[sview] = []
+            return proof_plain_value_type_with_work(expression, report, visiting, 0, source_work)

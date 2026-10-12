@@ -242,7 +242,7 @@ extend ElisaProof:
                 return (false, false) if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
                 attempt_name_matches: bool = attempt.name == name
                 if attempt_name_matches and attempt.line == line:
-                    return (true, false) if not attempt.proven or not proof_replay_receipt_attempt_status(receipt, goal_id)
+                    return (true, false) if not attempt.proven or not proof_replay_receipt_kernel_attempt_status(receipt, goal_id)
                     discharged <- true
             (true, discharged)
 
@@ -269,6 +269,7 @@ extend ElisaProof:
 
         def proof_replay_attempt_statuses_and_complete_with_work(report: ProofReport&, replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             return false if not proof_replay_attempt_statuses_with_work(report, replayed, source_work)
+            return false if not report.kernel.arena_validated or report.kernel.budget_exhausted
             return false if report.replay_gaps != 0 or report.replayed != report.certificates.count
             return false if replayed.count != report.goal_attempts.count
             return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
@@ -284,6 +285,7 @@ extend ElisaProof:
         # their counters or per-certificate flags were changed. Completion requires exact counts,
         # every certificate flag, and a replayed certificate bound to each proven attempt.
         def proof_replay_certificates_complete(report: ProofReport&) -> bool:
+            return false if not report.kernel.arena_validated or report.kernel.budget_exhausted
             return false if report.replay_gaps != 0 or report.replayed != report.certificates.count
             for certificate in report.certificates:
                 return false if not certificate.replayed
@@ -328,10 +330,11 @@ extend ElisaProof:
 
         def proof_replay_revoke_certificate_batch(report: mutable ProofReport&) -> void:
             report.replayed <- 0
-            report.replay_gaps <- 0
+            max_gap_count: u32 = ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.u32()
+            report.replay_gaps <- max_gap_count if report.certificates.count > max_gap_count.usize() else report.certificates.count.u32()
             for certificate in report.certificates |certificate, report|:
                 certificate.replayed <- false
-                report.replay_gaps <- report.replay_gaps + 1
+            report.replay_gaps <- PROOF_REPLAY_INCOMPLETE_SENTINEL_GAPS if report.certificates.count == 0
 
         def proof_replay_certificates_mutating[@r](report: mutable ProofReport& @r) -> void can[Global.Read, Global.Write]:
             # Replay is a query over the current immutable certificate set. Reset presentation
@@ -347,6 +350,9 @@ extend ElisaProof:
             for certificate in report.certificates |certificate|:
                 certificate.replayed <- false
             report.kernel.arena_validated <- (ElisaProofKernelReplay::proof_kernel_replay_arena_all_report(&report.kernel.nodes, &report.kernel.children) can Global{Read,Write})
+            if not report.kernel.arena_validated:
+                proof_replay_revoke_certificate_batch(report)
+                return
             validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
             structural_cache: mutable ProofReplayStructuralValidationCache = ProofReplayStructuralValidationCache{}
             proof_replay_build_fact_trace_index(report)
@@ -408,8 +414,8 @@ extend ElisaProof:
             report.replay_gaps
 
         # Standalone compatibility API: the returned receipt is a replay-status snapshot only.
-        # It does not freeze or source-bind the mutable caller report; use the combined checked
-        # view below for any claim that needs source authorization.
+        # Its explicitly named kernel diagnostic accessors are not source-authorized. Use the
+        # combined checked view below for proof status or any claim about the source program.
         def proof_replay_certificates[@r](report: mutable ProofReport& @r) -> ProofReplayReceipt[r] can[Memory.Allocate, Global.Read, Global.Write]:
             (proof_replay_certificates_mutating(report) can Global{Read,Write})
             return proof_replay_receipt_from_report(report, false)
@@ -513,10 +519,15 @@ extend ElisaProof:
             receipt.issued
 
         def proof_replay_receipt_is_complete[@r](receipt: ProofReplayReceipt[r]) -> bool:
+            receipt.issued and receipt.source_bound and receipt.source_validated and receipt.complete
+
+        # Explicitly low-trust diagnostic for the standalone compatibility API. This says only
+        # that the kernel replay batch completed; it does not bind the results to source.
+        def proof_replay_receipt_kernel_batch_complete[@r](receipt: ProofReplayReceipt[r]) -> bool:
             receipt.issued and receipt.complete
 
         def proof_replay_receipt_source_validated[@r](receipt: ProofReplayReceipt[r]) -> bool:
-            receipt.issued and receipt.source_validated
+            receipt.issued and receipt.source_bound and receipt.source_validated
 
         def proof_replay_receipt_attempt_count[@r](receipt: ProofReplayReceipt[r]) -> usize:
             return 0 if not receipt.issued
@@ -531,20 +542,33 @@ extend ElisaProof:
             (true, receipt.replay_gap_count)
 
         def proof_replay_receipt_attempt_status[@r](receipt: ProofReplayReceipt[r], attempt_index: usize) -> bool:
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or attempt_index >= receipt.attempt_statuses.count
+            receipt.attempt_statuses[attempt_index]
+
+        # Low-trust standalone replay diagnostic. Callers must not use this as proof that a
+        # source-level obligation was established; proof_checked_view_attempt_is_proven is the
+        # source-authorized query.
+        def proof_replay_receipt_kernel_attempt_status[@r](receipt: ProofReplayReceipt[r], attempt_index: usize) -> bool:
             return false if not receipt.issued or attempt_index >= receipt.attempt_statuses.count
             receipt.attempt_statuses[attempt_index]
 
         def proof_replay_receipt_attempt_is_proven[@r](receipt: ProofReplayReceipt[r], attempt_index: usize) -> bool:
-            return false if not receipt.issued or not receipt.source_validated or attempt_index >= receipt.attempt_proven_statuses.count
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or attempt_index >= receipt.attempt_proven_statuses.count
             receipt.attempt_proven_statuses[attempt_index]
 
         def proof_replay_receipt_certificate_status[@r](receipt: ProofReplayReceipt[r], certificate_index: usize) -> bool:
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or certificate_index >= receipt.certificate_statuses.count
+            receipt.certificate_statuses[certificate_index]
+
+        # Low-trust standalone replay diagnostic; use a checked view for source-authorized
+        # certificate status.
+        def proof_replay_receipt_kernel_certificate_status[@r](receipt: ProofReplayReceipt[r], certificate_index: usize) -> bool:
             return false if not receipt.issued or certificate_index >= receipt.certificate_statuses.count
             receipt.certificate_statuses[certificate_index]
 
         def proof_replay_receipt_attempt_statuses_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
-            return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.attempt_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.attempt_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + receipt.attempt_statuses.count
             for status in receipt.attempt_statuses |replayed|:
                 replayed.push(status)
@@ -552,7 +576,7 @@ extend ElisaProof:
 
         def proof_replay_receipt_certificate_statuses_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
-            return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + receipt.certificate_statuses.count
             for status in receipt.certificate_statuses |replayed|:
                 replayed.push(status)
@@ -561,7 +585,7 @@ extend ElisaProof:
         def proof_replay_receipt_certificate_statuses_and_count_with_work[@r](receipt: ProofReplayReceipt[r], replayed: mutable darray[bool]&, replayed_count: mutable u32&, source_work: mutable usize&) -> bool can[Memory.Allocate]:
             replayed.clear()
             replayed_count <- 0
-            return false if not receipt.issued or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            return false if not receipt.issued or not receipt.source_bound or not receipt.source_validated or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or receipt.certificate_statuses.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + receipt.certificate_statuses.count
             for status in receipt.certificate_statuses |replayed, replayed_count|:
                 replayed.push(status)

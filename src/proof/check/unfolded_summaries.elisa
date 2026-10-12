@@ -46,29 +46,31 @@ extend ElisaProof:
                         return false
             return false
 
-        def proof_unfold_named_enum_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&) -> bool:
+        def proof_unfold_named_enum_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
             if type_expression is declared:
                 match declared:
                     Ast::Expr.Ident(name, _):
-                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         return counts.enums == 0 and counts.const_enums == 1 and counts.structs == 0
                     _:
                         return false
             return false
 
-        def proof_unfold_named_struct_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&) -> bool:
+        def proof_unfold_named_struct_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> bool:
             if type_expression is declared:
                 match declared:
                     Ast::Expr.Ident(name, _):
-                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+                        counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+                        return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         return counts.enums == 0 and counts.const_enums == 0 and counts.structs == 1
                     _:
                         return false
             return false
 
-        def proof_unfold_value_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&, allow_struct: bool) -> bool:
-            return true if proof_unfold_primitive_type(type_expression) or proof_unfold_named_enum_type(type_expression, declarations)
-            return allow_struct and proof_unfold_named_struct_type(type_expression, declarations)
+        def proof_unfold_value_type(type_expression: Ast::Expr?, declarations: darray[Ast::Decl]&, allow_struct: bool, source_work: mutable usize&) -> bool:
+            return true if proof_unfold_primitive_type(type_expression) or proof_unfold_named_enum_type(type_expression, declarations, source_work)
+            return allow_struct and proof_unfold_named_struct_type(type_expression, declarations, source_work)
 
         def proof_unfold_collect_names(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> void:
             return if depth > ProofUnfoldLimit::NODES
@@ -124,13 +126,13 @@ extend ElisaProof:
                 return proof_ident_name(declared) == "bool"
             return false
 
-        def proof_unfolded_ensures(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, return_type: Ast::Expr?, declarations: darray[Ast::Decl]&) -> darray[Ast::Expr]:
+        def proof_unfolded_ensures(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, return_type: Ast::Expr?, declarations: darray[Ast::Decl]&, source_work: mutable usize&) -> darray[Ast::Expr]:
             result: mutable darray[Ast::Expr] = []
-            return result if not proof_unfold_value_type(return_type, declarations, false)
+            return result if not proof_unfold_value_type(return_type, declarations, false, source_work)
             # By-value admitted scalar/const-enum/struct parameters only. Reference parameters
             # would make the summary an equation over a place rather than a value.
-            for parameter in parameters |result|:
-                return result if parameter.has_default or not proof_unfold_value_type(parameter.type_expression, declarations, true)
+            for parameter in parameters |result, source_work|:
+                return result if parameter.has_default or not proof_unfold_value_type(parameter.type_expression, declarations, true, source_work)
             prefix: mutable Ast::Expr = Ast::Expr.BoolLit(true, proof_resource_default_position())
             has_prefix: mutable bool = false
             paths: mutable usize = 0
@@ -204,7 +206,7 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, _, right, _):
                     proof_unfold_contract_calls(left, facts, report, line, name, functions, depth + 1)
                     proof_unfold_contract_calls(right, facts, report, line, name, functions, depth + 1)
-                Ast::Expr.Call(callee, arguments, argument_names, _):
+                Ast::Expr.Call(callee, arguments, argument_names, position):
                     return if not proof_contract_calls_are_pure(expression, functions)
                     for argument_name in argument_names:
                         return if argument_name != ""
@@ -213,26 +215,26 @@ extend ElisaProof:
                     called: usize = proof_function_index_for_callee(functions, callee)
                     return if called >= functions.lookup.names.count or called >= functions.summaries.pure.count or not functions.summaries.pure[called]
                     return if called >= functions.summaries.verified.count or not functions.summaries.verified[called]
-                    return if called >= functions.contracts.requires_counts.count or functions.contracts.requires_counts[called] != 0
-                    return if called >= functions.parameters.param_counts.count or functions.parameters.param_counts[called] != arguments.count
-                    return if called >= functions.contracts.ensure_counts.count
+                    return if called >= functions.contracts.obligations.requires_counts.count or functions.contracts.obligations.requires_counts[called] != 0
+                    return if called >= functions.parameters.metadata.param_counts.count or functions.parameters.metadata.param_counts[called] != arguments.count
+                    return if called >= functions.contracts.obligations.ensure_counts.count
                     parameter_names: mutable darray[sview] = []
                     for parameter_index in 0..<arguments.count |parameter_names, functions, called|:
-                        parameter_names.push(functions.parameters.all_params[functions.parameters.param_starts[called] + parameter_index])
+                        parameter_names.push(functions.parameters.metadata.all_params[functions.parameters.metadata.param_starts[called] + parameter_index])
                     argument_values: mutable darray[Ast::Expr] = []
                     argument_values.extend(arguments)
                     result_names: mutable darray[sview] = ["result"]
                     result_values: mutable darray[Ast::Expr] = [expression]
                     no_requires: mutable darray[usize] = []
-                    for ensure_index in 0..<functions.contracts.ensure_counts[called] |facts, report, line, name, functions, called, parameter_names, argument_values, result_names, result_values, no_requires, expression|:
-                        source_ensure: Ast::Expr = functions.contracts.all_ensures[functions.contracts.ensure_starts[called] + ensure_index]
+                    for ensure_index in 0..<functions.contracts.obligations.ensure_counts[called] |facts, report, line, name, functions, called, parameter_names, argument_values, result_names, result_values, no_requires, expression, position|:
+                        source_ensure: Ast::Expr = functions.contracts.obligations.all_ensures[functions.contracts.obligations.ensure_starts[called] + ensure_index]
                         continue if proof_expr_has_old(source_ensure)
                         ensured: Ast::Expr = proof_substitute(proof_substitute(source_ensure, parameter_names, argument_values), result_names, result_values)
                         known: mutable bool = false
                         for fact in facts |known, ensured|:
                             known <- true if proof_expr_equal(fact, ensured)
                         continue if known
-                        proof_add_function_summary_fact(facts, report, functions, ensured, line, name, functions.lookup.names[called], parameter_names, argument_values, expression, no_requires, ensure_index, false, Ast::Expr.Absent, functions.lookup.lines[called] if called < functions.lookup.lines.count else 0)
+                        proof_add_function_summary_fact(facts, report, functions, ensured, line, name, functions.lookup.names[called], parameter_names, argument_values, expression, no_requires, ensure_index, false, Ast::Expr.Absent, functions.lookup.lines[called] if called < functions.lookup.lines.count else 0, position)
                     proof_add_pure_call_witnesses(expression, facts, functions, report, line, name, 0)
                 _:
                     return

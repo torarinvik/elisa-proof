@@ -2,8 +2,8 @@ extend ElisaProof:
     private:
         # This first local-record transition accepts a deliberately small source shape.
         # It cannot hide binders, address-taking, calls, or ownership changes in expressions.
-        def proof_local_record_expression_closed(expression: Ast::Expr, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_local_record_expression_closed_with_work(expression: Ast::Expr, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Ident(_, _):
                     return true
@@ -12,88 +12,100 @@ extend ElisaProof:
                 Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Field(object, _, _):
-                    return proof_local_record_expression_closed(object, depth + 1)
+                    return proof_local_record_expression_closed_with_work(object, depth + 1, source_work)
                 Ast::Expr.Paren(inner, _):
-                    return proof_local_record_expression_closed(inner, depth + 1)
+                    return proof_local_record_expression_closed_with_work(inner, depth + 1, source_work)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    return proof_local_record_expression_closed(inner, depth + 1)
+                    return proof_local_record_expression_closed_with_work(inner, depth + 1, source_work)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return (proof_is_comparison(operator) or operator == TokenKind.And or operator == TokenKind.Or) and proof_local_record_expression_closed(left, depth + 1) and proof_local_record_expression_closed(right, depth + 1)
+                    return (proof_is_comparison(operator) or operator == TokenKind.And or operator == TokenKind.Or) and proof_local_record_expression_closed_with_work(left, depth + 1, source_work) and proof_local_record_expression_closed_with_work(right, depth + 1, source_work)
                 Ast::Expr.Construct(_, fields, _):
-                    for field in fields |depth|:
-                        return false if not proof_local_record_expression_closed(field.value, depth + 1)
+                    for field in fields |depth, source_work|:
+                        return false if not proof_type_audit_work_charge(1, source_work)
+                        return false if not proof_local_record_expression_closed_with_work(field.value, depth + 1, source_work)
                     return true
                 _:
                     return false
 
         # Resolve only an explicit record declaration, without stripping a reference or
         # following an alias that might denote reference storage.
-        def proof_local_direct_record_name(expression: Ast::Expr, depth: usize) -> sview:
-            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_local_direct_record_name_with_work(expression: Ast::Expr, depth: usize, source_work: mutable usize&) -> sview:
+            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Ident(name, _):
+                    return "" if not proof_type_audit_work_charge(sview_len(name), source_work)
                     return name
                 Ast::Expr.Paren(inner, _):
-                    return proof_local_direct_record_name(inner, depth + 1)
+                    return proof_local_direct_record_name_with_work(inner, depth + 1, source_work)
                 Ast::Expr.Unary(TokenKind.Mutable, inner, _):
-                    return proof_local_direct_record_name(inner, depth + 1)
+                    return proof_local_direct_record_name_with_work(inner, depth + 1, source_work)
                 _:
                     return ""
 
         # Require a unique declaration at function scope. Shadowing or an unsupported
         # binding construct rejects the transition, even when it appears on another path.
-        def proof_local_record_in_body(body: darray[Ast::Stmt]&, wanted: sview, depth: usize) -> (count: usize, record: sview):
-            return (2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_local_record_in_body_with_work(body: darray[Ast::Stmt]&, wanted: sview, depth: usize, source_work: mutable usize&) -> (count: usize, record: sview):
+            return (2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             count: mutable usize = 0
             record: mutable sview = ""
-            for statement in body |body, wanted, depth, count, record|:
+            for statement in body |body, wanted, depth, count, record, source_work|:
+                return (2, "") if not proof_type_audit_work_charge(1, source_work)
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, _):
-                        return (2, "") if not proof_local_record_expression_closed(initializer, 0)
+                        return (2, "") if not proof_local_record_expression_closed_with_work(initializer, 0, source_work)
+                        return (2, "") if not proof_type_audit_work_charge(sview_len(local_name) + sview_len(wanted), source_work)
                         if local_name == wanted:
                             return (2, "") if depth != 0 or count != 0
                             count <- 1
-                            record <- proof_local_direct_record_name(type_expression, 0)
+                            record <- proof_local_direct_record_name_with_work(type_expression, 0, source_work)
+                            return (2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return (2, "") if not proof_local_record_expression_closed(condition, 0)
-                        first: (count: usize, record: sview) = proof_local_record_in_body(then_body, wanted, depth + 1)
-                        second: (count: usize, record: sview) = proof_local_record_in_body(else_body, wanted, depth + 1)
+                        return (2, "") if not proof_local_record_expression_closed_with_work(condition, 0, source_work)
+                        first: (count: usize, record: sview) = proof_local_record_in_body_with_work(then_body, wanted, depth + 1, source_work)
+                        return (2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or first.count > 0
+                        second: (count: usize, record: sview) = proof_local_record_in_body_with_work(else_body, wanted, depth + 1, source_work)
+                        return (2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         return (2, "") if first.count > 0 or second.count > 0
                     Ast::Stmt.While(condition, loop_body, _):
-                        return (2, "") if not proof_local_record_expression_closed(condition, 0)
-                        nested: (count: usize, record: sview) = proof_local_record_in_body(loop_body, wanted, depth + 1)
-                        return (2, "") if nested.count > 0
+                        return (2, "") if not proof_local_record_expression_closed_with_work(condition, 0, source_work)
+                        nested: (count: usize, record: sview) = proof_local_record_in_body_with_work(loop_body, wanted, depth + 1, source_work)
+                        return (2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or nested.count > 0
                     Ast::Stmt.Assign(target, _, initializer, _):
-                        return (2, "") if not proof_local_record_expression_closed(target, 0) or not proof_local_record_expression_closed(initializer, 0)
+                        return (2, "") if not proof_local_record_expression_closed_with_work(target, 0, source_work) or not proof_local_record_expression_closed_with_work(initializer, 0, source_work)
                     Ast::Stmt.Contract(_, expression, _):
-                        return (2, "") if not proof_local_record_expression_closed(expression, 0)
+                        return (2, "") if not proof_local_record_expression_closed_with_work(expression, 0, source_work)
                     Ast::Stmt.Return(value, _):
                         if value is returned:
-                            return (2, "") if not proof_local_record_expression_closed(returned, 0)
+                            return (2, "") if not proof_local_record_expression_closed_with_work(returned, 0, source_work)
                     _:
                         return (2, "")
             return (count, record)
 
-        def proof_local_record_source(declarations: darray[Ast::Decl]&, owner: sview, wanted: sview, depth: usize) -> (owners: usize, count: usize, record: sview):
-            return (2, 2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_local_record_source_with_work(declarations: darray[Ast::Decl]&, owner: sview, wanted: sview, depth: usize, source_work: mutable usize&) -> (owners: usize, count: usize, record: sview):
+            return (2, 2, "") if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             owners: mutable usize = 0
             count: mutable usize = 0
             record: mutable sview = ""
-            for declaration in declarations |declarations, owner, wanted, depth, owners, count, record|:
+            for declaration in declarations |declarations, owner, wanted, depth, owners, count, record, source_work|:
+                return (2, 2, "") if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, _, _, body, _, _, _):
+                        return (2, 2, "") if not proof_type_audit_work_charge(sview_len(name) + sview_len(owner), source_work)
                         if name == owner:
                             owners <- owners + 1
-                            local: (count: usize, record: sview) = proof_local_record_in_body(body, wanted, 0)
+                            local: (count: usize, record: sview) = proof_local_record_in_body_with_work(body, wanted, 0, source_work)
+                            return (2, 2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                             count <- count + local.count
                             record <- local.record if local.count == 1
                     Ast::Decl.Module(_, body, _):
-                        nested: (owners: usize, count: usize, record: sview) = proof_local_record_source(body, owner, wanted, depth + 1)
+                        nested: (owners: usize, count: usize, record: sview) = proof_local_record_source_with_work(body, owner, wanted, depth + 1, source_work)
+                        return (2, 2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         owners <- owners + nested.owners
                         count <- count + nested.count
                         record <- nested.record if nested.count == 1
                     Ast::Decl.Scoped(body, _):
-                        nested: (owners: usize, count: usize, record: sview) = proof_local_record_source(body, owner, wanted, depth + 1)
+                        nested: (owners: usize, count: usize, record: sview) = proof_local_record_source_with_work(body, owner, wanted, depth + 1, source_work)
+                        return (2, 2, "") if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         owners <- owners + nested.owners
                         count <- count + nested.count
                         record <- nested.record if nested.count == 1
@@ -101,17 +113,51 @@ extend ElisaProof:
                         pass
             return (owners, count, record)
 
-        def proof_unaliased_local_record_field(target: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, report: ProofReport&, owner: sview) -> bool:
+        def proof_unaliased_local_record_field_with_work(target: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, report: ProofReport&, owner: sview, source_work: mutable usize&) -> bool:
             match target:
                 Ast::Expr.Field(Ast::Expr.Ident(root, _), field, _):
-                    return false if root == "" or field == "" or proof_current_parameter(names, frame_parameters, root)
-                    return false if report.aliased_owner != owner or owner == "" or not (any live in names where live == root)
-                    return false if any aliased in report.aliased_names where aliased == root or aliased == "*"
-                    return false if any escaping in report.escaping_names where escaping == root or escaping == "*"
-                    source: (owners: usize, count: usize, record: sview) = proof_local_record_source(report.source_declarations, owner, root, 0)
+                    return false if not proof_type_audit_work_charge(sview_len(root) + sview_len(field), source_work)
+                    return false if root == "" or field == ""
+                    return false if not proof_type_audit_work_charge(sview_len(owner) + sview_len(report.aliased_owner), source_work)
+                    parameter: mutable bool = false
+                    live: mutable bool = false
+                    name_index: mutable usize = names.count
+                    while name_index > 0 |name_index, names, root, source_work, parameter, frame_parameters, live|:
+                        name_index <- name_index - 1
+                        return false if not proof_type_audit_work_charge(sview_len(names[name_index]) + sview_len(root), source_work)
+                        if names[name_index] == root:
+                            live <- true
+                            parameter <- name_index < frame_parameters.count
+                            break
+                    return false if parameter
+                    return false if report.aliased_owner != owner or owner == ""
+                    return false if not live
+                    aliased: mutable bool = false
+                    for name in report.aliased_names |report.aliased_names, root, source_work, aliased|:
+                        return false if not proof_type_audit_work_charge(sview_len(name) + sview_len(root) + 1, source_work)
+                        if name == root or name == "*":
+                            aliased <- true
+                            break
+                    return false if aliased
+                    escaping: mutable bool = false
+                    for name in report.escaping_names |report.escaping_names, root, source_work, escaping|:
+                        return false if not proof_type_audit_work_charge(sview_len(name) + sview_len(root) + 1, source_work)
+                        if name == root or name == "*":
+                            escaping <- true
+                            break
+                    return false if escaping
+                    source: (owners: usize, count: usize, record: sview) = proof_local_record_source_with_work(report.source_declarations, owner, root, 0, source_work)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return false if source.owners != 1 or source.count != 1 or source.record == ""
-                    fields: mutable darray[sview] = []
-                    return false if proof_struct_field_names(report.source_declarations, source.record, 0, &fields) != 1
-                    return proof_struct_field_type(report.source_declarations, source.record, field, 0).count == 1
+                    members: mutable darray[Ast::StructMember] = []
+                    return false if proof_struct_members_with_work(report.source_declarations, source.record, 0, &members, source_work) != 1 or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    field_type: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type_with_work(members, field, source_work)
+                    return field_type.count == 1 and source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 _:
                     return false
+
+        def proof_unaliased_local_record_field(target: Ast::Expr, names: darray[sview]&, frame_parameters: darray[sview]&, report: mutable ProofReport&, owner: sview) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            found: bool = proof_unaliased_local_record_field_with_work(target, names, frame_parameters, report, owner, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return found

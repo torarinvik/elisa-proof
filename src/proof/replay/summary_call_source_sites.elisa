@@ -1,45 +1,5 @@
 extend ElisaProof:
     private:
-        def proof_replay_summary_direct_call_statement(body: darray[Ast::Stmt]&, line: u32, call: Ast::Expr, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
-            return false if depth >= 96 or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + body.count
-            for statement in body |line, call, matches, work, complete, depth|:
-                match statement:
-                    Ast::Stmt.VarDecl(_, _, initializer, position):
-                        return true if position.line > line
-                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains_bounded(initializer, call, work, complete, 0)
-                    Ast::Stmt.Assign(_, TokenKind.Assign, value, position) | Ast::Stmt.Expr(value, position) | Ast::Stmt.Return(value, position):
-                        return true if position.line > line
-                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains_bounded(value, call, work, complete, 0)
-                    Ast::Stmt.If(_, _, _, position) | Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Match(_, _, position) | Ast::Stmt.Block(_, _, _, _, position):
-                        return true if position.line > line
-                        return false
-                    Ast::Stmt.Contract(_, expression, position):
-                        return true if position.line > line
-                        matches <- matches + 1 if proof_replay_deterministic_call_source_contains_bounded(expression, call, work, complete, 0)
-                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
-                        pass
-                    _:
-                        return false
-                return false if not proof_replay_summary_bool_ref_value(complete)
-            return true
-
-        def proof_replay_summary_direct_call_declarations(declarations: darray[Ast::Decl]&, owner: sview, line: u32, call: Ast::Expr, matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> bool:
-            return false if depth >= 96 or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + declarations.count
-            for declaration in declarations |owner, line, call, matches, work, complete, depth|:
-                match declaration:
-                    Ast::Decl.Func(name, _, _, body, _, _, position):
-                        if name == owner and position.line <= line:
-                            return false if not proof_replay_summary_direct_call_statement(body, line, call, matches, work, complete, 0)
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_summary_direct_call_declarations(nested, owner, line, call, matches, work, complete, depth + 1)
-                    Ast::Decl.Invalid:
-                        return false
-                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
-                        pass
-            return true
-
         # Entry preconditions are checked at the function declaration site, but a pure call
         # summary introduced while unfolding one of those preconditions must still be tied to
         # the call's actual source span. `trace.line` is the owning function's declaration line,
@@ -80,11 +40,45 @@ extend ElisaProof:
         def proof_replay_summary_requires_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> bool:
             owner_line: u32 = report.replay_owner_line
             return false if owner_line == 0 or owner_line == 4294967295 or trace.name == "" or trace.line != owner_line
+            if proof_replay_summary_signature_requires_call_source_site(report, trace, call, owner_line, work):
+                return true
             matches: mutable usize = 0
             owners: mutable usize = 0
             complete: mutable bool = true
             return false if not proof_replay_summary_requires_call_declarations(report.source_declarations, trace.name, owner_line, call, &matches, &owners, work, &complete, 0)
             return owners == 1 and matches == 1
+
+        def proof_replay_summary_signature_requires_call_source_site(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, owner_line: u32, work: mutable usize&) -> bool:
+            position: Ast::Pos = trace.source_call_position
+            return false if position.offset == 0 or position.end_offset <= position.offset
+            expected_call: mutable Ast::Expr = Ast::Expr.Invalid
+            match call:
+                Ast::Expr.Call(callee, arguments, type_arguments, call_position):
+                    return false if not proof_replay_source_position_equal(call_position, position)
+                    expected_call <- Ast::Expr.Call(callee, arguments, type_arguments, position)
+                _:
+                    return false
+            return false if proof_replay_trace_owner_source_position_line_for_trace_with_work(report, trace, work) != owner_line
+            rows: usize = report.source_signature_contract_lines.count
+            return false if rows != report.source_signature_contract_kinds.count or rows != report.source_signature_contracts.count
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or rows > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + rows
+            matches: mutable usize = 0
+            for index in 0..<rows |index, report, trace, owner_line, expected_call, matches, work|:
+                kind: sview = report.source_signature_contract_kinds[index]
+                return false if sview_len(kind) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                work <- work + sview_len(kind)
+                continue if report.source_signature_contract_lines[index] != owner_line or kind != "requires"
+                source_call: mutable Ast::Expr = Ast::Expr.Invalid
+                source_calls: mutable usize = 0
+                return false if not proof_replay_summary_call_exact_span_in_expr(report.source_signature_contracts[index], expected_call, &source_call, &source_calls, work, 0)
+                return false if source_calls > 1
+                if source_calls == 1:
+                    complete: mutable bool = true
+                    return false if not proof_replay_summary_call_same_source_span(report, trace, source_call, expected_call, 0, work, &complete, 0) or not complete
+                    matches <- matches + 1
+                    return false if matches > 1
+            return matches == 1
 
         # A call summary stores normalized argument values: formal identifiers and checked
         # constants carry their declaration positions, while the source call carries the
@@ -98,8 +92,11 @@ extend ElisaProof:
                 Ast::Expr.Call(source_callee, source_arguments, _, source_position):
                     match expected:
                         Ast::Expr.Call(expected_callee, expected_arguments, _, expected_position):
-                            if source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and source_arguments.count == expected_arguments.count:
-                                callee_equal: bool = proof_replay_summary_expr_equal_with_work(source_callee, expected_callee, work)
+                            wildcard_call: bool = match expected_callee:
+                                Ast::Expr.Invalid: true
+                                _: false
+                            if source_position.line == expected_position.line and source_position.column == expected_position.column and source_position.offset == expected_position.offset and source_position.end_line == expected_position.end_line and source_position.end_column == expected_position.end_column and source_position.end_offset == expected_position.end_offset and (wildcard_call or source_arguments.count == expected_arguments.count):
+                                callee_equal: bool = wildcard_call or proof_replay_summary_expr_equal_with_work(source_callee, expected_callee, work)
                                 if callee_equal:
                                     matches <- matches + 1
                                     found <- source
@@ -278,74 +275,6 @@ extend ElisaProof:
         def proof_replay_summary_direct_call_source_site_with_work(report: mutable ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> bool:
             return proof_replay_summary_direct_call_source_site_at(report, trace, call, 0, work)
 
-        # A sole return in one arm and an empty other arm cannot bind the
-        # later result local. Only the continuing path reaches that call.
-        def proof_replay_summary_early_return_arm(body: darray[Ast::Stmt]&) -> bool:
-            return false if body.count != 1
-            match body[0]:
-                Ast::Stmt.Return(_, _):
-                    return true
-                _:
-                    return false
-
-        def proof_replay_summary_local_call_statement(body: darray[Ast::Stmt]&, local_name: sview, binding_position: Ast::Pos, expected_call: Ast::Expr, matches: mutable usize&, depth: usize) -> bool:
-            return false if depth >= 96
-            for statement in body |local_name, binding_position, expected_call, matches, depth|:
-                match statement:
-                    Ast::Stmt.VarDecl(name, _, initializer, position):
-                        return true if position.line > binding_position.line
-                        if name == local_name:
-                            match initializer:
-                                Ast::Expr.Call(_, _, _, _):
-                                    matches <- 1 if proof_replay_call_source_position_equal(initializer, expected_call)
-                                Ast::Expr.Paren(inner, _):
-                                    matches <- 1 if proof_replay_call_source_position_equal(inner, expected_call)
-                                _:
-                                    matches <- 0
-                    Ast::Stmt.Assign(target, operator, value, position):
-                        return true if position.line > binding_position.line
-                        if proof_replay_ident_name(target) == local_name:
-                            match value:
-                                Ast::Expr.Call(_, _, _, _) if operator == TokenKind.Assign or operator == TokenKind.LArrow:
-                                    matches <- 1 if proof_replay_call_source_position_equal(value, expected_call)
-                                Ast::Expr.Paren(inner, _) if operator == TokenKind.Assign or operator == TokenKind.LArrow:
-                                    matches <- 1 if proof_replay_call_source_position_equal(inner, expected_call)
-                                _:
-                                    matches <- 0
-                    Ast::Stmt.If(_, yes, no, position):
-                        return true if position.line > binding_position.line
-                        if position.line < binding_position.line:
-                            continue if (yes.count == 0 and proof_replay_summary_early_return_arm(no)) or (no.count == 0 and proof_replay_summary_early_return_arm(yes))
-                        return false if not proof_replay_summary_local_call_statement(yes, local_name, binding_position, expected_call, matches, depth + 1)
-                        return false if not proof_replay_summary_local_call_statement(no, local_name, binding_position, expected_call, matches, depth + 1)
-                    Ast::Stmt.Match(_, arms, position):
-                        return true if position.line > binding_position.line
-                        for arm in arms |arm, local_name, binding_position, expected_call, matches, depth|:
-                            return false if not proof_replay_summary_local_call_statement(arm.body, local_name, binding_position, expected_call, matches, depth + 1)
-                    Ast::Stmt.While(_, _, position) | Ast::Stmt.For(_, _, _, _, position) | Ast::Stmt.Block(_, _, _, _, position):
-                        return true if position.line > binding_position.line
-                        return false
-                    Ast::Stmt.Return(value, position):
-                        # These statements do not rebind the local. A later statement ends this
-                        # linear source window; an earlier/same-line return is ambiguous and
-                        # must not authenticate a result local.
-                        if position.line == binding_position.line:
-                            return proof_replay_source_local_use(value, local_name, binding_position, 0) and matches == 1
-                        return true if position.line > binding_position.line
-                        return false
-                    Ast::Stmt.Expr(_, position):
-                        return true if position.line > binding_position.line
-                        return false
-                    Ast::Stmt.Break(_, position) | Ast::Stmt.Continue(_, position):
-                        # A transfer before the call site makes simple sequential binding
-                        # reconstruction incomplete. Do not skip it as harmless syntax.
-                        return true if position.line > binding_position.line
-                        return false
-                    Ast::Stmt.Contract(_, _, _):
-                        pass
-                    _:
-                        return false
-            return true
         # A summary equation names the call's actuals as they read at the call, so its call is
         # anchored by its raw text at its exact span in the owner's body, never by a value the
         # names held at an earlier point (that substituted comparison is for deterministic-call

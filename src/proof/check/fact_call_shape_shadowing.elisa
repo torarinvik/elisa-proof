@@ -1,209 +1,12 @@
-# Source-position-aware local callable shadow checks for fact publication.
+# Call-site local binding shadow analysis and freshness checks for fact publication.
 extend ElisaProof:
     private:
-        def proof_fact_call_shape_source_span_contains(position: Ast::Pos, offset: u32) -> (valid: bool, contains: bool):
-            return (false, false) if position.line == 0 or position.end_offset <= position.offset
-            return (true, offset >= position.offset and offset < position.end_offset)
-
-        def proof_fact_call_shape_offset_merge(left: (valid: bool, contains: bool), right: (valid: bool, contains: bool)) -> (valid: bool, contains: bool):
-            return (false, false) if not left.valid or not right.valid or left.contains and right.contains
-            return (true, left.contains or right.contains)
-
-        def proof_fact_call_shape_expr_list_contains_offset(snapshot: mutable ProofFactCallShapeSnapshot&, expressions: darray[Ast::Expr]&, offset: u32, depth: usize) -> (valid: bool, contains: bool):
-            state: mutable (valid: bool, contains: bool) = (true, false)
-            for expression in expressions |expression, snapshot, offset, depth, state|:
-                child: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, expression, offset, depth + 1)
-                state <- proof_fact_call_shape_offset_merge(state, child)
-                return (false, false) if not state.valid
-            return state
-
-        def proof_fact_call_shape_expr_contains_offset(snapshot: mutable ProofFactCallShapeSnapshot&, expression: Ast::Expr, offset: u32, depth: usize = 0) -> (valid: bool, contains: bool):
-            return (false, false) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or not proof_fact_call_shape_charge(snapshot, 1)
-            match expression:
-                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
-                    return (true, false)
-                Ast::Expr.Call(callee, arguments, _, position):
-                    return (true, true) if position.line > 0 and position.end_offset > position.offset and position.offset == offset
-                    state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, callee, offset, depth + 1)
-                    return (false, false) if not state.valid
-                    arguments_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_list_contains_offset(snapshot, arguments, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(state, arguments_state)
-                Ast::Expr.StaticEffectCall(effect_type, _, _, arguments, _, position):
-                    return (true, true) if position.line > 0 and position.end_offset > position.offset and position.offset == offset
-                    state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, effect_type, offset, depth + 1)
-                    return (false, false) if not state.valid
-                    arguments_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_list_contains_offset(snapshot, arguments, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(state, arguments_state)
-                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
-                    return proof_fact_call_shape_expr_contains_offset(snapshot, object, offset, depth + 1)
-                Ast::Expr.Index(left, right, _) | Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
-                    left_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, left, offset, depth + 1)
-                    right_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, right, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(left_state, right_state)
-                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
-                    object_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, object, offset, depth + 1)
-                    low_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, low, offset, depth + 1)
-                    high_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, high, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(proof_fact_call_shape_offset_merge(object_state, low_state), high_state)
-                Ast::Expr.IndexN(object, arguments, _):
-                    object_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, object, offset, depth + 1)
-                    arguments_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_list_contains_offset(snapshot, arguments, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(object_state, arguments_state)
-                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
-                    return proof_fact_call_shape_expr_list_contains_offset(snapshot, elements, offset, depth + 1)
-                Ast::Expr.DictLit(entries, _):
-                    state: mutable (valid: bool, contains: bool) = (true, false)
-                    for entry in entries |entry, snapshot, offset, depth, state|:
-                        key_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, entry.key, offset, depth + 1)
-                        value_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, entry.value, offset, depth + 1)
-                        state <- proof_fact_call_shape_offset_merge(state, proof_fact_call_shape_offset_merge(key_state, value_state))
-                        return (false, false) if not state.valid
-                    return state
-                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
-                    state: mutable (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, base, offset, depth + 1)
-                    return (false, false) if not state.valid
-                    for field in fields |field, snapshot, offset, depth, state|:
-                        field_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, field.value, offset, depth + 1)
-                        state <- proof_fact_call_shape_offset_merge(state, field_state)
-                        return (false, false) if not state.valid
-                    return state
-                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
-                    state: mutable (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, subject, offset, depth + 1)
-                    return (false, false) if not state.valid
-                    for arm in arms |arm, snapshot, offset, depth, state|:
-                        guard_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, arm.guard, offset, depth + 1)
-                        body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, arm.body, offset, depth + 1)
-                        arm_state: (valid: bool, contains: bool) = proof_fact_call_shape_offset_merge(guard_state, body_state)
-                        state <- proof_fact_call_shape_offset_merge(state, arm_state)
-                        return (false, false) if not state.valid
-                    return state
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    iterable_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, iterable, offset, depth + 1)
-                    condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset, depth + 1)
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, body, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(proof_fact_call_shape_offset_merge(iterable_state, condition_state), body_state)
-                Ast::Expr.GetElse(guarded, recovery, _):
-                    guarded_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, guarded, offset, depth + 1)
-                    recovery_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, recovery, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(guarded_state, recovery_state)
-                Ast::Expr.Lambda(_, body, _):
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset, depth + 1)
-                    return body_state
-                Ast::Expr.Block(statements, value, _, _):
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, statements, offset, depth + 1)
-                    value_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, value, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(body_state, value_state)
-                _:
-                    return (false, false)
-
-        def proof_fact_call_shape_statement_contains_offset(snapshot: mutable ProofFactCallShapeSnapshot&, statement: Ast::Stmt, offset: u32, depth: usize) -> (valid: bool, contains: bool):
-            return (false, false) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or not proof_fact_call_shape_charge(snapshot, 1)
-            match statement:
-                Ast::Stmt.Invalid | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
-                    return (true, false)
-                Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
-                    return proof_fact_call_shape_expr_contains_offset(snapshot, expression, offset, depth + 1)
-                Ast::Stmt.VarDecl(_, type_expression, initializer, _) | Ast::Stmt.Assign(type_expression, _, initializer, _):
-                    left_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, type_expression, offset, depth + 1)
-                    right_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, initializer, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(left_state, right_state)
-                Ast::Stmt.If(condition, yes, no, _):
-                    condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset, depth + 1)
-                    yes_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, yes, offset, depth + 1)
-                    no_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, no, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(proof_fact_call_shape_offset_merge(condition_state, yes_state), no_state)
-                Ast::Stmt.While(condition, body, _):
-                    condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset, depth + 1)
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(condition_state, body_state)
-                Ast::Stmt.For(_, _, iterable, body, _):
-                    iterable_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, iterable, offset, depth + 1)
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset, depth + 1)
-                    return proof_fact_call_shape_offset_merge(iterable_state, body_state)
-                Ast::Stmt.Block(_, _, _, body, _):
-                    return proof_fact_call_shape_body_contains_offset(snapshot, body, offset, depth + 1)
-                Ast::Stmt.Match(subject, arms, _):
-                    state: mutable (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, subject, offset, depth + 1)
-                    return (false, false) if not state.valid
-                    for arm in arms |arm, snapshot, offset, depth, state|:
-                        guard_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, arm.guard, offset, depth + 1)
-                        body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, arm.body, offset, depth + 1)
-                        state <- proof_fact_call_shape_offset_merge(state, proof_fact_call_shape_offset_merge(guard_state, body_state))
-                        return (false, false) if not state.valid
-                    return state
-                _:
-                    return (false, false)
-
-        def proof_fact_call_shape_body_contains_offset(snapshot: mutable ProofFactCallShapeSnapshot&, body: darray[Ast::Stmt]&, offset: u32, depth: usize = 0) -> (valid: bool, contains: bool):
-            return (false, false) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
-            matches: mutable usize = 0
-            for statement in body |statement, offset, matches, snapshot, depth|:
-                return (false, false) if not proof_fact_call_shape_charge(snapshot, 1)
-                state: (valid: bool, contains: bool) = proof_fact_call_shape_statement_contains_offset(snapshot, statement, offset, depth + 1)
-                return (false, false) if not state.valid
-                if state.contains:
-                    matches <- matches + 1
-                    return (false, false) if matches > 1
-            return (true, matches == 1)
-
-        # A declaration/assignment earlier in this statement list introduces the local name
-        # before a later statement. Bindings in nested branches do not escape their body.
-        def proof_fact_call_shape_mark_prior_binding(snapshot: mutable ProofFactCallShapeSnapshot&, statement: Ast::Stmt, name: sview, shadowed: mutable bool&) -> bool:
-            match statement:
-                Ast::Stmt.VarDecl(local_name, _, _, _) | Ast::Stmt.Assign(Ast::Expr.Ident(local_name, _), TokenKind.Assign, _, _):
-                    return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name) + sview_len(local_name))
-                    shadowed <- true if local_name == name
-                _:
-                    pass
-            return true
-
-        def proof_fact_call_shape_function_body(report: ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, caller: usize) -> (known: bool, body: darray[Ast::Stmt]):
-            empty: darray[Ast::Stmt] = []
-            return (false, empty) if caller >= snapshot.function_names.count or caller >= snapshot.declaration_path_starts.count or caller >= snapshot.declaration_path_counts.count
-            start: usize = snapshot.declaration_path_starts[caller]
-            count: usize = snapshot.declaration_path_counts[caller]
-            return (false, empty) if count == 0 or start > snapshot.all_declaration_path.count or count > snapshot.all_declaration_path.count - start
-            declarations: mutable darray[Ast::Decl] = report.source_declarations
-            for depth in 0..<count - 1 |depth, declarations, snapshot, caller, start|:
-                return (false, empty) if not proof_fact_call_shape_charge(snapshot, 1)
-                index: usize = snapshot.all_declaration_path[start + depth]
-                return (false, empty) if index >= declarations.count
-                match declarations[index]:
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        declarations <- nested
-                    _:
-                        return (false, empty)
-            index: usize = snapshot.all_declaration_path[start + count - 1]
-            return (false, empty) if index >= declarations.count
-            match declarations[index]:
-                Ast::Decl.Func(name, _, _, body, _, _, position):
-                    return (false, empty) if not proof_fact_call_shape_charge(snapshot, sview_len(name) + sview_len(snapshot.function_names[caller]))
-                    return (false, empty) if name != snapshot.function_names[caller] or position.line != snapshot.function_lines[caller]
-                    return (true, body)
-                _:
-                    return (false, empty)
-
-        def proof_fact_call_shape_signature_contract_contains_offset(snapshot: mutable ProofFactCallShapeSnapshot&, caller: usize, offset: u32) -> (valid: bool, contains: bool):
-            return (false, false) if caller >= snapshot.function_names.count or snapshot.signature_contract_starts.count != snapshot.function_names.count or snapshot.signature_contract_counts.count != snapshot.function_names.count
-            start: usize = snapshot.signature_contract_starts[caller]
-            count: usize = snapshot.signature_contract_counts[caller]
-            return (false, false) if start > snapshot.all_signature_contracts.count or count > snapshot.all_signature_contracts.count - start
-            matches: mutable usize = 0
-            for index in 0..<count |index, start, snapshot, offset, matches|:
-                return (false, false) if not proof_fact_call_shape_charge(snapshot, 1)
-                state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, snapshot.all_signature_contracts[start + index], offset)
-                return (false, false) if not state.valid
-                if state.contains:
-                    matches <- matches + 1
-                    return (false, false) if matches > 1
-            return (true, matches == 1)
-
-        # Follow only the AST path containing the exact call-node offset. Statement-list order
-        # determines which preceding declarations are in scope; token-only Pos spans do not.
-        def proof_fact_call_shape_local_shadow_body_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, body: darray[Ast::Stmt]&, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize) -> bool:
+        # Skip only the root containment walk when the caller has already proved a unique hit.
+        def proof_fact_call_shape_local_shadow_body_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, body: darray[Ast::Stmt]&, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize, validated_contains: bool = false) -> bool:
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
-            body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset)
-            return false if not body_state.valid or not body_state.contains
+            if not validated_contains:
+                body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset)
+                return false if not body_state.valid or not body_state.contains
             for statement in body |statement, body, name, offset, shadowed, located, depth, report, snapshot|:
                 return false if not proof_fact_call_shape_charge(snapshot, 1)
                 statement_state: (valid: bool, contains: bool) = proof_fact_call_shape_statement_contains_offset(snapshot, statement, offset, depth + 1)
@@ -217,8 +20,126 @@ extend ElisaProof:
             state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset)
             return (false, false) if not state.valid
             if state.contains:
-                return (false, false) if not proof_fact_call_shape_local_shadow_body_at(report, snapshot, body, name, offset, shadowed, located, depth + 1)
+                return (false, false) if not proof_fact_call_shape_local_shadow_body_at(report, snapshot, body, name, offset, shadowed, located, depth + 1, true)
             return state
+
+        # Reuse the source runtime alias collectors, which validate parser metadata and
+        # reject binders that collide with formals or type/callable names.
+        def proof_fact_call_shape_shadow_parameters(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&) -> (complete: bool, parameters: darray[Ast::ParamDecl]):
+            empty: darray[Ast::ParamDecl] = []
+            return (false, empty) if snapshot.active_caller >= snapshot.function_names.count
+            caller: (known: bool, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt]) = proof_fact_call_shape_function_body(report, snapshot, snapshot.active_caller)
+            return (caller.known, caller.parameters)
+
+        def proof_fact_call_shape_apply_source_aliases(snapshot: mutable ProofFactCallShapeSnapshot&, aliases: darray[sview]&, name: sview, shadowed: mutable bool&) -> bool:
+            for alias in aliases |snapshot, alias, name, shadowed|:
+                return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(alias) + sview_len(name))
+                shadowed <- true if alias == name
+            return true
+
+        def proof_fact_call_shape_condition_shadow_bindings(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, condition: Ast::Expr, name: sview, shadowed: mutable bool&) -> bool:
+            aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, [], report)
+            return false if not aliases.complete
+            return proof_fact_call_shape_apply_source_aliases(snapshot, aliases.aliases, name, shadowed)
+
+        # Replay visits a condition with short-circuit scope: bindings from the left side
+        # of && are visible while evaluating its right side. Branch bodies use the full
+        # condition alias collector above.
+        def proof_fact_call_shape_local_shadow_condition_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, condition: Ast::Expr, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset)
+            return false if not state.valid or not state.contains
+            match condition:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, inner, name, offset, shadowed, located, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    left_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, left, offset)
+                    right_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, right, offset)
+                    return false if not left_state.valid or not right_state.valid or left_state.contains and right_state.contains or not left_state.contains and not right_state.contains
+                    if left_state.contains:
+                        return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, left, name, offset, shadowed, located, depth + 1)
+                    return false if not proof_fact_call_shape_condition_shadow_bindings(report, snapshot, left, name, shadowed)
+                    return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, right, name, offset, shadowed, located, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, left, offset)
+                    right_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, right, offset)
+                    return false if not left_state.valid or not right_state.valid or left_state.contains and right_state.contains or not left_state.contains and not right_state.contains
+                    if left_state.contains:
+                        return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, left, name, offset, shadowed, located, depth + 1)
+                    return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, right, name, offset, shadowed, located, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Is, _, _) | Ast::Expr.Binary(left, TokenKind.As, _, _):
+                    left_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, left, offset)
+                    return false if not left_state.valid or not left_state.contains
+                    return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, left, name, offset, shadowed, located, depth + 1)
+                _:
+                    return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
+
+        def proof_fact_call_shape_filter_shadow_bindings(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, filter: Ast::Expr, name: sview, shadowed: mutable bool&, depth: usize) -> bool:
+            parameters: (complete: bool, parameters: darray[Ast::ParamDecl]) = proof_fact_call_shape_shadow_parameters(report, snapshot)
+            return false if not parameters.complete
+            aliases: mutable darray[sview] = []
+            return false if not proof_source_loop_filter_aliases_add(filter, &aliases, parameters.parameters, report, depth + 1)
+            return proof_fact_call_shape_apply_source_aliases(snapshot, aliases, name, shadowed)
+
+        def proof_fact_call_shape_comprehension_shadow_bindings(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, variable: sview, position: Ast::Pos, filter: Ast::Expr, include_filter: bool, name: sview, shadowed: mutable bool&, depth: usize) -> bool:
+            parameters: (complete: bool, parameters: darray[Ast::ParamDecl]) = proof_fact_call_shape_shadow_parameters(report, snapshot)
+            return false if not parameters.complete
+            aliases: mutable (complete: bool, aliases: darray[sview]) = proof_source_comprehension_aliases(variable, position, [], parameters.parameters, report)
+            return false if not aliases.complete
+            if include_filter:
+                return false if not proof_source_loop_filter_aliases_add(filter, &aliases.aliases, parameters.parameters, report, depth + 1)
+            return proof_fact_call_shape_apply_source_aliases(snapshot, aliases.aliases, name, shadowed)
+
+        def proof_fact_call_shape_comprehension_filter_splits(snapshot: mutable ProofFactCallShapeSnapshot&, condition: Ast::Expr, depth: usize) -> (complete: bool, splits: bool):
+            work: mutable usize = 0
+            result: (complete: bool, splits: bool) = proof_replay_call_comprehension_filter_splits(condition, &work, depth + 1)
+            return (false, false) if not result.complete or not proof_fact_call_shape_charge(snapshot, work)
+            return result
+
+        def proof_fact_call_shape_local_shadow_for_iterable_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, variables: darray[sview]&, iterable: Ast::Expr, body: darray[Ast::Stmt]&, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize) -> bool:
+            filters: mutable darray[Ast::Expr] = []
+            base_iterable: mutable Ast::Expr = iterable
+            while filters.count < 3 |filters, base_iterable, snapshot|:
+                return false if not proof_fact_call_shape_charge(snapshot, 1)
+                match base_iterable:
+                    Ast::Expr.Refinement(base, predicate, _):
+                        filters.push(predicate)
+                        base_iterable <- base
+                    _:
+                        break
+            # Replay deliberately rejects more than two refinement filters.
+            return false if filters.count > 2 or base_iterable is Ast::Expr.Refinement(_, _, _)
+            base_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, base_iterable, offset)
+            return false if not base_state.valid
+            filter_states: mutable darray[bool] = []
+            selected: mutable usize = 0
+            for filter in filters |filter, offset, snapshot, filter_states, selected|:
+                state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, filter, offset)
+                return false if not state.valid
+                filter_states.push(state.contains)
+                selected <- selected + 1 if state.contains
+            body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset)
+            return false if not body_state.valid
+            selected <- selected + 1 if base_state.contains
+            selected <- selected + 1 if body_state.contains
+            return false if selected != 1
+            if base_state.contains:
+                return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, base_iterable, name, offset, shadowed, located, depth + 1)
+            for variable in variables |snapshot, variable, name, shadowed|:
+                return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(variable) + sview_len(name))
+                shadowed <- true if variable == name
+            if body_state.contains:
+                if filters.count == 1:
+                    return false if not proof_fact_call_shape_filter_shadow_bindings(report, snapshot, filters[0], name, shadowed, depth + 1)
+                if filters.count == 2:
+                    return false if not proof_fact_call_shape_filter_shadow_bindings(report, snapshot, filters[1], name, shadowed, depth + 1)
+                return proof_fact_call_shape_local_shadow_body_at(report, snapshot, body, name, offset, shadowed, located, depth + 1)
+            for index in 0..<filters.count |index, filters, filter_states, report, snapshot, name, offset, shadowed, located, depth|:
+                continue if not filter_states[index]
+                if filters.count == 2 and index == 0:
+                    return false if not proof_fact_call_shape_filter_shadow_bindings(report, snapshot, filters[1], name, shadowed, depth + 1)
+                return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, filters[index], name, offset, shadowed, located, depth + 1)
+            return false
 
         def proof_fact_call_shape_local_shadow_statement_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, statement: Ast::Stmt, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize) -> bool:
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
@@ -245,30 +166,25 @@ extend ElisaProof:
                     condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset)
                     return false if not condition_state.valid
                     if condition_state.contains:
-                        return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
-                    yes_state: (valid: bool, contains: bool) = proof_fact_call_shape_local_shadow_body_child_at(report, snapshot, yes, name, offset, shadowed, located, depth)
-                    return false if not yes_state.valid
-                    no_state: (valid: bool, contains: bool) = proof_fact_call_shape_local_shadow_body_child_at(report, snapshot, no, name, offset, shadowed, located, depth)
-                    return false if not no_state.valid or yes_state.contains and no_state.contains or not yes_state.contains and not no_state.contains
-                    return true
+                        return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
+                    yes_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, yes, offset)
+                    no_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, no, offset)
+                    return false if not yes_state.valid or not no_state.valid or yes_state.contains and no_state.contains or not yes_state.contains and not no_state.contains
+                    if yes_state.contains:
+                        return false if not proof_fact_call_shape_condition_shadow_bindings(report, snapshot, condition, name, shadowed)
+                        return proof_fact_call_shape_local_shadow_body_at(report, snapshot, yes, name, offset, shadowed, located, depth + 1)
+                    return proof_fact_call_shape_local_shadow_body_at(report, snapshot, no, name, offset, shadowed, located, depth + 1)
                 Ast::Stmt.While(condition, body, _):
                     condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset)
                     return false if not condition_state.valid
                     if condition_state.contains:
-                        return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_local_shadow_body_child_at(report, snapshot, body, name, offset, shadowed, located, depth)
-                    return body_state.valid and body_state.contains
-                Ast::Stmt.For(_, variables, iterable, body, _):
-                    iterable_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, iterable, offset)
-                    return false if not iterable_state.valid
-                    if iterable_state.contains:
-                        return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, iterable, name, offset, shadowed, located, depth + 1)
-                    for variable in variables |variable, snapshot, name, shadowed|:
-                        return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name) + sview_len(variable))
-                        shadowed <- true if variable == name
-                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_local_shadow_body_child_at(report, snapshot, body, name, offset, shadowed, located, depth)
+                        return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
+                    body_state: (valid: bool, contains: bool) = proof_fact_call_shape_body_contains_offset(snapshot, body, offset)
                     return false if not body_state.valid or not body_state.contains
-                    return true
+                    return false if not proof_fact_call_shape_condition_shadow_bindings(report, snapshot, condition, name, shadowed)
+                    return proof_fact_call_shape_local_shadow_body_at(report, snapshot, body, name, offset, shadowed, located, depth + 1)
+                Ast::Stmt.For(_, variables, iterable, body, _):
+                    return proof_fact_call_shape_local_shadow_for_iterable_at(report, snapshot, variables, iterable, body, name, offset, shadowed, located, depth + 1)
                 Ast::Stmt.Block(_, clause, binding, body, _):
                     return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name) + sview_len(binding))
                     shadowed <- true if binding == name
@@ -311,7 +227,7 @@ extend ElisaProof:
             if state.contains:
                 matched <- matched + 1
                 return false if matched > 1
-                return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, child, name, offset, shadowed, located, depth + 1)
+                return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, child, name, offset, shadowed, located, depth + 1, true)
             return true
 
         def proof_fact_call_shape_local_shadow_expr_list_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, children: darray[Ast::Expr]&, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize, matched: mutable usize&) -> bool:
@@ -319,11 +235,12 @@ extend ElisaProof:
                 return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, child, name, offset, shadowed, located, depth, matched)
             return true
 
-        def proof_fact_call_shape_local_shadow_expr_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, expression: Ast::Expr, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize) -> bool:
+        def proof_fact_call_shape_local_shadow_expr_at(report: mutable ProofReport&, snapshot: mutable ProofFactCallShapeSnapshot&, expression: Ast::Expr, name: sview, offset: u32, shadowed: mutable bool&, located: mutable bool&, depth: usize, validated_contains: bool = false) -> bool:
             return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or not proof_fact_call_shape_charge(snapshot, 1)
-            span: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, expression, offset)
-            return false if not span.valid
-            return true if not span.contains
+            if not validated_contains:
+                span: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, expression, offset)
+                return false if not span.valid
+                return true if not span.contains
             match expression:
                 Ast::Expr.Call(callee, arguments, _, position):
                     if position.offset == offset:
@@ -357,7 +274,7 @@ extend ElisaProof:
                     for statement in statements |statement, snapshot, name, shadowed|:
                         return false if not proof_fact_call_shape_mark_prior_binding(snapshot, statement, name, shadowed)
                     return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, value, name, offset, shadowed, located, depth + 1)
-                Ast::Expr.Comprehension(variable, iterable, condition, body, _):
+                Ast::Expr.Comprehension(variable, iterable, condition, body, position):
                     iterable_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, iterable, offset)
                     condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset)
                     body_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, body, offset)
@@ -367,13 +284,34 @@ extend ElisaProof:
                     selected <- selected + 1 if condition_state.contains
                     selected <- selected + 1 if body_state.contains
                     return false if selected != 1
-                    if condition_state.contains or body_state.contains:
-                        return false if not proof_fact_call_shape_charge(snapshot, 1 + sview_len(name) + sview_len(variable))
-                        shadowed <- true if variable == name
                     if iterable_state.contains:
                         return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, iterable, name, offset, shadowed, located, depth + 1)
+                    split_result: (complete: bool, splits: bool) = proof_fact_call_shape_comprehension_filter_splits(snapshot, condition, depth + 1)
+                    return false if not split_result.complete
                     if condition_state.contains:
+                        if split_result.splits:
+                            match condition:
+                                Ast::Expr.Binary(filter_test, TokenKind.And, guard, _):
+                                    filter_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, filter_test, offset)
+                                    guard_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, guard, offset)
+                                    return false if not filter_state.valid or not guard_state.valid or filter_state.contains == guard_state.contains
+                                    if guard_state.contains:
+                                        return false if not proof_fact_call_shape_comprehension_shadow_bindings(report, snapshot, variable, position, filter_test, true, name, shadowed, depth + 1)
+                                        return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, guard, name, offset, shadowed, located, depth + 1)
+                                    return false if not proof_fact_call_shape_comprehension_shadow_bindings(report, snapshot, variable, position, Ast::Expr.Absent, false, name, shadowed, depth + 1)
+                                    return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, filter_test, name, offset, shadowed, located, depth + 1)
+                                _:
+                                    return false
+                        return false if not proof_fact_call_shape_comprehension_shadow_bindings(report, snapshot, variable, position, Ast::Expr.Absent, false, name, shadowed, depth + 1)
                         return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
+                    if split_result.splits:
+                        match condition:
+                            Ast::Expr.Binary(filter_test, TokenKind.And, _, _):
+                                return false if not proof_fact_call_shape_comprehension_shadow_bindings(report, snapshot, variable, position, filter_test, true, name, shadowed, depth + 1)
+                            _:
+                                return false
+                    else:
+                        return false if not proof_fact_call_shape_comprehension_shadow_bindings(report, snapshot, variable, position, condition, true, name, shadowed, depth + 1)
                     return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, body, name, offset, shadowed, located, depth + 1)
                 Ast::Expr.GetElse(guarded, recovery, _):
                     guarded_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, guarded, offset)
@@ -405,6 +343,22 @@ extend ElisaProof:
                         else:
                             return false if not proof_fact_call_shape_local_shadow_body_at(report, snapshot, arm.body, name, offset, shadowed, located, depth + 1)
                     return selected == 1
+                Ast::Expr.If(condition, yes, no, _):
+                    condition_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, condition, offset)
+                    yes_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, yes, offset)
+                    no_state: (valid: bool, contains: bool) = proof_fact_call_shape_expr_contains_offset(snapshot, no, offset)
+                    return false if not condition_state.valid or not yes_state.valid or not no_state.valid
+                    selected: mutable usize = 0
+                    selected <- selected + 1 if condition_state.contains
+                    selected <- selected + 1 if yes_state.contains
+                    selected <- selected + 1 if no_state.contains
+                    return false if selected != 1
+                    if condition_state.contains:
+                        return proof_fact_call_shape_local_shadow_condition_at(report, snapshot, condition, name, offset, shadowed, located, depth + 1)
+                    if yes_state.contains:
+                        return false if not proof_fact_call_shape_condition_shadow_bindings(report, snapshot, condition, name, shadowed)
+                        return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, yes, name, offset, shadowed, located, depth + 1)
+                    return proof_fact_call_shape_local_shadow_expr_at(report, snapshot, no, name, offset, shadowed, located, depth + 1)
                 _:
                     pass
             matched: mutable usize = 0
@@ -415,7 +369,7 @@ extend ElisaProof:
                     return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, left, name, offset, shadowed, located, depth, matched)
                     return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, right, name, offset, shadowed, located, depth, matched)
                     return matched == 1
-                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                Ast::Expr.Slice(object, low, high, _):
                     return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, object, name, offset, shadowed, located, depth, matched)
                     return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, low, name, offset, shadowed, located, depth, matched)
                     return false if not proof_fact_call_shape_local_shadow_expr_child_at(report, snapshot, high, name, offset, shadowed, located, depth, matched)
@@ -496,7 +450,7 @@ extend ElisaProof:
                         if state.contains:
                             return true if not proof_fact_call_shape_local_shadow_expr_at(report, snapshot, expression, name, call_offset, shadowed, located, 0)
                 else:
-                    body: (known: bool, body: darray[Ast::Stmt]) = proof_fact_call_shape_function_body(report, snapshot, caller)
+                    body: (known: bool, parameters: darray[Ast::ParamDecl], body: darray[Ast::Stmt]) = proof_fact_call_shape_function_body(report, snapshot, caller)
                     return true if not body.known
                     return true if not proof_fact_call_shape_local_shadow_body_at(report, snapshot, body.body, name, call_offset, &shadowed, &located, 0)
                 return true if not located

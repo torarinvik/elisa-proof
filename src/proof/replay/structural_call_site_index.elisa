@@ -1,0 +1,108 @@
+# Bounded source call-site index shared by structural certificate edge checks.
+extend ElisaProof:
+    private:
+        def proof_replay_structural_call_site_hash(caller: usize, offset: usize) -> u32:
+            basis: i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            mixed: u32 = proof_expr_shape_mix(basis.u32(), caller.i64())
+            return proof_expr_shape_mix(mixed, offset.i64())
+
+        def proof_replay_structural_call_site_events_append(graph: mutable ProofReplayStructuralSourceGraph&, caller: usize, target: ProofReplayCallSiteTarget&, source_work: mutable usize&) -> bool:
+            return false if target.captured_call_offsets.count != target.captured_call_names.count or target.captured_call_offsets.count != target.captured_call_lines.count
+            for index in 0..<target.captured_call_offsets.count |index, caller, target, graph, source_work|:
+                name: sview = target.captured_call_names[index]
+                return false if not proof_replay_call_work_add(source_work, 1 + sview_len(name))
+                graph.call_site_raw_callers.push(caller)
+                graph.call_site_raw_offsets.push(target.captured_call_offsets[index])
+                graph.call_site_raw_names.push(name)
+                graph.call_site_raw_lines.push(target.captured_call_lines[index])
+                graph.call_site_raw_scoped.push(false)
+            for offset in target.captured_scope_offsets |offset, caller, graph, source_work|:
+                return false if not proof_replay_call_work_add(source_work, 1)
+                graph.call_site_raw_callers.push(caller)
+                graph.call_site_raw_offsets.push(offset)
+                graph.call_site_raw_names.push("")
+                graph.call_site_raw_lines.push(0)
+                graph.call_site_raw_scoped.push(true)
+            return true
+
+        def proof_replay_structural_call_site_index_build(graph: mutable ProofReplayStructuralSourceGraph&, source_work: mutable usize&) -> bool:
+            raw_count: usize = graph.call_site_raw_callers.count
+            return false if raw_count != graph.call_site_raw_offsets.count or raw_count != graph.call_site_raw_names.count or raw_count != graph.call_site_raw_lines.count or raw_count != graph.call_site_raw_scoped.count
+            return true if raw_count == 0
+            capacity: usize = proof_name_index_capacity(raw_count)
+            return false if capacity == 0 or not proof_replay_call_work_add(source_work, capacity)
+            graph.call_site_hashes.resize(capacity)
+            graph.call_site_slots.resize(capacity)
+            for slot in 0..<capacity |slot, graph|:
+                graph.call_site_slots[slot] <- 0
+            for event in 0..<raw_count |event, graph, capacity, source_work|:
+                caller: usize = graph.call_site_raw_callers[event]
+                offset: usize = graph.call_site_raw_offsets[event]
+                hash: u32 = proof_replay_structural_call_site_hash(caller, offset)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, caller, offset, event, graph, capacity, source_work, placed|:
+                    return false if not proof_replay_call_work_add(source_work, 1)
+                    current: usize = graph.call_site_slots[slot]
+                    row: mutable usize = 0
+                    if current == 0:
+                        return false if not proof_replay_call_work_add(source_work, 7)
+                        row <- graph.call_site_callers.count
+                        graph.call_site_slots[slot] <- row + 1
+                        graph.call_site_hashes[slot] <- hash
+                        graph.call_site_callers.push(caller)
+                        graph.call_site_offsets.push(offset)
+                        graph.call_site_counts.push(0)
+                        graph.call_site_names.push("")
+                        graph.call_site_lines.push(0)
+                        graph.call_site_scoped.push(false)
+                        placed <- true
+                    else:
+                        row <- current - 1
+                        return false if row >= graph.call_site_callers.count or row >= graph.call_site_offsets.count or row >= graph.call_site_counts.count or row >= graph.call_site_names.count or row >= graph.call_site_lines.count or row >= graph.call_site_scoped.count
+                        if graph.call_site_hashes[slot] == hash and graph.call_site_callers[row] == caller and graph.call_site_offsets[row] == offset:
+                            placed <- true
+                        else:
+                            slot <- (slot + 1) % capacity
+                            probes <- probes + 1
+                            continue
+                    if placed:
+                        if graph.call_site_raw_scoped[event]:
+                            graph.call_site_scoped[row] <- true
+                        else:
+                            return false if graph.call_site_counts[row] >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            if graph.call_site_counts[row] == 0:
+                                return false if not proof_replay_call_work_add(source_work, sview_len(graph.call_site_raw_names[event]))
+                                graph.call_site_names[row] <- graph.call_site_raw_names[event]
+                                graph.call_site_lines[row] <- graph.call_site_raw_lines[event]
+                            graph.call_site_counts[row] <- graph.call_site_counts[row] + 1
+                        break
+                return false if not placed
+            graph.call_site_raw_callers.clear()
+            graph.call_site_raw_offsets.clear()
+            graph.call_site_raw_names.clear()
+            graph.call_site_raw_lines.clear()
+            graph.call_site_raw_scoped.clear()
+            return true
+
+        def proof_replay_structural_call_site_matches(graph: ProofReplayStructuralSourceGraph&, caller: usize, offset: usize, name: sview, line: u32, source_work: mutable usize&) -> bool:
+            return false if caller >= graph.call_site_scan_valid.count or not graph.call_site_scan_valid[caller]
+            capacity: usize = graph.call_site_slots.count
+            return false if capacity == 0 or graph.call_site_hashes.count != capacity
+            hash: u32 = proof_replay_structural_call_site_hash(caller, offset)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, caller, offset, name, line, graph, capacity, source_work|:
+                return false if not proof_replay_call_work_add(source_work, 1)
+                current: usize = graph.call_site_slots[slot]
+                return false if current == 0
+                row: usize = current - 1
+                return false if row >= graph.call_site_callers.count or row >= graph.call_site_offsets.count or row >= graph.call_site_counts.count or row >= graph.call_site_names.count or row >= graph.call_site_lines.count or row >= graph.call_site_scoped.count
+                if graph.call_site_hashes[slot] == hash and graph.call_site_callers[row] == caller and graph.call_site_offsets[row] == offset:
+                    return false if graph.call_site_scoped[row] or graph.call_site_counts[row] != 1 or graph.call_site_lines[row] != line
+                    return false if not proof_replay_call_string_compare_charge(graph.call_site_names[row], name, source_work)
+                    return graph.call_site_names[row] == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false

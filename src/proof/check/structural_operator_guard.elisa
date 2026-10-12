@@ -2,17 +2,6 @@ extend ElisaProof:
     private:
         const PROOF_STRUCTURAL_OPERATOR_GUARD_BUCKET_LIMIT: usize = 64
 
-        def proof_structural_operator_guard_binding_lookup(bindings: darray[ProofStructuralOperatorBinding]&, name: sview, report: mutable ProofReport&) -> (found: bool, type_name: sview):
-            index: mutable usize = bindings.count
-            while index > 0 |index, bindings, name, report|:
-                index <- index - 1
-                binding: ProofStructuralOperatorBinding = bindings[index]
-                return (true, "") if not proof_source_index_work_charge(report, 1)
-                return (true, "") if not proof_source_index_work_charge(report, sview_len(name))
-                return (true, "") if not proof_source_index_work_charge(report, sview_len(binding.name))
-                if binding.name == name:
-                    return (true, binding.type_name)
-            return (false, "")
         # Check aliases and underlying names; ambiguous or malformed chains use global fallback.
         def proof_structural_operator_guard_expand_aliases(name: sview, names: mutable darray[sview]&, report: mutable ProofReport&, depth: usize) -> bool:
             return false if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT or name == ""
@@ -60,33 +49,14 @@ extend ElisaProof:
             return true if proof_source_primitive_operator_mask_has(report.source_operator_protocol_mask, protocol)
             return proof_structural_operator_guard_generic_bound_overloaded(report, "", protocol, true)
 
-        # Newest local binding wins; inferred locals and projections remain unknown.
+        # Newest local binding wins. Typed field and built-in container projections retain their
+        # declared result type; inferred locals and ambiguous projections remain unknown.
         def proof_structural_operator_guard_receiver_name(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, depth: usize) -> (known: bool, name: sview):
-            return (false, "") if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
-            return (false, "") if not proof_source_index_work_charge(report, 1)
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    binding: (found: bool, type_name: sview) = proof_structural_operator_guard_binding_lookup(shadowed, name, report)
-                    return (false, "") if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    return (false, "") if binding.found and binding.type_name == ""
-                    return (true, binding.type_name) if binding.found
-                    selected: mutable sview = ""
-                    matches: mutable usize = 0
-                    for parameter in parameters |name, selected, matches, report|:
-                        return (false, "") if not proof_source_index_work_charge(report, 1)
-                        return (false, "") if not proof_source_index_work_charge(report, sview_len(name))
-                        return (false, "") if not proof_source_index_work_charge(report, sview_len(parameter.name))
-                        if parameter.name == name:
-                            selected <- proof_structural_operator_guard_type_name(parameter.type_expression, report, 0)
-                            matches <- matches + 1
-                    return (false, "") if matches != 1 or selected == ""
-                    return (true, selected)
-                Ast::Expr.Paren(inner, _):
-                    return proof_structural_operator_guard_receiver_name(inner, parameters, shadowed, report, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_structural_operator_guard_receiver_name(base, parameters, shadowed, report, depth + 1)
-                _:
-                    return (false, "")
+            receiver: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(expression, parameters, shadowed, report, depth)
+            return (false, "") if not receiver.known
+            name: sview = proof_structural_operator_guard_type_name(receiver.type_expression, report, 0)
+            return (false, "") if name == ""
+            return (true, name)
 
         def proof_structural_operator_guard_type_name(type_expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> sview:
             return "" if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
@@ -94,8 +64,14 @@ extend ElisaProof:
             match type_expression:
                 Ast::Expr.Ident(name, _):
                     return name
-                Ast::Expr.Scope(_, name, _):
-                    return name
+                Ast::Expr.Index(head, _, _):
+                    return "darray" if proof_ident_name(head) == "darray"
+                    return ""
+                # Do not erase the qualifier. A module-scoped nominal type can share a
+                # primitive's final spelling; treating `module::i32` as scalar would admit
+                # compound assignment even though the backend only lowers scalar targets.
+                Ast::Expr.Scope(_, _, _):
+                    return ""
                 Ast::Expr.Paren(inner, _):
                     return proof_structural_operator_guard_type_name(inner, report, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
@@ -137,6 +113,11 @@ extend ElisaProof:
             return false if not aliases.complete
             proof_structural_operator_guard_add_aliases(aliases.aliases, &shadowed, report)
 
+        def proof_structural_operator_guard_add_false_condition_aliases(condition: Ast::Expr, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&) -> bool:
+            aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_false_aliases(condition, [], report)
+            return false if not aliases.complete
+            proof_structural_operator_guard_add_aliases(aliases.aliases, &shadowed, report)
+
         def proof_structural_operator_guard_add_comprehension_aliases(variable: sview, position: Ast::Pos, parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&) -> bool:
             inherited: mutable darray[sview] = []
             for binding in shadowed |inherited, report|:
@@ -154,7 +135,7 @@ extend ElisaProof:
             return false if not proof_source_index_work_charge(report, 1)
             return false if not proof_source_index_work_charge(report, sview_len(name))
             return false if not proof_source_index_work_charge(report, sview_len(type_name))
-            shadowed.push(ProofStructuralOperatorBinding{name: name, type_name: type_name})
+            shadowed.push(ProofStructuralOperatorBinding{name: name, type_name: type_name, type_expression: type_expression})
             return true
 
         def proof_structural_operator_guard_current_scope_has_binding(shadowed: darray[ProofStructuralOperatorBinding]&, name: sview, scope_start: usize, report: mutable ProofReport&) -> (complete: bool, found: bool):
@@ -262,49 +243,127 @@ extend ElisaProof:
                 return true if proof_report_builtin_operator_impl_exists(report, concrete_name, protocol) or (protocol == "Ord" and proof_report_builtin_operator_impl_exists(report, concrete_name, "Less"))
             return false
 
-        def proof_structural_typed_operator_expression_inner(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_structural_operator_guard_numeric_compound_type(name: sview) -> bool:
+            return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "i128" or name == "isize" or name == "int"
+            return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "u128" or name == "usize" or name == "uintptr" or name == "uint" or name == "byte"
+            return name == "f32" or name == "f64" or name == "char"
+
+        def proof_structural_operator_guard_integer_compound_type(name: sview) -> bool:
+            return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "i128" or name == "isize" or name == "int"
+            return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "u128" or name == "usize" or name == "uintptr" or name == "uint" or name == "byte"
+            return name == "char"
+
+        # Compound assignment has no source-protocol dispatch in codegen. Accept only a
+        # receiver whose compiler lowering is known: numeric scalars, or the built-in darray
+        # push form for +=. Unknown/Named types are rejected because semantic checking can
+        # accept them as possible overloads even though the backend does not lower one.
+        def proof_structural_operator_guard_direct_darray_shape(type_expression: Ast::Expr, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
+            return false if not proof_source_index_work_charge(report, 1)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _) | Ast::Expr.Unary(TokenKind.Mutable, inner, _) | Ast::Expr.Unary(TokenKind.Ampersand, inner, _) | Ast::Expr.Unary(TokenKind.Lmut, inner, _) | Ast::Expr.Unary(TokenKind.Static, inner, _) | Ast::Expr.Unary(TokenKind.Heap, inner, _) | Ast::Expr.Unary(TokenKind.Stack, inner, _) | Ast::Expr.Unary(TokenKind.Tail, inner, _):
+                    return proof_structural_operator_guard_direct_darray_shape(inner, declaration_line, report, depth + 1)
+                Ast::Expr.Index(head, _, _):
+                    seen: mutable darray[usize] = []
+                    unwrapped_head: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(head, declaration_line, true, "", report, &seen, 0)
+                    match unwrapped_head.type_expression:
+                        Ast::Expr.Ident(name, _):
+                            return unwrapped_head.complete and name == "darray"
+                        _:
+                            return false
+                Ast::Expr.IndexN(head, arguments, _):
+                    return false if arguments.count != 1
+                    seen: mutable darray[usize] = []
+                    unwrapped_head: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(head, declaration_line, true, "", report, &seen, 0)
+                    match unwrapped_head.type_expression:
+                        Ast::Expr.Ident(name, _):
+                            return unwrapped_head.complete and name == "darray"
+                        _:
+                            return false
+                _:
+                    return false
+
+        def proof_structural_operator_guard_compound_unsupported(receiver: Ast::Expr, protocol: sview, parameters: darray[Ast::ParamDecl]&, shadowed: darray[ProofStructuralOperatorBinding]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
+            concrete: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(receiver, parameters, shadowed, report, 0)
+            return true if not concrete.known
+            seen: mutable darray[usize] = []
+            unwrapped: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(concrete.type_expression, declaration_line, true, "", report, &seen, 0)
+            if unwrapped.complete:
+                match unwrapped.type_expression:
+                    Ast::Expr.Ident(name, _):
+                        return true if not proof_structural_operator_guard_numeric_compound_type(name)
+                        return true if (protocol == "BitXor" or protocol == "BitOr" or protocol == "BitAnd") and not proof_structural_operator_guard_integer_compound_type(name)
+                        # The pinned backend lowers scalar compound assignments through
+                        # `emit_binary` directly. Operator implementation rows only affect
+                        # struct operands in ordinary binary expressions, and the aggregate
+                        # primitive mask would reject this scalar for an unrelated type's impl.
+                        return false
+                    Ast::Expr.Index(head, _, _):
+                        head_is_darray: bool = match head:
+                            Ast::Expr.Ident(name, _): name == "darray"
+                            _: false
+                        return false if protocol == "Add" and head_is_darray
+                    Ast::Expr.IndexN(head, arguments, _):
+                        head_is_darray: bool = match head:
+                            Ast::Expr.Ident(name, _): name == "darray"
+                            _: false
+                        return false if protocol == "Add" and head_is_darray and arguments.count == 1
+                    _:
+                        pass
+            if protocol == "Add" and proof_structural_operator_guard_direct_darray_shape(concrete.type_expression, declaration_line, report, 0):
+                return false
+            return true
+
+        def proof_structural_typed_operator_expression_inner(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, declaration_line: u32, depth: usize) -> bool:
             return true if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
             return true if not proof_source_index_work_charge(report, 1)
             match expression:
                 Ast::Expr.Unary(operator, operand, _):
                     protocol: sview = proof_builtin_unary_operator_protocol(operator)
                     return true if protocol != "" and proof_structural_operator_guard_overloaded_for_receiver(operand, protocol, parameters, shadowed, report, 0)
-                    return proof_structural_typed_operator_expression_inner(operand, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(operand, parameters, &shadowed, report, declaration_line, depth + 1)
+                Ast::Expr.Binary(_, TokenKind.And, _, _) | Ast::Expr.Binary(_, TokenKind.Or, _, _):
+                    return proof_structural_typed_operator_condition_inner(expression, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     protocol: sview = proof_builtin_operator_protocol(operator)
                     return true if protocol != "" and proof_structural_operator_guard_overloaded_for_receiver(left, protocol, parameters, shadowed, report, 0)
-                    return proof_structural_typed_operator_expression_inner(left, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(right, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(left, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(right, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
-                    return proof_structural_typed_operator_expression_inner(inner, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(inner, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return proof_structural_typed_operator_expression_inner(base, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(predicate, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(base, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(predicate, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if proof_structural_typed_operator_expression_inner(callee, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(callee, parameters, &shadowed, report, declaration_line, depth + 1)
                     for argument in arguments |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(argument, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(argument, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
-                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Index(object, index, _):
-                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(index, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(index, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, declaration_line, depth + 1)
                     for argument in arguments |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(argument, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(argument, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(low, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(high, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_expression_inner(object, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(low, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(high, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, declaration_line, depth + 1)
                     saved_count: usize = shadowed.count
                     return true if not proof_structural_operator_guard_add_condition_aliases(condition, &shadowed, report)
-                    found: bool = proof_structural_typed_operator_expression_inner(then_expression, parameters, &shadowed, report, depth + 1)
+                    found: bool = proof_structural_typed_operator_expression_inner(then_expression, parameters, &shadowed, report, declaration_line, depth + 1)
                     while shadowed.count > saved_count |shadowed, saved_count|:
                         shadowed.pop()
                     return true if found
-                    proof_structural_typed_operator_expression_inner(else_expression, parameters, &shadowed, report, depth + 1)
+                    else_count: usize = shadowed.count
+                    return true if not proof_structural_operator_guard_add_false_condition_aliases(condition, &shadowed, report)
+                    else_found: bool = proof_structural_typed_operator_expression_inner(else_expression, parameters, &shadowed, report, declaration_line, depth + 1)
+                    while shadowed.count > else_count |shadowed, else_count|:
+                        shadowed.pop()
+                    else_found
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
-                    return true if proof_structural_typed_operator_expression_inner(iterable, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(iterable, parameters, &shadowed, report, declaration_line, depth + 1)
                     shadow_count: usize = shadowed.count
                     return true if not proof_structural_operator_guard_add_comprehension_aliases(variable, position, parameters, &shadowed, report)
                     filter_test: mutable Ast::Expr = condition
@@ -324,43 +383,43 @@ extend ElisaProof:
                                 filter_guard <- right
                         _:
                             pass
-                    return true if proof_structural_typed_operator_expression_inner(filter_test, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(filter_test, parameters, &shadowed, report, declaration_line, depth + 1)
                     filter_bindings: mutable darray[sview] = []
                     return true if not proof_structural_operator_guard_collect_refinement_bindings(filter_test, &filter_bindings, report)
                     for binding in filter_bindings |shadowed, report|:
                         return true if not proof_structural_operator_guard_add_binding(binding, &shadowed, report)
-                    return true if proof_structural_typed_operator_expression_inner(filter_guard, parameters, &shadowed, report, depth + 1)
-                    found: bool = proof_structural_typed_operator_expression_inner(body, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(filter_guard, parameters, &shadowed, report, declaration_line, depth + 1)
+                    found: bool = proof_structural_typed_operator_expression_inner(body, parameters, &shadowed, report, declaration_line, depth + 1)
                     while shadowed.count > shadow_count |shadowed, shadow_count|:
                         shadowed.pop()
                     return found
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_structural_typed_operator_expression_inner(guarded, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_statements_inner(recovery, parameters, &shadowed, report, depth + 1, true)
+                    return proof_structural_typed_operator_expression_inner(guarded, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_statements_inner(recovery, parameters, &shadowed, report, declaration_line, depth + 1, true)
                 Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
                     for element in elements |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(element, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(element, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.DictLit(entries, _):
                     for entry in entries |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(entry.key, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(entry.value, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(entry.key, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(entry.value, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_structural_typed_operator_expression_inner(type_expression, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(type_expression, parameters, &shadowed, report, declaration_line, depth + 1)
                     for field in fields |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(field.value, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(field.value, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_structural_typed_operator_expression_inner(base, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(base, parameters, &shadowed, report, declaration_line, depth + 1)
                     for field in fields |parameters, shadowed, report, depth|:
-                        return true if proof_structural_typed_operator_expression_inner(field.value, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(field.value, parameters, &shadowed, report, declaration_line, depth + 1)
                     return false
                 Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
-                    return true if proof_structural_typed_operator_expression_inner(scrutinee, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_expression_inner(scrutinee, parameters, &shadowed, report, declaration_line, depth + 1)
                     for arm in arms |parameters, shadowed, report, depth|:
                         saved_count: usize = shadowed.count
                         return true if not proof_structural_operator_guard_pattern_shadow(arm.pattern, &shadowed, report, 0)
-                        return true if proof_structural_typed_operator_expression_inner(arm.guard, parameters, &shadowed, report, depth + 1)
-                        found: bool = proof_structural_typed_operator_statements_inner(arm.body, parameters, &shadowed, report, depth + 1, true)
+                        return true if proof_structural_typed_operator_expression_inner(arm.guard, parameters, &shadowed, report, declaration_line, depth + 1)
+                        found: bool = proof_structural_typed_operator_statements_inner(arm.body, parameters, &shadowed, report, declaration_line, depth + 1, true)
                         while shadowed.count > saved_count |shadowed, saved_count|:
                             shadowed.pop()
                         return true if found
@@ -368,11 +427,11 @@ extend ElisaProof:
                 Ast::Expr.Lambda(_, body, _):
                     empty_parameters: darray[Ast::ParamDecl] = []
                     empty_shadowed: mutable darray[ProofStructuralOperatorBinding] = []
-                    return proof_structural_typed_operator_statements_inner(body, empty_parameters, &empty_shadowed, report, depth + 1, true)
+                    return proof_structural_typed_operator_statements_inner(body, empty_parameters, &empty_shadowed, report, declaration_line, depth + 1, true)
                 Ast::Expr.Block(statements, value, _, _):
                     saved_count: usize = shadowed.count
-                    return true if proof_structural_typed_operator_statements_inner(statements, parameters, &shadowed, report, depth + 1, false)
-                    found: bool = proof_structural_typed_operator_expression_inner(value, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_statements_inner(statements, parameters, &shadowed, report, declaration_line, depth + 1, false)
+                    found: bool = proof_structural_typed_operator_expression_inner(value, parameters, &shadowed, report, declaration_line, depth + 1)
                     while shadowed.count > saved_count |shadowed, saved_count|:
                         shadowed.pop()
                     return found
@@ -381,30 +440,35 @@ extend ElisaProof:
                 _:
                     return true
 
-        def proof_structural_typed_operator_condition_inner(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_structural_typed_operator_condition_inner(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, declaration_line: u32, depth: usize) -> bool:
             return true if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
                     return true if not proof_source_index_work_charge(report, 1)
-                    return proof_structural_typed_operator_condition_inner(inner, parameters, &shadowed, report, depth + 1)
+                    return proof_structural_typed_operator_condition_inner(inner, parameters, &shadowed, report, declaration_line, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
-                    return proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, depth) if operator != TokenKind.And and operator != TokenKind.Or
+                    return proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, declaration_line, depth) if operator != TokenKind.And and operator != TokenKind.Or
                     return true if not proof_source_index_work_charge(report, 1)
                     protocol: sview = proof_builtin_operator_protocol(operator)
                     return true if protocol != "" and proof_structural_operator_guard_overloaded_for_receiver(left, protocol, parameters, shadowed, report, 0)
-                    return true if proof_structural_typed_operator_condition_inner(left, parameters, &shadowed, report, depth + 1)
+                    return true if proof_structural_typed_operator_condition_inner(left, parameters, &shadowed, report, declaration_line, depth + 1)
                     if operator == TokenKind.And:
                         saved_count: usize = shadowed.count
                         return true if not proof_structural_operator_guard_add_condition_aliases(left, &shadowed, report)
-                        found: bool = proof_structural_typed_operator_condition_inner(right, parameters, &shadowed, report, depth + 1)
+                        found: bool = proof_structural_typed_operator_condition_inner(right, parameters, &shadowed, report, declaration_line, depth + 1)
                         while shadowed.count > saved_count |shadowed, saved_count|:
                             shadowed.pop()
                         return found
-                    return proof_structural_typed_operator_condition_inner(right, parameters, &shadowed, report, depth + 1)
+                    saved_count: usize = shadowed.count
+                    return true if not proof_structural_operator_guard_add_false_condition_aliases(left, &shadowed, report)
+                    found: bool = proof_structural_typed_operator_condition_inner(right, parameters, &shadowed, report, declaration_line, depth + 1)
+                    while shadowed.count > saved_count |shadowed, saved_count|:
+                        shadowed.pop()
+                    return found
                 _:
-                    return proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, depth)
+                    return proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, declaration_line, depth)
 
-        def proof_structural_typed_operator_statements_inner(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, depth: usize, scoped: bool) -> bool:
+        def proof_structural_typed_operator_statements_inner(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, shadowed: mutable darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, declaration_line: u32, depth: usize, scoped: bool) -> bool:
             return true if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
             saved_count: usize = shadowed.count
             for statement in statements |parameters, shadowed, report, depth, saved_count|:
@@ -413,10 +477,10 @@ extend ElisaProof:
                     Ast::Stmt.Invalid:
                         return true
                     Ast::Stmt.Expr(expression, _):
-                        return true if proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, declaration_line, depth + 1)
                         return true if not proof_structural_operator_guard_add_expression_bindings(expression, &shadowed, report)
                     Ast::Stmt.Return(value, _):
-                        return true if value is returned and proof_structural_typed_operator_expression_inner(returned, parameters, &shadowed, report, depth + 1)
+                        return true if value is returned and proof_structural_typed_operator_expression_inner(returned, parameters, &shadowed, report, declaration_line, depth + 1)
                     Ast::Stmt.Block(kind, _, binding, body, _):
                         for _kind_probe in 0..<9 |kind, report|:
                             return true if not proof_source_index_work_charge(report, sview_len(kind))
@@ -424,37 +488,42 @@ extend ElisaProof:
                         block_count: usize = shadowed.count
                         if binding != "":
                             return true if not proof_structural_operator_guard_add_binding(binding, &shadowed, report)
-                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, depth + 1, block_scoped)
+                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, declaration_line, depth + 1, block_scoped)
                         if block_scoped:
                             while shadowed.count > block_count |shadowed, block_count|:
                                 shadowed.pop()
                         return true if found
                     Ast::Stmt.VarDecl(name, type_expression, initializer, _):
-                        return true if proof_structural_typed_operator_expression_inner(type_expression, parameters, &shadowed, report, depth + 1) or proof_structural_typed_operator_expression_inner(initializer, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(type_expression, parameters, &shadowed, report, declaration_line, depth + 1) or proof_structural_typed_operator_expression_inner(initializer, parameters, &shadowed, report, declaration_line, depth + 1)
                         return true if not proof_structural_operator_guard_add_expression_bindings(initializer, &shadowed, report)
                         return true if not proof_structural_operator_guard_add_typed_binding(name, type_expression, &shadowed, report)
                     Ast::Stmt.Assign(target, operator, value, _):
-                        return true if proof_structural_typed_operator_expression_inner(value, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(value, parameters, &shadowed, report, declaration_line, depth + 1)
                         return true if not proof_structural_operator_guard_add_expression_bindings(value, &shadowed, report)
                         compound_protocol: sview = proof_source_compound_assignment_protocol(operator)
                         return true if compound_protocol == "?"
-                        return true if compound_protocol != "" and proof_structural_operator_guard_overloaded_for_receiver(target, compound_protocol, parameters, shadowed, report, 0)
-                        return true if proof_structural_typed_operator_expression_inner(target, parameters, &shadowed, report, depth + 1)
+                        return true if compound_protocol != "" and proof_structural_operator_guard_compound_unsupported(target, compound_protocol, parameters, shadowed, declaration_line, report)
+                        return true if proof_structural_typed_operator_expression_inner(target, parameters, &shadowed, report, declaration_line, depth + 1)
                         return true if operator == TokenKind.Assign and not proof_structural_operator_guard_add_fresh_assignment_bindings(target, parameters, &shadowed, saved_count, report, depth + 1)
                     Ast::Stmt.If(condition, then_body, else_body, _):
-                        return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, declaration_line, depth + 1)
                         saved_count: usize = shadowed.count
                         return true if not proof_structural_operator_guard_add_condition_aliases(condition, &shadowed, report)
-                        found: bool = proof_structural_typed_operator_statements_inner(then_body, parameters, &shadowed, report, depth + 1, true)
+                        found: bool = proof_structural_typed_operator_statements_inner(then_body, parameters, &shadowed, report, declaration_line, depth + 1, true)
                         while shadowed.count > saved_count |shadowed, saved_count|:
                             shadowed.pop()
                         return true if found
-                        proof_structural_typed_operator_statements_inner(else_body, parameters, &shadowed, report, depth + 1, true)
+                        else_count: usize = shadowed.count
+                        return true if not proof_structural_operator_guard_add_false_condition_aliases(condition, &shadowed, report)
+                        else_found: bool = proof_structural_typed_operator_statements_inner(else_body, parameters, &shadowed, report, declaration_line, depth + 1, true)
+                        while shadowed.count > else_count |shadowed, else_count|:
+                            shadowed.pop()
+                        else_found
                     Ast::Stmt.While(condition, body, _):
-                        return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_condition_inner(condition, parameters, &shadowed, report, declaration_line, depth + 1)
                         saved_count: usize = shadowed.count
                         return true if not proof_structural_operator_guard_add_condition_aliases(condition, &shadowed, report)
-                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, depth + 1, true)
+                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, declaration_line, depth + 1, true)
                         while shadowed.count > saved_count |shadowed, saved_count|:
                             shadowed.pop()
                         return found
@@ -470,35 +539,35 @@ extend ElisaProof:
                                 _:
                                     break
                         return true if predicates.count > 2
-                        return true if proof_structural_typed_operator_expression_inner(base_iterable, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(base_iterable, parameters, &shadowed, report, declaration_line, depth + 1)
                         loop_count: usize = shadowed.count
                         for variable in variables |shadowed|:
                             return true if not proof_structural_operator_guard_add_binding(variable, &shadowed, report)
                         if predicates.count > 0:
                             inner_filter: Ast::Expr = predicates[predicates.count - 1]
-                            return true if proof_structural_typed_operator_expression_inner(inner_filter, parameters, &shadowed, report, depth + 1)
+                            return true if proof_structural_typed_operator_expression_inner(inner_filter, parameters, &shadowed, report, declaration_line, depth + 1)
                             filter_bindings: mutable darray[sview] = []
                             return true if not proof_structural_operator_guard_collect_refinement_bindings(inner_filter, &filter_bindings, report)
                             for binding in filter_bindings |shadowed, report|:
                                 return true if not proof_structural_operator_guard_add_binding(binding, &shadowed, report)
                         if predicates.count == 2:
-                            return true if proof_structural_typed_operator_expression_inner(predicates[0], parameters, &shadowed, report, depth + 1)
-                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, depth + 1, true)
+                            return true if proof_structural_typed_operator_expression_inner(predicates[0], parameters, &shadowed, report, declaration_line, depth + 1)
+                        found: bool = proof_structural_typed_operator_statements_inner(body, parameters, &shadowed, report, declaration_line, depth + 1, true)
                         while shadowed.count > loop_count |shadowed, loop_count|:
                             shadowed.pop()
                         return true if found
                     Ast::Stmt.Match(scrutinee, arms, _):
-                        return true if proof_structural_typed_operator_expression_inner(scrutinee, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(scrutinee, parameters, &shadowed, report, declaration_line, depth + 1)
                         for arm in arms |parameters, shadowed, report, depth|:
                             arm_count: usize = shadowed.count
                             return true if not proof_structural_operator_guard_pattern_shadow(arm.pattern, &shadowed, report, 0)
-                            return true if proof_structural_typed_operator_expression_inner(arm.guard, parameters, &shadowed, report, depth + 1)
-                            found: bool = proof_structural_typed_operator_statements_inner(arm.body, parameters, &shadowed, report, depth + 1, true)
+                            return true if proof_structural_typed_operator_expression_inner(arm.guard, parameters, &shadowed, report, declaration_line, depth + 1)
+                            found: bool = proof_structural_typed_operator_statements_inner(arm.body, parameters, &shadowed, report, declaration_line, depth + 1, true)
                             while shadowed.count > arm_count |shadowed, arm_count|:
                                 shadowed.pop()
                             return true if found
                     Ast::Stmt.Contract(_, expression, _):
-                        return true if proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, depth + 1)
+                        return true if proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, declaration_line, depth + 1)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
@@ -509,22 +578,22 @@ extend ElisaProof:
             return false
 
         # Checker entry points charge AST visits and lookup work through the shared meter.
-        def proof_structural_typed_operator_expression_has_overload(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_structural_typed_operator_expression_has_overload(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
             shadowed: mutable darray[ProofStructuralOperatorBinding] = []
-            proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, depth)
+            proof_structural_typed_operator_expression_inner(expression, parameters, &shadowed, report, declaration_line, depth)
 
-        def proof_structural_typed_operator_statements_have_overload(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&, depth: usize) -> bool:
+        def proof_structural_typed_operator_statements_have_overload(statements: darray[Ast::Stmt], parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&, depth: usize) -> bool:
             shadowed: mutable darray[ProofStructuralOperatorBinding] = []
-            proof_structural_typed_operator_statements_inner(statements, parameters, &shadowed, report, depth, false)
+            proof_structural_typed_operator_statements_inner(statements, parameters, &shadowed, report, declaration_line, depth, false)
 
-        def proof_structural_typed_operator_defaults_have_overload(parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&) -> bool:
+        def proof_structural_typed_operator_defaults_have_overload(parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
             for parameter in parameters |parameters, report|:
                 return true if not proof_source_index_work_charge(report, 1)
-                return true if parameter.has_default and proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, report, 0)
+                return true if parameter.has_default and proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, declaration_line, report, 0)
             return false
 
-        def proof_structural_typed_operator_contracts_have_overload(contracts: darray[Ast::Expr]&, parameters: darray[Ast::ParamDecl]&, report: mutable ProofReport&) -> bool:
+        def proof_structural_typed_operator_contracts_have_overload(contracts: darray[Ast::Expr]&, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
             for contract in contracts |parameters, report|:
                 return true if not proof_source_index_work_charge(report, 1)
-                return true if proof_structural_typed_operator_expression_has_overload(contract, parameters, report, 0)
+                return true if proof_structural_typed_operator_expression_has_overload(contract, parameters, declaration_line, report, 0)
             return false

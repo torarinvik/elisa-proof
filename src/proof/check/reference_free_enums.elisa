@@ -2,27 +2,61 @@ extend ElisaProof:
     private:
         # Audit every payload, even variants the current callee never returns.
         # Recursive and ambiguous names fail closed under the shared depth limit.
-        def proof_enum_payloads_reference_free(current: darray[Ast::Decl]&, declarations: darray[Ast::Decl]&, name: sview, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in current |declarations, name, annotations, depth|:
+        def proof_enum_payloads_reference_free(current: darray[Ast::Decl]&, declarations: darray[Ast::Decl]&, name: sview, annotations: darray[Ast::EnumAnnotation]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            for declaration in current |declarations, name, annotations, depth, source_work|:
+                return false if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(enum_name, variants, is_const, _, _):
                         if enum_name == name and not is_const:
-                            for variant in variants |declarations, annotations, depth|:
-                                for field in variant.fields |declarations, annotations, depth|:
-                                    return false if not proof_type_is_reference_free(field, declarations, annotations, depth + 1)
+                            for variant in variants |declarations, annotations, depth, source_work|:
+                                return false if not proof_type_audit_work_charge(1, source_work)
+                                for field in variant.fields |declarations, annotations, depth, source_work|:
+                                    return false if not proof_type_audit_work_charge(1, source_work)
+                                    return false if not proof_type_is_reference_free_with_work(field, declarations, annotations, depth + 1, source_work)
                     Ast::Decl.Module(_, body, _):
-                        return false if not proof_enum_payloads_reference_free(body, declarations, name, annotations, depth + 1)
+                        return false if not proof_enum_payloads_reference_free(body, declarations, name, annotations, depth + 1, source_work)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_enum_payloads_reference_free(body, declarations, name, annotations, depth + 1)
+                        return false if not proof_enum_payloads_reference_free(body, declarations, name, annotations, depth + 1, source_work)
                     _:
                         pass
             return true
 
-        def proof_named_aggregate_is_reference_free(name: sview, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or name == "" or proof_enum_in_hierarchy(annotations, name)
-            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(declarations, name, 0)
+        def proof_named_aggregate_is_reference_free(name: sview, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or name == "" or not proof_type_audit_work_charge(1, source_work)
+            return false if proof_enum_in_hierarchy_with_work(annotations, name, source_work)
+            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(declarations, name, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return false if counts.const_enums != 0
-            return proof_struct_is_reference_free(name, declarations, annotations, depth + 1) if counts.structs == 1 and counts.enums == 0
+            return proof_struct_is_reference_free(name, declarations, annotations, depth + 1, source_work) if counts.structs == 1 and counts.enums == 0
             return false if counts.enums != 1 or counts.structs != 0
-            return proof_enum_payloads_reference_free(declarations, declarations, name, annotations, depth + 1)
+            return proof_enum_payloads_reference_free(declarations, declarations, name, annotations, depth + 1, source_work)
+
+        # A struct holds no reference when every field's declared type holds none. A name that
+        # resolves to no struct, or to more than one, holds one as far as this is concerned.
+        def proof_struct_is_reference_free(struct_name: sview, declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            return false if struct_name == ""
+            members: mutable darray[Ast::StructMember] = []
+            return false if proof_struct_members_with_work(declarations, struct_name, 0, &members, source_work) != 1
+            latest: mutable darray[bool] = []
+            latest_rows: mutable darray[usize] = []
+            return false if not proof_struct_member_latest_rows_with_work(members, &latest, &latest_rows, source_work)
+            for row in 0..<members.count |row, members, latest, declarations, annotations, depth, source_work|:
+                return false if not proof_type_audit_work_charge(1, source_work)
+                continue if not latest[row]
+                return false if not proof_type_is_reference_free_with_work(members[row].type_expression, declarations, annotations, depth + 1, source_work)
+            return true
+
+        def proof_struct_contains_borrowed_view(struct_name: sview, declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> bool:
+            return true if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or struct_name == "" or not proof_type_audit_work_charge(1, source_work)
+            members: mutable darray[Ast::StructMember] = []
+            return true if proof_struct_members_with_work(declarations, struct_name, 0, &members, source_work) != 1
+            latest: mutable darray[bool] = []
+            latest_rows: mutable darray[usize] = []
+            return true if not proof_struct_member_latest_rows_with_work(members, &latest, &latest_rows, source_work)
+            for row in 0..<members.count |row, members, latest, declarations, depth, source_work|:
+                return true if not proof_type_audit_work_charge(1, source_work)
+                continue if not latest[row]
+                return true if proof_type_contains_borrowed_view_with_work(members[row].type_expression, declarations, depth + 1, source_work)
+            return false

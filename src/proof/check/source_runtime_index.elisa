@@ -61,9 +61,10 @@ extend ElisaProof:
                     right_aliases: mutable darray[sview] = []
                     return false if not proof_source_condition_aliases_add(left, &left_aliases, report, depth + 1)
                     return false if not proof_source_condition_aliases_add(right, &right_aliases, report, depth + 1)
-                    for candidate in left_aliases |aliases, right_aliases, report|:
-                        if proof_source_runtime_alias_name_contains(right_aliases, candidate, report):
-                            return false if not proof_source_runtime_alias_add(aliases, candidate, report)
+                    common: (complete: bool, aliases: darray[sview]) = proof_source_condition_alias_intersection(left_aliases, right_aliases, report)
+                    return false if not common.complete
+                    for candidate in common.aliases |aliases, report|:
+                        return false if not proof_source_runtime_alias_add(aliases, candidate, report)
                     return true
                 Ast::Expr.Binary(_, TokenKind.Is, right, position):
                     return false if not proof_source_is_target_aliases_add(right, aliases, report, depth + 1)
@@ -130,7 +131,17 @@ extend ElisaProof:
                     for argument in arguments |aliases, report, depth|:
                         return false if not proof_source_for_filter_aliases_add(argument, aliases, report, depth + 1)
                     return true
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |candidate, aliases, report, depth|:
+                        return false if not proof_source_index_work_charge(report, 1)
+                        for capture in candidate.captures |aliases, report, depth|:
+                            return false if not proof_source_for_filter_aliases_add(capture, aliases, report, depth + 1)
+                    for argument in arguments |aliases, report, depth|:
+                        return false if not proof_source_for_filter_aliases_add(argument, aliases, report, depth + 1)
+                    return true
                 Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _):
+                    return proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
+                Ast::Expr.RegionNew(object, _, _):
                     return proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
                 Ast::Expr.Index(object, index, _):
                     return false if not proof_source_for_filter_aliases_add(object, aliases, report, depth + 1)
@@ -166,6 +177,16 @@ extend ElisaProof:
                     return false if not proof_source_for_filter_aliases_add(condition, aliases, report, depth + 1)
                     return false if not proof_source_for_filter_aliases_add(then_expression, aliases, report, depth + 1)
                     return proof_source_for_filter_aliases_add(else_expression, aliases, report, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_source_for_filter_aliases_add(base, aliases, report, depth + 1)
+                    return proof_source_for_filter_aliases_add(predicate, aliases, report, depth + 1)
+                Ast::Expr.GetElse(guarded, _, _) | Ast::Expr.Comprehension(_, guarded, _, _, _) | Ast::Expr.Match(guarded, _, _) | Ast::Expr.Catch(guarded, _, _):
+                    # These forms export aliases only from their outer expression. Recovery
+                    # code, comprehension filters/bodies, and match arms keep local scopes.
+                    return proof_source_for_filter_aliases_add(guarded, aliases, report, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    # Bindings introduced inside these scopes do not escape the expression.
+                    return true
                 Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
                     return true
                 _:
@@ -235,11 +256,12 @@ extend ElisaProof:
                     return true
 
         def proof_source_condition_true_aliases(condition: Ast::Expr, inherited: darray[sview], report: mutable ProofReport&) -> (complete: bool, aliases: darray[sview]):
-            aliases: mutable darray[sview] = []
-            for alias in inherited |aliases, report|:
-                return (false, aliases) if not proof_source_runtime_alias_add(&aliases, alias, report)
-            complete: bool = proof_source_condition_aliases_add(condition, &aliases, report, 0)
-            return (complete, aliases)
+            paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(condition, inherited, report, 0)
+            return (paths.complete, paths.true_aliases)
+
+        def proof_source_condition_false_aliases(condition: Ast::Expr, inherited: darray[sview], report: mutable ProofReport&) -> (complete: bool, aliases: darray[sview]):
+            paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(condition, inherited, report, 0)
+            return (paths.complete, paths.false_aliases)
 
         # Compiler annotations preserve query binders that the compact comprehension node
         # omits. Their association is line-based, so all binders on that line are conservatively
@@ -385,6 +407,11 @@ extend ElisaProof:
                     true_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(left, aliases, report)
                     return true if not true_aliases.complete
                     return proof_source_expression_has_unsafe_runtime_index(right, parameters, report, depth + 1, true_aliases.aliases)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return true if proof_source_expression_has_unsafe_runtime_index(left, parameters, report, depth + 1, aliases)
+                    false_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_false_aliases(left, aliases, report)
+                    return true if not false_aliases.complete
+                    return proof_source_expression_has_unsafe_runtime_index(right, parameters, report, depth + 1, false_aliases.aliases)
                 Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _):
                     return proof_source_expression_has_unsafe_runtime_index(left, parameters, report, depth + 1, aliases) or proof_source_expression_has_unsafe_runtime_index(right, parameters, report, depth + 1, aliases)
                 Ast::Expr.Call(callee, arguments, _, _):
@@ -404,7 +431,9 @@ extend ElisaProof:
                     return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, aliases)
                     then_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, aliases, report)
                     return true if not then_aliases.complete
-                    return proof_source_expression_has_unsafe_runtime_index(then_expression, parameters, report, depth + 1, then_aliases.aliases) or proof_source_expression_has_unsafe_runtime_index(else_expression, parameters, report, depth + 1, aliases)
+                    else_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_false_aliases(condition, aliases, report)
+                    return true if not else_aliases.complete
+                    return proof_source_expression_has_unsafe_runtime_index(then_expression, parameters, report, depth + 1, then_aliases.aliases) or proof_source_expression_has_unsafe_runtime_index(else_expression, parameters, report, depth + 1, else_aliases.aliases)
                 Ast::Expr.Comprehension(variable, iterable, condition, body, position):
                     return true if not proof_structural_builtin_iteration_source(iterable, parameters, report, 0, aliases)
                     return true if proof_source_expression_has_unsafe_runtime_index(iterable, parameters, report, depth + 1, aliases)
@@ -501,7 +530,9 @@ extend ElisaProof:
                         then_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)
                         return true if not then_aliases.complete
                         return true if proof_source_statements_have_unsafe_runtime_index(then_body, parameters, report, depth + 1, then_aliases.aliases)
-                        return true if proof_source_statements_have_unsafe_runtime_index(else_body, parameters, report, depth + 1, statement_aliases)
+                        else_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_false_aliases(condition, statement_aliases, report)
+                        return true if not else_aliases.complete
+                        return true if proof_source_statements_have_unsafe_runtime_index(else_body, parameters, report, depth + 1, else_aliases.aliases)
                     Ast::Stmt.While(condition, body, _):
                         return true if proof_source_expression_has_unsafe_runtime_index(condition, parameters, report, depth + 1, statement_aliases)
                         body_aliases: (complete: bool, aliases: darray[sview]) = proof_source_condition_true_aliases(condition, statement_aliases, report)

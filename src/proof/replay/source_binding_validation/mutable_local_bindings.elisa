@@ -8,109 +8,23 @@
 #     writes and unshadowed global constants, with no source-overloaded operator, so it cannot
 #     go stale through another write;
 #   - nothing writes the local between that statement and the consuming certificate, and a
-#     binding nested in a branch or loop body reaches only consumers inside that body. Same-line
-#     order is used only after the certificate goal matches one exact source assertion/contract
-#     and one successful attempt. Ambiguous consumers fail closed; loop-entry checks keep their
-#     separate source-authenticated phase rule. Self-referential updates with a fresh symbol and
-#     threaded calls can preserve a value at later source positions.
+#     binding nested in a branch or loop body reaches only consumers inside that body. Ordering
+#     uses offsets only after the certificate goal matches one exact source assertion/contract
+#     and one successful attempt; unanchored consumers fail closed. Ambiguous consumers fail
+#     closed; loop-entry checks keep their separate source-authenticated phase rule.
+#     Self-referential updates with a fresh symbol and threaded calls can preserve a value at
+#     later source positions.
 extend ElisaProof:
     private:
         const PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID: usize = 0
         const PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE: usize = 1
         const PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER: usize = 2
-
-        def proof_replay_mutable_local_statement_work_charge(statement: Ast::Stmt, work: mutable usize&, depth: usize) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or depth >= 96
-            cost: mutable usize = 1
-            match statement:
-                Ast::Stmt.VarDecl(name, type_expression, value, _):
-                    return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + sview_len(name)
-                    return false if not proof_replay_summary_expr_cost(type_expression, &cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
-                Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
-                    return false if not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
-                Ast::Stmt.Assign(target, _, value, _):
-                    return false if not proof_replay_summary_expr_cost(target, &cost, work, depth + 1) or not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
-                Ast::Stmt.If(condition, yes, no, _):
-                    return false if not proof_replay_summary_expr_cost(condition, &cost, work, depth + 1)
-                    return false if not proof_replay_mutable_local_body_work_charge(yes, work, depth + 1) or not proof_replay_mutable_local_body_work_charge(no, work, depth + 1)
-                Ast::Stmt.While(condition, nested, _):
-                    return false if not proof_replay_summary_expr_cost(condition, &cost, work, depth + 1)
-                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
-                Ast::Stmt.For(_, variables, iterable, nested, _):
-                    return false if variables.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + variables.count
-                    for variable in variables |variable, cost, work|:
-                        return false if sview_len(variable) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + sview_len(variable)
-                    return false if not proof_replay_summary_expr_cost(iterable, &cost, work, depth + 1)
-                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
-                Ast::Stmt.Match(value, arms, _):
-                    return false if not proof_replay_summary_expr_cost(value, &cost, work, depth + 1)
-                    return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + arms.count
-                    for arm in arms |cost, work|:
-                        pattern_names: mutable darray[sview] = []
-                        pattern_work: mutable usize = work + cost
-                        return false if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, depth + 1)
-                        cost <- pattern_work - work
-                        return false if pattern_names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + pattern_names.count
-                        for pattern_name in pattern_names |pattern_name, cost, work|:
-                            return false if sview_len(pattern_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                            cost <- cost + sview_len(pattern_name)
-                        return false if not proof_replay_summary_expr_cost(arm.guard, &cost, work, depth + 1)
-                        return false if not proof_replay_mutable_local_body_work_charge(arm.body, work, depth + 1)
-                Ast::Stmt.Block(_, clause, binding, nested, _):
-                    return false if clause.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + clause.count
-                    return false if sview_len(binding) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + sview_len(binding)
-                    for word in clause |cost, work|:
-                        return false if sview_len(word) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                        cost <- cost + sview_len(word)
-                    return false if not proof_replay_mutable_local_body_work_charge(nested, work, depth + 1)
-                Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
-                    pass
-                _:
-                    return false
-            return false if cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + cost
-            return true
-
-        def proof_replay_mutable_local_body_work_charge(body: darray[Ast::Stmt]&, work: mutable usize&, depth: usize) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or depth >= 96
-            for statement in body |work, depth|:
-                return false if not proof_replay_mutable_local_statement_work_charge(statement, work, depth)
-            return true
-
-        def proof_replay_mutable_local_trace_work_charge(report: ProofReport&, work: mutable usize&, repetitions: usize) -> bool:
-            cost: mutable usize = report.traces.records.count
-            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            for candidate in report.traces.records |cost, report|:
-                return false if not proof_replay_summary_expr_cost(candidate.expression, &cost, work, 0)
-                return false if sview_len(candidate.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                cost <- cost + sview_len(candidate.name)
-                return false if sview_len(candidate.kind) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                cost <- cost + sview_len(candidate.kind)
-                return false if sview_len(candidate.dependency) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                cost <- cost + sview_len(candidate.dependency)
-                return false if candidate.summary_bindings_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                cost <- cost + candidate.summary_bindings_count
-                return false if candidate.summary_bindings_start > report.traces.summary_names.count or candidate.summary_bindings_count > report.traces.summary_names.count - candidate.summary_bindings_start
-                return false if candidate.summary_bindings_start > report.traces.summary_values.count or candidate.summary_bindings_count > report.traces.summary_values.count - candidate.summary_bindings_start
-                for offset in 0..<candidate.summary_bindings_count |offset, candidate, report, cost, work|:
-                    binding: usize = candidate.summary_bindings_start + offset
-                    return false if sview_len(report.traces.summary_names[binding]) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work - cost
-                    cost <- cost + sview_len(report.traces.summary_names[binding])
-                    return false if not proof_replay_summary_expr_cost(report.traces.summary_values[binding], &cost, work, 0)
-            return false if repetitions != 0 and cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / repetitions
-            work <- work + cost * repetitions
-            return true
+        const PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_OUTSIDE: usize = 3
+        const PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE: usize = 4
 
         # A serialized certificate position is usable only after the goal is tied to one exact
-        # source assertion/contract and its unique proven goal attempt. Calls whose instantiated
-        # precondition does not have such a caller source site deliberately stay line-only.
+        # source assertion/contract and its unique proven goal attempt. Consumers without that
+        # caller source site remain unavailable to mutable-local liveness checks.
         def proof_replay_mutable_local_consumer_position(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: mutable Ast::Pos&) -> bool:
             work: mutable usize = 0
             return proof_replay_mutable_local_consumer_position_with_work(report, trace, body, position, &work)
@@ -143,20 +57,45 @@ extend ElisaProof:
             return position.line != 0 and position.offset != 0 and position.end_offset != 0
 
         def proof_replay_mutable_local_source_order(position: Ast::Pos, extent: ProofReplayTypeBoundSourceExtent, consumer: Ast::Pos) -> usize:
-            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if position.line == 0 or extent.end_line == 0 or consumer.line == 0
-            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER if position.line > consumer.line
-            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE if extent.end_line < consumer.line
-            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if extent.end_line > consumer.line
             return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if not extent.offsets_complete or extent.end_offset == 0 or consumer.offset == 0
-            if position.line == consumer.line:
-                return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if position.offset == 0
-                return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER if position.offset >= consumer.offset
-            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE if extent.end_offset < consumer.offset
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if position.offset == 0
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if position.offset <= consumer.offset and consumer.offset < extent.end_offset
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE if extent.end_offset <= consumer.offset
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER if position.offset >= consumer.offset
             return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID
 
         def proof_replay_mutable_local_extent_contains_consumer(position: Ast::Pos, extent: ProofReplayTypeBoundSourceExtent, consumer: Ast::Pos) -> bool:
             return false if position.offset == 0 or consumer.offset == 0 or not extent.offsets_complete or extent.end_offset == 0
-            return position.offset <= consumer.offset and consumer.offset <= extent.end_offset
+            return position.offset <= consumer.offset and consumer.offset < extent.end_offset
+
+        # Classify whether the authenticated consumer lies in this exact statement list.
+        # The caller has already charged a complete walk of the enclosing AST before using it.
+        def proof_replay_mutable_local_consumer_scope(body: darray[Ast::Stmt]&, consumer: Ast::Pos) -> usize:
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if consumer.offset == 0
+            return PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_OUTSIDE if body.count == 0
+            first: Ast::Pos = proof_replay_statement_position(body[0])
+            extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmts_extent(body, 0)
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if first.offset == 0 or not extent.offsets_complete or extent.end_offset == 0
+            return PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID if first.offset >= extent.end_offset
+            return PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_OUTSIDE if consumer.offset < first.offset or consumer.offset >= extent.end_offset
+            return PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE
+
+        # A loop-entry certificate skips writes in its own loop body, but containment in a
+        # statement extent is not enough: an enclosing loop also contains nested consumers.
+        # Identify the loop whose direct invariant contract owns this exact source expression.
+        def proof_replay_mutable_local_is_consumer_loop(statement: Ast::Stmt, consumer: Ast::Pos) -> bool:
+            return false if consumer.offset == 0
+            match statement:
+                Ast::Stmt.While(_, loop_body, _) | Ast::Stmt.For(_, _, _, loop_body, _):
+                    for child in loop_body |consumer|:
+                        match child:
+                            Ast::Stmt.Contract("invariant", expression, _):
+                                return true if proof_replay_source_position_equal(Ast::expr_pos(expression), consumer)
+                            _:
+                                pass
+                _:
+                    pass
+            return false
 
         def proof_replay_mutable_local_global_constant_collect(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
@@ -184,40 +123,30 @@ extend ElisaProof:
 
         def proof_replay_mutable_local_live_with_work(report: ProofReport&, owner: sview, body: darray[Ast::Stmt]&, index: usize, local_name: sview, consumer_line: u32, nested: bool, loop_entry: bool, consumer_position: Ast::Pos, consumer_position_valid: bool, source_work: mutable usize&) -> bool:
             return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or index >= body.count or consumer_line == 0
+            # A line-only consumer can be reordered by #line directives. Without an
+            # authenticated source offset, no binding site is safe to use as a liveness proof.
+            return false if not consumer_position_valid
             return false if body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + body.count
             binding_position: Ast::Pos = proof_replay_statement_position(body[index])
             binding_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(body[index], 0)
-            binding_line: u32 = binding_position.line
-            return false if consumer_line < binding_line
-            if loop_entry:
-                # Entry obligations are evaluated at the loop header, while the goal AST is the
-                # invariant's body declaration. Keep this phase on the header's source line.
-                return false if binding_line >= consumer_line or binding_extent.end_line >= consumer_line
-            if consumer_position_valid:
-                return false if proof_replay_mutable_local_source_order(binding_position, binding_extent, consumer_position) != PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE
-            else:
-                # Without an anchored goal point, only a completed earlier-line statement has
-                # an unambiguous order. This also covers call-precondition certificates.
-                return false if binding_line >= consumer_line or binding_extent.end_line >= consumer_line
-            return false if nested and consumer_line > proof_replay_body_last_line(body, 0)
+            return false if proof_replay_mutable_local_source_order(binding_position, binding_extent, consumer_position) != PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE
+            if nested and consumer_position_valid:
+                return false if body.count == 0 or not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
+                scope_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmts_extent(body, 0)
+                first_position: Ast::Pos = proof_replay_statement_position(body[0])
+                return false if not scope_extent.offsets_complete or scope_extent.end_offset == 0 or first_position.offset == 0
+                return false if consumer_position.offset < first_position.offset or consumer_position.offset >= scope_extent.end_offset
             first_later: usize = index + 1
             for later in first_later..<body.count |later, body, report, owner, local_name, consumer_line, loop_entry, consumer_position, consumer_position_valid, source_work|:
                 return false if not proof_replay_mutable_local_statement_work_charge(body[later], source_work, 0)
                 position: Ast::Pos = proof_replay_statement_position(body[later])
                 statement_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(body[later], 0)
-                if loop_entry and position.line == consumer_line:
-                    match body[later]:
-                        Ast::Stmt.While(_, _, _) | Ast::Stmt.For(_, _, _, _, _) | Ast::Stmt.Expr(Ast::Expr.Block(_, _, _, _), _):
-                            # The positive loop-entry classifier proves this check precedes the
-                            # first iteration, so later loop-body writes do not stale its facts.
-                            break
-                        _:
-                            pass
-                order: mutable usize = proof_replay_mutable_local_source_order(position, statement_extent, consumer_position) if consumer_position_valid else PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID
-                if not consumer_position_valid:
-                    order <- PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER if position.line > consumer_line
-                    order <- PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE if statement_extent.end_line < consumer_line
+                if loop_entry and consumer_position_valid and proof_replay_mutable_local_is_consumer_loop(body[later], consumer_position):
+                    # Only this loop's entry check precedes its first iteration. A containing
+                    # loop or a captured block may include the consumer without being its loop.
+                    break
+                order: usize = proof_replay_mutable_local_source_order(position, statement_extent, consumer_position)
                 if consumer_position_valid and order == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID and proof_replay_mutable_local_extent_contains_consumer(position, statement_extent, consumer_position):
                     # This statement contains the anchored consumer. Only its prefix can
                     # invalidate the binding; the consumer expression itself may read it.
@@ -240,6 +169,7 @@ extend ElisaProof:
         # equation, whose span is the binding statement's.
         def proof_replay_mutable_local_site(report: ProofReport&, trace: ProofFactTrace, owner: sview, body: darray[Ast::Stmt]&, local_name: sview, binding: Ast::Expr, value: Ast::Expr, consumer_line: u32, consumer_position: Ast::Pos, consumer_position_valid: bool, nested: bool, loop_entry: bool, depth: usize, source_work: mutable usize&) -> usize:
             return ProofReplayLocalAlias::INVALID if depth >= ProofReplayLocalAlias::DEPTH_LIMIT
+            return ProofReplayLocalAlias::INVALID if not consumer_position_valid or consumer_position.offset == 0
             found: mutable usize = ProofReplayLocalAlias::ABSENT
             for index in 0..<body.count |index, body, report, trace, owner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, nested, loop_entry, depth, found, source_work|:
                 return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_statement_work_charge(body[index], source_work, depth)
@@ -259,63 +189,88 @@ extend ElisaProof:
                             site <- true
                             site_position <- statement_position
                             written <- initializer
-                    Ast::Stmt.If(_, yes, no, if_position):
-                        then_site: usize = proof_replay_mutable_local_site(report, trace, owner, yes, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work)
-                        else_site: usize = proof_replay_mutable_local_site(report, trace, owner, no, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work)
-                        # Inline `if`/`else` arms can share one physical line. A certificate
-                        # carries only that line, so it cannot distinguish a binding from the
-                        # opposite arm (or a same-line consumer before either arm runs). Never
-                        # merge such a branch-local fact into that consumer. Later-line consumers
-                        # are already excluded by the nested-body extent check above.
-                        if if_position.line == consumer_line and (then_site != ProofReplayLocalAlias::ABSENT or else_site != ProofReplayLocalAlias::ABSENT):
+                    Ast::Stmt.If(_, yes, no, _):
+                        then_scope: usize = proof_replay_mutable_local_consumer_scope(yes, consumer_position)
+                        else_scope: usize = proof_replay_mutable_local_consumer_scope(no, consumer_position)
+                        if then_scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID or else_scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID or then_scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE and else_scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
                             here <- ProofReplayLocalAlias::INVALID
+                        elif then_scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, yes, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        elif else_scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, no, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
                         else:
-                            here <- proof_replay_mutable_local_merge(here, then_site)
-                            here <- proof_replay_mutable_local_merge(here, else_site)
+                            then_site: usize = proof_replay_mutable_local_site(report, trace, owner, yes, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            else_site: usize = proof_replay_mutable_local_site(report, trace, owner, no, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            here <- ProofReplayLocalAlias::INVALID if then_site != ProofReplayLocalAlias::ABSENT or else_site != ProofReplayLocalAlias::ABSENT
                     Ast::Stmt.Block(block_kind, _, _, inner, block_position):
                         # A can body executes once on every path that reaches its successor.
                         # Its outer-local writes can dominate a later consumer, but still need
                         # both the inner reaching check and the enclosing suffix's havoc check.
                         block_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
                         consumer_after_block: bool = consumer_position_valid and proof_replay_mutable_local_source_order(block_position, block_extent, consumer_position) == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE
-                        outside_can: bool = block_kind == "can" and (consumer_line > proof_replay_body_last_line(inner, 0) or consumer_after_block)
+                        outside_can: bool = block_kind == "can" and consumer_after_block
                         inside_nested: bool = nested if outside_can else true
-                        here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, inside_nested, loop_entry, depth + 1, source_work)
-                        if outside_can and here == ProofReplayLocalAlias::VALID:
-                            here <- ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_live_with_work(report, owner, body, index, local_name, consumer_line, nested, loop_entry, consumer_position, consumer_position_valid, source_work)
-                        consumer_inside_block: bool = consumer_position_valid and proof_replay_mutable_local_extent_contains_consumer(block_position, block_extent, consumer_position)
-                        if block_position.line == consumer_line and here != ProofReplayLocalAlias::ABSENT and not consumer_inside_block and not outside_can:
-                            here <- ProofReplayLocalAlias::INVALID
-                    Ast::Stmt.While(_, inner, loop_position):
-                        loop_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work)
-                        if loop_position.line == consumer_line and loop_site != ProofReplayLocalAlias::ABSENT:
-                            here <- ProofReplayLocalAlias::INVALID
-                        else:
-                            here <- loop_site
-                    Ast::Stmt.For(_, _, _, inner, loop_position):
-                        loop_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work)
-                        if loop_position.line == consumer_line and loop_site != ProofReplayLocalAlias::ABSENT:
+                        inner_scope: usize = proof_replay_mutable_local_consumer_scope(inner, consumer_position)
+                        if inner_scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        elif outside_can:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, inside_nested, loop_entry, depth + 1, source_work)
+                            if here == ProofReplayLocalAlias::VALID:
+                                here <- ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_live_with_work(report, owner, body, index, local_name, consumer_line, nested, loop_entry, consumer_position, true, source_work)
+                        elif inner_scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID:
                             here <- ProofReplayLocalAlias::INVALID
                         else:
-                            here <- loop_site
-                    Ast::Stmt.Match(_, arms, match_position):
-                        arm_site: mutable usize = ProofReplayLocalAlias::ABSENT
-                        for arm in arms |arm_site, report, trace, owner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, loop_entry, depth, source_work|:
-                            arm_site <- proof_replay_mutable_local_merge(arm_site, proof_replay_mutable_local_site(report, trace, owner, arm.body, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work))
-                        # As with inline if arms, a match arm's branch is not represented by a
-                        # certificate line. Do not merge a same-line arm binding into a consumer.
-                        if match_position.line == consumer_line and arm_site != ProofReplayLocalAlias::ABSENT:
+                            candidate: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            here <- ProofReplayLocalAlias::INVALID if candidate != ProofReplayLocalAlias::ABSENT
+                    Ast::Stmt.While(_, inner, _):
+                        scope: usize = proof_replay_mutable_local_consumer_scope(inner, consumer_position)
+                        if scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        elif scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID:
                             here <- ProofReplayLocalAlias::INVALID
                         else:
-                            here <- proof_replay_mutable_local_merge(here, arm_site)
-                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, block_position), _):
-                        block_site: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, consumer_position_valid, true, loop_entry, depth + 1, source_work)
-                        block_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
-                        consumer_inside_block: bool = consumer_position_valid and proof_replay_mutable_local_extent_contains_consumer(block_position, block_extent, consumer_position)
-                        if block_position.line == consumer_line and block_site != ProofReplayLocalAlias::ABSENT and not consumer_inside_block:
+                            candidate: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            here <- ProofReplayLocalAlias::INVALID if candidate != ProofReplayLocalAlias::ABSENT
+                    Ast::Stmt.For(_, _, _, inner, _):
+                        scope: usize = proof_replay_mutable_local_consumer_scope(inner, consumer_position)
+                        if scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        elif scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID:
                             here <- ProofReplayLocalAlias::INVALID
                         else:
-                            here <- block_site
+                            candidate: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            here <- ProofReplayLocalAlias::INVALID if candidate != ProofReplayLocalAlias::ABSENT
+                    Ast::Stmt.Match(_, arms, _):
+                        matches_consumer: mutable usize = 0
+                        selected_arm: mutable usize = 0
+                        arm_index: mutable usize = 0
+                        for arm in arms |consumer_position, matches_consumer, selected_arm, arm_index|:
+                            scope: usize = proof_replay_mutable_local_consumer_scope(arm.body, consumer_position)
+                            return ProofReplayLocalAlias::INVALID if scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID
+                            if scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                                matches_consumer <- matches_consumer + 1
+                                selected_arm <- arm_index
+                            arm_index <- arm_index + 1
+                        if matches_consumer > 1:
+                            here <- ProofReplayLocalAlias::INVALID
+                        elif matches_consumer == 1:
+                            selected: Ast::MatchArm = arms[selected_arm]
+                            here <- proof_replay_mutable_local_site(report, trace, owner, selected.body, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        else:
+                            arm_site: mutable usize = ProofReplayLocalAlias::ABSENT
+                            for arm in arms |arm_site, report, trace, owner, local_name, binding, value, consumer_line, consumer_position, loop_entry, depth, source_work|:
+                                candidate: usize = proof_replay_mutable_local_site(report, trace, owner, arm.body, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                                arm_site <- proof_replay_mutable_local_merge(arm_site, candidate)
+                            here <- ProofReplayLocalAlias::INVALID if arm_site != ProofReplayLocalAlias::ABSENT
+                    Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
+                        scope: usize = proof_replay_mutable_local_consumer_scope(inner, consumer_position)
+                        if scope == PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE:
+                            here <- proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                        elif scope == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID:
+                            here <- ProofReplayLocalAlias::INVALID
+                        else:
+                            candidate: usize = proof_replay_mutable_local_site(report, trace, owner, inner, local_name, binding, value, consumer_line, consumer_position, true, true, loop_entry, depth + 1, source_work)
+                            here <- ProofReplayLocalAlias::INVALID if candidate != ProofReplayLocalAlias::ABSENT
                     _:
                         pass
                 if site:
@@ -329,8 +284,7 @@ extend ElisaProof:
                     return ProofReplayLocalAlias::INVALID if not proof_replay_mutable_local_expr_equal_with_work(written, value, &exact_value, source_work)
                     valid_value: bool = not proof_source_expression_has_overloaded_operator(written, report.source_primitive_operator_mask, 0) and (exact_value or proof_replay_summary_call_global_constant_matches_with_work(report, trace, written, value, source_work) or proof_replay_mutable_local_authenticated_initializer_with_work(report, trace, written, value, local_name, source_work, 0, false))
                     statement_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
-                    before_consumer: mutable bool = proof_replay_mutable_local_source_order(site_position, statement_extent, consumer_position) == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE if consumer_position_valid else false
-                    before_consumer <- site_position.line < consumer_line and statement_extent.end_line < consumer_line if not consumer_position_valid
+                    before_consumer: bool = proof_replay_mutable_local_source_order(site_position, statement_extent, consumer_position) == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE
                     here <- ProofReplayLocalAlias::VALID if valid_value and before_consumer and proof_replay_mutable_local_live_with_work(report, owner, body, index, local_name, consumer_line, nested, loop_entry, consumer_position, consumer_position_valid, source_work) else ProofReplayLocalAlias::INVALID
                 found <- proof_replay_mutable_local_merge(found, here)
             return found

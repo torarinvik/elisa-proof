@@ -1,0 +1,123 @@
+# Source-derived field-conversion name/shadow index shared by producer checks and replay.
+extend ElisaProof:
+    private:
+        def proof_source_field_conversion_name_index_build(names: darray[sview]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+            hashes.clear()
+            values.clear()
+            counts.clear()
+            count: usize = names.count
+            return true if count == 0
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0
+            return false if not proof_report_source_work_charge(capacity, source_work)
+            return false if not proof_report_source_work_charge(count, source_work)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            counts.resize(capacity)
+            for slot in 0..<capacity |slot, values, counts, count|:
+                values[slot] <- count
+                counts[slot] <- 0
+            for row in 0..<count |row, names, hashes, values, counts, count, capacity, source_work|:
+                name: sview = names[row]
+                return false if not proof_report_source_work_charge(sview_len(name), source_work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, names, hashes, values, counts, count, capacity, source_work, placed|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    current: usize = values[slot]
+                    if current == count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        counts[slot] <- 1
+                        placed <- true
+                        break
+                    if current < count and hashes[slot] == hash:
+                        current_name: sview = names[current]
+                        return false if not proof_report_source_work_charge(sview_len(current_name), source_work)
+                        if current_name == name:
+                            counts[slot] <- counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, count, source_work)
+            return cluster_status.complete and cluster_status.bounded
+
+        def proof_source_field_conversion_index_build(report: mutable ProofReport&, source_work: mutable usize&) -> bool:
+            index: mutable ProofSourceEffectIndex& = &report.source_effect_index
+            index.field_conversion_index_hashes.clear()
+            index.field_conversion_index_values.clear()
+            index.field_conversion_index_counts.clear()
+            index.field_conversion_index_valid <- false
+            return false if not proof_source_field_conversion_name_index_build(index.field_conversion_names, &index.field_conversion_index_hashes, &index.field_conversion_index_values, &index.field_conversion_index_counts, source_work)
+            index.field_conversion_index_valid <- true
+            return true
+
+        def proof_source_implicit_effect_charge(report: mutable ProofReport&, amount: usize) -> bool:
+            if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                return false
+            if not proof_report_source_work_charge(amount, &report.source_effect_index.implicit_effect_work):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return true
+
+        def proof_source_effect_field_conversion_lookup(report: mutable ProofReport&, wanted: sview) -> (complete: bool, count: usize, row: usize):
+            index: ProofSourceEffectIndex& = report.source_effect_index
+            count: usize = index.field_conversion_names.count
+            return (false, 2, count) if not index.field_conversion_index_valid
+            return (false, 2, count) if index.field_conversion_index_values.count != index.field_conversion_index_hashes.count or index.field_conversion_index_values.count != index.field_conversion_index_counts.count
+            return (false, 2, count) if count == 0 and index.field_conversion_index_values.count != 0
+            return (false, 2, count) if count > 0 and (proof_name_index_capacity(count) == 0 or index.field_conversion_index_values.count != proof_name_index_capacity(count))
+            return (false, 2, count) if not proof_source_implicit_effect_charge(report, sview_len(wanted))
+            return (true, 0, count) if count == 0
+            capacity: usize = index.field_conversion_index_values.count
+            wanted_hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, wanted, index, capacity, count, report|:
+                return (false, 2, count) if not proof_source_implicit_effect_charge(report, 1)
+                current: usize = index.field_conversion_index_values[slot]
+                return (true, 0, count) if current == count
+                return (false, 2, count) if current > count or current >= index.field_conversion_names.count
+                if index.field_conversion_index_hashes[slot] == wanted_hash:
+                    current_name: sview = index.field_conversion_names[current]
+                    return (false, 2, count) if not proof_source_implicit_effect_charge(report, sview_len(current_name))
+                    if current_name == wanted:
+                        matches: usize = index.field_conversion_index_counts[slot]
+                        return (false, 2, count) if matches == 0
+                        return (true, matches, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 2, count)
+
+        def proof_source_effect_callable_lookup(report: mutable ProofReport&, wanted: sview) -> (complete: bool, count: usize, row: usize):
+            index: ProofSourceEffectIndex& = report.source_effect_index
+            names_count: usize = index.callable_names.count
+            return (false, 2, names_count) if not index.callable_index_valid or names_count != index.callable_return_types.count
+            return (false, 2, names_count) if index.callable_index_values.count != index.callable_index_hashes.count or index.callable_index_values.count != index.callable_index_counts.count
+            return (false, 2, names_count) if names_count == 0 and index.callable_index_values.count != 0
+            return (false, 2, names_count) if names_count > 0 and (proof_name_index_capacity(names_count) == 0 or index.callable_index_values.count != proof_name_index_capacity(names_count))
+            return (false, 2, names_count) if not proof_source_implicit_effect_charge(report, sview_len(wanted))
+            return (true, 0, names_count) if names_count == 0
+            capacity: usize = index.callable_index_values.count
+            wanted_hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, wanted_hash, wanted, index, capacity, names_count, report|:
+                return (false, 2, names_count) if not proof_source_implicit_effect_charge(report, 1)
+                current: usize = index.callable_index_values[slot]
+                return (true, 0, names_count) if current == names_count
+                return (false, 2, names_count) if current > names_count or current >= index.callable_names.count
+                if index.callable_index_hashes[slot] == wanted_hash:
+                    current_name: sview = index.callable_names[current]
+                    return (false, 2, names_count) if not proof_source_implicit_effect_charge(report, sview_len(current_name))
+                    if current_name == wanted:
+                        matches: usize = index.callable_index_counts[slot]
+                        return (false, 2, names_count) if matches == 0
+                        return (true, matches, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 2, names_count)

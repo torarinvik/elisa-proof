@@ -7,11 +7,10 @@ extend ElisaProof:
             outside: mutable darray[Ast::Stmt] = []
             for statement in body |outside|:
                 position: Ast::Pos = proof_statement_position(statement)
-                outside.push(statement) if position.offset != outer_position.offset or position.line != outer_position.line
+                outside.push(statement) if not proof_replay_source_position_equal(position, outer_position)
             return not proof_replay_source_body_declares(report.source_declarations, outside, local)
 
         def proof_replay_value_block_immutable_binding_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
-            return false if trace.line == 0 or trace.line > report.trace_owner_line
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
                     return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
@@ -23,9 +22,18 @@ extend ElisaProof:
                     proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &matches, 0)
                     return false if matches != 1
                     return false if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
+                    consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+                    return false if not proof_replay_mutable_local_consumer_position_with_work(report, trace, body, &consumer_position, source_work)
+                    return false if consumer_position.offset == 0 or consumer_position.end_offset <= consumer_position.offset
                     for statement in body:
                         match statement:
                             Ast::Stmt.VarDecl(outer, outer_type, Ast::Expr.Block(statements, yielded, _, _), outer_position):
+                                outer_extent_cost: mutable usize = 0
+                                return false if not proof_replay_summary_expr_cost_body([statement], &outer_extent_cost, source_work, 0)
+                                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or outer_extent_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                                source_work <- source_work + outer_extent_cost
+                                outer_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
+                                return false if not outer_extent.offsets_complete or outer_position.offset == 0 or outer_extent.end_offset <= outer_position.offset
                                 yielded_local: mutable bool = false
                                 for inner in statements:
                                     match inner:
@@ -36,7 +44,12 @@ extend ElisaProof:
                                                 return false if not proof_replay_summary_expr_charge_with_work(initializer, source_work)
                                                 return false if not proof_replay_mutable_local_identifier_scan_charge(initializer, owner_scan_work, source_work)
                                                 stable: bool = proof_replay_local_binding_stable_initializer(initializer, local, report.source_declarations, trace.name, report.replay_owner_line, 0)
-                                                if stable and proof_replay_value_block_unique_local(report, body, statements, outer_position, local, trace.name) and position.line == trace.line and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position):
+                                                inner_extent_cost: mutable usize = 0
+                                                return false if not proof_replay_summary_expr_cost_body([inner], &inner_extent_cost, source_work, 0)
+                                                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or inner_extent_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                                                source_work <- source_work + inner_extent_cost
+                                                inner_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(inner, 0)
+                                                if stable and inner_extent.offsets_complete and inner_extent.end_offset <= consumer_position.offset and consumer_position.offset < outer_extent.end_offset and proof_replay_value_block_unique_local(report, body, statements, outer_position, local, trace.name) and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position):
                                                     return false if not proof_replay_summary_expr_charge_with_work(initializer, source_work) or not proof_replay_summary_expr_charge_with_work(source_value, source_work)
                                                     return false if not proof_replay_summary_expr_charge_with_work(initializer, source_work)
                                                     return true if proof_replay_expr_equal(initializer, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
@@ -48,8 +61,8 @@ extend ElisaProof:
                                     return false if not proof_replay_mutable_local_identifier_scan_charge(yielded, owner_scan_work, source_work)
                                     return false if not proof_replay_summary_expr_charge_with_work(outer_type, source_work) or not proof_replay_summary_expr_charge_with_work(outer_type, source_work)
                                     valid_outer_type: bool = proof_replay_local_binding_integer_type(outer_type, 0) and not proof_replay_local_binding_mutable_integer_type(outer_type)
-                                    valid_yielded_local: bool = proof_replay_source_single_declaration(report.source_declarations, body, target) and proof_replay_value_block_unique_local(report, body, statements, outer_position, proof_ident_name(yielded), trace.name)
-                                    if valid_outer_type and valid_yielded_local and outer_position.line == trace.line and proof_replay_local_binding_pos_matches(trace.expression, outer_position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), outer_position):
+                                    valid_yielded_local: bool = proof_replay_source_single_declaration(report.source_declarations, body, target) and not proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0) and proof_replay_value_block_unique_local(report, body, statements, outer_position, proof_ident_name(yielded), trace.name)
+                                    if valid_outer_type and valid_yielded_local and outer_extent.end_offset <= consumer_position.offset and proof_replay_local_binding_pos_matches(trace.expression, outer_position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), outer_position):
                                         return false if not proof_replay_summary_expr_charge_with_work(yielded, source_work) or not proof_replay_summary_expr_charge_with_work(source_value, source_work)
                                         return true if proof_replay_expr_equal(yielded, source_value)
                             _:
@@ -60,27 +73,34 @@ extend ElisaProof:
 
         # A single scalar capture write from a fresh immutable literal local.
         # Authenticate its reaching source assignment, not an arbitrary old equation.
-        def proof_replay_value_block_capture_write(report: ProofReport&, trace: ProofFactTrace) -> bool:
-            return false if trace.line == 0 or trace.line > report.trace_owner_line
+        def proof_replay_value_block_capture_write(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(target, target_position), TokenKind.EqEq, source_value, _):
+                    return false if not proof_replay_mutable_local_owner_preflight_work_charge(report, trace.name, report.replay_owner_line, source_work)
                     body: mutable darray[Ast::Stmt] = []
                     matches: mutable usize = 0
                     proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &matches, 0)
                     return false if matches != 1 or body.count > 64 or proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0)
+                    return false if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
+                    consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+                    return false if not proof_replay_mutable_local_consumer_position_with_work(report, trace, body, &consumer_position, source_work)
+                    return false if consumer_position.offset == 0 or consumer_position.end_offset <= consumer_position.offset
                     declared: mutable usize = 0
                     target_type: mutable Ast::Expr = Ast::Expr.Invalid
-                    declaration_line: mutable u32 = 0
-                    for statement in body |declared, target_type|:
+                    declaration_statement: mutable Ast::Stmt = Ast::Stmt.Invalid
+                    for statement in body |declared, target_type, declaration_statement|:
                         match statement:
-                            Ast::Stmt.VarDecl(local, type_expression, _, position):
+                            Ast::Stmt.VarDecl(local, type_expression, _, _):
                                 if local == target:
                                     declared <- declared + 1
                                     target_type <- type_expression
-                                    declaration_line <- position.line
+                                    declaration_statement <- statement
                             _:
                                 pass
                     return false if declared != 1 or not proof_replay_local_binding_mutable_integer_type(target_type)
+                    declaration_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(declaration_statement, 0)
+                    return false if not declaration_extent.offsets_complete or declaration_extent.end_offset == 0
                     target_scalar_type: mutable Ast::Expr = target_type
                     match target_type:
                         Ast::Expr.Unary(TokenKind.Mutable, inner, _):
@@ -90,18 +110,25 @@ extend ElisaProof:
                     for statement in body:
                         match statement:
                             Ast::Stmt.VarDecl(_, _, Ast::Expr.Block(statements, yielded, captures, _), block_position):
-                                continue if statements.count != 2 or declaration_line >= block_position.line or not (any captured in captures where captured == target)
+                                block_extent_cost: mutable usize = 0
+                                return false if not proof_replay_summary_expr_cost_body([statement], &block_extent_cost, source_work, 0)
+                                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or block_extent_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                                source_work <- source_work + block_extent_cost
+                                block_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
+                                continue if statements.count != 2 or declaration_extent.end_offset > block_position.offset or block_position.offset == 0 or not block_extent.offsets_complete or block_extent.end_offset <= block_position.offset or block_extent.end_offset > consumer_position.offset or not (any captured in captures where captured == target)
                                 match statements[0]:
                                     Ast::Stmt.VarDecl(local, local_type, Ast::Expr.IntLit(_, _), _):
                                         continue if not proof_replay_local_binding_integer_type(local_type, 0) or proof_replay_local_binding_mutable_integer_type(local_type) or proof_replay_local_binding_integer_type_name(local_type, 0) != proof_replay_local_binding_integer_type_name(target_scalar_type, 0) or proof_ident_name(yielded) != local or proof_ident_name(source_value) != local
                                         continue if not proof_replay_value_block_unique_local(report, body, statements, block_position, local, trace.name)
                                         match statements[1]:
                                             Ast::Stmt.Assign(Ast::Expr.Ident(written, _), TokenKind.LArrow, Ast::Expr.Ident(read, _), position):
-                                                continue if written != target or read != local or position.line != trace.line or not proof_replay_local_binding_pos_matches(trace.expression, position) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position)
+                                                assignment_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statements[1], 0)
+                                                continue if written != target or read != local or not assignment_extent.offsets_complete or position.offset == 0 or assignment_extent.end_offset <= position.offset or position.offset < block_position.offset or assignment_extent.end_offset > block_extent.end_offset or not proof_replay_local_binding_pos_matches(trace.expression, position) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position)
+                                                return false if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
                                                 safe: mutable bool = true
                                                 for other in body |safe|:
                                                     other_position: Ast::Pos = proof_statement_position(other)
-                                                    continue if other_position.offset == block_position.offset and other_position.line == block_position.line
+                                                    continue if proof_replay_source_position_equal(other_position, block_position)
                                                     match other:
                                                         Ast::Stmt.VarDecl(declaration, _, initializer, _):
                                                             if declaration == target:

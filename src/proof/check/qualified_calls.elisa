@@ -168,180 +168,348 @@ extend ElisaProof:
         # A local enum spelling is expanded in a contract row only when that exact lexical
         # declaration list contains one const enum with one matching member. This keeps the
         # summary's member owner aligned with source scope and refuses sibling-name guessing.
-        def proof_scope_const_enum_member_count(declarations: darray[Ast::Decl]&, enum_name: sview, member_name: sview, depth: usize) -> usize:
-            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+        def proof_scope_const_enum_member_count(declarations: darray[Ast::Decl]&, enum_name: sview, member_name: sview, functions: mutable ProofFunctionTable&, depth: usize) -> usize:
+            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
             count: mutable usize = 0
-            for declaration in declarations |enum_name, member_name, depth, count|:
+            for declaration in declarations |enum_name, member_name, functions, depth, count|:
+                return 0 if not proof_qualify_enum_source_work_charge(functions, 1)
                 match declaration:
                     Ast::Decl.Enum(name, variants, is_const, _, _):
+                        return 0 if not proof_qualify_enum_source_work_charge(functions, sview_len(name) + sview_len(enum_name))
                         if name == enum_name and is_const:
-                            for variant in variants |member_name, count|:
+                            for variant in variants |member_name, functions, count|:
+                                return 0 if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(variant.name) + sview_len(member_name))
                                 count <- count + 1 if variant.name == member_name
                     Ast::Decl.Scoped(body, _):
-                        count <- count + proof_scope_const_enum_member_count(body, enum_name, member_name, depth + 1)
+                        count <- count + proof_scope_const_enum_member_count(body, enum_name, member_name, functions, depth + 1)
                     _:
                         pass
             return count
 
-        def proof_scope_const_enum_type_count(declarations: darray[Ast::Decl]&, enum_name: sview, depth: usize) -> usize:
-            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+        def proof_scope_const_enum_type_count(declarations: darray[Ast::Decl]&, enum_name: sview, functions: mutable ProofFunctionTable&, depth: usize) -> usize:
+            return 0 if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
             count: mutable usize = 0
-            for declaration in declarations |enum_name, depth, count|:
+            for declaration in declarations |enum_name, functions, depth, count|:
+                return 0 if not proof_qualify_enum_source_work_charge(functions, 1)
                 match declaration:
                     Ast::Decl.Enum(name, _, is_const, _, _):
+                        return 0 if not proof_qualify_enum_source_work_charge(functions, sview_len(name) + sview_len(enum_name))
                         count <- count + 1 if name == enum_name and is_const
                     Ast::Decl.Scoped(body, _):
-                        count <- count + proof_scope_const_enum_type_count(body, enum_name, depth + 1)
+                        count <- count + proof_scope_const_enum_type_count(body, enum_name, functions, depth + 1)
                     _:
                         pass
             return count
 
-        def proof_qualify_contract_enum_members(expression: Ast::Expr, declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: ProofFunctionTable&, row: usize, depth: usize) -> Ast::Expr:
-            return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT
+        # Reuse compiler-visible condition binders conservatively. If an `is`/`as` target
+        # or a bare variant-filter call can bind a name, that spelling shadows the enum on
+        # the corresponding branch. Extra names only suppress qualification; missing a
+        # name could change the source term.
+        def proof_qualify_enum_pattern_target_names(target: Ast::Expr, names: mutable darray[sview]&, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
+            match target:
+                Ast::Expr.Ident(name, _):
+                    return false if not proof_qualify_enum_name_add(names, name, functions)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |names, depth|:
+                        return false if not proof_qualify_enum_pattern_target_names(argument, names, functions, depth + 1)
+                Ast::Expr.Array(elements, _):
+                    for element in elements |names, depth|:
+                        return false if not proof_qualify_enum_pattern_target_names(element, names, functions, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |names, depth|:
+                        return false if not proof_qualify_enum_pattern_target_names(field.value, names, functions, depth + 1)
+                _:
+                    pass
+            return true
+
+        def proof_qualify_contract_enum_members(expression: Ast::Expr, declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: mutable ProofFunctionTable&, row: usize, shadowed: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> Ast::Expr:
+            return expression if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
             match expression:
                 Ast::Expr.Field(Ast::Expr.Ident(enum_name, type_position), member_name, position):
-                    if proof_scope_const_enum_type_count(declarations, enum_name, 0) == 1 and proof_scope_const_enum_member_count(declarations, enum_name, member_name, 0) == 1 and module_scope.count > 0 and not proof_function_parameter_named(functions, row, enum_name):
+                    enum_type_count: usize = proof_scope_const_enum_type_count(declarations, enum_name, functions, 0)
+                    return expression if functions.lookup.module_resolution_work_exhausted
+                    member_count: usize = proof_scope_const_enum_member_count(declarations, enum_name, member_name, functions, 0)
+                    return expression if functions.lookup.module_resolution_work_exhausted
+                    parameter_shadowed: bool = proof_function_parameter_named(functions, row, enum_name)
+                    local_shadowed: bool = proof_qualify_name_shadowed(functions, shadowed, enum_name)
+                    return expression if functions.lookup.module_resolution_work_exhausted
+                    if enum_type_count == 1 and member_count == 1 and module_scope.count > 0 and not parameter_shadowed and not local_shadowed:
                         type_path: mutable Ast::Expr = Ast::Expr.Ident(module_scope[0], type_position)
                         for index in 1..<module_scope.count |index, module_scope, type_position, type_path|:
                             type_path <- Ast::Expr.Scope(type_path, module_scope[index], type_position)
                         type_path <- Ast::Expr.Scope(type_path, enum_name, type_position)
                         return Ast::Expr.Field(type_path, member_name, position)
                     return expression
+                Ast::Expr.Field(object, member, position):
+                    return Ast::Expr.Field(proof_qualify_contract_enum_members(object, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), member, position)
+                Ast::Expr.Scope(base, member, position):
+                    return Ast::Expr.Scope(proof_qualify_contract_enum_members(base, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), member, position)
+                Ast::Expr.Binary(left, TokenKind.And, right, position):
+                    left_paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(left, annotations, functions, depth + 1)
+                    return expression if not left_paths.complete
+                    right_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(shadowed, left_paths.when_true, functions)
+                    return expression if not right_shadowed.complete
+                    return Ast::Expr.Binary(proof_qualify_contract_enum_members(left, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), TokenKind.And, proof_qualify_contract_enum_members(right, declarations, module_scope, functions, row, right_shadowed.names, annotations, depth + 1), position)
+                Ast::Expr.Binary(left, TokenKind.Or, right, position):
+                    left_paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(left, annotations, functions, depth + 1)
+                    return expression if not left_paths.complete
+                    right_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(shadowed, left_paths.when_false, functions)
+                    return expression if not right_shadowed.complete
+                    return Ast::Expr.Binary(proof_qualify_contract_enum_members(left, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), TokenKind.Or, proof_qualify_contract_enum_members(right, declarations, module_scope, functions, row, right_shadowed.names, annotations, depth + 1), position)
                 Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_qualify_contract_enum_members(left, declarations, module_scope, functions, row, depth + 1), operator, proof_qualify_contract_enum_members(right, declarations, module_scope, functions, row, depth + 1), position)
+                    return Ast::Expr.Binary(proof_qualify_contract_enum_members(left, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), operator, proof_qualify_contract_enum_members(right, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
                 Ast::Expr.Unary(operator, operand, position):
-                    return Ast::Expr.Unary(operator, proof_qualify_contract_enum_members(operand, declarations, module_scope, functions, row, depth + 1), position)
+                    return Ast::Expr.Unary(operator, proof_qualify_contract_enum_members(operand, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Move(operand, position):
+                    return Ast::Expr.Move(proof_qualify_contract_enum_members(operand, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
+                Ast::Expr.RegionNew(operand, region, position):
+                    return Ast::Expr.RegionNew(proof_qualify_contract_enum_members(operand, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), region, position)
                 Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_qualify_contract_enum_members(inner, declarations, module_scope, functions, row, depth + 1), position)
+                    return Ast::Expr.Paren(proof_qualify_contract_enum_members(inner, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
                 Ast::Expr.If(condition, then_value, else_value, position):
-                    return Ast::Expr.If(proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, depth + 1), proof_qualify_contract_enum_members(then_value, declarations, module_scope, functions, row, depth + 1), proof_qualify_contract_enum_members(else_value, declarations, module_scope, functions, row, depth + 1), position)
+                    paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(condition, annotations, functions, depth + 1)
+                    return expression if not paths.complete
+                    then_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(shadowed, paths.when_true, functions)
+                    return expression if not then_shadowed.complete
+                    else_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(shadowed, paths.when_false, functions)
+                    return expression if not else_shadowed.complete
+                    return Ast::Expr.If(proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_contract_enum_members(then_value, declarations, module_scope, functions, row, then_shadowed.names, annotations, depth + 1), proof_qualify_contract_enum_members(else_value, declarations, module_scope, functions, row, else_shadowed.names, annotations, depth + 1), position)
+                Ast::Expr.Call(callee, arguments, argument_names, position):
+                    return expression if not proof_qualify_enum_argument_names_charge(argument_names, functions)
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(proof_qualify_contract_enum_members(argument, declarations, module_scope, functions, row, shadowed, annotations, depth + 1))
+                    return Ast::Expr.Call(proof_qualify_contract_enum_members(callee, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), rewritten, argument_names, position)
+                Ast::Expr.StaticEffectCall(effect_type, operation, candidates, arguments, argument_names, position):
+                    return expression if not proof_qualify_enum_source_work_charge(functions, sview_len(operation)) or not proof_qualify_enum_argument_names_charge(argument_names, functions)
+                    rewritten_candidates: mutable darray[Ast::StaticEffectCandidate] = []
+                    for candidate in candidates |rewritten_candidates, declarations, module_scope, functions, row, shadowed, annotations, depth|:
+                        return expression if not proof_qualify_enum_source_work_charge(functions, 1) or not proof_qualify_enum_source_work_charge(functions, sview_len(candidate.callee)) or not proof_qualify_enum_source_work_charge(functions, sview_len(candidate.callee_owner))
+                        rewritten_captures: mutable darray[Ast::Expr] = []
+                        for capture in candidate.captures |rewritten_captures, declarations, module_scope, functions, row, shadowed, annotations, depth|:
+                            return expression if not proof_qualify_enum_source_work_charge(functions, 1)
+                            rewritten_captures.push(proof_qualify_contract_enum_members(capture, declarations, module_scope, functions, row, shadowed, annotations, depth + 1))
+                        rewritten_candidates.push(Ast::StaticEffectCandidate{effect_type: proof_qualify_contract_enum_members(candidate.effect_type, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), callee: candidate.callee, captures: rewritten_captures, effect_identity_id: candidate.effect_identity_id, handler_identity_id: candidate.handler_identity_id, callee_owner: candidate.callee_owner})
+                    rewritten_arguments: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten_arguments, declarations, module_scope, functions, row, shadowed, annotations, depth|:
+                        return expression if not proof_qualify_enum_source_work_charge(functions, 1)
+                        rewritten_arguments.push(proof_qualify_contract_enum_members(argument, declarations, module_scope, functions, row, shadowed, annotations, depth + 1))
+                    return Ast::Expr.StaticEffectCall(proof_qualify_contract_enum_members(effect_type, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), operation, rewritten_candidates, rewritten_arguments, argument_names, position)
+                Ast::Expr.Index(object, index, position):
+                    return Ast::Expr.Index(proof_qualify_contract_enum_members(object, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_contract_enum_members(index, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
+                Ast::Expr.IndexN(object, arguments, position):
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for argument in arguments |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(proof_qualify_contract_enum_members(argument, declarations, module_scope, functions, row, shadowed, annotations, depth + 1))
+                    return Ast::Expr.IndexN(proof_qualify_contract_enum_members(object, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), rewritten, position)
+                Ast::Expr.Slice(object, low, high, position):
+                    return Ast::Expr.Slice(proof_qualify_contract_enum_members(object, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_contract_enum_members(low, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_contract_enum_members(high, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Refinement(base, predicate, position):
+                    return Ast::Expr.Refinement(proof_qualify_contract_enum_members(base, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_contract_enum_members(predicate, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Array(elements, position) | Ast::Expr.Tuple(elements, position) | Ast::Expr.SetLit(elements, position):
+                    rewritten: mutable darray[Ast::Expr] = []
+                    for element in elements |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(proof_qualify_contract_enum_members(element, declarations, module_scope, functions, row, shadowed, annotations, depth + 1))
+                    match expression:
+                        Ast::Expr.Array(_, _):
+                            return Ast::Expr.Array(rewritten, position)
+                        Ast::Expr.Tuple(_, _):
+                            return Ast::Expr.Tuple(rewritten, position)
+                        _:
+                            return Ast::Expr.SetLit(rewritten, position)
+                Ast::Expr.DictLit(entries, position):
+                    rewritten: mutable darray[Ast::DictEntry] = []
+                    for entry in entries |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(Ast::DictEntry{key: proof_qualify_contract_enum_members(entry.key, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), value: proof_qualify_contract_enum_members(entry.value, declarations, module_scope, functions, row, shadowed, annotations, depth + 1)})
+                    return Ast::Expr.DictLit(rewritten, position)
+                Ast::Expr.Construct(type_expression, fields, position):
+                    rewritten: mutable darray[Ast::FieldInit] = []
+                    for field in fields |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(Ast::FieldInit{name: field.name, value: proof_qualify_contract_enum_members(field.value, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), is_copy_base: field.is_copy_base})
+                    return Ast::Expr.Construct(type_expression, rewritten, position)
+                Ast::Expr.RecordUpdate(base, fields, position):
+                    rewritten: mutable darray[Ast::FieldInit] = []
+                    for field in fields |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                        rewritten.push(Ast::FieldInit{name: field.name, value: proof_qualify_contract_enum_members(field.value, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), is_copy_base: field.is_copy_base})
+                    return Ast::Expr.RecordUpdate(proof_qualify_contract_enum_members(base, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), rewritten, position)
+                Ast::Expr.Match(scrutinee, arms, position):
+                    return Ast::Expr.Match(proof_qualify_contract_enum_members(scrutinee, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_enum_match_arms(declarations, module_scope, functions, row, arms, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Catch(guarded, arms, position):
+                    return Ast::Expr.Catch(proof_qualify_contract_enum_members(guarded, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_enum_match_arms(declarations, module_scope, functions, row, arms, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Comprehension(variable, iterable, condition, result, position):
+                    variable_names: mutable darray[sview] = []
+                    return expression if position.line == 0 or variable == ""
+                    return expression if not proof_qualify_enum_name_add(&variable_names, variable, functions)
+                    # The compact comprehension node omits query binders; retain source aliases by line.
+                    for annotation in annotations |annotation, position, variable_names, functions|:
+                        return expression if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(annotation.owner) + sview_len(annotation.name))
+                        if annotation.name == "__query_binder" and annotation.line == position.line:
+                            return expression if annotation.owner == "" or annotation.owner == variable
+                            return expression if not proof_qualify_enum_name_add(&variable_names, annotation.owner, functions)
+                    loop_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(shadowed, variable_names, functions)
+                    return expression if not loop_shadowed.complete
+                    filter_binders: (complete: bool, names: darray[sview]) = proof_qualify_enum_filter_binders(condition, functions, depth + 1)
+                    qualified_result: Ast::Expr = result
+                    if filter_binders.complete:
+                        filter_shadowed: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(loop_shadowed.names, filter_binders.names, functions)
+                        return expression if not filter_shadowed.complete
+                        qualified_result <- proof_qualify_contract_enum_members(result, declarations, module_scope, functions, row, filter_shadowed.names, annotations, depth + 1)
+                    qualified_condition: Ast::Expr = proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, loop_shadowed.names, annotations, depth + 1)
+                    return Ast::Expr.Comprehension(variable, proof_qualify_contract_enum_members(iterable, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), qualified_condition, qualified_result, position)
+                Ast::Expr.GetElse(guarded, recovery, position):
+                    return Ast::Expr.GetElse(proof_qualify_contract_enum_members(guarded, declarations, module_scope, functions, row, shadowed, annotations, depth + 1), proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, recovery, shadowed, annotations, depth + 1), position)
+                Ast::Expr.Lambda(parameters, body, position):
+                    lambda_shadowed: mutable darray[sview] = []
+                    lambda_shadowed.extend(shadowed)
+                    lambda_shadowed.extend(parameters)
+                    return Ast::Expr.Lambda(parameters, proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, body, lambda_shadowed, annotations, depth + 1), position)
+                Ast::Expr.Block(statements, value, captures, position):
+                    block_shadowed: mutable darray[sview] = []
+                    block_shadowed.extend(shadowed)
+                    block_shadowed.extend(captures)
+                    block_result: (body: darray[Ast::Stmt], visible: darray[sview]) = proof_qualify_function_enum_body_in_scope_with_visible(declarations, module_scope, functions, row, statements, block_shadowed, annotations, depth + 1)
+                    return Ast::Expr.Block(block_result.body, proof_qualify_contract_enum_members(value, declarations, module_scope, functions, row, block_result.visible, annotations, depth + 1), captures, position)
                 _:
                     return expression
 
+        def proof_qualify_enum_match_arms(declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: mutable ProofFunctionTable&, row: usize, arms: darray[Ast::MatchArm]&, shadowed: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> darray[Ast::MatchArm]:
+            rewritten: mutable darray[Ast::MatchArm] = []
+            for arm in arms |rewritten, declarations, module_scope, functions, row, shadowed, depth|:
+                return arms if not proof_qualify_enum_source_work_charge(functions, 1)
+                pattern_names: mutable darray[sview] = []
+                pattern_work: mutable usize = 0
+                pattern_known: bool = proof_replay_call_arm_pattern_bindings_with_work(arm.pattern, &pattern_names, &pattern_work, 0)
+                return arms if not proof_qualify_enum_source_work_charge(functions, pattern_work)
+                return arms if not proof_qualify_enum_source_work_charge(functions, shadowed.count) or not proof_qualify_enum_source_work_charge(functions, pattern_names.count)
+                if not pattern_known:
+                    rewritten.push(arm)
+                    continue
+                arm_shadowed: mutable darray[sview] = []
+                arm_shadowed.extend(shadowed)
+                arm_shadowed.extend(pattern_names)
+                rewritten.push(Ast::MatchArm{pattern: arm.pattern, body: proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, arm.body, arm_shadowed, annotations, depth + 1), guard: proof_qualify_contract_enum_members(arm.guard, declarations, module_scope, functions, row, arm_shadowed, annotations, depth + 1), pos: arm.pos})
+            return rewritten
+
         # Body contracts are checked directly as well as copied into the call-summary table.
         # Apply the same lexical const-enum qualification to those direct checks.
-        def proof_qualify_function_enum_contract(file: Ast::File&, functions: ProofFunctionTable&, row: usize, expression: Ast::Expr) -> Ast::Expr:
-            scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
-            return expression if not scope_declarations.known or row >= functions.lookup.declaration_path_starts.count or row >= functions.lookup.declaration_path_counts.count
+        def proof_function_enum_context(file: Ast::File&, functions: mutable ProofFunctionTable&, row: usize) -> (known: bool, declarations: darray[Ast::Decl], module_scope: darray[sview]):
+            return (false, [], []) if row >= functions.lookup.declaration_path_starts.count or row >= functions.lookup.declaration_path_counts.count
             module_scope: mutable darray[sview] = []
             path_start: usize = functions.lookup.declaration_path_starts[row]
             path_count: usize = functions.lookup.declaration_path_counts[row]
-            for depth in 0..<path_count - 1 |depth, module_scope, functions, path_start, file|:
+            return (false, [], []) if path_count == 0 or path_start > functions.lookup.all_declaration_path.count or path_count > functions.lookup.all_declaration_path.count - path_start
+            declarations: mutable darray[Ast::Decl] = file.top_decls
+            for depth in 0..<path_count - 1 |depth, module_scope, declarations, functions, path_start|:
+                return (false, [], []) if not proof_qualify_enum_source_work_charge(functions, 1)
                 declaration_index: usize = functions.lookup.all_declaration_path[path_start + depth]
-                declarations_at: mutable darray[Ast::Decl] = file.top_decls
-                for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
-                    prior_index: usize = functions.lookup.all_declaration_path[path_start + prior]
-                    match declarations_at[prior_index]:
-                        Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                            declarations_at <- body
-                        _:
-                            pass
-                match declarations_at[declaration_index]:
-                    Ast::Decl.Module(module_name, _, _):
+                return (false, [], []) if declaration_index >= declarations.count
+                match declarations[declaration_index]:
+                    Ast::Decl.Module(module_name, body, _):
+                        return (false, [], []) if not proof_qualify_enum_source_work_charge(functions, sview_len(module_name) + module_scope.count)
                         module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
+                        declarations <- body
+                    Ast::Decl.Scoped(body, _):
+                        declarations <- body
                     _:
-                        pass
-            proof_qualify_contract_enum_members(expression, scope_declarations.declarations, module_scope, functions, row, 0)
+                        return (false, [], [])
+            return (true, declarations, module_scope)
 
-        def proof_qualify_function_enum_body(file: Ast::File&, functions: ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, depth: usize) -> darray[Ast::Stmt]:
+        def proof_qualify_function_enum_contract_with_shadowed(file: Ast::File&, functions: mutable ProofFunctionTable&, row: usize, expression: Ast::Expr, shadowed: darray[sview]&) -> Ast::Expr:
+            context: (known: bool, declarations: darray[Ast::Decl], module_scope: darray[sview]) = proof_function_enum_context(file, functions, row)
+            return expression if not context.known
+            proof_qualify_contract_enum_members(expression, context.declarations, context.module_scope, functions, row, shadowed, file.enum_annotations, 0)
+
+        def proof_qualify_function_enum_contract(file: Ast::File&, functions: mutable ProofFunctionTable&, row: usize, expression: Ast::Expr) -> Ast::Expr:
+            shadowed: darray[sview] = []
+            proof_qualify_function_enum_contract_with_shadowed(file, functions, row, expression, shadowed)
+
+        def proof_qualify_function_enum_body_in_scope(declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: mutable ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, shadowed: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> darray[Ast::Stmt]:
+            proof_qualify_function_enum_body_in_scope_with_visible(declarations, module_scope, functions, row, body, shadowed, annotations, depth).body
+
+        def proof_qualify_function_enum_body_in_scope_with_visible(declarations: darray[Ast::Decl]&, module_scope: darray[sview]&, functions: mutable ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, shadowed: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, depth: usize) -> (body: darray[Ast::Stmt], visible: darray[sview]):
             rewritten: mutable darray[Ast::Stmt] = []
-            for statement in body |rewritten, file, functions, row, depth|:
+            locals: mutable darray[sview] = []
+            locals.extend(shadowed)
+            for statement in body |rewritten, declarations, module_scope, functions, row, locals, depth|:
+                return (body, shadowed) if not proof_qualify_enum_source_work_charge(functions, 1)
                 match statement:
                     Ast::Stmt.Return(value, position):
                         if value is returned:
-                            rewritten.push(Ast::Stmt.Return(proof_qualify_function_enum_contract(file, functions, row, returned), position))
+                            rewritten.push(Ast::Stmt.Return(proof_qualify_contract_enum_members(returned, declarations, module_scope, functions, row, locals, annotations, 0), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.VarDecl(name, type_expression, initializer, position):
-                        rewritten.push(Ast::Stmt.VarDecl(name, type_expression, proof_qualify_function_enum_contract(file, functions, row, initializer), position))
+                        rewritten.push(Ast::Stmt.VarDecl(name, type_expression, proof_qualify_contract_enum_members(initializer, declarations, module_scope, functions, row, locals, annotations, 0), position))
+                        locals.push(name) if name != ""
                     Ast::Stmt.If(condition, then_body, else_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.If(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, then_body, depth + 1), proof_qualify_function_enum_body(file, functions, row, else_body, depth + 1), position))
+                            qualified_condition: Ast::Expr = proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, locals, annotations, 0)
+                            paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(condition, annotations, functions, 0)
+                            then_locals: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(locals, paths.when_true, functions) if paths.complete else (false, [])
+                            else_locals: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(locals, paths.when_false, functions) if paths.complete else (false, [])
+                            if then_locals.complete and else_locals.complete:
+                                rewritten.push(Ast::Stmt.If(qualified_condition, proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, then_body, then_locals.names, annotations, depth + 1), proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, else_body, else_locals.names, annotations, depth + 1), position))
+                            else:
+                                rewritten.push(Ast::Stmt.If(qualified_condition, then_body, else_body, position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.While(condition, while_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.While(proof_qualify_function_enum_contract(file, functions, row, condition), proof_qualify_function_enum_body(file, functions, row, while_body, depth + 1), position))
+                            qualified_condition: Ast::Expr = proof_qualify_contract_enum_members(condition, declarations, module_scope, functions, row, locals, annotations, 0)
+                            paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(condition, annotations, functions, 0)
+                            loop_locals: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(locals, paths.when_true, functions) if paths.complete else (false, [])
+                            if loop_locals.complete:
+                                rewritten.push(Ast::Stmt.While(qualified_condition, proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, while_body, loop_locals.names, annotations, depth + 1), position))
+                            else:
+                                rewritten.push(Ast::Stmt.While(qualified_condition, while_body, position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.For(label, variables, iterable, for_body, position):
                         if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
-                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualify_function_enum_contract(file, functions, row, iterable), proof_qualify_function_enum_body(file, functions, row, for_body, depth + 1), position))
+                            loop_locals: mutable darray[sview] = []
+                            loop_locals.extend(locals)
+                            loop_locals.extend(variables)
+                            rewritten.push(Ast::Stmt.For(label, variables, proof_qualify_contract_enum_members(iterable, declarations, module_scope, functions, row, locals, annotations, 0), proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, for_body, loop_locals, annotations, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.Block(kind, clause, binding, nested_body, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            block_locals: mutable darray[sview] = []
+                            block_locals.extend(locals)
+                            block_locals.extend(clause)
+                            block_locals.push(binding) if binding != ""
+                            rewritten.push(Ast::Stmt.Block(kind, clause, binding, proof_qualify_function_enum_body_in_scope(declarations, module_scope, functions, row, nested_body, block_locals, annotations, depth + 1), position))
+                        else:
+                            rewritten.push(statement)
+                    Ast::Stmt.Match(scrutinee, arms, position):
+                        if depth < PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT:
+                            rewritten.push(Ast::Stmt.Match(proof_qualify_contract_enum_members(scrutinee, declarations, module_scope, functions, row, locals, annotations, 0), proof_qualify_enum_match_arms(declarations, module_scope, functions, row, arms, locals, annotations, depth + 1), position))
                         else:
                             rewritten.push(statement)
                     Ast::Stmt.Assign(target, operator, assigned, position):
-                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualify_function_enum_contract(file, functions, row, assigned), position))
+                        rewritten.push(Ast::Stmt.Assign(target, operator, proof_qualify_contract_enum_members(assigned, declarations, module_scope, functions, row, locals, annotations, 0), position))
+                        target_name: sview = proof_ident_name(target)
+                        locals.push(target_name) if target_name != ""
                     Ast::Stmt.Expr(expression, position):
-                        rewritten.push(Ast::Stmt.Expr(proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                        rewritten.push(Ast::Stmt.Expr(proof_qualify_contract_enum_members(expression, declarations, module_scope, functions, row, locals, annotations, 0), position))
                     Ast::Stmt.Contract(kind, expression, position):
-                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualify_function_enum_contract(file, functions, row, expression), position))
+                        rewritten.push(Ast::Stmt.Contract(kind, proof_qualify_contract_enum_members(expression, declarations, module_scope, functions, row, locals, annotations, 0), position))
                     _:
                         rewritten.push(statement)
-            return rewritten
+            return (rewritten, locals)
 
-        # Qualify every table row's own requires and ensures from that row, so a caller in
-        # another module that instantiates the contract never re-resolves a bare name from
-        # its own module.
-        def proof_qualify_repeated_contract_rows(file: Ast::File&, functions: mutable ProofFunctionTable&) -> void:
-            for row in 0..<functions.lookup.names.count |row, functions|:
-                return if functions.lookup.module_resolution_work_exhausted
-                bounds: (requires_start: usize, requires_count: usize, ensures_start: usize, ensures_count: usize) = proof_qualified_own_rows(functions, row)
-                if bounds.requires_start > functions.contracts.all_requires.count or bounds.requires_count > functions.contracts.all_requires.count - bounds.requires_start or bounds.ensures_start > functions.contracts.all_ensures.count or bounds.ensures_count > functions.contracts.all_ensures.count - bounds.ensures_start:
-                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                    functions.lookup.module_resolution_work_exhausted <- true
-                    return
-                if not proof_replay_deterministic_declaration_scan_charge(file.top_decls, functions.lookup.module_resolution_work_used, 0):
-                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                    functions.lookup.module_resolution_work_exhausted <- true
-                    return
-                scope_declarations: (known: bool, declarations: darray[Ast::Decl]) = proof_function_scope_declarations(file, functions, row)
-                module_scope: mutable darray[sview] = []
-                shadowed: mutable darray[sview] = []
-                if row >= functions.parameters.param_starts.count or row >= functions.parameters.param_counts.count:
-                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                    functions.lookup.module_resolution_work_exhausted <- true
-                    return
-                param_start: usize = functions.parameters.param_starts[row]
-                param_count: usize = functions.parameters.param_counts[row]
-                if param_start > functions.parameters.all_params.count or param_count > functions.parameters.all_params.count - param_start:
-                    functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                    functions.lookup.module_resolution_work_exhausted <- true
-                    return
-                for parameter_offset in 0..<param_count |parameter_offset, functions, param_start, shadowed|:
-                    shadowed.push(functions.parameters.all_params[param_start + parameter_offset])
-                if scope_declarations.known:
-                    path_start: usize = functions.lookup.declaration_path_starts[row]
-                    for depth in 0..<functions.lookup.declaration_path_counts[row] - 1 |depth, module_scope, functions, path_start, file|:
-                        declaration_index: usize = functions.lookup.all_declaration_path[path_start + depth]
-                        declarations_at: mutable darray[Ast::Decl] = file.top_decls
-                        for prior in 0..<depth |prior, declarations_at, file, functions, path_start|:
-                            prior_index: usize = functions.lookup.all_declaration_path[path_start + prior]
-                            match declarations_at[prior_index]:
-                                Ast::Decl.Module(_, body, _):
-                                    declarations_at <- body
-                                Ast::Decl.Scoped(body, _):
-                                    declarations_at <- body
-                                _:
-                                    pass
-                        match declarations_at[declaration_index]:
-                            Ast::Decl.Module(module_name, _, _):
-                                module_scope <- proof_global_constant_scope_with_module(module_scope, module_name)
-                            _:
-                                pass
-                for offset in 0..<bounds.requires_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
-                    source_expression: Ast::Expr = functions.contracts.all_requires[bounds.requires_start + offset]
-                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.lookup.module_resolution_work_used):
-                        functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                        functions.lookup.module_resolution_work_exhausted <- true
-                        return
-                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
-                    functions.contracts.all_requires[bounds.requires_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known
-                for offset in 0..<bounds.ensures_count |offset, functions, bounds, row, shadowed, scope_declarations, module_scope|:
-                    source_expression: Ast::Expr = functions.contracts.all_ensures[bounds.ensures_start + offset]
-                    if not proof_replay_summary_expr_charge_with_work(source_expression, functions.lookup.module_resolution_work_used):
-                        functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
-                        functions.lookup.module_resolution_work_exhausted <- true
-                        return
-                    rewritten: Ast::Expr = proof_qualified_call_rewrite(source_expression, functions, row, shadowed, 0)
-                    functions.contracts.all_ensures[bounds.ensures_start + offset] <- proof_qualify_contract_enum_members(rewritten, scope_declarations.declarations, module_scope, functions, row, 0) if scope_declarations.known
+        def proof_qualify_function_enum_body(file: Ast::File&, functions: mutable ProofFunctionTable&, row: usize, body: darray[Ast::Stmt]&, depth: usize) -> darray[Ast::Stmt]:
+            context: (known: bool, declarations: darray[Ast::Decl], module_scope: darray[sview]) = proof_function_enum_context(file, functions, row)
+            shadowed: mutable darray[sview] = []
+            return body if not context.known or row >= functions.parameters.metadata.param_starts.count or row >= functions.parameters.metadata.param_counts.count
+            start: usize = functions.parameters.metadata.param_starts[row]
+            count: usize = functions.parameters.metadata.param_counts[row]
+            return body if start > functions.parameters.metadata.all_params.count or count > functions.parameters.metadata.all_params.count - start
+            for offset in 0..<count |offset, functions, start, shadowed|:
+                return body if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(functions.parameters.metadata.all_params[start + offset]))
+                shadowed.push(functions.parameters.metadata.all_params[start + offset])
+            proof_qualify_function_enum_body_in_scope(context.declarations, context.module_scope, functions, row, body, shadowed, file.enum_annotations, depth)
+
 include "./qualified_calls_integrated_helpers.elisa"
+include "./qualified_contract_rows.elisa"

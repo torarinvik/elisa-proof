@@ -7,50 +7,119 @@ extend ElisaProof:
         const PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT: usize = 32
         const PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT: usize = 8
 
-        def proof_variant_exclusion_enum_count(declarations: darray[Ast::Decl]&, enum_name: sview, depth: usize) -> usize:
-            return 2 if depth >= PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT
-            found: mutable usize = 0
-            for declaration in declarations |enum_name, depth, found|:
-                match declaration:
-                    Ast::Decl.Enum(name, _, _, _, _):
-                        found <- found + 1 if name == enum_name
-                    Ast::Decl.Module(_, body, _):
-                        found <- found + proof_variant_exclusion_enum_count(body, enum_name, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        found <- found + proof_variant_exclusion_enum_count(body, enum_name, depth + 1)
-                    _:
-                        pass
-            return found
+        # One per match statement: avoids rescanning all declarations for every enum arm while
+        # keeping the cache local to the source scope that produced the facts.
+        struct ProofVariantExclusionEnumCache:
+            names: mutable darray[sview]
+            variant_starts: mutable darray[usize]
+            variant_counts: mutable darray[usize]
+            variants: mutable darray[sview]
+            complete: mutable darray[bool]
+            unique: mutable darray[bool]
 
-        def proof_variant_exclusion_collect(declarations: darray[Ast::Decl]&, enum_name: sview, variants_out: mutable darray[sview]&, depth: usize) -> bool:
-            return false if depth >= PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT
-            for declaration in declarations |enum_name, variants_out, depth|:
+        # Count matching enums and collect the first declaration's variants in one bounded
+        # source walk. Repeated call-site walks share the report meter, and any failed nested
+        # traversal propagates instead of leaving a partial variant set looking complete.
+        def proof_variant_exclusion_name_equal_with_work(left: sview, right: sview, report: mutable ProofReport&) -> (complete: bool, equal: bool):
+            return (false, false) if not proof_source_index_work_charge(report, sview_len(left) + sview_len(right))
+            (true, left == right)
+
+        def proof_variant_exclusion_expr_charge_with_work(expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            complete: bool = proof_replay_summary_expr_charge_with_work(expression, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            complete
+
+        def proof_variant_exclusion_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, report: mutable ProofReport&) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            equal: bool = proof_replay_summary_expr_equal_with_work(left, right, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            equal
+
+        def proof_variant_exclusion_expr_repeat_charge_with_work(expression: Ast::Expr, repetitions: usize, report: mutable ProofReport&) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            complete: bool = proof_replay_summary_expr_repeat_charge_with_limit(expression, repetitions, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            report.source_effect_index.implicit_effect_work <- source_work
+            complete
+
+        def proof_variant_exclusion_collect_unique_enum_with_work(declarations: darray[Ast::Decl]&, enum_name: sview, variants_out: mutable darray[sview]&, matches: mutable usize&, variant_storage_limit: usize, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_VARIANT_EXCLUSION_DEPTH_LIMIT or not proof_report_source_work_charge(1, source_work)
+            for declaration in declarations |enum_name, variants_out, matches, variant_storage_limit, depth, source_work|:
+                return false if not proof_report_source_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(name, variants, _, _, _):
+                        return false if not proof_report_source_work_charge(sview_len(name) + sview_len(enum_name), source_work)
                         if name == enum_name:
-                            for variant in variants |variants_out|:
-                                variants_out.push(variant.name)
+                            matches <- matches + 1
+                            return true if matches > 1
+                            for variant in variants |variants_out, variant_storage_limit, source_work|:
+                                return false if not proof_report_source_work_charge(1 + sview_len(variant.name), source_work)
+                                variants_out.push(variant.name) if variants_out.count < variant_storage_limit
                     Ast::Decl.Module(_, body, _):
-                        proof_variant_exclusion_collect(body, enum_name, variants_out, depth + 1)
+                        return false if not proof_variant_exclusion_collect_unique_enum_with_work(body, enum_name, variants_out, matches, variant_storage_limit, depth + 1, source_work)
+                        return true if matches > 1
                     Ast::Decl.Scoped(body, _):
-                        proof_variant_exclusion_collect(body, enum_name, variants_out, depth + 1)
+                        return false if not proof_variant_exclusion_collect_unique_enum_with_work(body, enum_name, variants_out, matches, variant_storage_limit, depth + 1, source_work)
+                        return true if matches > 1
+                    Ast::Decl.Invalid:
+                        return false
                     _:
                         pass
             return true
 
-        def proof_add_variant_exclusions(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, function_name: sview, position: Ast::Pos):
+        def proof_add_variant_exclusions(enum_cache: mutable ProofVariantExclusionEnumCache&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, condition: Ast::Expr, line: u32, function_name: sview, position: Ast::Pos):
+            return if enum_cache.names.count != enum_cache.variant_starts.count or enum_cache.names.count != enum_cache.variant_counts.count or enum_cache.names.count != enum_cache.complete.count or enum_cache.names.count != enum_cache.unique.count
             match condition:
                 Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, _), variant_name, _), _):
-                    return if proof_variant_exclusion_enum_count(report.source_declarations, enum_name, 0) != 1
                     variants: mutable darray[sview] = []
-                    return if not proof_variant_exclusion_collect(report.source_declarations, enum_name, &variants, 0)
-                    return if variants.count > PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
+                    cached_row: mutable usize = enum_cache.names.count
+                    for index in 0..<enum_cache.names.count |index, enum_cache, enum_name, cached_row, report|:
+                        name_matches: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(enum_cache.names[index], enum_name, report)
+                        return if not name_matches.complete
+                        if name_matches.equal:
+                            cached_row <- index
+                            break
+                    if cached_row < enum_cache.names.count:
+                        return if not enum_cache.complete[cached_row] or not enum_cache.unique[cached_row]
+                        start: usize = enum_cache.variant_starts[cached_row]
+                        count: usize = enum_cache.variant_counts[cached_row]
+                        return if start > enum_cache.variants.count
+                        return if count > enum_cache.variants.count - start
+                        for offset in 0..<count |offset, start, count, variants, enum_cache, report|:
+                            variant: sview = enum_cache.variants[start + offset]
+                            return if not proof_source_index_work_charge(report, 1 + sview_len(variant))
+                            variants.push(variant)
+                    else:
+                        enum_matches: mutable usize = 0
+                        source_work: mutable usize = report.source_effect_index.implicit_effect_work
+                        complete: bool = proof_variant_exclusion_collect_unique_enum_with_work(report.source_declarations, enum_name, &variants, &enum_matches, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0, &source_work)
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return if not proof_source_index_work_charge(report, 6 + sview_len(enum_name))
+                        cache_variant_count: mutable usize = 0
+                        enum_cache.names.push(enum_name)
+                        enum_cache.variant_starts.push(enum_cache.variants.count)
+                        enum_cache.variant_counts.push(cache_variant_count)
+                        enum_cache.complete.push(complete)
+                        enum_cache.unique.push(complete and enum_matches == 1)
+                        if complete and enum_matches == 1:
+                            cache_variant_count <- variants.count
+                            enum_cache.variant_counts[enum_cache.variant_counts.count - 1] <- cache_variant_count
+                            for variant in variants |enum_cache, report|:
+                                return if not proof_source_index_work_charge(report, 1 + sview_len(variant))
+                                enum_cache.variants.push(variant)
+                        return if not complete or enum_matches != 1
                     known: mutable bool = false
-                    for variant in variants |variant_name, known|:
-                        known <- true if variant == variant_name
+                    for variant in variants |variant_name, known, report|:
+                        name_matches: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(variant, variant_name, report)
+                        return if not name_matches.complete
+                        known <- true if name_matches.equal
                     return if not known
+                    return if variants.count > 1 and not proof_variant_exclusion_expr_repeat_charge_with_work(subject, (variants.count - 1) * 2, report)
                     for other in variants |subject, enum_name, variant_name, facts, report, line, function_name, position|:
-                        if other != variant_name:
+                        name_matches: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(other, variant_name, report)
+                        return if not name_matches.complete
+                        if not name_matches.equal:
+                            return if not proof_source_index_work_charge(report, 12 + (sview_len(enum_name) * 2) + sview_len(variant_name) + sview_len(other))
                             has_variant: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, position), variant_name, position), position), position)
                             has_other: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, Ast::Expr.Binary(subject, TokenKind.Is, Ast::Expr.Field(Ast::Expr.Ident(enum_name, position), other, position), position), position)
                             proof_add_traced_fact(facts, report, Ast::Expr.Binary(has_variant, TokenKind.Or, has_other, position), "variant-exclusion", line, function_name)
@@ -60,12 +129,13 @@ extend ElisaProof:
         # Return the post-match case disjunction only when the earlier exact, unguarded
         # constructor conditions name every constructor of one uniquely resolved enum once.
         # Replay independently checks that same closed constructor set before admitting the fact.
-        def proof_match_case_disjunction(conditions: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, position: Ast::Pos) -> Ast::Expr?:
+        def proof_match_case_disjunction(conditions: darray[Ast::Expr]&, report: mutable ProofReport&, position: Ast::Pos) -> Ast::Expr?:
             return null if conditions.count == 0 or conditions.count > PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
             first_subject: mutable Ast::Expr = Ast::Expr.Invalid
             enum_name: mutable sview = ""
             seen_variants: mutable darray[sview] = []
-            for condition in conditions |first_subject, enum_name, seen_variants, position|:
+            for condition in conditions |first_subject, enum_name, seen_variants, position, report|:
+                return null if not proof_variant_exclusion_expr_charge_with_work(condition, report)
                 match condition:
                     Ast::Expr.Binary(subject, TokenKind.Is, target, _):
                         match target:
@@ -74,22 +144,36 @@ extend ElisaProof:
                                     enum_name <- owner
                                     first_subject <- subject
                                 else:
-                                    return null if owner != enum_name or not proof_expr_equal(subject, first_subject)
-                                return null if variant == "" or any existing in seen_variants where existing == variant
+                                    owner_matches: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(owner, enum_name, report)
+                                    return null if not owner_matches.complete or not owner_matches.equal or not proof_variant_exclusion_expr_equal_with_work(subject, first_subject, report)
+                                return null if variant == ""
+                                for existing in seen_variants |variant, report|:
+                                    duplicate: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(existing, variant, report)
+                                    return null if not duplicate.complete or duplicate.equal
                                 seen_variants.push(variant)
                             _:
                                 return null
                     _:
                         return null
-            return null if proof_variant_exclusion_enum_count(declarations, enum_name, 0) != 1
             variants: mutable darray[sview] = []
-            return null if not proof_variant_exclusion_collect(declarations, enum_name, &variants, 0)
+            enum_matches: mutable usize = 0
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            complete: bool = proof_variant_exclusion_collect_unique_enum_with_work(report.source_declarations, enum_name, &variants, &enum_matches, PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT + 1, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return null if not complete or enum_matches != 1
             return null if variants.count != seen_variants.count or variants.count > PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
             declared_variants: mutable darray[sview] = []
             for variant in variants |seen_variants, declared_variants|:
-                return null if any existing in declared_variants where existing == variant
+                for existing in declared_variants |variant, report|:
+                    duplicate: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(existing, variant, report)
+                    return null if not duplicate.complete or duplicate.equal
                 declared_variants.push(variant)
-                return null if not (any seen in seen_variants where seen == variant)
+                seen_match: mutable bool = false
+                for seen in seen_variants |variant, seen_match, report|:
+                    name_matches: (complete: bool, equal: bool) = proof_variant_exclusion_name_equal_with_work(seen, variant, report)
+                    return null if not name_matches.complete
+                    seen_match <- true if name_matches.equal
+                return null if not seen_match
             disjunction: mutable Ast::Expr = conditions[0]
             for index in 1..<conditions.count |index, conditions, disjunction, position|:
                 disjunction <- Ast::Expr.Binary(disjunction, TokenKind.Or, conditions[index], position)

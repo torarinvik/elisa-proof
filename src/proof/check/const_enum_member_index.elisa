@@ -1,0 +1,192 @@
+# Lazy report-local index for collision-safe enum member ownership queries.
+extend ElisaProof:
+    private:
+        const PROOF_CONST_ENUM_MEMBER_INDEX_ENTRY_LIMIT: usize = ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+
+        def proof_const_enum_member_index_reset(index: mutable ProofConstEnumMemberIndex&) -> void:
+            index.names.clear()
+            index.owners.clear()
+            index.name_hashes.clear()
+            index.const_members.clear()
+            index.fieldless_members.clear()
+            index.bucket_heads.clear()
+            index.next_indices.clear()
+            index.built <- false
+            index.complete <- false
+
+        def proof_const_enum_member_index_collect(declarations: darray[Ast::Decl]&, index: mutable ProofConstEnumMemberIndex&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |index, source_work, depth|:
+                return false if not proof_type_audit_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        for variant in variants |index, source_work, enum_name, is_const|:
+                            return false if index.names.count >= PROOF_CONST_ENUM_MEMBER_INDEX_ENTRY_LIMIT
+                            return false if not proof_type_audit_work_charge(1 + sview_len(enum_name) + sview_len(variant.name), source_work)
+                            index.names.push(variant.name)
+                            index.owners.push(enum_name)
+                            index.name_hashes.push(proof_name_hash(variant.name))
+                            index.const_members.push(is_const)
+                            index.fieldless_members.push(variant.fields.count == 0)
+                    Ast::Decl.Module(_, body, _):
+                        return false if not proof_const_enum_member_index_collect(body, index, source_work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_const_enum_member_index_collect(body, index, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            return true
+
+        def proof_const_enum_member_index_build(declarations: darray[Ast::Decl]&, index: mutable ProofConstEnumMemberIndex&, source_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+            return index.complete if index.built
+            index.built <- true
+            index.complete <- false
+            return false if not proof_const_enum_member_index_collect(declarations, index, source_work, 0)
+            count: usize = index.names.count
+            capacity: usize = proof_index_capacity(count)
+            if capacity == 0:
+                index.complete <- true
+                return true
+            return false if not proof_type_audit_work_charge(capacity, source_work)
+            return false if not proof_type_audit_work_charge(count, source_work)
+            index.bucket_heads.resize(capacity)
+            bucket_sizes: mutable darray[usize] = []
+            bucket_sizes.resize(capacity)
+            index.next_indices.resize(count)
+            for slot in 0..<capacity |slot, count, bucket_sizes|:
+                index.bucket_heads[slot] <- count
+                bucket_sizes[slot] <- 0
+            for entry in 0..<count |entry, index, capacity, count, source_work, bucket_sizes|:
+                return false if not proof_type_audit_work_charge(1, source_work)
+                hash: u32 = index.name_hashes[entry]
+                slot: usize = (hash.i64() % capacity.i64()).usize()
+                bucket_sizes[slot] <- bucket_sizes[slot] + 1
+                return false if bucket_sizes[slot] > PROOF_INDEX_MAX_CHAIN
+                index.next_indices[entry] <- index.bucket_heads[slot]
+                index.bucket_heads[slot] <- entry
+            index.complete <- true
+            return true
+
+        # Exact bounded fallback for a source tree whose member index exceeded its row or
+        # collision-chain limit. It never reads partial index state, and malformed declarations
+        # remain ineligible just as they are during index construction.
+        def proof_const_enum_member_index_scan(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize, source_work: mutable usize&) -> (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool):
+            return (false, 2, 2, "", false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            matches: mutable usize = 0
+            const_matches: mutable usize = 0
+            owner: mutable sview = ""
+            fieldless: mutable bool = false
+            for declaration in declarations |wanted, depth, source_work, matches, const_matches, owner, fieldless|:
+                return (false, 2, 2, "", false) if not proof_type_audit_work_charge(1, source_work)
+                match declaration:
+                    Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        for variant in variants |wanted, enum_name, is_const, source_work, matches, const_matches, owner, fieldless|:
+                            return (false, 2, 2, "", false) if not proof_type_audit_work_charge(1 + sview_len(wanted) + sview_len(variant.name) + sview_len(enum_name), source_work)
+                            if variant.name == wanted:
+                                matches <- 2 if matches >= 1 else 1
+                                const_matches <- const_matches + 1 if is_const and const_matches < 2
+                                if matches == 1:
+                                    owner <- enum_name
+                                    fieldless <- variant.fields.count == 0
+                                else:
+                                    fieldless <- false
+                    Ast::Decl.Module(_, body, _):
+                        nested: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(body, wanted, depth + 1, source_work)
+                        return (false, 2, 2, "", false) if not nested.complete
+                        if nested.matches > 0:
+                            if matches == 0:
+                                matches <- nested.matches
+                                const_matches <- nested.const_matches
+                                owner <- nested.owner
+                                fieldless <- nested.fieldless
+                            else:
+                                matches <- 2
+                                const_matches <- 2 if const_matches > 0 and nested.const_matches > 0
+                                const_matches <- nested.const_matches if const_matches == 0 and nested.const_matches > 0
+                                fieldless <- false
+                    Ast::Decl.Scoped(body, _):
+                        nested: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(body, wanted, depth + 1, source_work)
+                        return (false, 2, 2, "", false) if not nested.complete
+                        if nested.matches > 0:
+                            if matches == 0:
+                                matches <- nested.matches
+                                const_matches <- nested.const_matches
+                                owner <- nested.owner
+                                fieldless <- nested.fieldless
+                            else:
+                                matches <- 2
+                                const_matches <- 2 if const_matches > 0 and nested.const_matches > 0
+                                const_matches <- nested.const_matches if const_matches == 0 and nested.const_matches > 0
+                                fieldless <- false
+                    Ast::Decl.Invalid:
+                        return (false, 2, 2, "", false)
+                    _:
+                        pass
+            return (true, matches, const_matches, owner, fieldless)
+
+        def proof_const_enum_member_index_collision_lookup(index: ProofConstEnumMemberIndex, name: sview, source_work: mutable usize&) -> (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool):
+            return (false, 2, 2, "", false) if not index.built or not index.complete
+            count: usize = index.names.count
+            return (false, 2, 2, "", false) if count != index.owners.count or count != index.name_hashes.count or count != index.const_members.count or count != index.fieldless_members.count or count != index.next_indices.count
+            capacity: usize = proof_index_capacity(count)
+            return (false, 2, 2, "", false) if index.bucket_heads.count != capacity
+            return (true, 0, 0, "", false) if name == "" or count == 0
+            return (false, 2, 2, "", false) if not proof_type_audit_work_charge(sview_len(name), source_work)
+            hash: u32 = proof_name_hash(name)
+            slot: usize = (hash.i64() % capacity.i64()).usize()
+            entry: mutable usize = index.bucket_heads[slot]
+            return (false, 2, 2, "", false) if entry > count
+            steps: mutable usize = 0
+            matches: mutable usize = 0
+            const_matches: mutable usize = 0
+            owner: mutable sview = ""
+            fieldless: mutable bool = false
+            while entry < count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, index, hash, name, count, matches, const_matches, owner, fieldless, source_work|:
+                return (false, 2, 2, "", false) if not proof_type_audit_work_charge(1, source_work)
+                if index.name_hashes[entry] == hash:
+                    return (false, 2, 2, "", false) if not proof_type_audit_work_charge(sview_len(index.names[entry]) + sview_len(name), source_work)
+                    if index.names[entry] == name:
+                        matches <- matches + 1 if matches < 2
+                        const_matches <- const_matches + 1 if index.const_members[entry] and const_matches < 2
+                        if matches == 1:
+                            owner <- index.owners[entry]
+                            fieldless <- index.fieldless_members[entry]
+                        else:
+                            fieldless <- false
+                next_entry: usize = index.next_indices[entry]
+                return (false, 2, 2, "", false) if next_entry > count
+                entry <- next_entry
+                steps <- steps + 1
+            return (false, 2, 2, "", false) if entry < count
+            return (true, matches, const_matches, owner, fieldless)
+
+        def proof_const_enum_member_index_lookup(index: ProofConstEnumMemberIndex, name: sview, source_work: mutable usize&) -> (complete: bool, known: bool, owner: sview, fieldless: bool):
+            lookup: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_collision_lookup(index, name, source_work)
+            return (lookup.complete, lookup.matches == 1 and lookup.const_matches == 1, lookup.owner, lookup.fieldless)
+
+        def proof_report_const_enum_member_collision_lookup_with_work(report: mutable ProofReport&, name: sview, source_work: mutable usize&) -> (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool):
+            if not report.source_const_enum_members.built:
+                index_complete: bool = proof_const_enum_member_index_build(report.source_declarations, &report.source_const_enum_members, source_work)
+                if not index_complete:
+                    scanned: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(report.source_declarations, name, 0, source_work)
+                    return (false, 2, 2, "", false) if not scanned.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return scanned
+            if report.source_const_enum_members.complete:
+                return proof_const_enum_member_index_collision_lookup(report.source_const_enum_members, name, source_work)
+            scanned: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(report.source_declarations, name, 0, source_work)
+            return (false, 2, 2, "", false) if not scanned.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return scanned
+
+        def proof_report_const_enum_member_lookup_with_work(report: mutable ProofReport&, name: sview, source_work: mutable usize&) -> (complete: bool, known: bool, owner: sview, fieldless: bool):
+            if not report.source_const_enum_members.built:
+                index_complete: bool = proof_const_enum_member_index_build(report.source_declarations, &report.source_const_enum_members, source_work)
+                if not index_complete:
+                    scanned: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(report.source_declarations, name, 0, source_work)
+                    return (false, false, "", false) if not scanned.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return (true, scanned.matches == 1 and scanned.const_matches == 1, scanned.owner, scanned.fieldless)
+            if report.source_const_enum_members.complete:
+                return proof_const_enum_member_index_lookup(report.source_const_enum_members, name, source_work)
+            scanned: (complete: bool, matches: usize, const_matches: usize, owner: sview, fieldless: bool) = proof_const_enum_member_index_scan(report.source_declarations, name, 0, source_work)
+            return (false, false, "", false) if not scanned.complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, scanned.matches == 1 and scanned.const_matches == 1, scanned.owner, scanned.fieldless)

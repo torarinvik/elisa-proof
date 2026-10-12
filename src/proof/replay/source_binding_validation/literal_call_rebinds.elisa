@@ -12,17 +12,6 @@ include "./literal_call_source.elisa"
 # the function, the index carries no meaning, and any second definition is refused above.
 extend ElisaProof:
     private:
-        # The function declaration owning a trace at `line`, by the same rule certificates use.
-        def proof_replay_trace_owner_function_line(report: ProofReport&, name: sview, line: u32) -> u32:
-            work: mutable usize = 0
-            return proof_replay_trace_owner_function_line_with_work(report, name, line, &work)
-
-        def proof_replay_trace_owner_function_line_with_work(report: ProofReport&, name: sview, line: u32, work: mutable usize&) -> u32:
-            return 0 if not proof_replay_summary_owner_source_preflight(report, name, 0, work)
-            owner_line: mutable u32 = 0
-            proof_replay_owner_function_line(report.source_declarations, name, line, &owner_line, 0)
-            return owner_line
-
         # A summary value may mention the symbol only as this call's exact parameter value.
         def proof_replay_literal_rebind_summary_use_valid(value: Ast::Expr, symbol: sview, symbol_position: Ast::Pos) -> bool:
             return true if not proof_expr_mentions_name(value, symbol)
@@ -46,14 +35,14 @@ extend ElisaProof:
             return proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, literal, allow_loop_alias, &work)
 
         def proof_replay_rebind_definition_unique_with_work(report: ProofReport&, trace: ProofFactTrace, symbol: sview, symbol_position: Ast::Pos, literal: Ast::Expr, allow_loop_alias: bool, work: mutable usize&) -> bool:
-            owner_line: u32 = proof_replay_trace_owner_function_line_with_work(report, trace.name, trace.line, work)
+            owner_line: u32 = proof_replay_trace_owner_source_position_line_for_trace_with_work(report, trace, work)
             return false if owner_line == 0 or owner_line != report.replay_owner_line
             for candidate in report.traces.records |candidate, report, trace, symbol, symbol_position, literal, owner_line, allow_loop_alias, work|:
                 return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 work <- work + 1
                 continue if candidate.name != trace.name
                 continue if candidate.kind != "local-binding" and candidate.kind != "function-summary"
-                candidate_owner_line: u32 = proof_replay_trace_owner_function_line_with_work(report, candidate.name, candidate.line, work)
+                candidate_owner_line: u32 = proof_replay_trace_owner_source_position_line_for_trace_with_work(report, candidate, work)
                 return false if candidate_owner_line == 0
                 continue if candidate_owner_line != owner_line
                 if candidate.kind == "local-binding":
@@ -100,6 +89,10 @@ extend ElisaProof:
             return proof_replay_local_binding_literal_call_argument_source_at_with_work(report, trace, rebind_depth, &work)
 
         def proof_replay_local_binding_literal_call_argument_source_at_with_work(report: mutable ProofReport&, trace: ProofFactTrace, rebind_depth: usize, work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_local_binding_literal_call_argument_source_at_with_cache(report, trace, rebind_depth, work, &cache)
+
+        def proof_replay_local_binding_literal_call_argument_source_at_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, rebind_depth: usize, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if trace.name == "" or trace.line == 0
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, _):
@@ -107,7 +100,7 @@ extend ElisaProof:
                     return false if not proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, literal, false, work)
                     accepted_bindings: mutable usize = 0
                     accepted_call: mutable Ast::Expr = Ast::Expr.Invalid
-                    for candidate_index in 0..<report.traces.records.count |candidate_index, report, trace, symbol, literal, accepted_bindings, accepted_call, rebind_depth, work|:
+                    for candidate_index in 0..<report.traces.records.count |candidate_index, report, trace, symbol, literal, accepted_bindings, accepted_call, rebind_depth, work, cache|:
                         candidate: ProofFactTrace = report.traces.records[candidate_index]
                         return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         work <- work + 1
@@ -125,7 +118,7 @@ extend ElisaProof:
                                 summary_found <- true
                                 summary <- executable
                         continue if not summary_found or summary.parameters_count == 0 or summary.parameters_start > report.executables.parameters.count or summary.parameters_count > report.executables.parameters.count - summary.parameters_start
-                        source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_at_with_work(report, candidate, summary, rebind_depth, work)
+                        source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_at_with_cache(report, candidate, summary, rebind_depth, work, cache)
                         continue if not source_call.known
                         call_owner_matches: bool = match source_call.call:
                             Ast::Expr.Call(callee, _, _, _): proof_replay_summary_owner_matches_call_bounded(report, candidate, summary, callee, work)
@@ -188,6 +181,9 @@ extend ElisaProof:
         def proof_replay_local_binding_literal_call_argument_source_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return proof_replay_local_binding_literal_call_argument_source_at_with_work(report, trace, 0, source_work)
 
+        def proof_replay_local_binding_literal_call_argument_source_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            return proof_replay_local_binding_literal_call_argument_source_at_with_cache(report, trace, 0, source_work, cache)
+
         # A literal-argument binding used to restate a call's preconditions over the literal: it
         # must have no derivation or summary payload of its own, be bound at the call's line,
         # and pass the same source reconstruction and uniqueness checks as the binding itself.
@@ -196,10 +192,14 @@ extend ElisaProof:
             return proof_replay_literal_rebind_substitution_valid_with_work(report, trace, call_line, &source_work)
 
         def proof_replay_literal_rebind_substitution_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, call_line: u32, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_literal_rebind_substitution_valid_with_cache(report, trace, call_line, source_work, &cache)
+
+        def proof_replay_literal_rebind_substitution_valid_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, call_line: u32, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if trace.kind != "local-binding" or trace.line != call_line or call_line == 0
             return false if trace.dependency != "" or trace.premises_count != 0 or trace.kernel_premises_count != 0
             return false if trace.summary_bindings_count != 0 or trace.summary_requires_count != 0 or trace.summary_ensure_index != 0
-            return proof_replay_local_binding_literal_call_argument_source_with_work(report, trace, source_work)
+            return proof_replay_local_binding_literal_call_argument_source_with_cache(report, trace, source_work, cache)
 
         def proof_replay_literal_call_site_count(expression: Ast::Expr, position: Ast::Pos, literal: Ast::Expr, found: mutable usize&, depth: usize) -> void:
             return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT

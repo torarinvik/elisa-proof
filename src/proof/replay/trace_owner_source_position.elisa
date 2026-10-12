@@ -1,0 +1,436 @@
+# Resolve the active certificate's owner from authenticated source positions. Logical line
+# ordering is insufficient when #line directives rewind or repeat line numbers.
+extend ElisaProof:
+    private:
+        def proof_replay_trace_owner_position_node_allowed(expression: Ast::Expr, certificate: ProofGoalCertificate, source_work: mutable usize&) -> bool:
+            match certificate.rule:
+                "trace-owner" | "goal" | "quantifier-forall" | "quantifier-exists":
+                    return true
+                "index-lower" | "index-upper":
+                    match expression:
+                        Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _): return true
+                        _: return false
+                "slice-lower" | "slice-upper" | "slice-order":
+                    match expression:
+                        Ast::Expr.Slice(_, _, _, _): return true
+                        _: return false
+                "checked-index":
+                    match expression:
+                        Ast::Expr.Binary(Ast::Expr.Index(_, _, _), TokenKind.Else, _, _):
+                            return proof_replay_summary_expr_equal_with_work(expression, certificate.goal, source_work)
+                        _: return false
+                "checked-get":
+                    match expression:
+                        Ast::Expr.GetElse(Ast::Expr.Index(_, _, _), _, _):
+                            return proof_replay_summary_expr_equal_with_work(expression, certificate.goal, source_work)
+                        _: return false
+                _:
+                    return false
+
+        def proof_replay_trace_owner_position_in_expr(expression: Ast::Expr, expected: Ast::Pos, certificate: ProofGoalCertificate, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> void:
+            return if matches >= 2
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                matches <- 2
+                return
+            source_work <- source_work + 1
+            matches <- matches + 1 if proof_replay_source_position_equal(Ast::expr_pos(expression), expected) and proof_replay_trace_owner_position_node_allowed(expression, certificate, source_work)
+            return if matches >= 2
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_replay_trace_owner_position_in_expr(inner, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _):
+                    proof_replay_trace_owner_position_in_expr(object, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    proof_replay_trace_owner_position_in_expr(left, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(right, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    proof_replay_trace_owner_position_in_expr(object, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(low, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(high, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.IndexN(object, elements, _):
+                    proof_replay_trace_owner_position_in_expr(object, expected, certificate, matches, source_work, depth + 1)
+                    for element in elements |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        proof_replay_trace_owner_position_in_expr(element, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_replay_trace_owner_position_in_expr(callee, expected, certificate, matches, source_work, depth + 1)
+                    for argument in arguments |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        proof_replay_trace_owner_position_in_expr(argument, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        proof_replay_trace_owner_position_in_expr(element, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        source_work <- source_work + 1
+                        proof_replay_trace_owner_position_in_expr(entry.key, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_expr(entry.value, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_replay_trace_owner_position_in_expr(base, expected, certificate, matches, source_work, depth + 1)
+                    for field in fields |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        source_work <- source_work + 1
+                        proof_replay_trace_owner_position_in_expr(field.value, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                    proof_replay_trace_owner_position_in_expr(iterable, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(condition, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(value, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    proof_replay_trace_owner_position_in_expr(subject, expected, certificate, matches, source_work, depth + 1)
+                    for arm in arms |arm, expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        source_work <- source_work + 1
+                        proof_replay_trace_owner_position_in_expr(arm.guard, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_body(arm.body, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.GetElse(value, recovery, _):
+                    proof_replay_trace_owner_position_in_expr(value, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_body(recovery, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Block(statements, value, _, _):
+                    proof_replay_trace_owner_position_in_body(statements, expected, certificate, matches, source_work, depth + 1)
+                    proof_replay_trace_owner_position_in_expr(value, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Lambda(_, statements, _):
+                    proof_replay_trace_owner_position_in_body(statements, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |candidate, expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        source_work <- source_work + 1
+                        for capture in candidate.captures |expected, certificate, matches, source_work, depth|:
+                            return if matches >= 2
+                            proof_replay_trace_owner_position_in_expr(capture, expected, certificate, matches, source_work, depth + 1)
+                    for argument in arguments |expected, certificate, matches, source_work, depth|:
+                        return if matches >= 2
+                        proof_replay_trace_owner_position_in_expr(argument, expected, certificate, matches, source_work, depth + 1)
+                Ast::Expr.Invalid:
+                    matches <- 2
+                _:
+                    matches <- 2
+
+        def proof_replay_trace_owner_position_in_body(body: darray[Ast::Stmt]&, expected: Ast::Pos, certificate: ProofGoalCertificate, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> void:
+            return if matches >= 2
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                matches <- 2
+                return
+            source_work <- source_work + body.count
+            for statement in body |expected, certificate, matches, source_work, depth|:
+                return if matches >= 2
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    matches <- 2
+                    return
+                source_work <- source_work + 1
+                match statement:
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        proof_replay_trace_owner_position_in_expr(type_expression, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_expr(initializer, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        proof_replay_trace_owner_position_in_expr(target, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_expr(value, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
+                        proof_replay_trace_owner_position_in_expr(value, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        proof_replay_trace_owner_position_in_expr(condition, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_body(yes, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_body(no, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        proof_replay_trace_owner_position_in_expr(condition, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_body(nested, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        proof_replay_trace_owner_position_in_expr(iterable, expected, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_position_in_body(nested, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        proof_replay_trace_owner_position_in_expr(subject, expected, certificate, matches, source_work, depth + 1)
+                        for arm in arms |arm, expected, certificate, matches, source_work, depth|:
+                            return if matches >= 2
+                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                matches <- 2
+                                return
+                            source_work <- source_work + 1
+                            proof_replay_trace_owner_position_in_expr(arm.guard, expected, certificate, matches, source_work, depth + 1)
+                            proof_replay_trace_owner_position_in_body(arm.body, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_trace_owner_position_in_body(nested, expected, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        matches <- 2
+                    _:
+                        matches <- 2
+
+        # A certificate without a call-site anchor must point into a source construct that can
+        # create a proof obligation. This authenticates the source location; checked-view goal
+        # admission separately decides whether a supported source goal produced the claim.
+        # Contract rewrites may replace identifiers while preserving the source span, so first
+        # accept an exact expression+position pair and otherwise search recognized obligations.
+        def proof_replay_trace_owner_obligation_expr(expression: Ast::Expr, certificate: ProofGoalCertificate, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> void:
+            return if matches >= 2
+            position: Ast::Pos = Ast::expr_pos(certificate.goal)
+            if proof_replay_source_position_equal(Ast::expr_pos(expression), position) and proof_replay_summary_expr_equal_with_work(expression, certificate.goal, source_work):
+                matches <- matches + 1
+                return
+            proof_replay_trace_owner_position_in_expr(expression, position, certificate, matches, source_work, depth)
+
+        def proof_replay_trace_owner_obligation_position_in_body(body: darray[Ast::Stmt]&, certificate: ProofGoalCertificate, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> void:
+            return if matches >= 2
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                matches <- 2
+                return
+            source_work <- source_work + body.count
+            for statement in body |certificate, matches, source_work, depth|:
+                return if matches >= 2
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    matches <- 2
+                    return
+                source_work <- source_work + 1
+                match statement:
+                    Ast::Stmt.Contract(kind, expression, position):
+                        if kind == "requires" or kind == "ensures" or kind == "ensure" or kind == "assert" or kind == "invariant" or kind == "decreases":
+                            goal_position: Ast::Pos = Ast::expr_pos(certificate.goal)
+                            if goal_position.offset == 0 and kind == "decreases" and goal_position.line == position.line:
+                                matches <- matches + 1
+                            else:
+                                proof_replay_trace_owner_obligation_expr(expression, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident("assert", _), arguments, _, _), _):
+                        if arguments.count == 1:
+                            proof_replay_trace_owner_obligation_expr(arguments[0], certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Return(expression, _):
+                        proof_replay_trace_owner_obligation_expr(expression, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        proof_replay_trace_owner_obligation_expr(condition, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_obligation_position_in_body(yes, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_obligation_position_in_body(no, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        proof_replay_trace_owner_obligation_expr(condition, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_obligation_position_in_body(nested, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.For(_, _, iterable, nested, _):
+                        proof_replay_trace_owner_obligation_expr(iterable, certificate, matches, source_work, depth + 1)
+                        proof_replay_trace_owner_obligation_position_in_body(nested, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        proof_replay_trace_owner_obligation_expr(subject, certificate, matches, source_work, depth + 1)
+                        for arm in arms |arm, certificate, matches, source_work, depth|:
+                            return if matches >= 2
+                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                matches <- 2
+                                return
+                            source_work <- source_work + 1
+                            proof_replay_trace_owner_obligation_expr(arm.guard, certificate, matches, source_work, depth + 1)
+                            proof_replay_trace_owner_obligation_position_in_body(arm.body, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_trace_owner_obligation_position_in_body(nested, certificate, matches, source_work, depth + 1)
+                    Ast::Stmt.VarDecl(_, _, _, _) | Ast::Stmt.Assign(_, _, _, _) | Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
+                        pass
+                    Ast::Stmt.Invalid:
+                        matches <- 2
+                    _:
+                        matches <- 2
+
+        def proof_replay_trace_owner_position_present(position: Ast::Pos) -> bool:
+            return position.line != 0 or position.column != 0 or position.offset != 0 or position.end_line != 0 or position.end_column != 0 or position.end_offset != 0
+
+        # Function declarations retain the `def` token position, while signature contracts live
+        # in a file side table. Use the parser's exact function-name annotation and next source
+        # declaration to bound a bodyless header. This also keeps a later alias declaration's
+        # refinement predicate from falling inside the inferred header range.
+        def proof_replay_trace_owner_consider_declaration_offset(position: Ast::Pos, after_offset: u32, next_offset: mutable u32&) -> bool:
+            return false if position.offset == 0
+            next_offset <- position.offset if position.offset > after_offset and position.offset < next_offset
+            return true
+
+        def proof_replay_trace_owner_next_declaration_offset(declarations: darray[Ast::Decl]&, after_offset: u32, next_offset: mutable u32&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + declarations.count
+            for declaration in declarations |declarations, after_offset, next_offset, source_work, depth|:
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Struct(_, _, _, _, _, _, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Enum(_, _, _, _, position):
+                        # Machine-state enums are hoisted with `pos_at_line`, so their source
+                        # offsets are intentionally absent. Their owning function declaration
+                        # still supplies the positioned boundary.
+                        return false if position.offset != 0 and not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Law(_, _, position):
+                        # Frame/effect law placeholders also use `pos_at_line`; their source
+                        # clauses do not carry signature-call ASTs.
+                        return false if position.offset != 0 and not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Alias(_, _, position) | Ast::Decl.Import(_, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Const(_, _, _, _, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                    Ast::Decl.Module(_, nested, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                        return false if not proof_replay_trace_owner_next_declaration_offset(nested, after_offset, &next_offset, source_work, depth + 1)
+                    Ast::Decl.Scoped(nested, position):
+                        return false if not proof_replay_trace_owner_consider_declaration_offset(position, after_offset, &next_offset)
+                        return false if not proof_replay_trace_owner_next_declaration_offset(nested, after_offset, &next_offset, source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+            return true
+
+        def proof_replay_trace_owner_signature_header_end(report: ProofReport&, function_name: sview, declaration_position: Ast::Pos, body: darray[Ast::Stmt]&, header_end: mutable u32&, source_work: mutable usize&) -> bool:
+            return false if declaration_position.offset == 0 or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.source_annotations.count
+            found_declaration: mutable bool = false
+            header_end <- 4294967295
+            for annotation in report.source_annotations |function_name, declaration_position, header_end, found_declaration, source_work|:
+                return false if sview_len(annotation.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(annotation.name)
+                if annotation.name == "__lsp_func_name":
+                    return false if sview_len(annotation.owner) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                    source_work <- source_work + sview_len(annotation.owner)
+                    found_declaration <- true if annotation.owner == function_name and annotation.line == declaration_position.line and annotation.offset == declaration_position.offset
+            if body.count > 0:
+                first: Ast::Pos = proof_replay_statement_position(body[0])
+                return false if first.offset <= declaration_position.offset
+                header_end <- first.offset if first.offset < header_end
+            else:
+                return false if not proof_replay_trace_owner_next_declaration_offset(report.source_declarations, declaration_position.offset, &header_end, source_work, 0)
+            return found_declaration and header_end > declaration_position.offset
+
+        def proof_replay_trace_owner_signature_requires_call(report: ProofReport&, declaration_line: u32, expected_call: Ast::Expr, matches: mutable usize&, source_work: mutable usize&) -> bool:
+            rows: usize = report.source_signature_contract_lines.count
+            return false if rows != report.source_signature_contract_kinds.count or rows != report.source_signature_contracts.count
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or rows > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + rows
+            for index in 0..<rows |index, report, declaration_line, expected_call, matches, source_work|:
+                kind: sview = report.source_signature_contract_kinds[index]
+                return false if not proof_replay_mutable_local_text_compare_work_charge(kind, "requires", source_work)
+                continue if report.source_signature_contract_lines[index] != declaration_line or kind != "requires"
+                found_call: mutable Ast::Expr = Ast::Expr.Invalid
+                source_calls: mutable usize = 0
+                return false if not proof_replay_summary_call_exact_span_in_expr(report.source_signature_contracts[index], expected_call, &found_call, &source_calls, source_work, 0)
+                matches <- matches + source_calls
+                return false if matches > 1
+            return true
+
+        def proof_replay_trace_owner_signature_obligation(report: ProofReport&, declaration_line: u32, certificate: ProofGoalCertificate, matches: mutable usize&, source_work: mutable usize&) -> bool:
+            rows: usize = report.source_signature_contract_lines.count
+            return false if rows != report.source_signature_contract_kinds.count or rows != report.source_signature_contracts.count
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or rows > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + rows
+            for index in 0..<rows |index, report, declaration_line, certificate, matches, source_work|:
+                kind: sview = report.source_signature_contract_kinds[index]
+                continue if report.source_signature_contract_lines[index] != declaration_line
+                continue if kind != "requires" and kind != "ensures" and kind != "ensure"
+                return false if sview_len(kind) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + sview_len(kind)
+                proof_replay_trace_owner_obligation_expr(report.source_signature_contracts[index], certificate, matches, source_work, 0)
+                return false if matches > 1
+            return true
+
+        def proof_replay_trace_owner_source_position_line_in_declarations(report: ProofReport&, declarations: darray[Ast::Decl]&, certificate: ProofGoalCertificate, wanted_name: sview, source_position: Ast::Pos, selected_line: mutable u32&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in declarations |report, certificate, wanted_name, source_position, selected_line, matches, source_work, depth|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
+                match declaration:
+                    Ast::Decl.Func(name, _, _, body, _, _, declaration_position):
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(name, wanted_name, source_work)
+                        if name == wanted_name:
+                            return false if not proof_replay_type_bound_body_charge_with_work(body, source_work)
+                            first: Ast::Pos = proof_replay_statement_position(body[0]) if body.count > 0 else Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+                            if proof_replay_trace_owner_position_present(certificate.source_call_position):
+                                signature_header_end: mutable u32 = 0
+                                has_signature_header: bool = proof_replay_trace_owner_signature_header_end(report, name, declaration_position, body, &signature_header_end, source_work)
+                                if has_signature_header and source_position.offset >= declaration_position.offset and source_position.offset < signature_header_end and source_position.end_offset <= signature_header_end:
+                                    expected_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Invalid, [], [], source_position)
+                                    signature_calls: mutable usize = 0
+                                    return false if not proof_replay_trace_owner_signature_requires_call(report, declaration_position.line, expected_call, &signature_calls, source_work)
+                                    if signature_calls == 1:
+                                        matches <- matches + 1
+                                        return false if matches != 1 or declaration_position.line == 0
+                                        selected_line <- declaration_position.line
+                                        continue
+                            else if certificate.rule == "goal" or certificate.rule == "quantifier-forall" or certificate.rule == "quantifier-exists":
+                                signature_header_end: mutable u32 = 0
+                                has_signature_header: bool = proof_replay_trace_owner_signature_header_end(report, name, declaration_position, body, &signature_header_end, source_work)
+                                if has_signature_header and source_position.offset >= declaration_position.offset and source_position.offset < signature_header_end and source_position.end_offset <= signature_header_end:
+                                    signature_sites: mutable usize = 0
+                                    return false if not proof_replay_trace_owner_signature_obligation(report, declaration_position.line, certificate, &signature_sites, source_work)
+                                    if signature_sites == 1:
+                                        matches <- matches + 1
+                                        return false if matches != 1 or declaration_position.line == 0
+                                        selected_line <- declaration_position.line
+                                        continue
+                            continue if body.count == 0
+                            extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmts_extent(body, 0)
+                            return false if not extent.offsets_complete or extent.end_offset == 0
+                            return false if first.offset == 0
+                            if source_position.offset >= first.offset and source_position.offset < extent.end_offset:
+                                return false if source_position.end_offset > extent.end_offset
+                                if proof_replay_trace_owner_position_present(certificate.source_call_position):
+                                    expected_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Invalid, [], [], source_position)
+                                    found_call: mutable Ast::Expr = Ast::Expr.Invalid
+                                    source_calls: mutable usize = 0
+                                    return false if not proof_replay_summary_call_exact_span_in_body(body, expected_call, &found_call, &source_calls, source_work, 0) or source_calls != 1
+                                else:
+                                    source_sites: mutable usize = 0
+                                    if certificate.rule == "goal" or certificate.rule == "quantifier-forall" or certificate.rule == "quantifier-exists":
+                                        proof_replay_trace_owner_obligation_position_in_body(body, certificate, &source_sites, source_work, 0)
+                                    else:
+                                        proof_replay_trace_owner_position_in_body(body, source_position, certificate, &source_sites, source_work, 0)
+                                    return false if source_sites > 1
+                                    if source_sites == 1:
+                                        matches <- matches + 1
+                                        return false if matches != 1 or declaration_position.line == 0
+                                        selected_line <- declaration_position.line
+                                    continue
+                                matches <- matches + 1
+                                return false if matches != 1 or declaration_position.line == 0
+                                selected_line <- declaration_position.line
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_trace_owner_source_position_line_in_declarations(report, nested, certificate, wanted_name, source_position, &selected_line, &matches, &source_work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+            return true
+
+        def proof_replay_trace_owner_source_position_line_with_work(report: ProofReport&, certificate: ProofGoalCertificate, source_work: mutable usize&) -> u32:
+            return 0 if certificate.name == "" or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            selected_line: mutable u32 = 0
+            matches: mutable usize = 0
+            source_position: Ast::Pos = certificate.source_call_position
+            source_call_present: bool = proof_replay_trace_owner_position_present(source_position)
+            return 0 if source_call_present and (source_position.offset == 0 or source_position.end_offset <= source_position.offset)
+            source_position <- Ast::expr_pos(certificate.goal) if not source_call_present
+            return 0 if source_position.line == 0 or (source_call_present and source_position.line != certificate.line)
+            if source_position.offset == 0:
+                return 0 if source_call_present or (certificate.rule != "goal" and certificate.rule != "quantifier-forall" and certificate.rule != "quantifier-exists")
+            else:
+                return 0 if source_position.end_offset <= source_position.offset
+            return 0 if not proof_replay_trace_owner_source_position_line_in_declarations(report, report.source_declarations, certificate, certificate.name, source_position, &selected_line, &matches, source_work, 0) or matches != 1
+            # Existing consumers still use name+line. Confirm that tuple identifies exactly the
+            # source declaration selected by its unique body span before publishing the line.
+            body: mutable darray[Ast::Stmt] = []
+            return 0 if not proof_replay_source_owner_body_with_work(report, certificate.name, selected_line, &body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return selected_line
+
+        def proof_replay_trace_owner_source_position_line_for_trace_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> u32:
+            certificate_line: u32 = trace.line
+            certificate_line <- trace.source_call_position.line if proof_replay_trace_owner_position_present(trace.source_call_position)
+            certificate: ProofGoalCertificate = ProofGoalCertificate{goal: trace.expression, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: certificate_line, name: trace.name, rule: "trace-owner", source_call_position: trace.source_call_position, replayed: false}
+            return proof_replay_trace_owner_source_position_line_with_work(report, certificate, source_work)
+
+        def proof_replay_trace_owner_source_position_line_for_attempt_with_work(report: ProofReport&, attempt: ProofGoalAttempt, source_work: mutable usize&) -> u32:
+            certificate: ProofGoalCertificate = ProofGoalCertificate{goal: attempt.goal, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: attempt.line, name: attempt.name, rule: attempt.rule, source_call_position: attempt.source_call_position, replayed: false}
+            return proof_replay_trace_owner_source_position_line_with_work(report, certificate, source_work)

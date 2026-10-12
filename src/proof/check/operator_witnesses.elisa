@@ -1,28 +1,35 @@
 include "./operator_witness_queries.elisa"
 include "./operator_witness_markers.elisa"
+include "./operator_impl_queries.elisa"
 include "./operator_impl_chain.elisa"
 include "./struct_members.elisa"
 
 extend ElisaProof:
     private:
-        def proof_scalar_reference_parameter_type_in_declarations(declarations: darray[Ast::Decl]&, function_name: sview, parameter_name: sview, depth: usize) -> (count: usize, type_expression: Ast::Expr):
+        def proof_scalar_reference_parameter_type_in_declarations_with_work(declarations: darray[Ast::Decl]&, function_name: sview, parameter_name: sview, depth: usize, source_work: mutable usize&) -> (count: usize, type_expression: Ast::Expr):
             selected: mutable Ast::Expr = Ast::Expr.Invalid
             count: mutable usize = 0
-            return (2, selected) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |declaration, function_name, parameter_name, depth, selected, count|:
+            return (2, selected) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            for declaration in declarations |declaration, function_name, parameter_name, depth, selected, count, source_work|:
+                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(name), source_work)
+                        return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(function_name), source_work)
                         if name == function_name:
-                            for parameter in parameters |parameter, parameter_name, selected, count|:
+                            for parameter in parameters |parameter, parameter_name, selected, count, source_work|:
+                                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(1, source_work)
+                                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(parameter.name), source_work)
+                                return (2, Ast::Expr.Invalid) if not proof_type_audit_work_charge(sview_len(parameter_name), source_work)
                                 if parameter.name == parameter_name:
                                     selected <- parameter.type_expression
                                     count <- count + 1
                     Ast::Decl.Module(_, body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations(body, function_name, parameter_name, depth + 1)
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations_with_work(body, function_name, parameter_name, depth + 1, source_work)
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     Ast::Decl.Scoped(body, _):
-                        nested: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations(body, function_name, parameter_name, depth + 1)
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_scalar_reference_parameter_type_in_declarations_with_work(body, function_name, parameter_name, depth + 1, source_work)
                         count <- count + nested.count
                         selected <- nested.type_expression if nested.count == 1
                     _:
@@ -31,87 +38,16 @@ extend ElisaProof:
 
         const PROOF_PURE_CALL_WITNESS_DEPTH_LIMIT: usize = 32
 
-        def proof_container_element_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, element: Ast::Expr):
-            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_container_element_type(inner, declarations, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_container_element_type(base, declarations, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_container_element_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return proof_container_element_type(alias.target, declarations, depth + 1) if alias.count == 1
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.Index(head, argument, _):
-                    head_name: sview = proof_ident_name(head)
-                    return (true, argument) if head_name == "darray" or head_name == "view"
-                    match argument:
-                        Ast::Expr.IntLit(_, _):
-                            return (true, head)
-                        _:
-                            # `T[M::N]` requires a concrete primitive/record element and
-                            # a uniquely declared extent; arbitrary generic heads refuse.
-                            return (true, head) if proof_fixed_array_source_head(head, declarations) and proof_fixed_extent_constant(argument, declarations).known
-                            return (false, Ast::Expr.Invalid)
-                Ast::Expr.IndexN(head, arguments, _):
-                    head_name: sview = proof_ident_name(head)
-                    if head_name == "darray" or head_name == "view":
-                        return (false, Ast::Expr.Invalid) if arguments.count != 1
-                        return (true, arguments[0])
-                    return (false, Ast::Expr.Invalid) if proof_ident_name(head) != "array" or arguments.count != 2
-                    match arguments[1]:
-                        Ast::Expr.IntLit(_, _):
-                            return (true, arguments[0])
-                        _:
-                            return (true, arguments[0]) if proof_fixed_extent_constant(arguments[1], declarations).known
-                            return (false, Ast::Expr.Invalid)
-                _:
-                    return (false, Ast::Expr.Invalid)
-
-        # How many subscripts separate a container from a primitive scalar element: 1 for
-        # `darray[i64]`, 2 for `array[array[i64, 4], 4]`, and 0 when the innermost element is not
-        # a scalar or the spelling is not a built-in container.
-        def proof_scalar_element_depth(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
-            return 0 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            element: (known: bool, element: Ast::Expr) = proof_container_element_type(expression, declarations, depth)
-            return 0 if not element.known
-            return 1 if proof_scalar_type_kind(element.element, declarations, 0) == 1
-            inner: i64 = proof_scalar_element_depth(element.element, declarations, depth + 1)
-            return inner + 1 if inner > 0
-            return 0
-
-        # A scalar reference names exactly one value. Keep this separate from container
-        # detection: refs to slices, arrays and user-defined index receivers retain their
-        # existing bounds and protocol rules.
-        def proof_scalar_reference_target_type(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, target: Ast::Expr):
-            return (false, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_scalar_reference_target_type(inner, declarations, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_scalar_reference_target_type(base, declarations, depth + 1)
-                Ast::Expr.Ident(name, _):
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(declarations, name, 0)
-                    return proof_scalar_reference_target_type(alias.target, declarations, depth + 1) if alias.count == 1
-                    return (false, Ast::Expr.Invalid)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_scalar_reference_target_type(inner, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return (true, inner) if (operator == TokenKind.Ampersand or operator == TokenKind.Lmut) and proof_scalar_type_kind(inner, declarations, 0) == 1
-                    return (false, Ast::Expr.Invalid)
-                _:
-                    return (false, Ast::Expr.Invalid)
-
-        def proof_initialize_old_parameter_values(parameters: darray[Ast::ParamDecl]&, old_values: mutable darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, position: Ast::Pos) -> void:
+        def proof_initialize_old_parameter_values_with_work(parameters: darray[Ast::ParamDecl]&, old_values: mutable darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, generic_index: ProofSourceEffectIndex&, generic_names_complete: bool, position: Ast::Pos, source_work: mutable usize&) -> void:
             parameter_index: mutable usize = 0
-            for parameter in parameters |parameter_index, old_values, declarations, position|:
-                scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(parameter.type_expression, declarations, 0)
+            for parameter in parameters |parameter_index, old_values, declarations, generic_index, position, source_work|:
+                return if not proof_type_audit_work_charge(1, source_work) or not proof_type_audit_work_charge(sview_len(parameter.name), source_work)
+                scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(parameter.type_expression, declarations, 0, source_work)
+                parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_with_work(parameter.type_expression, declarations, generic_index, generic_names_complete, source_work)
                 if scalar_reference.known and parameter_index < old_values.count:
                     initial_value: Ast::Expr = Ast::Expr.Index(Ast::Expr.Ident(parameter.name, position), Ast::Expr.IntLit(0, position), position)
                     old_values[parameter_index] <- proof_scalar_reference_state_marker(initial_value, position)
-                elif parameter_index < old_values.count and (not proof_resource_type_is_scalar(parameter.type_expression) or (proof_resource_is_reference_type(parameter.type_expression) and proof_resource_is_mutable_reference_type(parameter.type_expression))):
+                elif parameter_index < old_values.count and (not proof_resource_type_is_scalar(parameter.type_expression) or (parameter_markers.reference and parameter_markers.mutable_reference)):
                     # An aggregate's entry value is not a stable name: mutable fields or
                     # collection contents can change while the parameter binding stays put.
                     # Until the adapter carries field/element snapshots, never substitute the
@@ -122,142 +58,47 @@ extend ElisaProof:
                     old_values[parameter_index] <- Ast::Expr.Call(Ast::Expr.Ident("__elisa_proof_entry_state", position), entry_arguments, [], position)
                 parameter_index <- parameter_index + 1
 
-        # Find a uniquely resolved record below one or more built-in containers. The depth is
-        # the number of dynamic subscripts between the binding and the record element.
-        def proof_container_struct_element(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> (known: bool, element: Ast::Expr, depth: i64):
-            return (false, Ast::Expr.Invalid, 0) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            container: (known: bool, element: Ast::Expr) = proof_container_element_type(expression, declarations, depth)
-            return (false, Ast::Expr.Invalid, 0) if not container.known
-            return (true, container.element, 1) if proof_type_head_name(container.element, declarations, 0) != ""
-            nested: (known: bool, element: Ast::Expr, depth: i64) = proof_container_struct_element(container.element, declarations, depth + 1)
-            return (true, nested.element, nested.depth + 1) if nested.known
-            return (false, Ast::Expr.Invalid, 0)
-
-        # Preserve the machine width of a scalar leaf reached through nested containers. The
-        # scalar-element marker alone only excludes overloaded operators; it cannot justify
-        # interpreting `darray[u8][i] + 1` as unbounded signed arithmetic.
-        def proof_unsigned_scalar_element_width(expression: Ast::Expr, declarations: darray[Ast::Decl]&, depth: usize) -> i64:
-            return 0 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            element: (known: bool, element: Ast::Expr) = proof_container_element_type(expression, declarations, depth)
-            return 0 if not element.known
-            return proof_unsigned_type_width(element.element, declarations, 0) if proof_scalar_type_kind(element.element, declarations, 0) == 1
-            return proof_unsigned_scalar_element_width(element.element, declarations, depth + 1)
-
         const PROOF_SCALAR_WITNESS_BUDGET: usize = 16
         const PROOF_SCALAR_WITNESS_FUNCTION_BUDGET: usize = 32
         const PROOF_SCALAR_WITNESS_DEPTH: usize = 3
-
-        # Impl metadata is preserved by the compiler parser as paired annotations keyed by the
-        # impl header line. An extension can also define an operator-like member, so it disables
-        # the built-in witness for that concrete type conservatively.
-        def proof_builtin_operator_impl_exists(annotations: darray[Ast::EnumAnnotation]&, concrete: sview, protocol: sview) -> bool:
-            return false if concrete == "" or protocol == ""
-            for annotation in annotations |concrete, protocol|:
-                if annotation.owner == "__ext_concrete" and annotation.name == concrete:
-                    return true
-                if annotation.owner == "__impl_concrete" and annotation.name == concrete:
-                    for scope in annotations |annotation, protocol|:
-                        return true if scope.owner == "__impl_scope" and scope.line == annotation.line and scope.name == protocol
-            return false
-
-        def proof_operator_impl_hash(concrete: sview, protocol: sview) -> u32:
-            concrete_hash: u32 = proof_name_hash(concrete)
-            protocol_hash: u32 = proof_name_hash(protocol)
-            combined: i64 = concrete_hash.i64() * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME + protocol_hash.i64()
-            return (combined % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
-
-        def proof_operator_impl_pair_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
-            capacity: usize = report.operator_impls.bucket_heads.count
-            return false if capacity == 0
-            hash: u32 = proof_operator_impl_hash(concrete, protocol)
-            slot: usize = (hash.i64() % capacity.i64()).usize()
-            entry: mutable usize = report.operator_impls.bucket_heads[slot]
-            while entry < report.operator_impls.rows.count |entry, hash, concrete, protocol, report|:
-                implementation: ProofOperatorImpl = report.operator_impls.rows[entry]
-                return true if report.operator_impls.hashes[entry] == hash and implementation.concrete == concrete and implementation.protocol == protocol
-                entry <- report.operator_impls.next_indices[entry]
-            return false
-
-        def proof_report_builtin_operator_impl_exists(report: ProofReport&, concrete: sview, protocol: sview) -> bool:
-            return proof_builtin_operator_impl_exists(report.source_annotations, concrete, protocol) if not report.operator_impls.valid
-            return false if concrete == "" or protocol == ""
-            return true if proof_operator_impl_pair_exists(report, concrete, protocol)
-            return proof_operator_impl_pair_exists(report, concrete, "")
-
-        def proof_add_operator_witness_for_concrete(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, protocol: sview, position: Ast::Pos) -> void:
-            marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if proof_report_builtin_operator_impl_exists(report, concrete, protocol) else proof_builtin_operator_marker(root, protocol, position)
-            proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
-
-        def proof_add_untrusted_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos, builtin_enum_eq: bool = false) -> void:
-            if not builtin_enum_eq:
-                proof_add_type_bound_fact(facts, report, proof_untrusted_operator_marker(root, "All", position), position.line, report.type_bounds.owner)
-                return
-            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            for protocol in protocols |facts, report, root, position|:
-                continue if builtin_enum_eq and protocol == "Eq"
-                marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
-                proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
-
-        # The imported-global-constant path may query the same source-wide alias tree once per
-        # constant and operator protocol. Reuse the per-import index there; exact name matching
-        # remains authoritative, and ambiguous/incomplete index state fails closed below.
-
-        def proof_type_has_operator_impl_index(expression: Ast::Expr, report: ProofReport&, index: ProofTypeAuditIndex, protocol: sview, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return true if proof_report_builtin_operator_impl_exists(report, name, protocol)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_index(index, name)
-                    # An incomplete or malformed index and an ambiguous alias both refuse to
-                    # prove that the operator is built in. Emit the untrusted marker so this
-                    # uncertainty can only reject/decline a proof, never silently admit one.
-                    return true if alias.count >= PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT
-                    return proof_type_has_operator_impl_index(alias.target, report, index, protocol, depth + 1) if alias.count == 1
-                    return false
-                Ast::Expr.Scope(_, name, _):
-                    return proof_report_builtin_operator_impl_exists(report, name, protocol)
-                Ast::Expr.Paren(inner, _):
-                    return proof_type_has_operator_impl_index(inner, report, index, protocol, depth + 1)
-                Ast::Expr.Refinement(base, _, _):
-                    return proof_type_has_operator_impl_index(base, report, index, protocol, depth + 1)
-                Ast::Expr.Unary(operator, inner, _):
-                    return proof_type_has_operator_impl_index(inner, report, index, protocol, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
-                    return false
-                _:
-                    return false
-
-        def proof_add_primitive_operator_witnesses_with_type_index(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, index: ProofTypeAuditIndex) -> void:
-            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            for protocol in protocols |facts, report, root, type_expression, position, index|:
-                has_impl: bool = proof_type_has_operator_impl_index(type_expression, report, index, protocol, 0)
-                if has_impl:
-                    marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
-                    proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
 
         def proof_add_builtin_index_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, position: Ast::Pos) -> void:
             marker: Ast::Expr = proof_builtin_index_marker(root, position)
             proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
 
-        def proof_add_index_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, element: Ast::Expr, position: Ast::Pos) -> void:
-            element_is_builtin: bool = proof_scalar_type_kind(element, report.source_declarations, 0) == 1 or (proof_builtin_operator_type_name(element, report.source_declarations, 0) can Global.Read) != ""
-            element_is_container: bool = proof_container_element_type(element, report.source_declarations, 0).known
-            element_is_named: bool = proof_type_head_name(element, report.source_declarations, 0) != ""
-            return if not element_is_builtin and not element_is_container and not element_is_named
+        def proof_add_index_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, element: Ast::Expr, position: Ast::Pos, source_work: mutable usize&) -> bool can[Global.Read]:
+            element_is_builtin: bool = proof_scalar_type_kind_with_work(element, report.source_declarations, 0, source_work) == 1 or (proof_builtin_operator_type_name_with_work(element, report.source_declarations, 0, source_work) can Global.Read) != ""
+            element_container: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(element, report.source_declarations, 0, source_work)
+            element_is_container: bool = element_container.known
+            element_is_named: bool = proof_type_head_name_with_work(element, report.source_declarations, 0, source_work) != ""
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return true if not element_is_builtin and not element_is_container and not element_is_named
             # One fact preserves the same complete indexed protocol set.
             marker: Ast::Expr = proof_builtin_operator_marker(root, "Index.All", position) if element_is_builtin else proof_untrusted_operator_marker(root, "Index.All", position)
             proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
+            return true
 
-        def proof_add_builtin_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
-            concrete: sview = (proof_builtin_operator_type_name(type_expression, report.source_declarations, 0) can Global.Read)
-            return if concrete == ""
+        def proof_add_builtin_operator_witnesses_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, concrete: sview, position: Ast::Pos, source_work: mutable usize&) -> bool:
+            return false if concrete == "" or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            overrides: bool = any protocol in protocols where proof_report_builtin_operator_impl_exists(report, concrete, protocol)
-            if not overrides:
+            overrides: mutable darray[bool] = []
+            any_override: mutable bool = false
+            for protocol in protocols |report, concrete, source_work, overrides, any_override|:
+                return false if not proof_type_audit_work_charge(1 + sview_len(concrete) + sview_len(protocol), source_work)
+                implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, concrete, protocol, source_work)
+                return false if not implementation.complete
+                overrides.push(implementation.exists)
+                any_override <- true if implementation.exists
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if not any_override:
                 proof_add_type_bound_fact(facts, report, proof_builtin_operator_marker(root, "All", position), position.line, report.type_bounds.owner)
             else:
-                for protocol in protocols |facts, report, root, concrete, position|:
-                    proof_add_operator_witness_for_concrete(facts, report, root, concrete, protocol, position)
+                for protocol_index in 0..<protocols.count |facts, report, root, protocols, overrides, position, protocol_index|:
+                    protocol: sview = protocols[protocol_index]
+                    marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position) if overrides[protocol_index] else proof_builtin_operator_marker(root, protocol, position)
+                    proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
             proof_add_builtin_index_witness(facts, report, root, position)
+            return true
 
         def proof_add_scalar_type_witness(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, expression: Ast::Expr, line: u32, owner: sview) -> void:
             # A witness already present costs nothing; every goal of a return re-derives them.
@@ -273,39 +114,63 @@ extend ElisaProof:
         # struct-typed fields to a fixed depth, the `count` of a built-in container, and the
         # container itself when its elements are scalars. Every witness is a type statement about
         # a place and is retained and invalidated with the binding's root symbol.
-        def proof_add_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, budget: mutable usize&, depth: usize) -> void can[Global.Read]:
-            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0 or report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET
-            proof_add_primitive_operator_witnesses(facts, report, root, type_expression, position)
-            scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type(type_expression, report.source_declarations, 0)
+        def proof_add_scalar_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, line: u32, owner: sview, position: Ast::Pos, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, budget: mutable usize&, depth: usize) -> void can[Global.Read]:
+            return if depth >= PROOF_SCALAR_WITNESS_DEPTH or budget == 0 or report.scalar_witness_facts >= PROOF_SCALAR_WITNESS_FUNCTION_BUDGET or report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            primitive_witness_complete: bool = proof_add_primitive_operator_witnesses_with_aliases_work(facts, report, root, type_expression, position, caller_scope, caller_module, module_aliases, declaration_line, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if not primitive_witness_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            scalar_reference: (known: bool, target: Ast::Expr) = proof_scalar_reference_target_type_with_work(type_expression, report.source_declarations, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             if scalar_reference.known:
                 # This root is scalar only because the source declaration resolved to a
                 # primitive pointee type; the branch does not apply to general references.
                 proof_add_scalar_type_witness(facts, report, proof_scalar_type_marker(proof_ident_name(root), position), line, owner) if proof_ident_name(root) != ""
                 proof_add_builtin_index_witness(facts, report, root, position)
-                (proof_add_index_operator_witnesses(facts, report, root, scalar_reference.target, position) can Global.Read)
-                element_width: i64 = proof_unsigned_type_width(scalar_reference.target, report.source_declarations, 0)
+                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, scalar_reference.target, position, &source_work) can Global.Read
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if not index_witness_complete
+                element_width: i64 = proof_unsigned_type_width_with_work(scalar_reference.target, report.source_declarations, 0, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, 1, position, element_width), line, owner)
                 # A scalar reference's implicit read and its explicit zero-index read have
                 # the declared pointee width, not an inferred "all references are scalar" type.
                 # The place marker below is exact to the one source index admitted by the
                 # builtin-index witness and is independently shape-checked during replay.
-                signed_element_width: i64 = proof_signed_type_width(scalar_reference.target, report.source_declarations, 0)
+                signed_element_width: i64 = proof_signed_type_width_with_work(scalar_reference.target, report.source_declarations, 0, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 proof_add_scalar_type_witness(facts, report, proof_signed_type_marker(root, signed_element_width, position), line, owner) if signed_element_width > 0
                 explicit_zero: Ast::Expr = Ast::Expr.Index(root, Ast::Expr.IntLit(0, position), position)
                 proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(explicit_zero, signed_element_width, position), line, owner) if signed_element_width > 0
                 return
-            builtin_type: sview = (proof_builtin_operator_type_name(type_expression, report.source_declarations, 0) can Global.Read)
+            builtin_type: sview = (proof_builtin_operator_type_name_with_work(type_expression, report.source_declarations, 0, &source_work) can Global.Read)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             if builtin_type != "":
-                (proof_add_builtin_operator_witnesses(facts, report, root, type_expression, position) can Global.Read)
+                builtin_witness_complete: bool = proof_add_builtin_operator_witnesses_with_work(facts, report, root, builtin_type, position, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if not builtin_witness_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return
-            named_type: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
-            builtin_enum_eq: bool = proof_plain_enum_builtin_equality_type(type_expression, "", report) != ""
+            named_type: sview = proof_type_head_name_with_work(type_expression, report.source_declarations, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            builtin_enum_eq: bool = proof_plain_enum_builtin_equality_type_with_work(type_expression, "", report, &source_work) != ""
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             proof_add_untrusted_operator_witnesses(facts, report, root, position, builtin_enum_eq) if named_type != ""
-            element_depth: i64 = proof_scalar_element_depth(type_expression, report.source_declarations, 0)
-            container: (known: bool, element: Ast::Expr) = proof_container_element_type(type_expression, report.source_declarations, 0)
+            container_profile: (known: bool, element: Ast::Expr, scalar_depth: i64, unsigned_width: i64) = proof_container_scalar_profile_with_work(type_expression, report.source_declarations, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            container: (known: bool, element: Ast::Expr) = (container_profile.known, container_profile.element)
+            element_depth: i64 = container_profile.scalar_depth
             if container.known:
                 proof_add_builtin_index_witness(facts, report, root, position)
-                (proof_add_index_operator_witnesses(facts, report, root, container.element, position) can Global.Read)
+                index_witness_complete: bool = proof_add_index_operator_witnesses(facts, report, root, container.element, position, &source_work) can Global.Read
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if not index_witness_complete
                 budget <- budget - 1
                 proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(Ast::Expr.Field(root, "count", position), position), line, owner)
                 # A count is a `usize`: its exact place gets the width marker the arithmetic
@@ -315,49 +180,94 @@ extend ElisaProof:
                 proof_add_scalar_type_witness(facts, report, Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, Ast::Expr.Field(root, "count", position), position), line, owner) if proof_count_fact_wanted(root, type_expression)
                 if element_depth > 0 and budget > 0:
                     budget <- budget - 1
-                    element_width: i64 = proof_unsigned_scalar_element_width(type_expression, report.source_declarations, 0)
-                    proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, element_depth, position, element_width), line, owner)
+                    proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(root, element_depth, position, container_profile.unsigned_width), line, owner)
                 # A container of records has no scalar leaf at the container level, but an
                 # indexed primitive field is scalar. Record one exact marker per declared field;
                 # replay matches only that field on an element of this exact container.
-                struct_element: (known: bool, element: Ast::Expr, depth: i64) = proof_container_struct_element(type_expression, report.source_declarations, 0)
-                element_struct: sview = proof_type_head_name(struct_element.element, report.source_declarations, 0)
+                source_work <- report.source_effect_index.implicit_effect_work
+                struct_element: (known: bool, element: Ast::Expr, depth: i64) = proof_container_struct_element_with_work(type_expression, report.source_declarations, 0, &source_work)
+                element_struct: sview = proof_type_head_name_with_work(struct_element.element, report.source_declarations, 0, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 if struct_element.known and element_struct != "" and budget > 0:
                     members: mutable darray[Ast::StructMember] = []
-                    if proof_struct_members(report.source_declarations, element_struct, 0, &members) == 1:
-                        for member in members |facts, report, root, element_struct, member, members, line, owner, position, budget|:
+                    if proof_struct_members_with_report(report.source_declarations, element_struct, 0, &members, report) == 1:
+                        return if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        latest: mutable darray[bool] = []
+                        latest_rows: mutable darray[usize] = []
+                        source_work <- report.source_effect_index.implicit_effect_work
+                        latest_complete: bool = proof_struct_member_latest_rows_with_work(members, &latest, &latest_rows, &source_work)
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return if not latest_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        for row in 0..<members.count |facts, report, root, element_struct, members, latest, latest_rows, line, owner, position, caller_scope, declaration_line, budget, source_work, row|:
+                            continue if not latest[row]
                             return if budget == 0
+                            row_work_complete: bool = proof_type_audit_work_charge(1, source_work)
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return if not row_work_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            member: Ast::StructMember = members[row]
+                            latest_member: Ast::StructMember = members[latest_rows[row]]
                             field_name: sview = member.name
-                            field: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type(members, field_name)
-                            continue if field.count != 1 or proof_scalar_type_kind(field.type_expression, report.source_declarations, 0) != 1
+                            field_type: Ast::Expr = latest_member.type_expression
+                            source_work <- report.source_effect_index.implicit_effect_work
+                            field_scalar_kind: i64 = proof_scalar_type_kind_with_work(field_type, report.source_declarations, 0, &source_work)
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            continue if field_scalar_kind != 1
                             budget <- budget - 1
                             field_container: Ast::Expr = Ast::Expr.Field(root, field_name, position)
-                            width: i64 = proof_unsigned_type_width(field.type_expression, report.source_declarations, 0)
-                            proof_add_primitive_operator_witnesses(facts, report, field_container, field.type_expression, position)
+                            width: i64 = proof_unsigned_type_width_with_work(field_type, report.source_declarations, 0, &source_work)
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            primitive_witness_complete: bool = proof_add_primitive_operator_witnesses_with_aliases_work(facts, report, field_container, field_type, position, caller_scope, caller_module, module_aliases, declaration_line, &source_work)
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return if not primitive_witness_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                             proof_add_scalar_type_witness(facts, report, proof_scalar_element_marker(field_container, struct_element.depth, position, width), line, owner)
                 return
-            struct_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
+            struct_name: sview = proof_type_head_name_with_work(type_expression, report.source_declarations, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return if struct_name == ""
             members: mutable darray[Ast::StructMember] = []
-            return if proof_struct_members(report.source_declarations, struct_name, 0, &members) != 1
-            for member in members |facts, report, root, struct_name, member, members, line, owner, position, budget, depth|:
+            return if proof_struct_members_with_report(report.source_declarations, struct_name, 0, &members, report) != 1
+            return if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            latest: mutable darray[bool] = []
+            latest_rows: mutable darray[usize] = []
+            source_work <- report.source_effect_index.implicit_effect_work
+            latest_complete: bool = proof_struct_member_latest_rows_with_work(members, &latest, &latest_rows, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            return if not latest_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for row in 0..<members.count |facts, report, root, struct_name, members, latest, latest_rows, line, owner, position, caller_scope, declaration_line, budget, depth, source_work, row|:
+                continue if not latest[row]
                 return if budget == 0
+                row_work_complete: bool = proof_type_audit_work_charge(1, source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if not row_work_complete or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                member: Ast::StructMember = members[row]
+                latest_member: Ast::StructMember = members[latest_rows[row]]
                 field_name: sview = member.name
-                field: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type(members, field_name)
-                continue if field.count != 1
+                field_type: Ast::Expr = latest_member.type_expression
+                source_work <- report.source_effect_index.implicit_effect_work
+                field_scalar_kind: i64 = proof_scalar_type_kind_with_work(field_type, report.source_declarations, 0, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 place: Ast::Expr = Ast::Expr.Field(root, field_name, position)
-                if proof_scalar_type_kind(field.type_expression, report.source_declarations, 0) == 1:
+                if field_scalar_kind == 1:
                     budget <- budget - 1
                     proof_add_scalar_type_witness(facts, report, proof_scalar_term_marker(place, position), line, owner)
                     # Exact place markers preserve scalar widths without extending them to sibling
                     # fields of the containing record.
-                    field_width: i64 = proof_unsigned_type_width(field.type_expression, report.source_declarations, 0)
+                    field_width: i64 = proof_unsigned_type_width_with_work(field_type, report.source_declarations, 0, &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(place, field_width, position), line, owner) if field_width > 0
-                    signed_field_width: i64 = proof_signed_type_width(field.type_expression, report.source_declarations, 0)
+                    signed_field_width: i64 = proof_signed_type_width_with_work(field_type, report.source_declarations, 0, &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(place, signed_field_width, position), line, owner) if signed_field_width > 0
                     proof_add_signed_range_facts(facts, report, place, signed_field_width, line, owner, position) if signed_field_width > 0
                 else:
-                    (proof_add_scalar_witnesses(facts, report, place, field.type_expression, line, owner, position, budget, depth + 1) can Global.Read)
+                    (proof_add_scalar_witnesses(facts, report, place, field_type, line, owner, position, caller_scope, caller_module, module_aliases, declaration_line, budget, depth + 1) can Global.Read)
 
         # A call to a verified total-pure function with a primitive scalar return type denotes
         # one value: the classification proves it reads nothing but its arguments and always
@@ -368,6 +278,7 @@ extend ElisaProof:
         # result without treating an arbitrary call or a partial function as stable.
         def proof_add_pure_call_witnesses(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, depth: usize) -> void:
             return if depth >= PROOF_PURE_CALL_WITNESS_DEPTH_LIMIT
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
             match expression:
                 Ast::Expr.Paren(inner, _):
                     proof_add_pure_call_witnesses(inner, facts, functions, report, line, owner, depth + 1)
@@ -418,7 +329,7 @@ extend ElisaProof:
                     return if called >= functions.returns.return_scalar.count or not functions.returns.return_scalar[called]
                     return if called >= functions.returns.return_types.count
                     return_type: Ast::Expr = functions.returns.return_types[called]
-                    boolean_atom: bool = proof_ident_name(return_type) == "bool" and called < functions.contracts.requires_counts.count and functions.contracts.requires_counts[called] == 0
+                    boolean_atom: bool = proof_ident_name(return_type) == "bool" and called < functions.contracts.obligations.requires_counts.count and functions.contracts.obligations.requires_counts[called] == 0
                     if not boolean_atom:
                         for argument in arguments |facts, report|:
                             continue if proof_value_binding_argument(argument, report, 0)
@@ -433,10 +344,15 @@ extend ElisaProof:
                     # The call's value has its callee's declared signed width, which is what lets
                     # `size(left) + size(right) + 1` be bounded without wrapping. The bare name
                     # must select exactly one source declaration; anything else keeps no width.
-                    return if proof_resource_is_reference_type(return_type)
+                    return_declaration_line: u32 = functions.lookup.lines[called] if called < functions.lookup.lines.count else 0
+                    return_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(return_type, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, return_declaration_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or return_markers.reference
                     unsigned_width: i64 = proof_unsigned_primitive_width(return_type)
                     proof_add_scalar_type_witness(facts, report, proof_unsigned_place_marker(expression, unsigned_width, position), line, owner) if unsigned_width > 0
-                    width: i64 = proof_signed_type_width(return_type, report.source_declarations, 0)
+                    width: i64 = proof_signed_type_width_with_work(return_type, report.source_declarations, 0, &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     proof_add_scalar_type_witness(facts, report, proof_signed_place_marker(expression, width, position), line, owner) if width > 0
                 Ast::Expr.Field(object, field, position):
                     proof_add_pure_call_witnesses(object, facts, functions, report, line, owner, depth + 1)

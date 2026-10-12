@@ -29,29 +29,65 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_required_reference_record_count(declarations: darray[Ast::Decl]&, wanted: sview, depth: usize) -> usize:
-            return 2 if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        def proof_required_reference_record_count_with_work(type_index: ProofTypeAuditIndex, enum_index: ProofEnumIndex, wanted: sview, source_work: mutable usize&) -> usize:
+            return 2 if not type_index.complete or type_index.entries.count != type_index.next_indices.count
+            return 2 if not proof_type_audit_work_charge(sview_len(wanted), source_work)
             count: mutable usize = 0
-            for declaration in declarations |wanted, depth, count|:
-                match declaration:
-                    Ast::Decl.Struct(name, _, _, _, _, _, _):
-                        count <- count + 1 if name == wanted
-                    Ast::Decl.Alias(name, _, _):
+            if type_index.entries.count > 0:
+                expected_capacity: usize = proof_index_capacity(type_index.entries.count)
+                return 2 if expected_capacity == 0 or type_index.bucket_heads.count != expected_capacity
+                hash: u32 = proof_name_hash(wanted)
+                slot: usize = (hash.i64() % type_index.bucket_heads.count.i64()).usize()
+                entry: mutable usize = type_index.bucket_heads[slot]
+                return 2 if entry > type_index.entries.count
+                steps: mutable usize = 0
+                while entry < type_index.entries.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, type_index, hash, wanted, count, source_work|:
+                    return 2 if entry >= type_index.next_indices.count or not proof_type_audit_work_charge(1, source_work)
+                    row: ProofTypeAuditDeclaration = type_index.entries[entry]
+                    if row.name_hash == hash:
+                        match row.declaration:
+                            Ast::Decl.Struct(name, _, _, _, _, _, _):
+                                return 2 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                                count <- count + 1 if name == wanted
+                            Ast::Decl.Alias(name, _, _):
+                                return 2 if not proof_type_audit_work_charge(sview_len(name), source_work)
+                                count <- count + 2 if name == wanted
+                            _:
+                                pass
+                    return 2 if count > 1
+                    next_entry: usize = type_index.next_indices[entry]
+                    return 2 if next_entry > type_index.entries.count
+                    entry <- next_entry
+                    steps <- steps + 1
+                return 2 if entry < type_index.entries.count
+            return 2 if not enum_index.complete or enum_index.names.count != enum_index.name_hashes.count or enum_index.names.count != enum_index.next_indices.count or enum_index.names.count != enum_index.const_enums.count
+            if enum_index.names.count > 0:
+                expected_capacity: usize = proof_index_capacity(enum_index.names.count)
+                return 2 if expected_capacity == 0 or enum_index.bucket_heads.count != expected_capacity
+                hash: u32 = proof_name_hash(wanted)
+                slot: usize = (hash.i64() % enum_index.bucket_heads.count.i64()).usize()
+                entry: mutable usize = enum_index.bucket_heads[slot]
+                return 2 if entry > enum_index.names.count
+                steps: mutable usize = 0
+                while entry < enum_index.names.count and steps < PROOF_INDEX_MAX_CHAIN |entry, steps, enum_index, hash, wanted, count, source_work|:
+                    return 2 if entry >= enum_index.next_indices.count or not proof_type_audit_work_charge(1, source_work)
+                    if enum_index.name_hashes[entry] == hash:
+                        name: sview = enum_index.names[entry]
+                        return 2 if not proof_type_audit_work_charge(sview_len(name), source_work)
                         count <- count + 2 if name == wanted
-                    Ast::Decl.Enum(name, _, _, _, _):
-                        count <- count + 2 if name == wanted
-                    Ast::Decl.Module(_, body, _):
-                        count <- count + proof_required_reference_record_count(body, wanted, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        count <- count + proof_required_reference_record_count(body, wanted, depth + 1)
-                    _:
-                        pass
+                    return 2 if count > 1
+                    next_entry: usize = enum_index.next_indices[entry]
+                    return 2 if next_entry > enum_index.names.count
+                    entry <- next_entry
+                    steps <- steps + 1
+                return 2 if entry < enum_index.names.count
             return count
 
-        def proof_add_required_reference_parameter_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, parameter: Ast::ParamDecl, owner: sview, position: Ast::Pos) -> void:
+        def proof_add_required_reference_parameter_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, parameter: Ast::ParamDecl, owner: sview, position: Ast::Pos, type_index: ProofTypeAuditIndex, enum_index: ProofEnumIndex) -> void:
             record: sview = proof_required_record_reference_target(parameter.type_expression, 0)
             return if record == "" or parameter.name == ""
-            return if proof_required_reference_record_count(report.source_declarations, record, 0) != 1
+            record_count: usize = proof_required_reference_record_count_with_work(type_index, enum_index, record, &report.source_effect_index.implicit_effect_work)
+            return if record_count != 1 or report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             expression: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Ident(parameter.name, position), TokenKind.BangEq, Ast::Expr.Ident("null", position), position)
             # Ordinary facts deliberately expire on rebinding, shadowing and opaque calls.
             # Never classify this as a persistent type-bound fact over a reusable spelling.

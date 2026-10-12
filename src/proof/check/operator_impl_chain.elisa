@@ -5,98 +5,81 @@ extend ElisaProof:
         # wrappers while looking for that implementation; otherwise a primitive scalar witness
         # could accidentally bless a user-defined equality as if it were Leibniz equality.
         #
-        # The walk is the same for every protocol: only the implementation lookup at each name
-        # reads it. So the names the walk reaches are collected once, in order, and a protocol
-        # has an implementation when one of them does. The alias lookups, a scan of the whole
-        # declaration tree each, then run once per type rather than once per protocol.
-        def proof_type_operator_impl_names(expression: Ast::Expr, report: ProofReport&, names: mutable darray[sview]&, depth: usize) -> void:
-            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+        # The walk is the same for every protocol, so collect the reachable names once and share
+        # the source-work meter across the type walk, alias scans, and protocol/name checks.
+        def proof_type_operator_impl_names(expression: Ast::Expr, report: ProofReport&, names: mutable darray[sview]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
             match expression:
                 Ast::Expr.Ident(name, _):
+                    return false if not proof_type_audit_work_charge(sview_len(name), source_work)
                     names.push(name)
-                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias(report.source_declarations, name, 0)
-                    proof_type_operator_impl_names(alias.target, report, names, depth + 1) if alias.count == 1
+                    alias: (count: usize, target: Ast::Expr) = proof_find_type_alias_with_work(report.source_declarations, name, 0, source_work)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return false if alias.count > 1
+                    return false if alias.count == 1 and proof_type_alias_root_count_with_work(report.source_declarations, name, 0, source_work) != 1
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return proof_type_operator_impl_names(alias.target, report, names, depth + 1, source_work) if alias.count == 1
                 Ast::Expr.Scope(_, name, _):
+                    # The exact owner path is resolved by the enum witness path below. Keep the
+                    # source spelling here only for the operator-override scan; matching an
+                    # unrelated same-leaf implementation can suppress a builtin witness, but
+                    # cannot grant one.
+                    return false if not proof_type_audit_work_charge(sview_len(name), source_work)
                     names.push(name)
                 Ast::Expr.Paren(inner, _):
-                    proof_type_operator_impl_names(inner, report, names, depth + 1)
+                    return proof_type_operator_impl_names(inner, report, names, depth + 1, source_work)
                 Ast::Expr.Refinement(base, _, _):
-                    proof_type_operator_impl_names(base, report, names, depth + 1)
+                    return proof_type_operator_impl_names(base, report, names, depth + 1, source_work)
                 Ast::Expr.Unary(operator, inner, _):
-                    proof_type_operator_impl_names(inner, report, names, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_type_operator_impl_names(inner, report, names, depth + 1, source_work) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                 _:
                     pass
+            return true
+
+        def proof_add_primitive_operator_witnesses_with_aliases_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32, source_work: mutable usize&) -> bool:
+            return false if not report.operator_impls.valid
+            return true if proof_resource_type_mentions_owner_generic_with_work(type_expression, declaration_line, report.source_generic_param_lines, report.source_generic_param_names, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, source_work, 0)
+            names: mutable darray[sview] = []
+            return false if not proof_type_operator_impl_names(type_expression, report, &names, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
+            witnessed_protocols: mutable darray[sview] = []
+            for protocol in protocols |facts, report, root, names, position, source_work, witnessed_protocols|:
+                return false if not proof_type_audit_work_charge(1 + sview_len(protocol), source_work)
+                has_impl: mutable bool = false
+                for name in names |report, protocol, source_work, has_impl|:
+                    return false if not proof_type_audit_work_charge(1 + sview_len(name) + sview_len(protocol), source_work)
+                    implementation: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, name, protocol, source_work)
+                    return false if not implementation.complete
+                    has_impl <- true if implementation.exists
+                witnessed_protocols.push(protocol) if has_impl
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            enum_name: sview = proof_plain_enum_builtin_equality_type_with_work(type_expression, "", report, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for protocol in witnessed_protocols |facts, report, root, position|:
+                marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
+                proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
+            return false if not proof_add_const_enum_member_scalar_witnesses_with_work(facts, report, type_expression, caller_scope, caller_module, module_aliases, declaration_line, position.line, report.type_bounds.owner, position, source_work)
+            return false if not proof_add_const_enum_value_exclusions_with_work(facts, report, root, type_expression, position, source_work)
+            proof_add_type_bound_fact(facts, report, proof_builtin_operator_marker(root, "Eq", position), position.line, report.type_bounds.owner) if enum_name != ""
+            return true
+
+        def proof_add_primitive_operator_witnesses_with_work(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, caller_scope: darray[sview]&, declaration_line: u32, source_work: mutable usize&) -> bool:
+            empty_aliases: ProofModuleAliasIndex = proof_operator_enum_empty_module_alias_index()
+            proof_add_primitive_operator_witnesses_with_aliases_work(facts, report, root, type_expression, position, caller_scope, "", empty_aliases, declaration_line, source_work)
 
         def proof_add_primitive_operator_witnesses(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
-            names: mutable darray[sview] = []
-            proof_type_operator_impl_names(type_expression, report, &names, 0)
-            protocols: darray[sview] = ["Eq", "Ord", "Add", "Sub", "Mul", "Div", "Neg"]
-            for protocol in protocols |facts, report, root, names, position|:
-                has_impl: bool = any name in names where proof_report_builtin_operator_impl_exists(report, name, protocol)
-                if has_impl:
-                    marker: Ast::Expr = proof_untrusted_operator_marker(root, protocol, position)
-                    proof_add_type_bound_fact(facts, report, marker, position.line, report.type_bounds.owner)
-            proof_add_const_enum_member_scalar_witnesses(facts, report, type_expression, position.line, report.type_bounds.owner, position)
-            proof_add_const_enum_value_exclusions(facts, report, root, type_expression, position)
-            enum_name: sview = proof_plain_enum_builtin_equality_type(type_expression, "", report)
-            proof_add_operator_witness_for_concrete(facts, report, root, enum_name, "Eq", position) if enum_name != ""
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            empty_scope: darray[sview] = []
+            proof_add_primitive_operator_witnesses_with_work(facts, report, root, type_expression, position, empty_scope, 0, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
 
-        # Distinct explicit tags of one const enum imply disjoint value equalities. Implicit
-        # tags and arbitrary expressions are left opaque: the independent replay rule admits
-        # only literal values and verifies their owner and inequality from source declarations.
-        def proof_add_const_enum_value_exclusions(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos) -> void:
-            enum_name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
-            return if enum_name == "" or proof_report_builtin_operator_impl_exists(report, enum_name, "Eq")
-            aggregates: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, enum_name, 0)
-            return if aggregates.enums != 0 or aggregates.const_enums != 1 or aggregates.structs != 0
-            # A closed enum member is already an exact constant. Generating every
-            # pairwise exclusion between that constant and all enum members adds
-            # O(variants^2) redundant facts for each occurrence in a function body.
-            # Keep exclusions for symbolic roots (parameters/locals), where they
-            # constrain the value domain, and let the member-value facts below
-            # establish relationships between the constructors themselves.
-            match root:
-                Ast::Expr.Field(root_type, root_member, _):
-                    exact_root: (known: bool, owner: sview) = proof_exact_const_enum_member_owner(root_type, root_member, report.source_declarations)
-                    return if exact_root.known and exact_root.owner == enum_name
-                _:
-                    pass
-            proof_add_const_enum_value_exclusions_in(facts, report, root, type_expression, enum_name, position, report.source_declarations, 0)
+        def proof_add_primitive_operator_witnesses_in_scope(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, caller_scope: darray[sview]&, declaration_line: u32) -> void:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            proof_add_primitive_operator_witnesses_with_work(facts, report, root, type_expression, position, caller_scope, declaration_line, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
 
-        def proof_add_const_enum_value_exclusions_in(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, enum_name: sview, position: Ast::Pos, declarations: darray[Ast::Decl]&, depth: usize) -> void:
-            return if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations |facts, report, root, type_expression, enum_name, position, depth|:
-                match declaration:
-                    Ast::Decl.Enum(declared_name, variants, is_const, _, _):
-                        if declared_name == enum_name and is_const and variants.count <= 16:
-                            for first_index in 0..<variants.count |first_index, variants, facts, report, root, type_expression, enum_name, position|:
-                                first: Ast::EnumVariant = variants[first_index]
-                                first_value: (known: bool, value: i64) = match first.value_expr:
-                                    Ast::Expr.IntLit(value, _): (true, value)
-                                    _: (false, 0)
-                                continue if not first_value.known
-                                first_owner: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(first.name, report.source_declarations)
-                                continue if not first_owner.known or first_owner.owner != enum_name
-                                for second_index in first_index + 1..<variants.count |second_index, variants, facts, report, root, type_expression, enum_name, position, first, first_value, first_owner|:
-                                    second: Ast::EnumVariant = variants[second_index]
-                                    second_value: (known: bool, value: i64) = match second.value_expr:
-                                        Ast::Expr.IntLit(value, _): (true, value)
-                                        _: (false, 0)
-                                    continue if not second_value.known
-                                    second_owner: (known: bool, owner: sview) = proof_unique_const_enum_member_owner(second.name, report.source_declarations)
-                                    continue if not second_owner.known or second_owner.owner != enum_name
-                                    if first_value.value != second_value.value:
-                                        first_test: Ast::Expr = Ast::Expr.Binary(root, TokenKind.EqEq, Ast::Expr.Field(type_expression, first.name, position), position)
-                                        second_test: Ast::Expr = Ast::Expr.Binary(root, TokenKind.EqEq, Ast::Expr.Field(type_expression, second.name, position), position)
-                                        exclusion: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Unary(TokenKind.Not, first_test, position), TokenKind.Or, Ast::Expr.Unary(TokenKind.Not, second_test, position), position)
-                                        proof_add_traced_fact(facts, report, exclusion, "const-enum-exclusion", position.line, report.type_bounds.owner) if not (any existing in facts where proof_expr_equal(existing, exclusion))
-                                    member_operator: TokenKind = TokenKind.EqEq if first_value.value == second_value.value else TokenKind.BangEq
-                                    member_comparison: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Field(type_expression, first.name, position), member_operator, Ast::Expr.Field(type_expression, second.name, position), position)
-                                    proof_add_traced_fact(facts, report, member_comparison, "const-enum-member-value", position.line, report.type_bounds.owner) if not (any existing in facts where proof_expr_equal(existing, member_comparison))
-                                    if first_value.value != second_value.value:
-                                        reverse_member_comparison: Ast::Expr = Ast::Expr.Binary(Ast::Expr.Field(type_expression, second.name, position), TokenKind.BangEq, Ast::Expr.Field(type_expression, first.name, position), position)
-                                        proof_add_traced_fact(facts, report, reverse_member_comparison, "const-enum-member-value", position.line, report.type_bounds.owner) if not (any existing in facts where proof_expr_equal(existing, reverse_member_comparison))
-                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_add_const_enum_value_exclusions_in(facts, report, root, type_expression, enum_name, position, body, depth + 1)
-                    _:
-                        pass
+        def proof_add_primitive_operator_witnesses_in_scope_with_aliases(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, root: Ast::Expr, type_expression: Ast::Expr, position: Ast::Pos, caller_scope: darray[sview]&, caller_module: sview, module_aliases: ProofModuleAliasIndex&, declaration_line: u32) -> void:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            proof_add_primitive_operator_witnesses_with_aliases_work(facts, report, root, type_expression, position, caller_scope, caller_module, module_aliases, declaration_line, &source_work)
+            report.source_effect_index.implicit_effect_work <- source_work

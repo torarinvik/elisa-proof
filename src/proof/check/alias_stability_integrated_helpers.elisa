@@ -131,8 +131,9 @@ extend ElisaProof:
                 proof_push_aliased(&report.aliased_names, root)
                 proof_push_aliased(&report.escaping_names, root)
 
-        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize) -> void:
+        def proof_add_lemma_summary_fact(facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, functions: mutable ProofFunctionTable&, expression: Ast::Expr, line: u32, name: sview, dependency: sview, parameter_names: darray[sview]&, argument_values: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, ensure_index: usize, source_call_position: Ast::Pos) -> void:
             return if proof_expression_has_fresh_runtime_value(expression, functions, 0) or not proof_contract_calls_are_pure(expression, functions)
+            return if line == 0 or source_call_position.line != line or source_call_position.offset == 0 or source_call_position.end_offset <= source_call_position.offset
             for argument in argument_values:
                 if proof_expr_has_call(argument):
                     return if proof_fact_expression_has_fresh_runtime_value(report, argument)
@@ -153,7 +154,7 @@ extend ElisaProof:
             report.traces.summary_values.extend(argument_values)
             requires_start: usize = report.traces.summary_require_goal_ids.count
             report.traces.summary_require_goal_ids.extend(require_goal_ids)
-            report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.traces.premises.count, premises_count: 0, kernel_premises_start: report.kernel.fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: 0})
+            report.traces.records.push(ProofFactTrace{expression: expression, kernel_expression: encoded.root, kind: "lemma-summary", line: line, name: name, dependency: dependency, premises_start: report.traces.premises.count, premises_count: 0, kernel_premises_start: report.kernel.fact_trace_premises.count, kernel_premises_count: 0, summary_bindings_start: bindings_start, summary_bindings_count: parameter_names.count, summary_requires_start: requires_start, summary_requires_count: require_goal_ids.count, summary_ensure_index: ensure_index, owner_line: 0, source_call_position: source_call_position})
 
         def proof_type_bound_name(expression: Ast::Expr) -> sview:
             marker_name: sview = proof_unsigned_marker_name(expression)
@@ -216,21 +217,41 @@ extend ElisaProof:
                 return true if marker.known and proof_expr_equal(marker.term, object)
             return false
 
-        def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+        def proof_fact_is_type_bound_with_work(report: ProofReport&, expression: Ast::Expr, owner: sview, source_work: mutable usize&) -> bool:
             return false if report.type_bounds.owner != owner
             if proof_type_bound_name(expression) == "":
-                return false if not proof_unique_builtin_const_enum_member_witness(expression, report) and not proof_fact_is_global_mutable_array_type_fact(report, expression, owner)
-                for trace in report.traces.records |expression, owner|:
+                enum_member: bool = proof_unique_builtin_const_enum_member_witness_with_work(expression, report, source_work)
+                return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                global_array: mutable bool = false
+                if not enum_member:
+                    for trace in report.traces.records |expression, owner, source_work, global_array|:
+                        return false if not proof_type_audit_work_charge(1 + sview_len(trace.name) + sview_len(owner) + sview_len(trace.kind), source_work)
+                        continue if trace.name != owner or (trace.kind != "global-mutable-array-type" and trace.kind != "global-mutable-array-index-bound")
+                        equal: bool = proof_replay_summary_expr_equal_with_limit(trace.expression, expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return false if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        global_array <- true if equal
+                return false if not enum_member and not global_array
+                for trace in report.traces.records |expression, owner, source_work|:
+                    return false if not proof_type_audit_work_charge(1 + sview_len(trace.name) + sview_len(owner) + sview_len(trace.kind), source_work)
                     continue if trace.name != owner or (trace.kind != "type-bound" and trace.kind != "global-mutable-array-type" and trace.kind != "global-mutable-array-index-bound")
-                    return true if proof_expr_equal(trace.expression, expression)
+                    equal: bool = proof_replay_summary_expr_equal_with_limit(trace.expression, expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return false if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return true if equal
                 return false
             # Equal terms hash alike, so an entry with another hash cannot match.
             hash: u32 = proof_expr_shape_hash(expression, 0)
             indexed: bool = report.type_bounds.seen_hashes.count == report.type_bounds.seen.count
-            for index in 0..<report.type_bounds.seen.count |index, report, expression, hash, indexed|:
+            for index in 0..<report.type_bounds.seen.count |index, report, expression, hash, indexed, source_work|:
+                return false if not proof_type_audit_work_charge(1, source_work)
                 continue if indexed and report.type_bounds.seen_hashes[index] != hash
-                return true if proof_expr_equal(report.type_bounds.seen[index], expression)
+                equal: bool = proof_replay_summary_expr_equal_with_limit(report.type_bounds.seen[index], expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return false if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return true if equal
             return false
+
+        def proof_fact_is_type_bound(report: ProofReport&, expression: Ast::Expr, owner: sview) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            proof_fact_is_type_bound_with_work(report, expression, owner, &source_work)
 
         # A qualified module constant is immutable independently of the function's alias
         # analysis. Preserve only the exact fact that entered through the source-constant

@@ -61,4 +61,21 @@ declarations = {row["name"]: row for row in data["declaration_details"]
 for name in ("callback_bounce", "reenter_at_same_measure"):
     assert name in declarations and not declarations[name]["verified"], declarations.get(name)
 
+code, data = run("rejected_structural_field_callback.elisa")
+assert code == 1 and data["status"] == "failed", (code, data.get("status"))
+assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]
+assert data["replay"]["gaps"] == 0, data["replay"]
+assert data["trust"]["trusted_assumptions"] == [], data["trust"]
+field_callback_findings = [f for f in data["findings"]
+                          if f["kind"] == "structural-decreases-unproven"
+                          and f["name"] == "field_callback_bounce"]
+assert field_callback_findings, data["findings"]
+assert any(any(marker in finding["message"].lower()
+               for marker in ("field", "indirect", "unresolved", "opaque"))
+           for finding in field_callback_findings), field_callback_findings
+declarations = {row["name"]: row for row in data["declaration_details"]
+                if row.get("kind") == "function"}
+for name in ("field_callback_bounce", "field_callback_reenter"):
+    assert name in declarations and not declarations[name]["verified"], declarations.get(name)
+
 print("adt library: lists, trees and token streams proved by structural induction, replayed; broken variants refused")

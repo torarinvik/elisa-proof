@@ -60,52 +60,221 @@ extend ElisaProof:
             return true if kind == "captured-block-unsupported"
             return kind == "loop-invariant-missing"
 
+        def proof_replay_dependency_work_charge(amount: usize, source_work: mutable usize&) -> bool:
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + amount
+            return true
+
+        def proof_replay_dependency_text_compare(left: sview, right: sview, source_work: mutable usize&) -> bool:
+            return false if not proof_replay_dependency_work_charge(1, source_work)
+            return false if not proof_replay_dependency_work_charge(sview_len(left), source_work)
+            return false if not proof_replay_dependency_work_charge(sview_len(right), source_work)
+            return true
+
+        def proof_replay_dependency_row_index_build(names: darray[sview]&, source_work: mutable usize&) -> (complete: bool, rows: ProofReplayDependencyRowIndex):
+            rows: mutable ProofReplayDependencyRowIndex = ProofReplayDependencyRowIndex{}
+            row_count: usize = names.count
+            if row_count == 0:
+                rows.complete <- true
+                return (true, rows)
+            capacity: usize = proof_name_index_capacity(row_count)
+            return (false, rows) if capacity == 0
+            return (false, rows) if capacity > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 3
+            return (false, rows) if row_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return (false, rows) if not proof_replay_dependency_work_charge(capacity * 3, source_work)
+            return (false, rows) if not proof_replay_dependency_work_charge(row_count * 2, source_work)
+            rows.names.extend(names)
+            rows.hashes.resize(capacity)
+            rows.heads.resize(capacity)
+            rows.tails.resize(capacity)
+            rows.next_indices.resize(row_count)
+            for slot in 0..<capacity |slot, rows, row_count|:
+                rows.heads[slot] <- row_count
+                rows.tails[slot] <- row_count
+            for row in 0..<row_count |row, rows, capacity, source_work, row_count|:
+                return (false, rows) if not proof_replay_dependency_work_charge(sview_len(rows.names[row]), source_work)
+                rows.next_indices[row] <- row_count
+                hash: u32 = proof_name_hash(rows.names[row])
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, rows, capacity, source_work, row_count, placed|:
+                    return (false, rows) if not proof_replay_dependency_work_charge(1, source_work)
+                    head: usize = rows.heads[slot]
+                    if head == row_count:
+                        rows.hashes[slot] <- hash
+                        rows.heads[slot] <- row
+                        rows.tails[slot] <- row
+                        placed <- true
+                        break
+                    if head >= row_count:
+                        return (false, rows)
+                    if rows.hashes[slot] == hash:
+                        previous_name: sview = rows.names[head]
+                        return (false, rows) if not proof_replay_dependency_text_compare(previous_name, rows.names[row], source_work)
+                        if previous_name == rows.names[row]:
+                            tail: usize = rows.tails[slot]
+                            return (false, rows) if tail >= row or tail >= row_count
+                            rows.next_indices[tail] <- row
+                            rows.tails[slot] <- row
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, rows) if not placed
+            rows.complete <- true
+            return (true, rows)
+
+        def proof_replay_dependency_row_index_shape_valid(index: ProofReplayDependencyRowIndex, expected_rows: usize) -> bool:
+            return false if not index.complete or index.names.count != expected_rows or index.next_indices.count != expected_rows
+            return true if expected_rows == 0 and index.hashes.count == 0 and index.heads.count == 0 and index.tails.count == 0
+            return false if expected_rows == 0 or index.hashes.count == 0 or index.hashes.count != index.heads.count or index.hashes.count != index.tails.count
+            return false if index.hashes.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return true
+
+        def proof_replay_dependency_indexes_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return cache.dependency_indexes_complete if cache.dependency_indexes_attempted
+            cache.dependency_indexes_attempted <- true
+            return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2 or report.findings.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            attempts: mutable darray[sview] = []
+            for attempt in report.goal_attempts |attempts, source_work|:
+                return false if not proof_replay_dependency_work_charge(1, source_work)
+                attempts.push(attempt.name)
+            findings: mutable darray[sview] = []
+            for finding in report.findings |findings, source_work|:
+                return false if not proof_replay_dependency_work_charge(1, source_work)
+                findings.push(finding.name)
+            attempt_index: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(attempts, source_work)
+            return false if not attempt_index.complete
+            cache.dependency_attempt_rows <- attempt_index.rows
+            finding_index: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(findings, source_work)
+            return false if not finding_index.complete
+            cache.dependency_finding_rows <- finding_index.rows
+            cache.dependency_indexes_complete <- true
+            return true
+
+        def proof_replay_dependency_certificate_index_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return cache.dependency_certificate_index_complete if cache.dependency_certificate_index_attempted
+            cache.dependency_certificate_index_attempted <- true
+            return false if report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            certificates: mutable darray[sview] = []
+            for certificate in report.certificates |certificates, source_work|:
+                return false if not proof_replay_dependency_work_charge(1, source_work)
+                certificates.push(certificate.name)
+            certificate_index: (complete: bool, rows: ProofReplayDependencyRowIndex) = proof_replay_dependency_row_index_build(certificates, source_work)
+            return false if not certificate_index.complete
+            cache.dependency_certificate_rows <- certificate_index.rows
+            cache.dependency_certificate_index_complete <- true
+            return true
+
+        def proof_replay_dependency_row_lookup(index: ProofReplayDependencyRowIndex, wanted: sview, source_work: mutable usize&) -> (complete: bool, head: usize):
+            missing: usize = index.names.count
+            return (false, missing) if not proof_replay_dependency_row_index_shape_valid(index, missing)
+            return (false, missing) if not proof_replay_dependency_text_compare(wanted, wanted, source_work)
+            return (true, missing) if missing == 0
+            capacity: usize = index.hashes.count
+            return (false, missing) if capacity == 0
+            hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hash, wanted, index, capacity, missing, source_work|:
+                return (false, missing) if not proof_replay_dependency_work_charge(1, source_work)
+                head: usize = index.heads[slot]
+                return (true, missing) if head == missing
+                return (false, missing) if head >= missing
+                if index.hashes[slot] == hash:
+                    name: sview = index.names[head]
+                    return (false, missing) if not proof_replay_dependency_text_compare(name, wanted, source_work)
+                    return (true, head) if name == wanted
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, missing)
+
+        def proof_replay_dependency_row_matches(index: ProofReplayDependencyRowIndex, row: usize, actual_name: sview, wanted: sview, source_work: mutable usize&) -> bool:
+            return false if row >= index.names.count or row >= index.next_indices.count
+            indexed_name: sview = index.names[row]
+            return false if not proof_replay_dependency_text_compare(indexed_name, actual_name, source_work)
+            return false if indexed_name != actual_name
+            return false if not proof_replay_dependency_text_compare(indexed_name, wanted, source_work)
+            return indexed_name == wanted
+
         # Replay every certificate owned by a modular dependency before allowing its summary to
         # support a caller. A dependency already on the stack is an SCC induction edge: the main
         # checker must have supplied the corresponding termination proof, while replay stops at
         # that fixed-point boundary instead of recursing forever. Acyclic summary chains therefore
         # receive full replay, and cyclic summaries remain visibly tied to the main termination
         # checker rather than being mistaken for ordinary facts.
-        # Whether a record at `line` belongs to the declaration row of `dependency` at
-        # `owner_line`. An unattributable record matches only when `unknown_matches` (findings
-        # fail closed by vetoing; goals and certificates fail closed by not vouching).
-        def proof_replay_dependency_row_matches(report: ProofReport&, dependency: sview, line: u32, owner_line: u32, unknown_matches: bool) -> bool:
-            work: mutable usize = 0
-            return proof_replay_dependency_row_matches_with_work(report, dependency, line, owner_line, unknown_matches, &work)
-
-        def proof_replay_dependency_row_matches_with_work(report: ProofReport&, dependency: sview, line: u32, owner_line: u32, unknown_matches: bool, source_work: mutable usize&) -> bool:
+        # Dependency records are classified by their exact source span. Logical line ordering
+        # can pair a #line-rewound sibling function's proof with another module's declaration.
+        # Unknown findings veto the dependency; unknown goals/certificates never vouch for it.
+        def proof_replay_dependency_attempt_row_matches_with_work(report: ProofReport&, dependency: sview, attempt: ProofGoalAttempt, owner_line: u32, unknown_matches: bool, source_work: mutable usize&) -> bool:
             return true if owner_line == 0
-            row: u32 = proof_replay_trace_owner_function_line_with_work(report, dependency, line, source_work)
+            return false if attempt.name != dependency
+            row: u32 = proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, source_work)
             return unknown_matches if row == 0
             return row == owner_line
 
+        def proof_replay_dependency_finding_row_matches_with_work(report: ProofReport&, dependency: sview, finding: ProofFinding, owner_line: u32, source_work: mutable usize&) -> bool:
+            return true if owner_line == 0
+            return true if not finding.has_goal or finding.goal_id >= report.goal_attempts.count
+            attempt: ProofGoalAttempt = report.goal_attempts[finding.goal_id]
+            return true if attempt.name != dependency
+            return proof_replay_dependency_attempt_row_matches_with_work(report, dependency, attempt, owner_line, true, source_work)
+
         def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, owner_line: u32, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
             return false if dependency == ""
+            return false if not proof_replay_dependency_indexes_build(report, validation_workspace.source_scan_work_used, &structural_cache)
+            return false if not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_attempt_rows, report.goal_attempts.count)
+            return false if not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_finding_rows, report.findings.count)
             found_goal: mutable bool = false
             all_goals_proven: mutable bool = true
-            return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-            validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + report.goal_attempts.count
             # A function-summary dependency names one declaration row (`owner_line`, the callee's
             # declaration line). Same-named functions of other modules are different rows: their
             # goals, findings, and certificates neither vouch for nor veto this callee. 0 keeps
-            # the name-wide check (lemma summaries, whose names are unique).
-            for attempt in report.goal_attempts |found_goal, all_goals_proven, dependency, owner_line, validation_workspace|:
-                return false if sview_len(attempt.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(attempt.name)
-                if attempt.name == dependency and proof_replay_dependency_row_matches_with_work(report, dependency, attempt.line, owner_line, false, validation_workspace.source_scan_work_used):
+            # the name-wide check (lemma summaries, whose names are unique). The linked row index
+            # retains duplicates and unresolved same-name rows, so owner ambiguity still fails
+            # closed rather than disappearing from this selection.
+            attempt_lookup: (complete: bool, head: usize) = proof_replay_dependency_row_lookup(structural_cache.dependency_attempt_rows, dependency, validation_workspace.source_scan_work_used)
+            return false if not attempt_lookup.complete
+            attempt_index: mutable usize = attempt_lookup.head
+            attempt_visits: mutable usize = 0
+            while attempt_index < report.goal_attempts.count and attempt_visits < report.goal_attempts.count |attempt_index, attempt_visits, report, dependency, owner_line, validation_workspace, structural_cache, found_goal, all_goals_proven|:
+                attempt: ProofGoalAttempt = report.goal_attempts[attempt_index]
+                return false if not proof_replay_dependency_row_matches(structural_cache.dependency_attempt_rows, attempt_index, attempt.name, dependency, validation_workspace.source_scan_work_used)
+                return false if not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
+                attempt_owner_line: u32 = owner_line
+                attempt_owner_line <- proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, validation_workspace.source_scan_work_used) if owner_line != 0
+                # An unresolved same-name attempt could be an unproven goal owned by this
+                # dependency. It must not disappear just because its source owner could not
+                # be authenticated; failed attempts need not have a finding or certificate.
+                return false if owner_line != 0 and attempt_owner_line == 0
+                if owner_line == 0 or attempt_owner_line == owner_line:
                     found_goal <- true
                     all_goals_proven <- false if not attempt.proven
+                next_attempt: usize = structural_cache.dependency_attempt_rows.next_indices[attempt_index]
+                return false if next_attempt != report.goal_attempts.count and (next_attempt <= attempt_index or next_attempt >= report.goal_attempts.count)
+                attempt_index <- next_attempt
+                attempt_visits <- attempt_visits + 1
+            return false if attempt_index < report.goal_attempts.count or attempt_visits > report.goal_attempts.count
             # Same filter the scheduler applies: a finding that only records a construct whose
             # effect was over-approximated did not enter this dependency's contract derivation,
             # and the two conditions that carry the weight here are untouched -- every goal the
             # dependency recorded must be proven, and every certificate it owns must replay.
-            return false if report.findings.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-            validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + report.findings.count
-            for finding in report.findings |validation_workspace|:
-                return false if sview_len(finding.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(finding.name)
-                continue if finding.name != dependency or not proof_replay_dependency_row_matches_with_work(report, dependency, finding.line, owner_line, true, validation_workspace.source_scan_work_used)
-                return false if not proof_replay_finding_only_widens_state(finding.kind)
+            finding_lookup: (complete: bool, head: usize) = proof_replay_dependency_row_lookup(structural_cache.dependency_finding_rows, dependency, validation_workspace.source_scan_work_used)
+            return false if not finding_lookup.complete
+            finding_index: mutable usize = finding_lookup.head
+            finding_visits: mutable usize = 0
+            while finding_index < report.findings.count and finding_visits < report.findings.count |finding_index, finding_visits, report, dependency, owner_line, validation_workspace, structural_cache|:
+                finding: ProofFinding = report.findings[finding_index]
+                return false if not proof_replay_dependency_row_matches(structural_cache.dependency_finding_rows, finding_index, finding.name, dependency, validation_workspace.source_scan_work_used)
+                return false if not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
+                if proof_replay_dependency_finding_row_matches_with_work(report, dependency, finding, owner_line, validation_workspace.source_scan_work_used):
+                    return false if not proof_replay_finding_only_widens_state(finding.kind)
+                next_finding: usize = structural_cache.dependency_finding_rows.next_indices[finding_index]
+                return false if next_finding != report.findings.count and (next_finding <= finding_index or next_finding >= report.findings.count)
+                finding_index <- next_finding
+                finding_visits <- finding_visits + 1
+            return false if finding_index < report.findings.count or finding_visits > report.findings.count
             return false if not found_goal or not all_goals_proven
             return true if proof_replay_dependency_in_stack(dependency_stack, dependency)
             return false if dependency_depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
@@ -113,26 +282,61 @@ extend ElisaProof:
             next_stack.extend(dependency_stack)
             next_stack.push(dependency)
             found_certificate: mutable bool = false
-            return false if report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-            validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + report.certificates.count
-            for certificate_index in 0..<report.certificates.count |certificate_index, report, next_stack, dependency_depth, found_certificate, active_certificates, dependency, validation_workspace|:
+            return false if not proof_replay_dependency_certificate_index_build(report, validation_workspace.source_scan_work_used, &structural_cache)
+            return false if not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_certificate_rows, report.certificates.count)
+            certificate_lookup: (complete: bool, head: usize) = proof_replay_dependency_row_lookup(structural_cache.dependency_certificate_rows, dependency, validation_workspace.source_scan_work_used)
+            return false if not certificate_lookup.complete
+            certificate_index: mutable usize = certificate_lookup.head
+            certificate_visits: mutable usize = 0
+            while certificate_index < report.certificates.count and certificate_visits < report.certificates.count |certificate_index, report, next_stack, dependency_depth, found_certificate, active_certificates, dependency, validation_workspace, structural_cache, certificate_visits|:
                 certificate: ProofGoalCertificate = report.certificates[certificate_index]
-                return false if sview_len(certificate.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
-                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(certificate.name)
-                if certificate.name == dependency and proof_replay_dependency_row_matches_with_work(report, dependency, certificate.line, owner_line, false, validation_workspace.source_scan_work_used):
+                return false if not proof_replay_dependency_row_matches(structural_cache.dependency_certificate_rows, certificate_index, certificate.name, dependency, validation_workspace.source_scan_work_used)
+                return false if not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
+                certificate_owner_line: u32 = owner_line
+                certificate_owner_line <- proof_replay_trace_owner_source_position_line_with_work(report, certificate, validation_workspace.source_scan_work_used) if owner_line != 0
+                return false if owner_line != 0 and certificate_owner_line == 0
+                if owner_line == 0 or certificate_owner_line == owner_line:
                     found_certificate <- true
                     return false if not (proof_replay_certificate_with_stack(report, certificate, certificate_index, next_stack, dependency_depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
+                next_certificate: usize = structural_cache.dependency_certificate_rows.next_indices[certificate_index]
+                return false if next_certificate != report.certificates.count and (next_certificate <= certificate_index or next_certificate >= report.certificates.count)
+                certificate_index <- next_certificate
+                certificate_visits <- certificate_visits + 1
+            return false if certificate_index < report.certificates.count or certificate_visits > report.certificates.count
             return found_certificate
 
         # A reusable lemma fact is valid only when it is the recorded postcondition instance for
         # the exact normalized arguments and every instantiated precondition is tied to a caller
         # certificate. Merely finding some replayable certificate with the same lemma name is not
         # enough: that would allow a buggy elaborator to manufacture an unrelated summary fact.
+        def proof_replay_lemma_summary_call_source_valid(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            position: Ast::Pos = trace.source_call_position
+            return false if trace.name == "" or trace.dependency == "" or trace.line == 0
+            return false if position.line != trace.line or position.offset == 0 or position.end_offset <= position.offset
+            owner_line: u32 = report.replay_owner_line
+            return false if owner_line == 4294967295
+            expected_call: Ast::Expr = Ast::Expr.Call(Ast::Expr.Invalid, [], [], position)
+            source_call: mutable Ast::Expr = Ast::Expr.Invalid
+            source_owner_line: mutable u32 = 0
+            matches: mutable usize = 0
+            owners: mutable usize = 0
+            return false if not proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, trace.name, owner_line, expected_call, &source_call, &source_owner_line, &matches, &owners, source_work, 0)
+            return false if matches != 1 or owners != 1 or source_owner_line == 0
+            match source_call:
+                Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), _, _, call_position):
+                    return false if not proof_replay_source_position_equal(call_position, position)
+                    return false if not proof_replay_mutable_local_text_compare_work_charge(callee_name, trace.dependency, source_work)
+                    return callee_name == trace.dependency
+                _:
+                    return false
+
         def proof_replay_lemma_summary_is_valid[@r](report: mutable ProofReport& @r, trace: ProofFactTrace, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
             return false if trace.kind != "lemma-summary" or trace.dependency == ""
             return false if trace.summary_bindings_start > report.traces.summary_names.count or trace.summary_bindings_count > report.traces.summary_names.count - trace.summary_bindings_start
             return false if trace.summary_bindings_start > report.traces.summary_values.count or trace.summary_bindings_count > report.traces.summary_values.count - trace.summary_bindings_start
             return false if trace.summary_requires_start > report.traces.summary_require_goal_ids.count or trace.summary_requires_count > report.traces.summary_require_goal_ids.count - trace.summary_requires_start
+            return false if not proof_replay_lemma_summary_call_source_valid(report, trace, validation_workspace.source_scan_work_used)
+            call_position: Ast::Pos = trace.source_call_position
             theorem_found: mutable bool = false
             theorem: mutable ProofTheoremSummary = ProofTheoremSummary{name: "", line: 0, parameters_start: 0, parameters_count: 0, requires_start: 0, requires_count: 0, ensures_start: 0, ensures_count: 0, decreases_start: 0, decreases_count: 0, proof_goals_start: 0, proof_goals_count: 0, recursive: false, verified: false, verification_reason: ""}
             return false if report.theorems.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
@@ -175,7 +379,7 @@ extend ElisaProof:
             return false if not proof_replay_summary_expr_repeat_charge_with_work(instance, theorem.parameters_count + 1, validation_workspace.source_scan_work_used)
             instance <- proof_replay_substitute_many(instance, substitution_names, substitution_values)
             return false if not proof_replay_summary_expr_equal_with_work(instance, trace.expression, validation_workspace.source_scan_work_used)
-            for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth, validation_workspace|:
+            for require_index in 0..<theorem.requires_count |require_index, theorem, report, trace, dependency_stack, dependency_depth, validation_workspace, call_position|:
                 required: mutable Ast::Expr = report.theorems.requires[theorem.requires_start + require_index]
                 return false if not proof_replay_summary_expr_repeat_charge_with_work(required, theorem.parameters_count + 1, validation_workspace.source_scan_work_used)
                 for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, trace, required|:
@@ -188,6 +392,9 @@ extend ElisaProof:
                 return false if sview_len(trace.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
                 validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(trace.name)
                 return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                return false if attempt.line != call_position.line or not proof_replay_source_position_equal(attempt.source_call_position, call_position)
+                require_certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
+                return false if not proof_replay_source_position_equal(require_certificate.source_call_position, call_position)
                 return false if not proof_replay_summary_expr_equal_with_work(attempt.goal, required, validation_workspace.source_scan_work_used)
                 return false if not (proof_replay_certificate_with_stack(report, report.certificates[attempt.certificate_index], attempt.certificate_index, dependency_stack, dependency_depth + 1, active_certificates, validation_workspace, structural_cache) can Global{Read,Write})
             return true

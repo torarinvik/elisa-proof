@@ -1,16 +1,263 @@
 # Small helpers factored from qualified_calls.elisa to keep source modules within the size cap.
 extend ElisaProof:
     private:
+        def proof_qualify_enum_source_work_charge(functions: mutable ProofFunctionTable&, amount: usize) -> bool:
+            if functions.lookup.module_resolution_work_exhausted:
+                return false
+            if functions.lookup.module_resolution_work_used > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - functions.lookup.module_resolution_work_used:
+                functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                functions.lookup.module_resolution_work_exhausted <- true
+                return false
+            functions.lookup.module_resolution_work_used <- functions.lookup.module_resolution_work_used + amount
+            return true
+
         def proof_qualified_owner_has_separator(owner: sview) -> bool:
             for offset in 0..<sview_len(owner):
                 return true if sview_at(owner, offset) == 58
             return false
 
-        def proof_function_parameter_named(functions: ProofFunctionTable&, row: usize, wanted: sview) -> bool:
-            return false if row >= functions.parameters.param_starts.count or row >= functions.parameters.param_counts.count
-            start: usize = functions.parameters.param_starts[row]
-            count: usize = functions.parameters.param_counts[row]
-            return false if start > functions.parameters.all_params.count or count > functions.parameters.all_params.count - start
+        def proof_function_parameter_named(functions: mutable ProofFunctionTable&, row: usize, wanted: sview) -> bool:
+            return true if row >= functions.parameters.metadata.param_starts.count or row >= functions.parameters.metadata.param_counts.count
+            start: usize = functions.parameters.metadata.param_starts[row]
+            count: usize = functions.parameters.metadata.param_counts[row]
+            return true if start > functions.parameters.metadata.all_params.count or count > functions.parameters.metadata.all_params.count - start
             for offset in 0..<count |offset, functions, start, wanted|:
-                return true if functions.parameters.all_params[start + offset] == wanted
+                parameter_name: sview = functions.parameters.metadata.all_params[start + offset]
+                return true if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(parameter_name) + sview_len(wanted))
+                return true if parameter_name == wanted
             return false
+
+        def proof_qualify_name_shadowed(functions: mutable ProofFunctionTable&, names: darray[sview]&, wanted: sview) -> bool:
+            for name in names |functions, wanted|:
+                return true if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(name) + sview_len(wanted))
+                return true if name == wanted
+            return false
+
+        def proof_qualify_enum_name_add(names: mutable darray[sview]&, name: sview, functions: mutable ProofFunctionTable&) -> bool:
+            return false if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(name))
+            return true if name == ""
+            for existing in names |name, functions|:
+                return false if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(existing) + sview_len(name))
+                return true if existing == name
+            names.push(name)
+            return true
+
+        def proof_qualify_enum_argument_names_charge(names: darray[sview]&, functions: mutable ProofFunctionTable&) -> bool:
+            for name in names |functions|:
+                return false if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(name))
+            return true
+
+        def proof_qualify_enum_names_union(left: darray[sview]&, right: darray[sview]&, functions: mutable ProofFunctionTable&) -> (complete: bool, names: darray[sview]):
+            names: mutable darray[sview] = []
+            for name in left |names, functions|:
+                return (false, names) if not proof_qualify_enum_name_add(&names, name, functions)
+            for name in right |names, functions|:
+                return (false, names) if not proof_qualify_enum_name_add(&names, name, functions)
+            return (true, names)
+
+        def proof_qualify_enum_names_intersection(left: darray[sview]&, right: darray[sview]&, functions: mutable ProofFunctionTable&) -> (complete: bool, names: darray[sview]):
+            names: mutable darray[sview] = []
+            for candidate in left |candidate, right, names, functions|:
+                present: mutable bool = false
+                for other in right |candidate, other, present, functions|:
+                    return (false, names) if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(candidate) + sview_len(other))
+                    present <- true if candidate == other
+                    break if present
+                return (false, names) if present and not proof_qualify_enum_name_add(&names, candidate, functions)
+            return (true, names)
+
+        # Comprehension filters use the compiler's expression-binding collector, which
+        # unions binders across operands. Keep this separate from branch path analysis.
+        def proof_qualify_enum_filter_binders(condition: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize) -> (complete: bool, names: darray[sview]):
+            names: mutable darray[sview] = []
+            complete: bool = proof_qualify_enum_filter_binders_add(condition, &names, functions, depth)
+            return (complete, names)
+
+        def proof_qualify_enum_filter_binders_add(condition: Ast::Expr, names: mutable darray[sview]&, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_qualify_enum_filter_binders_add(inner, names, functions, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    return false if not proof_qualify_enum_filter_binders_add(left, names, functions, depth + 1)
+                    if operator == TokenKind.Is or operator == TokenKind.As:
+                        return false if not proof_qualify_enum_filter_pattern_supported(right, functions, depth + 1)
+                        return proof_qualify_enum_pattern_target_names(right, names, functions, depth + 1)
+                    return proof_qualify_enum_filter_binders_add(right, names, functions, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    bare_variant_callee: bool = match callee:
+                        Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _): true
+                        _: false
+                    variant_filter: mutable bool = bare_variant_callee and arguments.count > 0
+                    for argument in arguments |variant_filter, functions|:
+                        return false if not proof_qualify_enum_source_work_charge(functions, 1)
+                        match argument:
+                            Ast::Expr.Ident(_, _):
+                                pass
+                            _:
+                                variant_filter <- false
+                                break
+                    if variant_filter:
+                        return false if not proof_qualify_enum_filter_pattern_supported(condition, functions, depth + 1)
+                        return proof_qualify_enum_pattern_target_names(condition, names, functions, depth + 1)
+                    return false if not proof_qualify_enum_filter_binders_add(callee, names, functions, depth + 1)
+                    for argument in arguments |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(argument, names, functions, depth + 1)
+                    return true
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |candidate, functions, depth|:
+                        return false if not proof_qualify_enum_source_work_charge(functions, 1)
+                        for capture in candidate.captures |capture, functions, depth|:
+                            return false if not proof_qualify_enum_filter_binders_add(capture, names, functions, depth + 1)
+                    for argument in arguments |argument, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(argument, names, functions, depth + 1)
+                    return true
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _):
+                    return proof_qualify_enum_filter_binders_add(object, names, functions, depth + 1)
+                Ast::Expr.RegionNew(object, _, _):
+                    return proof_qualify_enum_filter_binders_add(object, names, functions, depth + 1)
+                Ast::Expr.Index(object, index, _):
+                    return false if not proof_qualify_enum_filter_binders_add(object, names, functions, depth + 1)
+                    return proof_qualify_enum_filter_binders_add(index, names, functions, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_qualify_enum_filter_binders_add(object, names, functions, depth + 1)
+                    for argument in arguments |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(argument, names, functions, depth + 1)
+                    return true
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_qualify_enum_filter_binders_add(object, names, functions, depth + 1)
+                    return false if not proof_qualify_enum_filter_binders_add(low, names, functions, depth + 1)
+                    return proof_qualify_enum_filter_binders_add(high, names, functions, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(element, names, functions, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(entry.key, names, functions, depth + 1)
+                        return false if not proof_qualify_enum_filter_binders_add(entry.value, names, functions, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(field.value, names, functions, depth + 1)
+                    return true
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_qualify_enum_filter_binders_add(base, names, functions, depth + 1)
+                    for field in fields |names, functions, depth|:
+                        return false if not proof_qualify_enum_filter_binders_add(field.value, names, functions, depth + 1)
+                    return true
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_qualify_enum_filter_binders_add(condition, names, functions, depth + 1)
+                    return false if not proof_qualify_enum_filter_binders_add(then_expression, names, functions, depth + 1)
+                    return proof_qualify_enum_filter_binders_add(else_expression, names, functions, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return false if not proof_qualify_enum_filter_binders_add(base, names, functions, depth + 1)
+                    return proof_qualify_enum_filter_binders_add(predicate, names, functions, depth + 1)
+                Ast::Expr.GetElse(guarded, _, _) | Ast::Expr.Comprehension(_, guarded, _, _, _) | Ast::Expr.Match(guarded, _, _) | Ast::Expr.Catch(guarded, _, _):
+                    return proof_qualify_enum_filter_binders_add(guarded, names, functions, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return true
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
+                    return true
+                _:
+                    return false
+
+        def proof_qualify_enum_filter_pattern_supported(target: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
+            return false if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
+            match target:
+                Ast::Expr.Ident(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Absent:
+                    return true
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |functions, depth|:
+                        return false if not proof_qualify_enum_filter_pattern_supported(argument, functions, depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _):
+                    for element in elements |functions, depth|:
+                        return false if not proof_qualify_enum_filter_pattern_supported(element, functions, depth + 1)
+                    return true
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |functions, depth|:
+                        return false if not proof_qualify_enum_filter_pattern_supported(field.value, functions, depth + 1)
+                    return true
+                _:
+                    return false
+
+        # Return binders guaranteed on each Boolean outcome. Short-circuit joins intersect
+        # bindings that arrive along multiple paths, matching source condition-flow semantics.
+        def proof_qualify_enum_condition_paths(condition: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, functions: mutable ProofFunctionTable&, depth: usize) -> (complete: bool, when_true: darray[sview], when_false: darray[sview]):
+            empty_true: darray[sview] = []
+            empty_false: darray[sview] = []
+            return (false, empty_true, empty_false) if depth >= PROOF_QUALIFIED_CONSTANT_DEPTH_LIMIT or not proof_qualify_enum_source_work_charge(functions, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_qualify_enum_condition_paths(inner, annotations, functions, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    nested: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(inner, annotations, functions, depth + 1)
+                    return (false, empty_true, empty_false) if not nested.complete
+                    return (true, nested.when_false, nested.when_true)
+                Ast::Expr.Binary(left, TokenKind.And, right, _) | Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(left, annotations, functions, depth + 1)
+                    return (false, empty_true, empty_false) if not left_paths.complete
+                    right_paths: (complete: bool, when_true: darray[sview], when_false: darray[sview]) = proof_qualify_enum_condition_paths(right, annotations, functions, depth + 1)
+                    return (false, empty_true, empty_false) if not right_paths.complete
+                    match condition:
+                        Ast::Expr.Binary(_, TokenKind.And, _, _):
+                            true_names: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(left_paths.when_true, right_paths.when_true, functions)
+                            return (false, empty_true, empty_false) if not true_names.complete
+                            false_second: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(left_paths.when_true, right_paths.when_false, functions)
+                            return (false, empty_true, empty_false) if not false_second.complete
+                            false_names: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_intersection(left_paths.when_false, false_second.names, functions)
+                            return (false, empty_true, empty_false) if not false_names.complete
+                            return (true, true_names.names, false_names.names)
+                        _:
+                            true_second: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(left_paths.when_false, right_paths.when_true, functions)
+                            return (false, empty_true, empty_false) if not true_second.complete
+                            true_names: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_intersection(left_paths.when_true, true_second.names, functions)
+                            return (false, empty_true, empty_false) if not true_names.complete
+                            false_names: (complete: bool, names: darray[sview]) = proof_qualify_enum_names_union(left_paths.when_false, right_paths.when_false, functions)
+                            return (false, empty_true, empty_false) if not false_names.complete
+                            return (true, true_names.names, false_names.names)
+                Ast::Expr.Binary(_, TokenKind.Is, target, position):
+                    target_names: mutable darray[sview] = []
+                    return (false, empty_true, empty_false) if not proof_qualify_enum_pattern_target_names(target, &target_names, functions, depth + 1)
+                    match target:
+                        Ast::Expr.Field(_, _, target_position):
+                            for annotation in annotations |annotation, target_names, position, target_position, functions|:
+                                return (false, empty_true, empty_false) if not proof_qualify_enum_source_work_charge(functions, 1 + sview_len(annotation.owner) + sview_len(annotation.name))
+                                if annotation.name == "__is_variant_alias" and (annotation.line == position.line or annotation.line == target_position.line):
+                                    return (false, empty_true, empty_false) if annotation.owner == "" or not proof_qualify_enum_name_add(&target_names, annotation.owner, functions)
+                        _:
+                            pass
+                    return (true, target_names, empty_false)
+                Ast::Expr.Binary(_, TokenKind.As, target, _):
+                    target_names: mutable darray[sview] = []
+                    return (false, empty_true, empty_false) if not proof_qualify_enum_pattern_target_names(target, &target_names, functions, depth + 1)
+                    return (true, target_names, empty_false)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    bare_variant_callee: bool = match callee:
+                        Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _): true
+                        _: false
+                    variant_filter: mutable bool = bare_variant_callee and arguments.count > 0
+                    for argument in arguments |variant_filter, functions|:
+                        return (false, empty_true, empty_false) if not proof_qualify_enum_source_work_charge(functions, 1)
+                        match argument:
+                            Ast::Expr.Ident(_, _):
+                                pass
+                            _:
+                                variant_filter <- false
+                    if variant_filter:
+                        names: mutable darray[sview] = []
+                        for argument in arguments |names, functions|:
+                            match argument:
+                                Ast::Expr.Ident(name, _):
+                                    return (false, empty_true, empty_false) if not proof_qualify_enum_name_add(&names, name, functions)
+                                _:
+                                    pass
+                        return (true, names, empty_false)
+                Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent | Ast::Expr.Invalid:
+                    pass
+                Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.Binary(_, _, _, _) | Ast::Expr.Unary(_, _, _) | Ast::Expr.Move(_, _) | Ast::Expr.RegionNew(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _) | Ast::Expr.Slice(_, _, _, _) | Ast::Expr.Refinement(_, _, _) | Ast::Expr.Array(_, _) | Ast::Expr.Tuple(_, _) | Ast::Expr.SetLit(_, _) | Ast::Expr.DictLit(_, _) | Ast::Expr.Construct(_, _, _) | Ast::Expr.RecordUpdate(_, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _) | Ast::Expr.If(_, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.Comprehension(_, _, _, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    pass
+                _:
+                    return (false, empty_true, empty_false)
+            return (true, empty_true, empty_false)

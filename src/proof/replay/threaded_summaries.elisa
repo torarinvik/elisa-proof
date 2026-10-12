@@ -33,12 +33,12 @@ extend ElisaProof:
             return true
 
         # The unique source declaration of the callee and whether it may thread.
-        def proof_replay_thread_callee_find_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_thread_callee_find_with_work(declarations: darray[Ast::Decl]&, report: mutable ProofReport&, name: sview, line: u32, found: mutable usize&, safe: mutable bool&, mutable_slots: mutable darray[usize]&, work: mutable usize&, depth: usize) -> bool:
             if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
                 found <- 2
                 return false
             work <- work + declarations.count
-            for declaration in declarations |name, line, found, safe, mutable_slots, work, depth|:
+            for declaration in declarations |name, line, found, safe, mutable_slots, work, depth, report|:
                 match declaration:
                     Ast::Decl.Func(candidate, parameters, return_type, _, effects, _, position):
                         return false if sview_len(candidate) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
@@ -54,51 +54,291 @@ extend ElisaProof:
                                 work <- work + sview_len(effect)
                                 safe <- false if sview_starts_with(effect, "Unsafe")
                             if return_type is declared:
-                                return false if not proof_replay_summary_expr_charge_with_work(declared, work)
-                                safe <- false if proof_resource_is_reference_type(declared)
+                                return_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(declared, position.line, report, work, 0)
+                                return_reference_free: bool = proof_type_is_reference_free_with_work(declared, report.source_declarations, report.source_annotations, 0, work)
+                                return_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(declared, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, position.line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, work)
+                                return_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(declared, report.source_declarations, 0, work)
+                                return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                safe <- false if return_has_generic or not return_reference_free or return_markers.reference or not return_markers.complete or return_borrows_storage
                             return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                             work <- work + parameters.count
                             for index in 0..<parameters.count |index, parameters, safe, mutable_slots, work|:
                                 return false if sview_len(parameters[index].name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                                 work <- work + sview_len(parameters[index].name)
-                                return false if not proof_replay_summary_expr_charge_with_work(parameters[index].type_expression, work)
-                                continue if not proof_resource_is_reference_type(parameters[index].type_expression)
-                                return false if not proof_replay_summary_expr_charge_with_work(parameters[index].type_expression, work)
-                                safe <- false if not proof_resource_is_mutable_reference_type(parameters[index].type_expression)
+                                parameter_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(parameters[index].type_expression, position.line, report, work, 0)
+                                parameter_markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(parameters[index].type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, position.line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, work)
+                                parameter_storage_type: Ast::Expr = proof_type_strip_reference(parameters[index].type_expression, 0)
+                                parameter_storage_reference_free: bool = proof_type_is_reference_free_with_work(parameter_storage_type, report.source_declarations, report.source_annotations, 0, work)
+                                parameter_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(parameter_storage_type, report.source_declarations, 0, work)
+                                return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                safe <- false if parameter_has_generic
+                                safe <- false if not parameter_storage_reference_free or parameter_borrows_storage
+                                continue if not parameter_markers.reference
+                                safe <- false if not parameter_markers.complete or not parameter_markers.mutable_reference
                                 mutable_slots.push(index)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_thread_callee_find_with_work(nested, name, line, found, safe, mutable_slots, work, depth + 1)
+                        return false if not proof_replay_thread_callee_find_with_work(nested, report, name, line, found, safe, mutable_slots, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        found <- 2
+                        return false
                     _:
                         pass
             return true
 
-        # Declarations of `local_name` in an owner body: (count, any of them a reference).
-        def proof_replay_thread_local_declarations(body: darray[Ast::Stmt]&, local_name: sview, count: mutable usize&, reference: mutable bool&, depth: usize) -> void:
-            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
+        # Without an explicit type, only obvious scalar literals and their parenthesized forms
+        # establish a non-reference initializer. Unknown expressions fail closed.
+        def proof_replay_thread_inferred_initializer_may_reference(expression: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            source_work <- source_work + 1
+            match expression:
+                Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_thread_inferred_initializer_may_reference(inner, source_work, depth + 1)
+                _:
+                    return true
+
+        # Inspect nested expression scopes too: calls can occur in value blocks, matches,
+        # comprehensions, and recovery expressions inside an otherwise ordinary statement.
+        def proof_replay_thread_expression_scopes(expression: Ast::Expr, local_name: sview, report: mutable ProofReport&, count: mutable usize&, reference: mutable bool&, source_work: mutable usize&, depth: usize) -> void:
+            return if reference
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
                 count <- 2
                 reference <- true
                 return
-            for statement in body |local_name, count, reference, depth|:
+            source_work <- source_work + 1
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    proof_replay_thread_expression_scopes(inner, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Is:
+                        count <- 2
+                        reference <- true
+                        return
+                    proof_replay_thread_expression_scopes(left, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(right, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    proof_replay_thread_expression_scopes(left, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(right, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_replay_thread_expression_scopes(callee, local_name, report, count, reference, source_work, depth + 1)
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or arguments.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + arguments.count
+                    for argument in arguments |argument, local_name, report, count, reference, source_work, depth|:
+                        proof_replay_thread_expression_scopes(argument, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Field(base, _, _) | Ast::Expr.Scope(base, _, _):
+                    proof_replay_thread_expression_scopes(base, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Slice(base, low, high, _):
+                    proof_replay_thread_expression_scopes(base, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(low, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(high, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.IndexN(base, elements, _):
+                    proof_replay_thread_expression_scopes(base, local_name, report, count, reference, source_work, depth + 1)
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or elements.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + elements.count
+                    for element in elements |element, local_name, report, count, reference, source_work, depth|:
+                        proof_replay_thread_expression_scopes(element, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or elements.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + elements.count
+                    for element in elements |element, local_name, report, count, reference, source_work, depth|:
+                        proof_replay_thread_expression_scopes(element, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or entries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + entries.count
+                    for entry in entries |entry, local_name, report, count, reference, source_work, depth|:
+                        proof_replay_thread_expression_scopes(entry.key, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_expression_scopes(entry.value, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_replay_thread_expression_scopes(base, local_name, report, count, reference, source_work, depth + 1)
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or fields.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + fields.count
+                    for field in fields |field, local_name, report, count, reference, source_work, depth|:
+                        proof_replay_thread_expression_scopes(field.value, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    proof_replay_thread_expression_scopes(condition, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(yes, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(no, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Comprehension(name, iterable, condition, value, _):
+                    if not proof_replay_thread_name_compare_work_charge(name, local_name, source_work):
+                        count <- 2
+                        reference <- true
+                        return
+                    reference <- true if name == local_name
+                    proof_replay_thread_expression_scopes(iterable, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(condition, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Match(value, arms, _) | Ast::Expr.Catch(value, arms, _):
+                    proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + arms.count
+                    for arm in arms |arm, local_name, report, count, reference, source_work, depth|:
+                        bindings: mutable darray[sview] = []
+                        if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &bindings, source_work, depth + 1):
+                            count <- 2
+                            reference <- true
+                            return
+                        for binding in bindings |binding, local_name, count, reference, source_work|:
+                            if not proof_replay_thread_name_compare_work_charge(binding, local_name, source_work):
+                                count <- 2
+                                reference <- true
+                                return
+                            if binding == local_name:
+                                reference <- true
+                                return
+                        proof_replay_thread_expression_scopes(arm.guard, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_local_declarations(arm.body, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.GetElse(value, recovery, _):
+                    proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_local_declarations(recovery, local_name, report, count, reference, source_work, depth + 1)
+                Ast::Expr.Block(nested, value, captures, _):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or captures.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                        count <- 2
+                        reference <- true
+                        return
+                    source_work <- source_work + captures.count
+                    for capture in captures |capture, local_name, count, reference, source_work|:
+                        if not proof_replay_thread_name_compare_work_charge(capture, local_name, source_work):
+                            count <- 2
+                            reference <- true
+                            return
+                        reference <- true if capture == local_name
+                    proof_replay_thread_local_declarations(nested, local_name, report, count, reference, source_work, depth + 1)
+                    proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                _:
+                    count <- 2
+                    reference <- true
+
+        # Declarations of `local_name` in an owner body: (count, any of them a reference).
+        def proof_replay_thread_local_declarations(body: darray[Ast::Stmt]&, local_name: sview, report: mutable ProofReport&, count: mutable usize&, reference: mutable bool&, source_work: mutable usize&, depth: usize) -> void:
+            return if reference
+            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or body.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                count <- 2
+                reference <- true
+                return
+            source_work <- source_work + body.count
+            for statement in body |local_name, count, reference, source_work, depth|:
+                return if reference
                 match statement:
                     Ast::Stmt.VarDecl(name, type_expression, initializer, _):
+                        if not proof_replay_thread_name_compare_work_charge(name, local_name, source_work):
+                            count <- 2
+                            reference <- true
+                            return
                         if name == local_name:
                             count <- count + 1
-                            reference <- true if proof_resource_is_reference_type(type_expression)
-                            match initializer:
-                                Ast::Expr.Unary(TokenKind.Ampersand, _, _):
-                                    reference <- true
+                            inferred_reference: bool = false
+                            match type_expression:
+                                Ast::Expr.Absent:
+                                    inferred_reference <- proof_replay_thread_inferred_initializer_may_reference(initializer, source_work, 0)
                                 _:
-                                    pass
-                    Ast::Stmt.If(_, yes, no, _):
-                        proof_replay_thread_local_declarations(yes, local_name, count, reference, depth + 1)
-                        proof_replay_thread_local_declarations(no, local_name, count, reference, depth + 1)
-                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
-                        proof_replay_thread_local_declarations(nested, local_name, count, reference, depth + 1)
-                    Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |local_name, count, reference, depth|:
-                            proof_replay_thread_local_declarations(arm.body, local_name, count, reference, depth + 1)
-                    Ast::Stmt.Expr(Ast::Expr.Block(nested, _, _, _), _) | Ast::Stmt.Return(Ast::Expr.Block(nested, _, _, _), _):
-                        proof_replay_thread_local_declarations(nested, local_name, count, reference, depth + 1)
+                                    type_has_generic: bool = proof_replay_thread_type_mentions_owner_generic_with_work(type_expression, report.replay_owner_line, report, source_work, 0)
+                                    markers: (reference: bool, mutable_reference: bool, mutable: bool, complete: bool) = proof_resource_type_marker_summary_for_owner_with_work(type_expression, report.source_declarations, report.source_generic_param_lines, report.source_generic_param_names, report.replay_owner_line, report.source_effect_index, report.source_generic_params_valid and report.source_generic_param_lines.count == report.source_generic_param_names.count, source_work)
+                                    type_reference_free: bool = proof_type_is_reference_free_with_work(type_expression, report.source_declarations, report.source_annotations, 0, source_work)
+                                    type_borrows_storage: bool = proof_type_contains_borrowed_view_with_work(type_expression, report.source_declarations, 0, source_work)
+                                    reference <- true if type_has_generic or not type_reference_free or markers.reference or not markers.complete or type_borrows_storage
+                            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                count <- 2
+                                reference <- true
+                                return
+                            reference <- true if inferred_reference
+                        proof_replay_thread_expression_scopes(initializer, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.Assign(target, operator, value, _):
+                        if operator == TokenKind.Assign:
+                            match target:
+                                Ast::Expr.Ident(name, _):
+                                    if not proof_replay_thread_name_compare_work_charge(name, local_name, source_work):
+                                        count <- 2
+                                        reference <- true
+                                        return
+                                    if name == local_name:
+                                        reference <- true
+                                        return
+                                _:
+                                    reference <- true
+                                    return
+                        proof_replay_thread_expression_scopes(target, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        proof_replay_thread_expression_scopes(condition, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_local_declarations(yes, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_local_declarations(no, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        proof_replay_thread_expression_scopes(condition, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_local_declarations(nested, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or variables.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                            count <- 2
+                            reference <- true
+                            return
+                        source_work <- source_work + variables.count
+                        for variable in variables |variable, local_name, count, reference, source_work|:
+                            if not proof_replay_thread_name_compare_work_charge(variable, local_name, source_work):
+                                count <- 2
+                                reference <- true
+                                return
+                            if variable == local_name:
+                                reference <- true
+                                return
+                        proof_replay_thread_expression_scopes(iterable, local_name, report, count, reference, source_work, depth + 1)
+                        proof_replay_thread_local_declarations(nested, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.Match(value, arms, _):
+                        proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                        if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                            count <- 2
+                            reference <- true
+                            return
+                        source_work <- source_work + arms.count
+                        for arm in arms |local_name, count, reference, source_work, depth|:
+                            pattern_bindings: mutable darray[sview] = []
+                            if not proof_replay_call_pattern_bindings_with_work(arm.pattern, &pattern_bindings, source_work, depth + 1):
+                                count <- 2
+                                reference <- true
+                                return
+                            for pattern_binding in pattern_bindings |pattern_binding, local_name, count, reference, source_work|:
+                                if not proof_replay_thread_name_compare_work_charge(pattern_binding, local_name, source_work):
+                                    count <- 2
+                                    reference <- true
+                                    return
+                                if pattern_binding == local_name:
+                                    reference <- true
+                                    return
+                            proof_replay_thread_local_declarations(arm.body, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.Block(_, _, binding, nested, _):
+                        if not proof_replay_thread_name_compare_work_charge(binding, local_name, source_work):
+                            count <- 2
+                            reference <- true
+                            return
+                        if binding != "" and binding == local_name:
+                            reference <- true
+                            return
+                        proof_replay_thread_local_declarations(nested, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
+                        proof_replay_thread_expression_scopes(value, local_name, report, count, reference, source_work, depth + 1)
+                    Ast::Stmt.Invalid:
+                        count <- 2
+                        reference <- true
+                        return
                     _:
                         pass
 
@@ -156,7 +396,7 @@ extend ElisaProof:
             found: mutable usize = 0
             safe: mutable bool = false
             mutable_slots: mutable darray[usize] = []
-            return invalid if not proof_replay_thread_callee_find_with_work(report.source_declarations, summary.name, summary.line, &found, &safe, &mutable_slots, source_work, 0)
+            return invalid if not proof_replay_thread_callee_find_with_work(report.source_declarations, report, summary.name, summary.line, &found, &safe, &mutable_slots, source_work, 0)
             return invalid if found != 1 or not safe or mutable_slots.count != count
             return invalid if any region_line in report.source_region_param_lines where region_line == summary.line
             arguments: mutable darray[Ast::Expr] = []
@@ -168,10 +408,6 @@ extend ElisaProof:
                     return invalid
             body: mutable darray[Ast::Stmt] = []
             return invalid if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
-            body_cost: mutable usize = 0
-            return invalid if not proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)
-            return invalid if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / count
-            source_work <- source_work + body_cost * count
             plan: mutable ProofReplayThreading = proof_replay_threading_none(true)
             for index in 0..<count |index, mutable_slots, arguments, summary, report, trace, first, body, plan, invalid|:
                 slot: usize = mutable_slots[index]
@@ -184,8 +420,8 @@ extend ElisaProof:
                 return invalid if duplicate_local
                 declarations: mutable usize = 0
                 reference_local: mutable bool = false
-                proof_replay_thread_local_declarations(body, local_name, &declarations, &reference_local, 0)
-                return invalid if declarations == 0 or reference_local
+                proof_replay_thread_local_declarations(body, local_name, report, &declarations, &reference_local, source_work, 0)
+                return invalid if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or declarations == 0 or reference_local
                 for other in 0..<arguments.count |other, slot, arguments, local_name, invalid|:
                     return invalid if other != slot and proof_expr_mentions_name(arguments[other], local_name)
                 match report.traces.summary_values[first + index]:
@@ -234,113 +470,3 @@ extend ElisaProof:
                         _:
                             return false
             return true
-
-        # `p[0]` or a bare `p`: the referent of a scalar reference place, or "".
-        def proof_replay_thread_place(expression: Ast::Expr) -> sview:
-            match expression:
-                Ast::Expr.Index(object, index, _):
-                    match index:
-                        Ast::Expr.IntLit(offset, _):
-                            return proof_ident_name(object) if offset == 0
-                            return ""
-                        _:
-                            return ""
-                Ast::Expr.Ident(name, _):
-                    return name
-                _:
-                    return ""
-
-        # Read each threaded parameter's place as its exit symbol (or as the parameter, the entry
-        # value, when `pre`), and `old(place)` as the parameter. Any other mention is invalid.
-        def proof_replay_thread_rewrite(expression: Ast::Expr, parameters: darray[sview]&, symbols: darray[sview]&, pre: bool, valid: mutable bool&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
-            mentioned: mutable bool = false
-            for parameter in parameters |expression, mentioned|:
-                mentioned <- true if proof_expr_mentions_name(expression, parameter)
-            return expression if not mentioned
-            if depth >= PROOF_REPLAY_THREAD_DEPTH_LIMIT:
-                valid <- false
-                return expression
-            place: sview = proof_replay_thread_place(expression)
-            for index in 0..<parameters.count |index, parameters, symbols, place, pre, expression|:
-                if parameters[index] == place and index < symbols.count:
-                    return Ast::Expr.Ident(place, Ast::expr_pos(expression)) if pre
-                    return Ast::Expr.Ident(symbols[index], Ast::expr_pos(expression))
-            match expression:
-                Ast::Expr.Call(callee, arguments, argument_names, position):
-                    if proof_ident_name(callee) == "old":
-                        if not pre and arguments.count == 1:
-                            entry: sview = proof_replay_thread_place(arguments[0])
-                            return Ast::Expr.Ident(entry, position) if entry != "" and (any parameter in parameters where parameter == entry)
-                        valid <- false
-                        return expression
-                    rewritten: mutable darray[Ast::Expr] = []
-                    for argument in arguments |rewritten, parameters, symbols, pre, valid, depth|:
-                        rewritten.push(proof_replay_thread_rewrite(argument, parameters, symbols, pre, valid, depth + 1))
-                    return Ast::Expr.Call(proof_replay_thread_rewrite(callee, parameters, symbols, pre, valid, depth + 1), rewritten, argument_names, position)
-                Ast::Expr.Paren(inner, position):
-                    return Ast::Expr.Paren(proof_replay_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
-                Ast::Expr.Unary(operator, inner, position):
-                    return Ast::Expr.Unary(operator, proof_replay_thread_rewrite(inner, parameters, symbols, pre, valid, depth + 1), position)
-                Ast::Expr.Binary(left, operator, right, position):
-                    return Ast::Expr.Binary(proof_replay_thread_rewrite(left, parameters, symbols, pre, valid, depth + 1), operator, proof_replay_thread_rewrite(right, parameters, symbols, pre, valid, depth + 1), position)
-                Ast::Expr.If(condition, then_expression, else_expression, position):
-                    return Ast::Expr.If(proof_replay_thread_rewrite(condition, parameters, symbols, pre, valid, depth + 1), proof_replay_thread_rewrite(then_expression, parameters, symbols, pre, valid, depth + 1), proof_replay_thread_rewrite(else_expression, parameters, symbols, pre, valid, depth + 1), position)
-                _:
-                    valid <- false
-                    return expression
-
-        def proof_replay_thread_contract(expression: Ast::Expr, threading: ProofReplayThreading&, pre: bool) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
-            return expression if threading.symbols.count == 0
-            valid: mutable bool = true
-            rewritten: Ast::Expr = proof_replay_thread_rewrite(expression, threading.parameters, threading.symbols, pre, &valid, 0)
-            return rewritten if valid
-            return Ast::Expr.Invalid
-
-        # The source call of a statement that may thread `local_name`: `f(.., &x, ..)` or `x <- f(..)`.
-        def proof_replay_thread_statement_call(statement: Ast::Stmt, local_name: sview) -> Ast::Expr:
-            match statement:
-                Ast::Stmt.Expr(expression, _):
-                    return proof_strip_parens(expression)
-                Ast::Stmt.Assign(target, operator, value, _):
-                    return Ast::Expr.Invalid if operator != TokenKind.LArrow or proof_ident_name(target) != local_name
-                    return proof_strip_parens(value)
-                _:
-                    return Ast::Expr.Invalid
-
-        # Like a resymbolized self-update, a call that threads `local_name` leaves the local's own
-        # symbol denoting the value it had: its new value is the call's exit symbol. Only a summary
-        # of that very call whose threading validates names the local.
-        def proof_replay_thread_call_resymbolized(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview) -> bool:
-            source_work: mutable usize = 0
-            return proof_replay_thread_call_resymbolized_with_work(report, owner, statement, local_name, &source_work)
-
-        def proof_replay_thread_call_resymbolized_with_work(report: ProofReport&, owner: sview, statement: Ast::Stmt, local_name: sview, source_work: mutable usize&) -> bool:
-            return false if not proof_replay_mutable_local_statement_work_charge(statement, source_work, 0)
-            call: Ast::Expr = proof_replay_thread_statement_call(statement, local_name)
-            callee_name: mutable sview = ""
-            arguments: mutable darray[Ast::Expr] = []
-            match call:
-                Ast::Expr.Call(callee, call_arguments, _, _):
-                    callee_name <- proof_callable_name(callee)
-                    arguments.extend(call_arguments)
-                _:
-                    return false
-            return false if callee_name == ""
-            return false if not proof_replay_summary_expr_charge_with_work(call, source_work)
-            return false if not proof_replay_mutable_local_trace_work_charge(report, source_work, 1)
-            line: u32 = Ast::expr_pos(call).line
-            for candidate in report.traces.records |candidate, report, owner, local_name, call, callee_name, arguments, line, source_work|:
-                continue if candidate.kind != "function-summary" or candidate.name != owner or candidate.line != line or candidate.dependency != callee_name
-                continue if proof_replay_trace_owner_function_line_with_work(report, candidate.name, candidate.line, source_work) != report.replay_owner_line
-                return false if report.executables.summaries.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
-                source_work <- source_work + report.executables.summaries.count
-                for summary in report.executables.summaries |summary, candidate, report, call, arguments, local_name, source_work|:
-                    return false if sview_len(summary.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
-                    source_work <- source_work + sview_len(summary.name)
-                    continue if summary.name != candidate.dependency or (candidate.owner_line != 0 and summary.line != candidate.owner_line)
-                    continue if not summary.verified
-                    threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, candidate, summary, call, source_work)
-                    continue if not threading.valid
-                    for slot in threading.slots |slot, arguments, local_name|:
-                        return true if slot < arguments.count and proof_replay_thread_argument_local(arguments[slot]) == local_name
-            return false

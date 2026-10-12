@@ -93,15 +93,16 @@ extend ElisaProof:
             return false if sview_len("result") > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - validation_workspace.source_scan_work_used
             validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len("result")
             return false if report.traces.summary_names[trace.summary_bindings_start + summary.parameters_count] != "result"
-            source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_with_work(report, trace, summary, validation_workspace.source_scan_work_used)
+            source_call: (known: bool, call: Ast::Expr) = proof_replay_summary_source_call_at_with_cache(report, trace, summary, 0, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
             return false if not source_call.known
+            return false if not proof_replay_source_position_equal(Ast::expr_pos(source_call.call), trace.source_call_position)
             # Independently recover the caller's actual source call and pre-state. The
             # producer's resolved local value is not itself evidence that this call occurred.
-            return false if not proof_replay_summary_direct_call_source_site_with_work(report, trace, source_call.call, validation_workspace.source_scan_work_used)
+            return false if not proof_replay_summary_direct_call_source_site_at_with_cache(report, trace, source_call.call, 0, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
             # A threaded call's exclusive `&` arguments are matched as the locals they lend.
             threading: ProofReplayThreading = proof_replay_summary_threading_with_work(report, trace, summary, source_call.call, validation_workspace.source_scan_work_used)
             return false if not threading.valid
-            return false if not proof_replay_summary_call_arguments_match(report, trace, summary, proof_replay_thread_call_arguments(source_call.call, threading), validation_workspace.source_scan_work_used)
+            return false if not proof_replay_summary_call_arguments_match_with_cache(report, trace, summary, proof_replay_thread_call_arguments(source_call.call, threading), validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
             match source_call.call:
                 Ast::Expr.Call(callee, _, _, _):
                     return false if not proof_replay_summary_owner_matches_call_with_work(report, trace, summary, callee, validation_workspace.source_scan_work_used)
@@ -180,8 +181,10 @@ extend ElisaProof:
             # Each precondition was certified where the call is evaluated. A goal with the same
             # text proven at another program point is not evidence for this call.
             call_line: u32 = Ast::expr_pos(source_call.call).line
+            call_position: Ast::Pos = Ast::expr_pos(source_call.call)
             return false if summary.requires_count > 0 and call_line == 0
-            for require_index in 0..<summary.requires_count |require_index, summary, report, trace, dependency_stack, dependency_depth, validation_workspace, call_line, threading|:
+            return false if summary.requires_count > 0 and (call_position.offset == 0 or call_position.end_offset <= call_position.offset)
+            for require_index in 0..<summary.requires_count |require_index, summary, report, trace, dependency_stack, dependency_depth, validation_workspace, call_line, threading, structural_cache|:
                 required_source: Ast::Expr = report.executables.requires[summary.requires_start + require_index]
                 return false if not proof_replay_summary_expr_repeat_charge_with_work(required_source, threading.symbols.count + 1, validation_workspace.source_scan_work_used)
                 required: mutable Ast::Expr = proof_replay_thread_contract(required_source, threading, true)
@@ -197,9 +200,11 @@ extend ElisaProof:
                 validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + sview_len(trace.name)
                 return false if attempt.name != trace.name or not attempt.proven or not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
                 return false if attempt.line != call_line
+                require_certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
+                return false if not proof_replay_source_position_equal(attempt.source_call_position, call_position) or not proof_replay_source_position_equal(require_certificate.source_call_position, call_position)
                 matches_required: mutable bool = proof_replay_summary_expr_equal_with_work(attempt.goal, required, validation_workspace.source_scan_work_used)
                 if not matches_required:
-                    rebound_goal: Ast::Expr = proof_replay_literal_rebound_goal_with_work(report, trace.name, attempt.goal, call_line, validation_workspace.source_scan_work_used)
+                    rebound_goal: Ast::Expr = proof_replay_literal_rebound_goal_with_cache(report, trace.name, attempt.goal, call_line, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls)
                     return false if proof_replay_expr_is_invalid(rebound_goal)
                     matches_required <- proof_replay_summary_expr_equal_with_work(rebound_goal, required, validation_workspace.source_scan_work_used)
                 return false if not matches_required
@@ -399,7 +404,7 @@ extend ElisaProof:
             if trace.kind == "required-reference-parameter":
                 return (proof_replay_required_reference_trace_valid_with_work(report, trace, validation_workspace.source_scan_work_used) can Global{Read,Write})
             if proof_replay_boundary_trace_kind(trace.kind):
-                return (proof_replay_boundary_trace_shape_valid_with_work(report, trace, validation_workspace.source_scan_work_used) can Global{Read,Write})
+                return (proof_replay_boundary_trace_shape_valid_with_cache(report, trace, validation_workspace.source_scan_work_used, structural_cache) can Global{Read,Write})
             return true if trace.kind == "proof-step" and proof_replay_pop_scalar_snapshot_source(report, trace)
             validation_workspace.trace_stack_touched <- true if trace.kind == "lemma-summary" or trace.kind == "function-summary"
             if trace.kind == "lemma-summary":
@@ -491,7 +496,7 @@ extend ElisaProof:
             if trace.kind == "required-reference-parameter":
                 return (proof_replay_required_reference_trace_valid_with_work(report, trace, validation_workspace.source_scan_work_used) can Global{Read,Write})
             if proof_replay_boundary_trace_kind(trace.kind):
-                return (proof_replay_boundary_trace_shape_valid_with_work(report, trace, validation_workspace.source_scan_work_used) can Global{Read,Write})
+                return (proof_replay_boundary_trace_shape_valid_with_cache(report, trace, validation_workspace.source_scan_work_used, structural_cache) can Global{Read,Write})
             return true if trace.kind == "proof-step" and proof_replay_pop_scalar_snapshot_source(report, trace)
             validation_workspace.trace_stack_touched <- true if trace.kind == "lemma-summary" or trace.kind == "function-summary"
             if trace.kind == "lemma-summary":

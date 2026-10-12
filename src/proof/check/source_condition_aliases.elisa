@@ -1,0 +1,121 @@
+# Path-sensitive aliases for short-circuit conditions and branch edges.
+extend ElisaProof:
+    private:
+        const PROOF_SOURCE_CONDITION_ALIAS_INDEX_THRESHOLD: usize = 8
+
+        # For wide joins, index the right-hand path once so intersection lookup does not
+        # repeatedly scan that path for every candidate from the left. Exact string equality
+        # remains authoritative; bounded clusters and the shared meter keep collisions safe.
+        def proof_source_condition_alias_index_build(names: darray[sview], hashes: mutable darray[u32]&, values: mutable darray[usize]&, report: mutable ProofReport&) -> bool:
+            hashes.clear()
+            values.clear()
+            count: usize = names.count
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0
+            return false if not proof_source_index_work_charge(report, capacity) or not proof_source_index_work_charge(report, count)
+            hashes.resize(capacity)
+            values.resize(capacity)
+            for slot in 0..<capacity |slot, values, count|:
+                values[slot] <- count
+            for row in 0..<count |row, names, hashes, values, count, capacity, report|:
+                name: sview = names[row]
+                return false if not proof_source_index_work_charge(report, sview_len(name))
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, row, name, hash, names, hashes, values, count, capacity, report, placed|:
+                    return false if not proof_source_index_work_charge(report, 1)
+                    current: usize = values[slot]
+                    if current == count:
+                        hashes[slot] <- hash
+                        values[slot] <- row
+                        placed <- true
+                        break
+                    return false if current > count
+                    if hashes[slot] == hash:
+                        current_name: sview = names[current]
+                        return false if not proof_source_index_work_charge(report, sview_len(current_name))
+                        if current_name == name:
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            return true
+
+        def proof_source_condition_alias_index_contains(names: darray[sview], hashes: darray[u32]&, values: darray[usize]&, name: sview, report: mutable ProofReport&) -> (complete: bool, present: bool):
+            count: usize = names.count
+            capacity: usize = hashes.count
+            return (false, false) if capacity == 0 or values.count != capacity
+            return (false, false) if not proof_source_index_work_charge(report, sview_len(name))
+            hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, name, hash, names, hashes, values, count, capacity, report|:
+                return (false, false) if not proof_source_index_work_charge(report, 1)
+                current: usize = values[slot]
+                return (true, false) if current == count
+                return (false, false) if current > count
+                if hashes[slot] == hash:
+                    current_name: sview = names[current]
+                    return (false, false) if not proof_source_index_work_charge(report, sview_len(current_name))
+                    return (true, true) if current_name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false)
+
+        def proof_source_condition_alias_intersection(left: darray[sview], right: darray[sview], report: mutable ProofReport&) -> (complete: bool, aliases: darray[sview]):
+            aliases: mutable darray[sview] = []
+            use_index: bool = left.count >= PROOF_SOURCE_CONDITION_ALIAS_INDEX_THRESHOLD and right.count >= PROOF_SOURCE_CONDITION_ALIAS_INDEX_THRESHOLD
+            hashes: mutable darray[u32] = []
+            values: mutable darray[usize] = []
+            if use_index and not proof_source_condition_alias_index_build(right, &hashes, &values, report):
+                return (false, aliases)
+            for candidate in left |candidate, right, aliases, report|:
+                return (false, aliases) if not proof_source_index_work_charge(report, 1)
+                present: bool = false
+                if use_index:
+                    lookup: (complete: bool, present: bool) = proof_source_condition_alias_index_contains(right, hashes, values, candidate, report)
+                    return (false, aliases) if not lookup.complete
+                    present <- lookup.present
+                else:
+                    present <- proof_source_runtime_alias_name_contains(right, candidate, report)
+                if present:
+                    return (false, aliases) if not proof_source_index_work_charge(report, sview_len(candidate))
+                    aliases.push(candidate)
+            return (true, aliases)
+
+        def proof_source_condition_alias_paths(condition: Ast::Expr, inherited: darray[sview], report: mutable ProofReport&, depth: usize) -> (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]):
+            true_aliases: mutable darray[sview] = []
+            false_aliases: mutable darray[sview] = []
+            return (false, true_aliases, false_aliases) if depth >= PROOF_SOURCE_OPERATOR_AST_DEPTH_LIMIT
+            return (false, true_aliases, false_aliases) if not proof_source_index_work_charge(report, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_source_condition_alias_paths(inner, inherited, report, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    inner_paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(inner, inherited, report, depth + 1)
+                    return (inner_paths.complete, inner_paths.false_aliases, inner_paths.true_aliases)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    left_paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(left, inherited, report, depth + 1)
+                    return (false, true_aliases, left_paths.false_aliases) if not left_paths.complete
+                    right_paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(right, left_paths.true_aliases, report, depth + 1)
+                    return (false, right_paths.true_aliases, right_paths.false_aliases) if not right_paths.complete
+                    common_false: (complete: bool, aliases: darray[sview]) = proof_source_condition_alias_intersection(left_paths.false_aliases, right_paths.false_aliases, report)
+                    return (false, right_paths.true_aliases, common_false.aliases) if not common_false.complete
+                    return (true, right_paths.true_aliases, common_false.aliases)
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(left, inherited, report, depth + 1)
+                    return (false, left_paths.true_aliases, left_paths.false_aliases) if not left_paths.complete
+                    right_paths: (complete: bool, true_aliases: darray[sview], false_aliases: darray[sview]) = proof_source_condition_alias_paths(right, left_paths.false_aliases, report, depth + 1)
+                    return (false, right_paths.true_aliases, right_paths.false_aliases) if not right_paths.complete
+                    common_true: (complete: bool, aliases: darray[sview]) = proof_source_condition_alias_intersection(left_paths.true_aliases, right_paths.true_aliases, report)
+                    return (false, common_true.aliases, right_paths.false_aliases) if not common_true.complete
+                    return (true, common_true.aliases, right_paths.false_aliases)
+                _:
+                    for alias in inherited |true_aliases, false_aliases, report|:
+                        return (false, true_aliases, false_aliases) if not proof_source_runtime_alias_add(&true_aliases, alias, report)
+                        return (false, true_aliases, false_aliases) if not proof_source_runtime_alias_add(&false_aliases, alias, report)
+                    complete: bool = proof_source_condition_aliases_add(condition, &true_aliases, report, depth + 1)
+                    return (complete, true_aliases, false_aliases)

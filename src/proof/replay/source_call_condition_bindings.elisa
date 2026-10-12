@@ -1,0 +1,343 @@
+# Condition-path and filter-scope binding reconstruction for source call coverage.
+extend ElisaProof:
+    private:
+        def proof_replay_call_condition_name_present(names: darray[sview]&, name: sview, work: mutable usize&) -> (complete: bool, present: bool):
+            for existing in names |existing, name, work|:
+                return (false, false) if not proof_replay_call_string_compare_charge(existing, name, work)
+                return (true, true) if existing == name
+            return (true, false)
+
+        def proof_replay_call_condition_name_add_unique(names: mutable darray[sview]&, name: sview, work: mutable usize&) -> bool:
+            return false if name == "" or not proof_replay_call_work_add(work, 1 + sview_len(name))
+            present: (complete: bool, present: bool) = proof_replay_call_condition_name_present(names, name, work)
+            return false if not present.complete
+            names.push(name) if not present.present
+            return true
+
+        def proof_replay_call_condition_names_union(left: darray[sview]&, right: darray[sview]&, work: mutable usize&) -> (complete: bool, names: darray[sview]):
+            names: mutable darray[sview] = []
+            for candidate in left |candidate, names, work|:
+                return (false, names) if not proof_replay_call_condition_name_add_unique(&names, candidate, work)
+            for candidate in right |candidate, names, work|:
+                return (false, names) if not proof_replay_call_condition_name_add_unique(&names, candidate, work)
+            return (true, names)
+
+        def proof_replay_call_condition_names_intersection(left: darray[sview]&, right: darray[sview]&, work: mutable usize&) -> (complete: bool, names: darray[sview]):
+            names: mutable darray[sview] = []
+            for candidate in left |candidate, right, names, work|:
+                present: (complete: bool, present: bool) = proof_replay_call_condition_name_present(right, candidate, work)
+                return (false, names) if not present.complete
+                return (false, names) if present.present and not proof_replay_call_condition_name_add_unique(&names, candidate, work)
+            return (true, names)
+
+        # Collect names guaranteed on each Boolean outcome. For && and ||, the second
+        # operand's environment includes aliases established by the short-circuit edge.
+        # Joins retain only names present on every path to that outcome.
+        def proof_replay_call_condition_paths(condition: Ast::Expr, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> (complete: bool, paths: ProofReplayCallConditionPaths):
+            empty: ProofReplayCallConditionPaths = ProofReplayCallConditionPaths{}
+            return (false, empty) if depth >= 96 or not proof_replay_call_work_add(work, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_condition_paths(inner, call_target, work, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    nested: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(inner, call_target, work, depth + 1)
+                    return (false, empty) if not nested.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: nested.paths.when_false, when_false: nested.paths.when_true})
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return (false, empty) if not proof_replay_call_work_add(work, 1)
+                    left_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(left, call_target, work, depth + 1)
+                    return (false, empty) if not left_paths.complete
+                    right_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(right, call_target, work, depth + 1)
+                    return (false, empty) if not right_paths.complete
+                    true_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_true, right_paths.paths.when_true, work)
+                    return (false, empty) if not true_names.complete
+                    false_second_path: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_true, right_paths.paths.when_false, work)
+                    return (false, empty) if not false_second_path.complete
+                    false_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_intersection(left_paths.paths.when_false, false_second_path.names, work)
+                    return (false, empty) if not false_names.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names.names, when_false: false_names.names})
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return (false, empty) if not proof_replay_call_work_add(work, 1)
+                    left_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(left, call_target, work, depth + 1)
+                    return (false, empty) if not left_paths.complete
+                    right_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(right, call_target, work, depth + 1)
+                    return (false, empty) if not right_paths.complete
+                    true_second_path: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_false, right_paths.paths.when_true, work)
+                    return (false, empty) if not true_second_path.complete
+                    true_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_intersection(left_paths.paths.when_true, true_second_path.names, work)
+                    return (false, empty) if not true_names.complete
+                    false_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_false, right_paths.paths.when_false, work)
+                    return (false, empty) if not false_names.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names.names, when_false: false_names.names})
+                Ast::Expr.Binary(_, TokenKind.Is, target, position):
+                    target_names: mutable darray[sview] = []
+                    return (false, empty) if not proof_replay_call_target_bindings(target, &target_names, work, depth + 1)
+                    true_names: mutable darray[sview] = []
+                    for name in target_names |name, true_names, work|:
+                        return (false, empty) if not proof_replay_call_condition_name_add_unique(&true_names, name, work)
+                    match target:
+                        Ast::Expr.Field(_, _, target_position):
+                            for annotation in call_target.source_annotations |annotation, true_names, work, position, target_position|:
+                                return (false, empty) if not proof_replay_call_work_add(work, 1)
+                                return (false, empty) if not proof_replay_call_work_add(work, sview_len(annotation.name))
+                                return (false, empty) if not proof_replay_call_work_add(work, sview_len(annotation.owner))
+                                if annotation.name == "__is_variant_alias" and (annotation.line == position.line or annotation.line == target_position.line):
+                                    return (false, empty) if annotation.owner == "" or not proof_replay_call_condition_name_add_unique(&true_names, annotation.owner, work)
+                        _:
+                            pass
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names, when_false: []})
+                Ast::Expr.Binary(_, TokenKind.As, target, _):
+                    target_names: mutable darray[sview] = []
+                    return (false, empty) if not proof_replay_call_target_bindings(target, &target_names, work, depth + 1)
+                    true_names: mutable darray[sview] = []
+                    for name in target_names |name, true_names, work|:
+                        return (false, empty) if not proof_replay_call_condition_name_add_unique(&true_names, name, work)
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names, when_false: []})
+                _:
+                    return (true, empty)
+
+        def proof_replay_call_condition_bindings(condition: Ast::Expr, bindings: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(condition, call_target, work, depth)
+            return false if not paths.complete
+            return proof_replay_call_bindings_extend(paths.paths.when_true, bindings, work)
+
+        def proof_replay_call_condition_false_bindings(condition: Ast::Expr, bindings: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(condition, call_target, work, depth)
+            return false if not paths.complete
+            return proof_replay_call_bindings_extend(paths.paths.when_false, bindings, work)
+
+        # Mirror condition-aware visitation only at If/While/Expr.If sites.
+        def proof_replay_call_condition_expression(expression: Ast::Expr, bindings: mutable darray[sview]&, calls: mutable darray[sview]&, call_index: mutable ProofReplayCallNameIndex&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return false if not proof_replay_call_work_add(work, 1)
+                    return proof_replay_call_condition_expression(inner, bindings, calls, call_index, call_target, work, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return false if not proof_replay_call_work_add(work, 1)
+                    return proof_replay_call_condition_expression(inner, bindings, calls, call_index, call_target, work, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return false if not proof_replay_call_work_add(work, 1)
+                    return false if not proof_replay_call_condition_expression(left, bindings, calls, call_index, call_target, work, depth + 1)
+                    mark: usize = bindings.count
+                    return false if not proof_replay_call_condition_bindings(left, bindings, call_target, work, depth + 1)
+                    valid: bool = proof_replay_call_condition_expression(right, bindings, calls, call_index, call_target, work, depth + 1)
+                    bindings.resize(mark)
+                    return valid
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return false if not proof_replay_call_work_add(work, 1)
+                    return false if not proof_replay_call_condition_expression(left, bindings, calls, call_index, call_target, work, depth + 1)
+                    mark: usize = bindings.count
+                    return false if not proof_replay_call_condition_false_bindings(left, bindings, call_target, work, depth + 1)
+                    valid: bool = proof_replay_call_condition_expression(right, bindings, calls, call_index, call_target, work, depth + 1)
+                    bindings.resize(mark)
+                    return valid
+                Ast::Expr.Binary(left, TokenKind.Is, _, _) | Ast::Expr.Binary(left, TokenKind.As, _, _):
+                    return false if not proof_replay_call_work_add(work, 1)
+                    return proof_replay_call_expression_with_index(left, bindings, calls, call_index, call_target, work, depth + 1)
+                _:
+                    return proof_replay_call_expression_with_index(expression, bindings, calls, call_index, call_target, work, depth + 1)
+
+        # Structural filter binding behavior for non-boolean expression forms. Recursive
+        # children go through the path-aware wrapper so nested boolean filters keep scope.
+        def proof_replay_call_filter_bindings_structural(filter: Ast::Expr, bindings: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or not proof_replay_call_work_add(work, 1)
+            match filter:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_filter_bindings(inner, bindings, call_target, work, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.Is, target, position):
+                    return false if not proof_replay_call_filter_bindings(left, bindings, call_target, work, depth + 1)
+                    return false if not proof_replay_call_target_bindings(target, bindings, work, depth + 1)
+                    match target:
+                        Ast::Expr.Field(_, _, target_position):
+                            for annotation in call_target.source_annotations |annotation, bindings, work, position, target_position|:
+                                return false if not proof_replay_call_work_add(work, 1)
+                                return false if not proof_replay_call_work_add(work, sview_len(annotation.name))
+                                return false if not proof_replay_call_work_add(work, sview_len(annotation.owner))
+                                if annotation.name == "__is_variant_alias" and (annotation.line == position.line or annotation.line == target_position.line):
+                                    return false if annotation.owner == ""
+                                    bindings.push(annotation.owner)
+                        _:
+                            pass
+                Ast::Expr.Binary(left, TokenKind.As, target, _):
+                    return false if not proof_replay_call_filter_bindings(left, bindings, call_target, work, depth + 1)
+                    return proof_replay_call_target_bindings(target, bindings, work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Refinement(left, right, _) | Ast::Expr.Index(left, right, _):
+                    return false if not proof_replay_call_filter_bindings(left, bindings, call_target, work, depth + 1)
+                    return proof_replay_call_filter_bindings(right, bindings, call_target, work, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    match callee:
+                        Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _):
+                            if arguments.count > 0:
+                                bare_arguments: mutable bool = true
+                                for argument in arguments |bare_arguments, work|:
+                                    return false if not proof_replay_call_work_add(work, 1)
+                                    match argument:
+                                        Ast::Expr.Ident(_, _):
+                                            pass
+                                        _:
+                                            bare_arguments <- false
+                                if bare_arguments:
+                                    for argument in arguments |bindings, work, depth|:
+                                        return false if not proof_replay_call_target_bindings(argument, bindings, work, depth + 1)
+                                    return true
+                        _:
+                            pass
+                    return false if not proof_replay_call_filter_bindings(callee, bindings, call_target, work, depth + 1)
+                    for argument in arguments |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(argument, bindings, call_target, work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    return false if not proof_replay_call_effect_children_charge(candidates, arguments, work)
+                    for child in Ast::effect_runtime_children(candidates, arguments) |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(child, bindings, call_target, work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
+                    return proof_replay_call_filter_bindings(object, bindings, call_target, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return false if not proof_replay_call_filter_bindings(object, bindings, call_target, work, depth + 1)
+                    for argument in arguments |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(argument, bindings, call_target, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _):
+                    return false if not proof_replay_call_filter_bindings(object, bindings, call_target, work, depth + 1)
+                    return false if not proof_replay_call_filter_bindings(low, bindings, call_target, work, depth + 1)
+                    return proof_replay_call_filter_bindings(high, bindings, call_target, work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(element, bindings, call_target, work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(entry.key, bindings, call_target, work, depth + 1)
+                        return false if not proof_replay_call_filter_bindings(entry.value, bindings, call_target, work, depth + 1)
+                Ast::Expr.Construct(_, fields, _):
+                    for field in fields |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(field.value, bindings, call_target, work, depth + 1)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_replay_call_filter_bindings(base, bindings, call_target, work, depth + 1)
+                    for field in fields |bindings, call_target, work, depth|:
+                        return false if not proof_replay_call_filter_bindings(field.value, bindings, call_target, work, depth + 1)
+                Ast::Expr.If(condition, yes, no, _):
+                    return false if not proof_replay_call_filter_bindings(condition, bindings, call_target, work, depth + 1)
+                    return false if not proof_replay_call_filter_bindings(yes, bindings, call_target, work, depth + 1)
+                    return proof_replay_call_filter_bindings(no, bindings, call_target, work, depth + 1)
+                Ast::Expr.GetElse(guarded, _, _) | Ast::Expr.Comprehension(_, guarded, _, _, _) | Ast::Expr.Match(guarded, _, _) | Ast::Expr.Catch(guarded, _, _):
+                    return proof_replay_call_filter_bindings(guarded, bindings, call_target, work, depth + 1)
+                Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    pass
+                Ast::Expr.Invalid | Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                _:
+                    return false
+            return true
+
+        # Filter aliases are available after a successful predicate only when every
+        # successful path introduces them. Treat recognized filter-call binders as
+        # true-only atoms, like is/as aliases, and join short-circuit paths by intersection.
+        def proof_replay_call_filter_condition_paths(condition: Ast::Expr, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> (complete: bool, paths: ProofReplayCallConditionPaths):
+            empty: ProofReplayCallConditionPaths = ProofReplayCallConditionPaths{}
+            return (false, empty) if depth >= 96 or not proof_replay_call_work_add(work, 1)
+            match condition:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_filter_condition_paths(inner, call_target, work, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    nested: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(inner, call_target, work, depth + 1)
+                    return (false, empty) if not nested.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: nested.paths.when_false, when_false: nested.paths.when_true})
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    left_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(left, call_target, work, depth + 1)
+                    return (false, empty) if not left_paths.complete
+                    right_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(right, call_target, work, depth + 1)
+                    return (false, empty) if not right_paths.complete
+                    true_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_true, right_paths.paths.when_true, work)
+                    return (false, empty) if not true_names.complete
+                    false_second_path: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_true, right_paths.paths.when_false, work)
+                    return (false, empty) if not false_second_path.complete
+                    false_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_intersection(left_paths.paths.when_false, false_second_path.names, work)
+                    return (false, empty) if not false_names.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names.names, when_false: false_names.names})
+                Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    left_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(left, call_target, work, depth + 1)
+                    return (false, empty) if not left_paths.complete
+                    right_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(right, call_target, work, depth + 1)
+                    return (false, empty) if not right_paths.complete
+                    true_second_path: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_false, right_paths.paths.when_true, work)
+                    return (false, empty) if not true_second_path.complete
+                    true_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_intersection(left_paths.paths.when_true, true_second_path.names, work)
+                    return (false, empty) if not true_names.complete
+                    false_names: (complete: bool, names: darray[sview]) = proof_replay_call_condition_names_union(left_paths.paths.when_false, right_paths.paths.when_false, work)
+                    return (false, empty) if not false_names.complete
+                    return (true, ProofReplayCallConditionPaths{when_true: true_names.names, when_false: false_names.names})
+                Ast::Expr.Binary(_, TokenKind.Is, _, _) | Ast::Expr.Binary(_, TokenKind.As, _, _):
+                    paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_condition_paths(condition, call_target, work, depth + 1)
+                    return (false, empty) if not paths.complete
+                    collected: mutable darray[sview] = []
+                    return (false, empty) if not proof_replay_call_filter_bindings_structural(condition, &collected, call_target, work, depth + 1)
+                    for name in collected |name, paths, work|:
+                        present: (complete: bool, present: bool) = proof_replay_call_condition_name_present(paths.paths.when_true, name, work)
+                        return (false, empty) if not present.complete or not present.present
+                    return paths
+                Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _), arguments, _, _):
+                    recognized_filter_call: mutable bool = arguments.count > 0
+                    for argument in arguments |recognized_filter_call, work|:
+                        return (false, empty) if not proof_replay_call_work_add(work, 1)
+                        match argument:
+                            Ast::Expr.Ident(_, _):
+                                pass
+                            _:
+                                recognized_filter_call <- false
+                    if recognized_filter_call:
+                        names: mutable darray[sview] = []
+                        return (false, empty) if not proof_replay_call_filter_bindings_structural(condition, &names, call_target, work, depth + 1)
+                        return (true, ProofReplayCallConditionPaths{when_true: names, when_false: []})
+                    names: mutable darray[sview] = []
+                    return (false, empty) if not proof_replay_call_filter_bindings_structural(condition, &names, call_target, work, depth + 1)
+                    return (false, empty) if names.count != 0
+                    return (true, empty)
+                _:
+                    names: mutable darray[sview] = []
+                    return (false, empty) if not proof_replay_call_filter_bindings_structural(condition, &names, call_target, work, depth + 1)
+                    return (false, empty) if names.count != 0
+                    return (true, empty)
+
+        # Conjunction evaluates the right filter with the left filter's true aliases.
+        # Disjunction and negation export only aliases guaranteed on their true paths.
+        def proof_replay_call_filter_bindings(filter: Ast::Expr, bindings: mutable darray[sview]&, call_target: mutable ProofReplayCallSiteTarget&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96 or not proof_replay_call_work_add(work, 1)
+            match filter:
+                Ast::Expr.Paren(inner, _):
+                    return proof_replay_call_filter_bindings(inner, bindings, call_target, work, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    left_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(left, call_target, work, depth + 1)
+                    return false if not left_paths.complete or not proof_replay_call_bindings_extend(left_paths.paths.when_true, bindings, work)
+                    right_paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(right, call_target, work, depth + 1)
+                    return false if not right_paths.complete
+                    return proof_replay_call_bindings_extend(right_paths.paths.when_true, bindings, work)
+                Ast::Expr.Binary(_, TokenKind.Or, _, _) | Ast::Expr.Unary(TokenKind.Not, _, _):
+                    paths: (complete: bool, paths: ProofReplayCallConditionPaths) = proof_replay_call_filter_condition_paths(filter, call_target, work, depth + 1)
+                    return false if not paths.complete
+                    return proof_replay_call_bindings_extend(paths.paths.when_true, bindings, work)
+                _:
+                    return proof_replay_call_filter_bindings_structural(filter, bindings, call_target, work, depth + 1)
+
+        def proof_replay_call_comprehension_filter_splits(condition: Ast::Expr, work: mutable usize&, depth: usize) -> (complete: bool, splits: bool):
+            return (complete: false, splits: false) if depth >= 96 or not proof_replay_call_work_add(work, 1)
+            match condition:
+                Ast::Expr.Binary(left, TokenKind.And, _, _):
+                    return (complete: false, splits: false) if not proof_replay_call_work_add(work, 1)
+                    match left:
+                        Ast::Expr.Binary(_, TokenKind.Is, _, _):
+                            return (complete: true, splits: true)
+                        Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(_, _), _, _), arguments, _, _):
+                            return (complete: false, splits: false) if not proof_replay_call_work_add(work, 3)
+                            return (complete: false, splits: false) if arguments.count == 0
+                            bare_arguments: mutable bool = true
+                            for argument in arguments |bare_arguments, work|:
+                                return (complete: false, splits: false) if not proof_replay_call_work_add(work, 1)
+                                match argument:
+                                    Ast::Expr.Ident(_, _):
+                                        pass
+                                    _:
+                                        bare_arguments <- false
+                            return (complete: true, splits: bare_arguments)
+                        _:
+                            return (complete: true, splits: false)
+                _:
+                    return (complete: true, splits: false)

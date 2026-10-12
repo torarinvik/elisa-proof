@@ -8,6 +8,8 @@ extend ElisaProof:
         const PROOF_ASCII_LOWER_Z: u8 = 122
         const PROOF_ASCII_UNDERSCORE: u8 = 95
         const PROOF_ASCII_DECIMAL_POINT: u8 = 46
+        const PROOF_ASCII_SINGLE_QUOTE: u8 = 39
+        const PROOF_ASCII_BACKSLASH: u8 = 92
         const PROOF_PATTERN_DELIMITER_WIDTH: usize = 1
         const PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT: usize = 64
         const PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
@@ -69,6 +71,22 @@ extend ElisaProof:
                 return false if not identifier_character
             return true
 
+        # Char patterns retain their surrounding quotes in the compiler AST. Keep the proof
+        # subset to one printable ASCII byte or one explicitly supported single-byte escape;
+        # multi-byte and unknown escapes wait for authenticated compiler literal decoding.
+        def proof_pattern_unambiguous_char_literal(text: sview) -> bool:
+            length: usize = sview_len(text)
+            return false if length < 3
+            return false if sview_at(text, 0) != PROOF_ASCII_SINGLE_QUOTE or sview_at(text, length - 1) != PROOF_ASCII_SINGLE_QUOTE
+            interior_length: usize = length - 2
+            if interior_length == 1:
+                character: u8 = sview_at(text, 1)
+                return character >= 32 and character <= 126 and character != PROOF_ASCII_SINGLE_QUOTE and character != PROOF_ASCII_BACKSLASH
+            if interior_length == 2 and sview_at(text, 1) == PROOF_ASCII_BACKSLASH:
+                escaped: u8 = sview_at(text, 2)
+                return escaped == 110 or escaped == 116 or escaped == 114 or escaped == PROOF_ASCII_DIGIT_ZERO or escaped == PROOF_ASCII_BACKSLASH or escaped == PROOF_ASCII_SINGLE_QUOTE
+            return false
+
         # Produce modeled facts without type context. Pattern.Literal erases whether the source
         # token was a string or scalar, so no literal equality is admissible here. Ranges also
         # require authenticated width and signedness semantics.
@@ -128,8 +146,9 @@ extend ElisaProof:
             work <- work + reserved_work
             return proof_replay_source_body_declares(declarations, body, name)
 
-        # Only a bare builtin identifier, optionally parenthesized, is eligible as string
-        # evidence. Do not collapse aliases, references, refinements, or indexed applications.
+        # Only a bare builtin identifier, optionally parenthesized, is eligible as string or
+        # character representation evidence. Do not collapse aliases, references, refinements,
+        # or indexed applications.
         def proof_pattern_direct_type_name(type_expression: Ast::Expr, depth: usize) -> sview:
             return "" if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT
             match type_expression:
@@ -143,7 +162,7 @@ extend ElisaProof:
         def proof_pattern_type_name(type_expression: Ast::Expr) -> sview:
             return proof_pattern_direct_type_name(type_expression, 0)
 
-        def proof_pattern_source_string_type_shadowed(declarations: darray[Ast::Decl]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&, depth: usize) -> void:
+        def proof_pattern_source_builtin_type_shadowed(declarations: darray[Ast::Decl]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&, depth: usize) -> void:
             if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
                 complete <- false
                 return
@@ -163,7 +182,7 @@ extend ElisaProof:
                             shadowed <- true
                             return
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_pattern_source_string_type_shadowed(nested, wanted, work, shadowed, complete, depth + 1)
+                        proof_pattern_source_builtin_type_shadowed(nested, wanted, work, shadowed, complete, depth + 1)
                         complete_now: bool = proof_replay_summary_bool_ref_value(complete)
                         return if proof_replay_summary_bool_ref_value(shadowed) or not complete_now
                     Ast::Decl.Import(_, _):
@@ -195,7 +214,7 @@ extend ElisaProof:
         # Type imports are represented in parser annotations rather than Ast::Decl nodes.
         # Check exact aliases and imported members, and reject wildcard imports whose visible
         # names cannot be established from the frozen source tree.
-        def proof_pattern_source_string_type_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&) -> void:
+        def proof_pattern_source_builtin_type_import_shadowed(annotations: darray[Ast::EnumAnnotation]&, wanted: sview, work: mutable usize&, shadowed: mutable bool&, complete: mutable bool&) -> void:
             for annotation in annotations |wanted, work, shadowed, complete|:
                 if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
                     complete <- false
@@ -220,7 +239,7 @@ extend ElisaProof:
                         shadowed <- true
                         return
 
-        def proof_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
+        def proof_pattern_source_formal_type_find(declarations: darray[Ast::Decl]&, function_name: sview, parameter: sview, found: mutable Ast::Expr&, function_line: mutable u32&, function_matches: mutable usize&, parameter_matches: mutable usize&, work: mutable usize&, complete: mutable bool&, depth: usize) -> void:
             if depth >= PROOF_PATTERN_SOURCE_TYPE_DEPTH_LIMIT or work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT:
                 complete <- false
                 return
@@ -230,13 +249,14 @@ extend ElisaProof:
                     return
                 work <- work + 1
                 match declaration:
-                    Ast::Decl.Func(name, parameters, _, body, _, _, _):
+                    Ast::Decl.Func(name, parameters, _, body, _, _, position):
                         same_function: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(name, function_name, work)
                         if not same_function.complete:
                             complete <- false
                             return
                         if same_function.equal:
                             function_matches <- function_matches + 1
+                            function_line <- position.line
                             matching_parameters: mutable usize = 0
                             for candidate in parameters |parameter, found, parameter_matches, matching_parameters, work, complete|:
                                 same_parameter: (complete: bool, equal: bool) = proof_pattern_source_type_text_equal_with_work(candidate.name, parameter, work)
@@ -252,9 +272,19 @@ extend ElisaProof:
                             # declaration, or an exhausted bounded scan, as unavailable type data.
                             complete <- false if matching_parameters != 0 and proof_pattern_source_body_declares_with_work(declarations, body, parameter, work)
                     Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        proof_pattern_source_formal_type_find(body, function_name, parameter, found, function_matches, parameter_matches, work, complete, depth + 1)
+                        proof_pattern_source_formal_type_find(body, function_name, parameter, found, function_line, function_matches, parameter_matches, work, complete, depth + 1)
                     _:
                         pass
+
+        # A generic type binder may legally reuse a builtin spelling. Do not use that
+        # spelling as representation evidence for a typed string or character pattern fact.
+        def proof_pattern_source_generic_type_shadowed(report: ProofReport&, declaration_line: u32, wanted: sview, work: mutable usize&) -> (complete: bool, shadowed: bool):
+            return (false, false) if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+            work <- work + 1 + sview_len(wanted)
+            return (false, false) if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+            generic: (complete: bool, count: usize) = proof_source_conversion_generic_name(wanted, declaration_line, report)
+            return (false, false) if not generic.complete or generic.count > 1
+            return (true, generic.count == 1)
 
         def proof_pattern_source_formal_type(report: ProofReport&, function_name: sview, scrutinee: Ast::Expr, work: mutable usize&) -> Ast::Expr:
             parameter: mutable sview = ""
@@ -265,16 +295,19 @@ extend ElisaProof:
                     return Ast::Expr.Absent
             return Ast::Expr.Absent if parameter == "" or function_name == ""
             found: mutable Ast::Expr = Ast::Expr.Absent
+            function_line: mutable u32 = 0
             function_matches: mutable usize = 0
             parameter_matches: mutable usize = 0
             complete: mutable bool = true
-            proof_pattern_source_formal_type_find(report.source_declarations, function_name, parameter, &found, &function_matches, &parameter_matches, work, &complete, 0)
+            proof_pattern_source_formal_type_find(report.source_declarations, function_name, parameter, &found, &function_line, &function_matches, &parameter_matches, work, &complete, 0)
             return Ast::Expr.Absent if not complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT or function_matches != 1 or parameter_matches != 1
-            if proof_pattern_is_string_type(found):
+            if proof_pattern_is_string_type(found) or proof_pattern_is_char_type(found):
                 type_name: sview = proof_pattern_type_name(found)
+                generic_shadow: (complete: bool, shadowed: bool) = proof_pattern_source_generic_type_shadowed(report, function_line, type_name, work)
+                return Ast::Expr.Absent if not generic_shadow.complete or generic_shadow.shadowed or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
                 shadowed: mutable bool = false
-                proof_pattern_source_string_type_shadowed(report.source_declarations, type_name, work, &shadowed, &complete, 0)
-                proof_pattern_source_string_type_import_shadowed(report.source_annotations, type_name, work, &shadowed, &complete) if not shadowed and complete
+                proof_pattern_source_builtin_type_shadowed(report.source_declarations, type_name, work, &shadowed, &complete, 0)
+                proof_pattern_source_builtin_type_import_shadowed(report.source_annotations, type_name, work, &shadowed, &complete) if not shadowed and complete
                 return Ast::Expr.Absent if shadowed or not complete or work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
             return found
 
@@ -315,9 +348,14 @@ extend ElisaProof:
                 "sview" | "cstr" -> true
                 _ -> false
 
+        def proof_pattern_is_char_type(type_expression: Ast::Expr) -> bool:
+            return proof_pattern_type_name(type_expression) == "char"
+
         def proof_pattern_typed_literal_expression(text: sview, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
             if proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text):
                 return Ast::Expr.StringLit(text, position)
+            if proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text):
+                return Ast::Expr.CharLit(string_view_slice(text, 1, (sview_len(text) - 1).i64()), position)
             return null
 
         def proof_pattern_condition_typed(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
@@ -392,7 +430,7 @@ extend ElisaProof:
                         return false if not proof_pattern_irrefutable_depth(field, depth + 1, work)
                     return true
                 Ast::Pattern.Literal(text):
-                    return proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text)
+                    return (proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text)) or (proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text))
                 Ast::Pattern.Range(_, _, _):
                     return false
                 Ast::Pattern.Or(options):

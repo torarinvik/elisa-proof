@@ -1,0 +1,125 @@
+# One exact-name census for deterministic call replay. Duplicate counts include every named
+# declaration kind so function and scalar-type resolution preserve the source lookup contract.
+extend ElisaProof:
+    private:
+        def proof_replay_deterministic_declaration_collect(declarations: darray[Ast::Decl]&, entries: mutable darray[ProofReplayDeterministicDeclarationEntry]&, current_owner: sview, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= 96
+            return false if not proof_replay_deterministic_call_budget_charge(declarations.count, work)
+            for declaration in declarations |entries, current_owner, work, depth|:
+                name: mutable sview = ""
+                is_function: mutable bool = false
+                match declaration:
+                    Ast::Decl.Func(found, parameters, _, _, _, _, _):
+                        name <- found
+                        is_function <- true
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(found), work)
+                        return false if not proof_replay_deterministic_call_budget_charge(parameters.count, work)
+                        for parameter in parameters |work|:
+                            return false if not proof_replay_deterministic_call_budget_charge(sview_len(parameter.name), work)
+                    Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Extern(found, _, _, _, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _) | Ast::Decl.Import(found, _):
+                        name <- found
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(found), work)
+                    Ast::Decl.Enum(found, variants, _, _, _):
+                        name <- found
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(found), work)
+                        return false if not proof_replay_deterministic_call_budget_charge(variants.count, work)
+                        for variant in variants |work|:
+                            return false if not proof_replay_deterministic_call_budget_charge(sview_len(variant.name), work)
+                    Ast::Decl.Module(found, nested, _):
+                        name <- found
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(found), work)
+                        entries.push(ProofReplayDeterministicDeclarationEntry{name: found, declaration: declaration, owner: current_owner, is_function: false, next_index: entries.count})
+                        return false if not proof_replay_deterministic_declaration_collect(nested, entries, found, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_deterministic_declaration_collect(nested, entries, current_owner, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        pass
+                if name != "":
+                    entries.push(ProofReplayDeterministicDeclarationEntry{name: name, declaration: declaration, owner: current_owner, is_function: is_function, next_index: entries.count})
+            return true
+
+        def proof_replay_deterministic_declaration_index_build(declarations: darray[Ast::Decl]&, index: mutable ProofReplayDeterministicDeclarationIndex&, work: mutable usize&) -> bool:
+            index.entries.clear()
+            index.hashes.clear()
+            index.heads.clear()
+            index.counts.clear()
+            index.valid <- false
+            return false if not proof_replay_deterministic_declaration_collect(declarations, &index.entries, "", work, 0)
+            count: usize = index.entries.count
+            if count == 0:
+                index.valid <- true
+                return true
+            for row in 0..<count |row, index, count|:
+                index.entries[row].next_index <- count
+            capacity: usize = proof_name_index_capacity(count)
+            return false if capacity == 0
+            return false if not proof_replay_deterministic_call_budget_charge(capacity, work)
+            return false if not proof_replay_deterministic_call_budget_charge(count, work)
+            index.hashes.resize(capacity)
+            index.heads.resize(capacity)
+            index.counts.resize(capacity)
+            for slot in 0..<capacity |slot, index, count|:
+                index.heads[slot] <- count
+                index.counts[slot] <- 0
+            for row in 0..<count |row, index, count, capacity, work|:
+                name: sview = index.entries[row].name
+                return false if not proof_replay_deterministic_call_budget_charge(sview_len(name), work)
+                hash: u32 = proof_name_hash(name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity |probes, slot, hash, row, index, count, capacity, work, placed|:
+                    return false if not proof_replay_deterministic_call_budget_charge(1, work)
+                    current: usize = index.heads[slot]
+                    if current == count:
+                        index.hashes[slot] <- hash
+                        index.heads[slot] <- row
+                        index.counts[slot] <- 1
+                        placed <- true
+                        break
+                    if index.hashes[slot] == hash:
+                        return false if current >= count
+                        current_name: sview = index.entries[current].name
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(current_name), work)
+                        if current_name == name:
+                            index.entries[row].next_index <- current
+                            index.heads[slot] <- row
+                            index.counts[slot] <- index.counts[slot] + 1
+                            placed <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(index.heads, count, work)
+            return false if not cluster_status.complete or not cluster_status.bounded
+            index.valid <- true
+            return true
+
+        def proof_replay_deterministic_declaration_group(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, work: mutable usize&) -> (complete: bool, count: usize, head: usize):
+            entry_count: usize = index.entries.count
+            return (false, 2, entry_count) if not index.valid
+            return (false, 2, entry_count) if index.heads.count != index.hashes.count or index.heads.count != index.counts.count
+            return (false, 2, entry_count) if entry_count > 0 and index.heads.count != proof_name_index_capacity(entry_count)
+            return (false, 2, entry_count) if not proof_replay_deterministic_call_budget_charge(sview_len(wanted), work)
+            return (true, 0, entry_count) if entry_count == 0 or wanted == ""
+            capacity: usize = index.heads.count
+            wanted_hash: u32 = proof_name_hash(wanted)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, wanted, index, capacity, entry_count, work|:
+                return (false, 2, entry_count) if not proof_replay_deterministic_call_budget_charge(1, work)
+                head: usize = index.heads[slot]
+                return (true, 0, entry_count) if head == entry_count
+                return (false, 2, entry_count) if head > entry_count
+                if index.hashes[slot] == wanted_hash:
+                    found_name: sview = index.entries[head].name
+                    return (false, 2, entry_count) if not proof_replay_deterministic_call_budget_charge(sview_len(found_name), work)
+                    if found_name == wanted:
+                        matches: usize = index.counts[slot]
+                        return (false, 2, entry_count) if matches == 0
+                        return (true, matches, head)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, 2, entry_count)

@@ -58,14 +58,17 @@ extend ElisaProof:
                     pass
             return false
 
-        def proof_replay_call_result_binding_scan_statements(body: darray[Ast::Stmt]&, name: sview, binding_position: Ast::Pos, binding_count: mutable usize&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, invalid: mutable bool&, lexical_depth: usize, depth: usize) -> bool:
+        def proof_replay_call_result_binding_scan_statements(body: darray[Ast::Stmt]&, name: sview, binding_position: Ast::Pos, binding_count: mutable usize&, binding_end_offset: mutable u32&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, invalid: mutable bool&, source_work: mutable usize&, lexical_depth: usize, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for statement in body |name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth, depth|:
+            for statement in body |name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth, depth|:
                 match statement:
                     Ast::Stmt.VarDecl(local_name, type_expression, initializer, position):
                         if local_name == name:
                             binding_count <- binding_count + 1
                             if lexical_depth == 0 and proof_replay_source_position_equal(position, binding_position):
+                                extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statement, 0)
+                                return false if not extent.offsets_complete or extent.end_offset <= position.offset
+                                binding_end_offset <- extent.end_offset
                                 source_type <- type_expression
                                 source_initializer <- initializer
                             else:
@@ -78,15 +81,15 @@ extend ElisaProof:
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(expression, name, 0)
                     Ast::Stmt.If(condition, yes, no, _):
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(condition, name, 0)
-                        return false if not proof_replay_call_result_binding_scan_statements(yes, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
-                        return false if not proof_replay_call_result_binding_scan_statements(no, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(yes, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(no, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.While(condition, nested, _):
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(condition, name, 0)
-                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.For(bind, variables, iterable, nested, _):
                         invalid <- true if bind == name or any variable in variables where variable == name
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(iterable, name, 0)
-                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.Match(scrutinee, arms, _):
                         invalid <- true if proof_replay_call_result_binding_expr_borrows(scrutinee, name, 0)
                         for arm in arms |arm, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth, depth|:
@@ -94,32 +97,31 @@ extend ElisaProof:
                             return false if not proof_replay_call_pattern_bindings(arm.pattern, &pattern_names, depth + 1)
                             invalid <- true if any pattern_name in pattern_names where pattern_name == name
                             invalid <- true if proof_replay_call_result_binding_expr_borrows(arm.guard, name, 0)
-                            return false if not proof_replay_call_result_binding_scan_statements(arm.body, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                            return false if not proof_replay_call_result_binding_scan_statements(arm.body, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.Block(_, _, _, nested, _):
-                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, source_type, source_initializer, invalid, lexical_depth + 1, depth + 1)
+                        return false if not proof_replay_call_result_binding_scan_statements(nested, name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, lexical_depth + 1, depth + 1)
                     Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
                     _:
                         return false
             return true
 
-        def proof_replay_call_result_binding_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, binding_count: mutable usize&, owner_count: mutable usize&, depth: usize) -> bool:
+        def proof_replay_call_result_binding_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, local_name: sview, binding_position: Ast::Pos, binding_end_offset: mutable u32&, source_type: mutable Ast::Expr&, source_initializer: mutable Ast::Expr&, binding_count: mutable usize&, owner_count: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, local_name, binding_position, source_type, source_initializer, binding_count, owner_count, depth|:
+            for declaration in declarations |owner, owner_line, local_name, binding_position, binding_end_offset, source_type, source_initializer, binding_count, owner_count, source_work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, body, _, _, position):
                         if candidate == owner and position.line == owner_line:
                             owner_count <- owner_count + 1
                             invalid: mutable bool = false
-                            source_work: mutable usize = 0
                             # Reserve one full-tree pass for the structural cost walk and a
                             # second for the borrow/shadow scan, including deferred captures.
                             return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
                             return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
-                            return false if not proof_replay_call_result_binding_scan_statements(body, local_name, binding_position, binding_count, source_type, source_initializer, invalid, 0, 0)
+                            return false if not proof_replay_call_result_binding_scan_statements(body, local_name, binding_position, binding_count, binding_end_offset, source_type, source_initializer, invalid, source_work, 0, 0)
                             return false if invalid
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_call_result_binding_owner(nested, owner, owner_line, local_name, binding_position, source_type, source_initializer, binding_count, owner_count, depth + 1)
+                        return false if not proof_replay_call_result_binding_owner(nested, owner, owner_line, local_name, binding_position, binding_end_offset, source_type, source_initializer, binding_count, owner_count, source_work, depth + 1)
                     _:
                         pass
             return true
@@ -150,6 +152,10 @@ extend ElisaProof:
             return proof_replay_call_result_binding_valid_with_work(report, trace, source_work)
 
         def proof_replay_call_result_binding_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_call_result_binding_valid_with_cache(report, trace, source_work, &cache)
+
+        def proof_replay_call_result_binding_valid_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             return false if report.trace_owner_line <= trace.line or report.replay_owner_line == 0 or report.replay_owner_line == 4294967295
             return false if trace.line == 0 or proof_replay_summary_has_unresolved_import(report.source_annotations)
@@ -170,10 +176,17 @@ extend ElisaProof:
                             return false if owner_module_count != 1
                             binding_count: mutable usize = 0
                             owner_count: mutable usize = 0
+                            binding_end_offset: mutable u32 = 0
                             source_type: mutable Ast::Expr = Ast::Expr.Invalid
                             source_initializer: mutable Ast::Expr = Ast::Expr.Invalid
-                            return false if not proof_replay_call_result_binding_owner(report.source_declarations, trace.name, report.replay_owner_line, local_name, binding_position, &source_type, &source_initializer, &binding_count, &owner_count, 0)
+                            return false if not proof_replay_call_result_binding_owner(report.source_declarations, trace.name, report.replay_owner_line, local_name, binding_position, &binding_end_offset, &source_type, &source_initializer, &binding_count, &owner_count, source_work, 0)
                             return false if owner_count != 1 or binding_count != 1
+                            return false if binding_end_offset == 0
+                            owner_body: mutable darray[Ast::Stmt] = []
+                            return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &owner_body, source_work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
+                            consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+                            return false if not proof_replay_mutable_local_consumer_position_with_work(report, trace, owner_body, &consumer_position, source_work)
+                            return false if consumer_position.offset == 0 or consumer_position.end_offset <= consumer_position.offset or binding_end_offset > consumer_position.offset
                             return false if not proof_replay_deterministic_scalar_type(source_type, report.source_declarations, 0) or proof_replay_deterministic_parameter_type(source_type, 0)
                             match source_initializer:
                                 Ast::Expr.Call(Ast::Expr.Ident(source_callee, _), source_arguments, source_names, _):
@@ -185,7 +198,7 @@ extend ElisaProof:
                                         return false if argument_name != ""
                                     complete: mutable bool = true
                                     return false if not proof_replay_deterministic_call_expression_equal_with_work(source_initializer, source_call, source_work, &complete, 0) or not complete
-                                    return false if not proof_replay_deterministic_call_source_site_with_work(report, trace, source_initializer, source_work)
+                                    return false if not proof_replay_deterministic_call_source_site_with_cache(report, trace, source_initializer, source_work, cache)
                                     same_module_count: mutable usize = 0
                                     return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, owner_module, "", &same_module_count, 0) or same_module_count != 1
                                     global_candidate_count: mutable usize = 0

@@ -16,18 +16,29 @@ prefix += r'''
 def api_legacy_receipt_cannot_authorize_source[@r](report: mutable ProofReport& @r) -> bool can Memory.Allocate, Abort.Panic, Global.Read, Global.Write:
     receipt: ProofReplayReceipt[r] = (proof_replay_certificates(report) can Global{Read,Write})
     return false if not proof_replay_receipt_is_issued(receipt)
-    return false if not proof_replay_receipt_is_complete(receipt)
+    return false if not proof_replay_receipt_kernel_batch_complete(receipt)
+    return false if proof_replay_receipt_is_complete(receipt)
     return false if proof_replay_receipt_source_validated(receipt)
     replayed_attempt: mutable bool = false
     replayed_attempt_index: mutable usize = proof_replay_receipt_attempt_count(receipt)
+    replayed_certificate: mutable bool = false
+    replayed_certificate_index: mutable usize = proof_replay_receipt_certificate_count(receipt)
     for attempt_index in 0..<proof_replay_receipt_attempt_count(receipt) |attempt_index, receipt, replayed_attempt, replayed_attempt_index|:
         return false if proof_replay_receipt_attempt_is_proven(receipt, attempt_index)
-        if proof_replay_receipt_attempt_status(receipt, attempt_index):
+        return false if proof_replay_receipt_attempt_status(receipt, attempt_index)
+        if proof_replay_receipt_kernel_attempt_status(receipt, attempt_index):
             replayed_attempt <- true
             replayed_attempt_index <- attempt_index if replayed_attempt_index >= proof_replay_receipt_attempt_count(receipt)
+    for certificate_index in 0..<proof_replay_receipt_certificate_count(receipt) |certificate_index, receipt, replayed_certificate, replayed_certificate_index|:
+        return false if proof_replay_receipt_certificate_status(receipt, certificate_index)
+        if proof_replay_receipt_kernel_certificate_status(receipt, certificate_index):
+            replayed_certificate <- true
+            replayed_certificate_index <- certificate_index if replayed_certificate_index >= proof_replay_receipt_certificate_count(receipt)
     return false if not replayed_attempt or replayed_attempt_index >= proof_replay_receipt_attempt_count(receipt)
+    return false if not replayed_certificate or replayed_certificate_index >= proof_replay_receipt_certificate_count(receipt)
     report.goal_attempts.clear()
-    proof_replay_receipt_attempt_status(receipt, replayed_attempt_index)
+    return false if proof_replay_receipt_attempt_status(receipt, replayed_attempt_index)
+    proof_replay_receipt_kernel_attempt_status(receipt, replayed_attempt_index)
 '''
 valid = "def checked() -> i64:\n    ensure result == 1\n    return 1\n"
 invalid = (
@@ -140,8 +151,10 @@ def api_probe_before_replay(text: sview, source: mutable darray[u8]&, report: mu
     diagnostics.clear()
     if route == 0:
         (proof_check(file, report) can Global{Read,Write})
-    else:
+    elif route == 1:
         (proof_check_with_semantic_diagnostics(file, report, diagnostics) can Global{Read,Write})
+    else:
+        (proof_check_focused_with_semantic_diagnostics(file, report, diagnostics, "checked") can Global{Read,Write})
 
 def api_global_array_replay_probe(source: mutable darray[u8]&, report: mutable ProofReport&, diagnostics: mutable darray[Semantic::Diagnostic]&, route: usize, tamper: usize) -> void can Memory.Allocate, Abort.Panic:
     (api_probe(GLOBAL_INDEXED_READ_API_SOURCE, source, report, diagnostics, route) can Global{Read,Write})
@@ -331,6 +344,7 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         (api_probe(VALID_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 175 if report.certificates.count == 0 or report.failed != 0 or report.replay_gaps != 0
         return 260 if not (api_legacy_receipt_cannot_authorize_source(&report) can Global{Read,Write})
+        return 265 if not (api_disconnected_malformed_arena_revokes_batch(&source, &report, &diagnostics, route) can Global{Read,Write})
         (api_probe(REFINEMENT_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 190 if report.certificates.count == 0
         return 191 if report.proven == 0
@@ -343,6 +357,10 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
             return 193 if report.replay_gaps != 0
         (api_probe(MUTUAL_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 177 if report.failed != 0 or report.structural.verified_names.count == 0 or report.replay_gaps != 0
+        return 261 if not (api_structural_certificate_offset_tamper(&source, &report, &diagnostics) can Global{Read,Write})
+        return 262 if not (api_structural_certificate_callee_tamper(&source, &report, &diagnostics) can Global{Read,Write})
+        return 263 if not (api_structural_certificate_omission(&source, &report, &diagnostics) can Global{Read,Write})
+        return 264 if not (api_structural_ambiguous_owner_source(&source, &report, &diagnostics) can Global{Read,Write})
         (api_probe(UNKNOWN_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 178 if report.failed == 0 and report.proven == report.obligations
         (api_parameter_goal_probe(PARAMETER_RETURN_API_SOURCE, &source, &report, &diagnostics, route, 0) can Global{Read,Write})
@@ -516,6 +534,12 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
     return 246 if report.replay_gaps != 0
     return 0
 '''
+structural_mutations = (ROOT / "scripts/tests/fixtures/structural_replay_mutations.elisa").read_text()
+arena_mutations = (ROOT / "scripts/tests/fixtures/replay_arena_admission_mutations.elisa").read_text()
+marker = "def api_global_array_replay_probe("
+if harness.count(marker) != 1:
+    raise AssertionError("replay mutation fixture insertion point is missing or ambiguous")
+harness = harness.replace(marker, structural_mutations + "\n" + arena_mutations + "\n" + marker, 1)
 ast_nodes = (ROOT / "build/snapshot/Elisa-compiler/src/parser/ast_nodes.elisa").read_text()
 statement_nodes = ast_nodes.split("    enum Stmt is Node:", 1)[1].split("    enum Decl is Node:", 1)[0]
 statement_variants = set(re.findall(r"^        ([A-Z][A-Za-z0-9_]*)\b", statement_nodes, re.MULTILINE))
@@ -529,4 +553,4 @@ run_source_binding_replay_harness(
     ROOT, ROOT / "examples/loop_invariants_compile.elisa",
     Path(os.environ.get("ELISA_COMPILER_ROOT", ROOT.parent / "Elisa-compiler")),
     (ROOT / "ELISA_COMPILER_REV").read_text().strip(), harness)
-print("Direct API semantic admission: source-goal and assert-by identity, loop-binder scope, Global grants, source-bound refinements, and reused-state clearing pass")
+print("Direct API semantic admission: source-goal identity, loop-binder scope, Global grants, source-bound structural evidence, disconnected-arena revocation, and reused-state clearing pass")

@@ -1,0 +1,99 @@
+extend ElisaProof:
+    private:
+        # Resolve a field type without building a temporary member array. Charge each declaration
+        # and each compared name so a single very wide struct is bounded by the same replay work
+        # limit as a source file with many declarations.
+        def proof_structural_operator_guard_field_type_walk(declarations: darray[Ast::Decl]&, struct_name: sview, field_name: sview, report: mutable ProofReport&, depth: usize) -> (count: usize, type_expression: Ast::Expr):
+            return (2, Ast::Expr.Invalid) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            count: mutable usize = 0
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            for declaration in declarations |struct_name, field_name, report, depth, count, found|:
+                return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+                match declaration:
+                    Ast::Decl.Struct(name, members, _, _, _, _, _):
+                        return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+                        return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, sview_len(name))
+                        return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, sview_len(struct_name))
+                        if name == struct_name:
+                            count <- count + 1
+                            for member in members |field_name, report, found|:
+                                return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, 1)
+                                return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, sview_len(member.name))
+                                return (2, Ast::Expr.Invalid) if not proof_source_index_work_charge(report, sview_len(field_name))
+                                found <- member.type_expression if member.name == field_name
+                    Ast::Decl.Module(_, body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(body, struct_name, field_name, report, depth + 1)
+                        count <- count + nested.count
+                        found <- nested.type_expression if nested.count > 0
+                    _:
+                        pass
+            return (count, found)
+
+        def proof_structural_operator_guard_binding_lookup(bindings: darray[ProofStructuralOperatorBinding]&, name: sview, report: mutable ProofReport&) -> (found: bool, type_name: sview, type_expression: Ast::Expr):
+            index: mutable usize = bindings.count
+            while index > 0 |index, bindings, name, report|:
+                index <- index - 1
+                binding: ProofStructuralOperatorBinding = bindings[index]
+                return (true, "", Ast::Expr.Absent) if not proof_source_index_work_charge(report, 1)
+                return (true, "", Ast::Expr.Absent) if not proof_source_index_work_charge(report, sview_len(name))
+                return (true, "", Ast::Expr.Absent) if not proof_source_index_work_charge(report, sview_len(binding.name))
+                if binding.name == name:
+                    return (true, binding.type_name, binding.type_expression)
+            return (false, "", Ast::Expr.Absent)
+
+        # Keep the declared result type through field and built-in container projections. Unknown
+        # bindings, ambiguous fields, and user-defined indexing stay unclassified.
+        def proof_structural_operator_guard_receiver_type(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, shadowed: darray[ProofStructuralOperatorBinding]&, report: mutable ProofReport&, depth: usize) -> (known: bool, type_expression: Ast::Expr):
+            return (false, Ast::Expr.Absent) if depth >= PROOF_STRUCTURAL_OPERATOR_GUARD_DEPTH_LIMIT
+            return (false, Ast::Expr.Absent) if not proof_source_index_work_charge(report, 1)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    binding: (found: bool, type_name: sview, type_expression: Ast::Expr) = proof_structural_operator_guard_binding_lookup(shadowed, name, report)
+                    return (false, Ast::Expr.Absent) if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    binding_type_known: bool = match binding.type_expression:
+                        Ast::Expr.Absent | Ast::Expr.Invalid: false
+                        _: true
+                    return (false, Ast::Expr.Absent) if binding.found and not binding_type_known
+                    return (true, binding.type_expression) if binding.found
+                    selected: mutable Ast::Expr = Ast::Expr.Absent
+                    matches: mutable usize = 0
+                    for parameter in parameters |name, selected, matches, report|:
+                        return (false, Ast::Expr.Absent) if not proof_source_index_work_charge(report, 1)
+                        return (false, Ast::Expr.Absent) if not proof_source_index_work_charge(report, sview_len(name))
+                        return (false, Ast::Expr.Absent) if not proof_source_index_work_charge(report, sview_len(parameter.name))
+                        if parameter.name == name:
+                            selected <- parameter.type_expression
+                            matches <- matches + 1
+                    return (false, Ast::Expr.Absent) if matches != 1
+                    return (true, selected)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_operator_guard_receiver_type(inner, parameters, shadowed, report, depth + 1)
+                Ast::Expr.Field(object, field, _):
+                    base: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(object, parameters, shadowed, report, depth + 1)
+                    return (false, Ast::Expr.Absent) if not base.known
+                    head: sview = proof_type_head_name_with_work(base.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
+                    return (false, Ast::Expr.Absent) if report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or head == ""
+                    field_type: (count: usize, type_expression: Ast::Expr) = proof_structural_operator_guard_field_type_walk(report.source_declarations, head, field, report, 0)
+                    return (false, Ast::Expr.Absent) if field_type.count != 1
+                    return (true, field_type.type_expression)
+                Ast::Expr.Index(object, _, _):
+                    base: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(object, parameters, shadowed, report, depth + 1)
+                    return (false, Ast::Expr.Absent) if not base.known
+                    element: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(base.type_expression, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
+                    return (false, Ast::Expr.Absent) if not element.known or report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return (true, element.element)
+                Ast::Expr.IndexN(object, arguments, _):
+                    base: (known: bool, type_expression: Ast::Expr) = proof_structural_operator_guard_receiver_type(object, parameters, shadowed, report, depth + 1)
+                    return (false, Ast::Expr.Absent) if not base.known
+                    indexed_type: mutable Ast::Expr = base.type_expression
+                    for _argument in arguments |indexed_type, report, depth|:
+                        element: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(indexed_type, report.source_declarations, 0, &report.source_effect_index.implicit_effect_work)
+                        return (false, Ast::Expr.Absent) if not element.known or report.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        indexed_type <- element.element
+                    return (true, indexed_type)
+                _:
+                    return (false, Ast::Expr.Absent)

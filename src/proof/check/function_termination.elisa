@@ -113,7 +113,114 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], extern_contract_summary_complete: bool, reachable_extern_contract_unsafe: bool, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> void:
+        def proof_structural_signature_contract_table_valid(signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&) -> bool:
+            contract_count: usize = signature_lines.count
+            return false if contract_count != signature_kinds.count or contract_count != signature_contracts.count
+            return false if not proof_report_source_work_charge(3, source_work)
+            if contract_count > 1:
+                for contract_index in 1..<contract_count |contract_index, signature_lines, source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work)
+                    return false if signature_lines[contract_index] < signature_lines[contract_index - 1]
+            return true
+
+        # Contract rows are source ordered. Validate that invariant once, then use two
+        # bounded searches per function instead of rescanning the module's whole contract table.
+        def proof_structural_signature_contract_range_for_line(signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, declaration_line: u32, source_work: mutable usize&) -> (complete: bool, start: usize, count: usize):
+            contract_count: usize = signature_lines.count
+            return (false, 0, 0) if contract_count != signature_kinds.count or contract_count != signature_contracts.count
+            low: mutable usize = 0
+            high: mutable usize = contract_count
+            while low < high |low, high, signature_lines, declaration_line, source_work|:
+                return (false, 0, 0) if not proof_report_source_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                if signature_lines[middle] < declaration_line:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            start: usize = low
+            high <- contract_count
+            while low < high |low, high, signature_lines, declaration_line, source_work|:
+                return (false, 0, 0) if not proof_report_source_work_charge(1, source_work)
+                middle: usize = low + (high - low) / 2
+                if signature_lines[middle] <= declaration_line:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            return (true, start, low - start)
+
+        def proof_structural_function_has_implicit_dispatch_risk_range(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, contract_start: usize, contract_count: usize, source_work: mutable usize&, report: mutable ProofReport&) -> bool:
+            return true if proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report)
+            return true if proof_structural_typed_operator_defaults_have_overload(parameters, declaration_line, report)
+            return true if proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0)
+            for parameter in parameters |parameters, report|:
+                return true if parameter.has_default and proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
+            return true if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, [])
+            return true if signature_lines.count != signature_kinds.count or signature_kinds.count != signature_contracts.count
+            return true if contract_start > signature_contracts.count or contract_count > signature_contracts.count - contract_start
+            for offset in 0..<contract_count |offset, contract_start, declaration_line, signature_lines, signature_kinds, signature_contracts, report, source_work|:
+                return true if not proof_report_source_work_charge(1, source_work)
+                contract_index: usize = contract_start + offset
+                return true if signature_lines[contract_index] != declaration_line
+                kind: sview = signature_kinds[contract_index]
+                return true if not proof_source_index_work_charge(report, 1 + sview_len(kind))
+                continue if kind != "requires" and kind != "ensure"
+                expression: Ast::Expr = signature_contracts[contract_index]
+                return true if proof_source_expression_has_drop_risk(expression, parameters, declaration_line, report, 0)
+                return true if proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0)
+                return true if proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, [])
+            return false
+
+        # Source call-graph edges do not include operations lowered to implicit trait calls,
+        # indexing hooks, or generated drops. Record those hazards per function so they can be
+        # propagated only to structural callers that can reach the function.
+        def proof_structural_function_has_implicit_dispatch_risk(function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> bool:
+            contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_contracts, declaration_line, source_work)
+            return true if not contract_range.complete
+            return proof_structural_function_has_implicit_dispatch_risk_range(function_name, declaration_line, parameters, body, signature_lines, signature_kinds, signature_contracts, contract_range.start, contract_range.count, source_work, report)
+
+        def proof_structural_source_type_is_byte_darray(type_expression: Ast::Expr, report: mutable ProofReport&, depth: usize) -> bool:
+            return false if depth >= 32 or not proof_source_index_work_charge(report, 1)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_source_type_is_byte_darray(inner, report, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_structural_source_type_is_byte_darray(inner, report, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return false
+                Ast::Expr.Index(head, element, _):
+                    return false if not proof_source_index_work_charge(report, sview_len(proof_ident_name(head)) + sview_len(proof_ident_name(element)))
+                    return proof_ident_name(head) == "darray" and proof_ident_name(element) == "u8"
+                Ast::Expr.IndexN(head, elements, _):
+                    return false if elements.count != 1 or not proof_source_index_work_charge(report, sview_len(proof_ident_name(head)) + sview_len(proof_ident_name(elements[0])))
+                    return proof_ident_name(head) == "darray" and proof_ident_name(elements[0]) == "u8"
+                _:
+                    return false
+
+        def proof_structural_source_type_head_name(type_expression: Ast::Expr, depth: usize) -> sview:
+            return "" if depth >= 32
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_structural_source_type_head_name(inner, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    return proof_structural_source_type_head_name(inner, depth + 1) if operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return ""
+                _:
+                    return proof_head_name(type_expression)
+
+        def proof_structural_field_conversion_type_supported(method: sview, receiver: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, report: mutable ProofReport&) -> bool:
+            receiver_type: (known: bool, type_expression: Ast::Expr) = proof_structural_source_value_type(receiver, parameters, report, 0, [])
+            return false if not receiver_type.known
+            active_aliases: mutable darray[usize] = []
+            unwrapped_type: (complete: bool, type_expression: Ast::Expr) = proof_source_conversion_type_alias_unwrap(receiver_type.type_expression, declaration_line, true, "", report, &active_aliases, 0)
+            return false if not unwrapped_type.complete
+            if method == "as_sview":
+                return false if not proof_structural_source_type_is_byte_darray(unwrapped_type.type_expression, report, 0)
+                element: (known: bool, element: Ast::Expr) = proof_structural_builtin_container_element_type(unwrapped_type.type_expression, report)
+                return element.known and proof_ident_name(element.element) == "u8"
+            type_name: sview = proof_structural_source_type_head_name(unwrapped_type.type_expression, 0)
+            return type_name == "sview" or type_name == "dstr" or type_name == "cstr" if method == "sview"
+            return proof_builtin_scalar_type_name(type_name)
+
+        def proof_check_structural_function(enum_index: ProofEnumIndex, function_name: sview, declaration_line: u32, parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt], extern_contract_summary_complete: bool, reachable_extern_contract_unsafe: bool, reachable_unresolved_call: bool, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, source_work: mutable usize&, report: mutable ProofReport&) -> void:
             decreases_clauses: darray[Ast::Expr] = proof_contracts(body, "decreases")
             components: mutable darray[Ast::Expr] = []
             proof_decreases_component_slice(decreases_clauses, &components)
@@ -144,34 +251,35 @@ extend ElisaProof:
                 proof_structural_termination_finding(report, declaration_line, function_name, "reachable callable extern contracts could not be classified within their validated bound")
                 return
             proof_structural_termination_finding(report, declaration_line, function_name, "a reachable callable extern contract may hide recursive edges") if reachable_extern_contract_unsafe
-            proof_structural_termination_finding(report, declaration_line, function_name, "generated destructor calls in this structural function are not represented in the recursive call graph") if proof_source_function_has_drop_risk(function_name, parameters, body, report)
+            proof_structural_termination_finding(report, declaration_line, function_name, "a reachable opaque call or implicit dispatch may hide a structural recursive edge") if reachable_unresolved_call
+            proof_structural_termination_finding(report, declaration_line, function_name, "an unmodeled destructor or opaque source call in this structural function may hide recursive calls") if proof_source_function_has_drop_risk(function_name, declaration_line, parameters, body, report)
             # Operator implementations and user-defined indexers are implicit calls and are
             # absent from the current source call graph. Reject these paths unless a runtime
             # index receiver is statically known to be a built-in container.
             for parameter in parameters |parameter, report, function_name|:
                 if parameter.has_default:
-                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "overloaded operators in structural defaults may hide recursive calls") if proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, report, 0)
+                    proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "overloaded operators in structural defaults may hide recursive calls") if proof_structural_typed_operator_expression_has_overload(parameter.default_value, parameters, declaration_line, report, 0)
                     proof_structural_termination_finding(report, Ast::expr_pos(parameter.default_value).line, function_name, "user-defined indexing in structural defaults may hide recursive calls") if proof_source_expression_has_unsafe_runtime_index(parameter.default_value, parameters, report, 0, [])
-            if proof_structural_typed_operator_statements_have_overload(body, parameters, report, 0):
+            if proof_structural_typed_operator_statements_have_overload(body, parameters, declaration_line, report, 0):
                 proof_structural_termination_finding(report, 0, function_name, "overloaded operators in structural bodies may hide recursive calls")
             if proof_source_statements_have_unsafe_runtime_index(body, parameters, report, 0, []):
                 proof_structural_termination_finding(report, 0, function_name, "user-defined indexing in structural bodies may hide recursive calls")
-            contract_count: usize = signature_lines.count
-            if contract_count != signature_kinds.count or contract_count != signature_contracts.count:
+            contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_contracts, declaration_line, source_work)
+            if not contract_range.complete or contract_range.start > signature_contracts.count or contract_range.count > signature_contracts.count - contract_range.start:
                 proof_structural_termination_finding(report, declaration_line, function_name, "the signature contract source snapshot is malformed")
             else:
-                for contract_index in 0..<contract_count |contract_index, report, function_name, declaration_line, signature_lines, signature_kinds, signature_contracts, source_work|:
+                for offset in 0..<contract_range.count |offset, contract_range, report, function_name, signature_kinds, signature_contracts, source_work|:
+                    contract_index: usize = contract_range.start + offset
                     kind: sview = signature_kinds[contract_index]
                     if not proof_report_source_work_charge(1 + sview_len(kind), &source_work):
                         proof_structural_termination_finding(report, declaration_line, function_name, "signature contract source work exceeded its validated bound")
                         return
-                    continue if signature_lines[contract_index] != declaration_line
                     continue if kind != "requires" and kind != "ensure"
                     expression: Ast::Expr = signature_contracts[contract_index]
                     if not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work) or not proof_replay_summary_expr_charge_with_work(expression, &source_work):
                         proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "signature contract source work exceeded its validated bound")
                         return
-                    if proof_structural_typed_operator_expression_has_overload(expression, parameters, report, 0) or proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, []):
+                    if proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, report, 0) or proof_source_expression_has_unsafe_runtime_index(expression, parameters, report, 0, []):
                         proof_structural_termination_finding(report, Ast::expr_pos(expression).line, function_name, "implicit operator or index dispatch in structural signature contracts may hide recursive calls")
                     proof_structural_check_expression(expression, function_name, subject_position, parameters, destructurable, smaller, report, function_name)
             for parameter in parameters |parameter, report, function_name|:
@@ -201,9 +309,9 @@ extend ElisaProof:
                 report.structural.members.clear()
                 for index in 0..<functions.lookup.names.count |index, functions, report|:
                     report.structural.names.push(functions.lookup.names[index])
-                    report.structural.subject_positions.push(functions.contracts.structural_subject_positions[index] if index < functions.contracts.structural_subject_positions.count else functions.parameters.param_counts[index])
-                    report.structural.subject_types.push(functions.contracts.structural_subject_types[index] if index < functions.contracts.structural_subject_types.count else "")
-                    report.structural.members.push(functions.contracts.structural[index] if index < functions.contracts.structural.count else false)
+                    report.structural.subject_positions.push(functions.contracts.termination.structural_subject_positions[index] if index < functions.contracts.termination.structural_subject_positions.count else functions.parameters.metadata.param_counts[index])
+                    report.structural.subject_types.push(functions.contracts.termination.structural_subject_types[index] if index < functions.contracts.termination.structural_subject_types.count else "")
+                    report.structural.members.push(functions.contracts.termination.structural[index] if index < functions.contracts.termination.structural.count else false)
                     component: mutable usize = index
                     for candidate in 0..<index |candidate, functions, index, component|:
                         if proof_functions_same_recursive_component(functions, index, candidate):
@@ -214,7 +322,12 @@ extend ElisaProof:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, _, _, position):
                         function_index: usize = proof_function_index_at_line(functions, name, position.line)
-                        proof_check_structural_function(functions.type_indexes.enum_index, name, position.line, parameters, body, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count and functions.externs.reachable_extern_contract_unsafe[function_index], report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, functions.lookup.module_resolution_work_used, report) if function_index < functions.contracts.structural.count and functions.contracts.structural[function_index]
+                        if function_index < functions.contracts.termination.structural.count and functions.contracts.termination.structural[function_index]:
+                            unresolved_reachable: bool = function_index >= functions.call_graph.reachable_unresolved_calls.count or functions.call_graph.reachable_unresolved_calls[function_index]
+                            saved_caller: usize = report.fact_call_shapes.active_caller
+                            report.fact_call_shapes.active_caller <- function_index
+                            proof_check_structural_function(functions.type_indexes.enum_index, name, position.line, parameters, body, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count, functions.externs.extern_contract_analysis_complete and function_index < functions.externs.reachable_extern_contract_unsafe.count and functions.externs.reachable_extern_contract_unsafe[function_index], unresolved_reachable, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, functions.lookup.module_resolution_work_used, report)
+                            report.fact_call_shapes.active_caller <- saved_caller
                     Ast::Decl.Module(_, module_body, _):
                         proof_check_structural_termination(file, module_body, functions, report, false)
                     Ast::Decl.Scoped(scoped_body, _):

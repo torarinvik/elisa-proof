@@ -121,50 +121,54 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_source_binding_type(name: sview, names: darray[sview]&, source_types: darray[Ast::Expr]&) -> Ast::Expr:
+        def proof_source_binding_type(name: sview, names: darray[sview]&, source_types: darray[Ast::Expr]&, source_work: mutable usize&) -> Ast::Expr:
             found: mutable Ast::Expr = Ast::Expr.Absent
             return found if names.count != source_types.count
-            for index in 0..<names.count |index, names, source_types, name, found|:
+            for index in 0..<names.count |index, names, source_types, name, found, source_work|:
+                return Ast::Expr.Absent if not proof_source_kernel_charge_work(1, source_work) or not proof_source_kernel_charge_text_comparison(names[index], name, source_work)
                 found <- source_types[index] if names[index] == name
             return found
 
         # A tiny source-type projection used only when the compiler's conservative inference
         # returns Unknown for a supported container element or declared struct field. It reads
         # declaration types; it never guesses from the kernel node kind.
-        def proof_source_expression_type_hint(expression: Ast::Expr, names: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
-            return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+        def proof_source_expression_type_hint(expression: Ast::Expr, names: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> Ast::Expr can[Memory.Allocate, Abort.Panic]:
+            return Ast::Expr.Absent if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT or not proof_source_kernel_charge_work(1, source_work)
             match expression:
                 Ast::Expr.Ident(name, _):
-                    return proof_source_binding_type(name, names, source_types)
+                    return proof_source_binding_type(name, names, source_types, source_work)
                 Ast::Expr.Paren(inner, _):
-                    return proof_source_expression_type_hint(inner, names, source_types, declarations, depth + 1)
+                    return proof_source_expression_type_hint(inner, names, source_types, declarations, source_work, depth + 1)
                 Ast::Expr.Refinement(base, _, _):
-                    return proof_source_expression_type_hint(base, names, source_types, declarations, depth + 1)
+                    return proof_source_expression_type_hint(base, names, source_types, declarations, source_work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_source_expression_type_hint(inner, names, source_types, declarations, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return proof_source_expression_type_hint(inner, names, source_types, declarations, source_work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                     return Ast::Expr.Absent
                 Ast::Expr.Field(object, field, _):
-                    base_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
-                    head: sview = proof_type_head_name(base_type, declarations, 0)
-                    resolved: (count: usize, type_expression: Ast::Expr) = proof_struct_field_type(declarations, head, field, 0)
+                    base_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, source_work, depth + 1)
+                    head: sview = proof_type_head_name_with_work(base_type, declarations, 0, source_work)
+                    return Ast::Expr.Absent if head == ""
+                    members: mutable darray[Ast::StructMember] = []
+                    return Ast::Expr.Absent if proof_struct_members_with_work(declarations, head, 0, &members, source_work) != 1
+                    resolved: (count: usize, type_expression: Ast::Expr) = proof_struct_member_type_with_work(members, field, source_work)
                     return resolved.type_expression if head != "" and resolved.count == 1
                     return Ast::Expr.Absent
                 Ast::Expr.Index(object, _, _):
-                    container_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
-                    element: (known: bool, element: Ast::Expr) = proof_container_element_type(container_type, declarations, 0)
+                    container_type: Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, source_work, depth + 1)
+                    element: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(container_type, declarations, 0, source_work)
                     return element.element if element.known
                     return Ast::Expr.Absent
                 Ast::Expr.IndexN(object, arguments, _):
-                    indexed_type: mutable Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, depth + 1)
-                    for _ in arguments |indexed_type, declarations|:
-                        element: (known: bool, element: Ast::Expr) = proof_container_element_type(indexed_type, declarations, 0)
+                    indexed_type: mutable Ast::Expr = proof_source_expression_type_hint(object, names, source_types, declarations, source_work, depth + 1)
+                    for _ in arguments |indexed_type, declarations, source_work|:
+                        element: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(indexed_type, declarations, 0, source_work)
                         return Ast::Expr.Absent if not element.known
                         indexed_type <- element.element
                     return indexed_type
                 Ast::Expr.Construct(type_expression, _, _):
                     return type_expression
                 Ast::Expr.RecordUpdate(base, _, _):
-                    return proof_source_expression_type_hint(base, names, source_types, declarations, depth + 1)
+                    return proof_source_expression_type_hint(base, names, source_types, declarations, source_work, depth + 1)
                 _:
                     return Ast::Expr.Absent
 
@@ -177,11 +181,11 @@ extend ElisaProof:
                 diagnostic: sview = "kernel post-state result binding absent" if kernel_failure == "post-result-binding-missing" else "kernel context binding absent" if kernel_failure == "local-context-binding-missing" else "kernel context sort mismatch" if kernel_failure == "local-context-sort-mismatch" else "kernel context type-name mismatch" if kernel_failure == "local-context-name-mismatch" else "kernel context element-sort mismatch" if kernel_failure == "local-context-element-mismatch" else "kernel typing environment unrepresentable" if kernel_failure == "local-context-unrepresented" else kernel_failure if kernel_failure != "" and kernel_failure != "term-sort-or-operator-rejected" else "kernel proposition formation rejected the term or operator"
                 proof_add_finding(report, "contract-proposition-type", source_position.line, name, diagnostic) if kernel_failure != "kernel source work budget exceeded"
 
-        def proof_source_for_element_type(iterable: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&) -> sview can[Memory.Allocate, Abort.Panic]:
+        def proof_source_for_element_type(iterable: Ast::Expr, names: darray[sview]&, types: darray[sview]&, source_types: darray[Ast::Expr]&, declarations: darray[Ast::Decl]&, table: Semantic::SymbolTable&, source_work: mutable usize&) -> sview can[Memory.Allocate, Abort.Panic]:
             range_element: sview = proof_source_range_element_type(iterable, names, types, table)
             return range_element if range_element != ""
-            iterable_type: Ast::Expr = proof_source_expression_type_hint(iterable, names, source_types, declarations, 0)
-            element: (known: bool, element: Ast::Expr) = proof_container_element_type(iterable_type, declarations, 0)
+            iterable_type: Ast::Expr = proof_source_expression_type_hint(iterable, names, source_types, declarations, source_work, 0)
+            element: (known: bool, element: Ast::Expr) = proof_container_element_type_with_work(iterable_type, declarations, 0, source_work)
             return proof_source_type_spelling(element.element, 0) if element.known
             return ""
 
@@ -261,7 +265,7 @@ extend ElisaProof:
                         loop_name_mark: usize = names.count
                         loop_type_mark: usize = types.count
                         loop_source_type_mark: usize = source_types.count
-                        element_type: sview = proof_source_for_element_type(iterable, names, types, source_types, file.top_decls, table)
+                        element_type: sview = proof_source_for_element_type(iterable, names, types, source_types, file.top_decls, table, kernel_workspace.source_work_used)
                         for variable in variables |names, types, source_types, element_type|:
                             names.push(variable)
                             types.push(element_type)
@@ -283,7 +287,7 @@ extend ElisaProof:
                             payload_types: mutable darray[Ast::Expr] = []
                             payload_typed: bool = proof_payload_binder_types(arm.pattern, file.top_decls, file.enum_annotations, &payload_types) and payload_types.count == binding_names.count
                             for binding_index in 0..<binding_names.count |binding_index, binding_names, binding_values, names, types, source_types, table, file, payload_typed, payload_types|:
-                                binding_source_type: Ast::Expr = payload_types[binding_index] if payload_typed else proof_source_expression_type_hint(binding_values[binding_index], names, source_types, file.top_decls, 0)
+                                binding_source_type: Ast::Expr = payload_types[binding_index] if payload_typed else proof_source_expression_type_hint(binding_values[binding_index], names, source_types, file.top_decls, kernel_workspace.source_work_used, 0)
                                 binding_type_name: mutable sview = proof_source_type_spelling(binding_source_type, 0)
                                 if binding_type_name == "":
                                     inferred_binding: Semantic::InferType = Semantic::infer_expression_type_for_proof(binding_values[binding_index], names, types, table)
@@ -353,7 +357,7 @@ extend ElisaProof:
                 post_source_types.push(declared_return_type)
             postconditions: mutable darray[Ast::Expr] = proof_contracts(body, "ensure")
             postconditions.extend(signature_contracts.postconditions)
-            postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls)) if postconditions.count == 0
+            postconditions.extend(proof_unfolded_ensures(parameters, body, return_type, file.top_decls, &kernel_workspace.source_work_used)) if postconditions.count == 0
             for postcondition in postconditions |post_names, post_types, post_source_types, module_path, global_kernel_bindings, kernel_workspace, table, file, report, name|:
                 kernel_failure: mutable sview = ""
                 kernel_formed: bool = proof_source_kernel_proposition_formed(postcondition, post_names, post_types, post_source_types, module_path, global_kernel_bindings, kernel_workspace, validation_workspace, file, &kernel_failure)

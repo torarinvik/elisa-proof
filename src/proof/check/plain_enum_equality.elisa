@@ -2,65 +2,106 @@
 # This witness admits Eq only; it never models enum values as arithmetic scalars.
 extend ElisaProof:
     private:
-        def proof_zero_payload_enum_in(declarations: darray[Ast::Decl]&, name: sview, member: sview, depth: usize) -> bool:
-            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
-            for declaration in declarations:
+        def proof_zero_payload_enum_in_with_work(declarations: darray[Ast::Decl]&, name: sview, member: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            for declaration in declarations |name, member, source_work|:
+                return false if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(enum_name, variants, is_const, _, _):
+                        return false if not proof_type_audit_work_charge(sview_len(name), source_work)
+                        return false if not proof_type_audit_work_charge(sview_len(enum_name), source_work)
                         if enum_name == name and not is_const:
                             return false if variants.count == 0
                             found: mutable bool = member == ""
-                            for variant in variants |found, member|:
+                            for variant in variants |found, member, source_work|:
+                                return false if not proof_type_audit_work_charge(1, source_work)
+                                return false if not proof_type_audit_work_charge(sview_len(member), source_work)
+                                return false if not proof_type_audit_work_charge(sview_len(variant.name), source_work)
                                 return false if variant.fields.count != 0
                                 found <- true if variant.name == member
                             return found
-                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
-                        return true if proof_zero_payload_enum_in(body, name, member, depth + 1)
+                    Ast::Decl.Module(_, body, _):
+                        return true if proof_zero_payload_enum_in_with_work(body, name, member, depth + 1, source_work)
+                    Ast::Decl.Scoped(body, _):
+                        return true if proof_zero_payload_enum_in_with_work(body, name, member, depth + 1, source_work)
                     _:
                         pass
             false
 
         # Only a unique nominal enum with no payload or hierarchy is reference-free.
-        def proof_parameter_target_is_reference_free(expression: Ast::Expr, file: Ast::File&) -> bool:
+        def proof_parameter_target_is_reference_free(expression: Ast::Expr, file: Ast::File&, source_work: mutable usize&) -> bool:
             target: Ast::Expr = proof_type_strip_reference(expression, 0)
-            return true if proof_type_is_reference_free(target, file.top_decls, file.enum_annotations, 0)
-            name: sview = proof_type_head_name(target, file.top_decls, 0)
-            return false if name == "" or proof_enum_in_hierarchy(file.enum_annotations, name)
-            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(file.top_decls, name, 0)
+            reference_free: bool = proof_type_is_reference_free_with_work(target, file.top_decls, file.enum_annotations, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return true if reference_free
+            name: sview = proof_type_head_name_with_work(target, file.top_decls, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or name == ""
+            in_hierarchy: bool = proof_enum_in_hierarchy_with_work(file.enum_annotations, name, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or in_hierarchy
+            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(file.top_decls, name, 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return false if counts.enums != 1 or counts.const_enums != 0 or counts.structs != 0
-            return proof_zero_payload_enum_in(file.top_decls, name, "", 0)
+            zero_payload: bool = proof_zero_payload_enum_in_with_work(file.top_decls, name, "", 0, source_work)
+            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return zero_payload
 
-        def proof_zero_payload_enum_type(type_expression: Ast::Expr, member: sview, report: ProofReport&) -> sview:
-            name: sview = proof_type_head_name(type_expression, report.source_declarations, 0)
-            return "" if name == "" or proof_enum_in_hierarchy(report.source_annotations, name)
-            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates(report.source_declarations, name, 0)
-            return "" if counts.enums != 1 or counts.const_enums != 0 or counts.structs != 0
-            name if proof_zero_payload_enum_in(report.source_declarations, name, member, 0) else ""
+        def proof_zero_payload_enum_type_with_work(type_expression: Ast::Expr, member: sview, report: ProofReport&, source_work: mutable usize&) -> sview:
+            name: sview = proof_type_head_name_with_work(type_expression, report.source_declarations, 0, source_work)
+            return "" if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or name == ""
+            in_hierarchy: bool = proof_enum_in_hierarchy_with_work(report.source_annotations, name, source_work)
+            return "" if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or in_hierarchy
+            counts: (enums: usize, const_enums: usize, structs: usize) = proof_count_named_aggregates_with_work(report.source_declarations, name, 0, source_work)
+            return "" if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or counts.enums != 1 or counts.const_enums != 0 or counts.structs != 0
+            zero_payload: bool = proof_zero_payload_enum_in_with_work(report.source_declarations, name, member, 0, source_work)
+            return "" if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not zero_payload
+            name
 
-        def proof_plain_enum_member_has_builtin_equality(expression: Ast::Expr, protocol: sview, report: ProofReport&) -> bool:
+        def proof_plain_enum_member_has_builtin_equality_with_work(expression: Ast::Expr, protocol: sview, report: ProofReport&, source_work: mutable usize&) -> bool:
             return false if protocol != "Eq"
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_plain_enum_member_has_builtin_equality(inner, protocol, report)
+                    return proof_plain_enum_member_has_builtin_equality_with_work(inner, protocol, report, source_work)
                 Ast::Expr.Field(enum_type, member, _):
-                    return proof_plain_enum_builtin_equality_type(enum_type, member, report) != ""
+                    return proof_plain_enum_builtin_equality_type_with_work(enum_type, member, report, source_work) != ""
                 _:
                     return false
 
-        def proof_plain_enum_builtin_equality_type(type_expression: Ast::Expr, member: sview, report: ProofReport&) -> sview:
-            name: sview = proof_zero_payload_enum_type(type_expression, member, report)
-            return "" if name == "" or proof_report_builtin_operator_impl_exists(report, name, "Eq")
+        def proof_plain_enum_builtin_equality_type_with_work(type_expression: Ast::Expr, member: sview, report: ProofReport&, source_work: mutable usize&) -> sview:
+            name: sview = proof_zero_payload_enum_type_with_work(type_expression, member, report, source_work)
+            return "" if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or name == ""
+            return "" if not proof_type_audit_work_charge(1 + sview_len(name) + sview_len("Eq"), source_work)
+            name_operator: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, name, "Eq", source_work)
+            return "" if not name_operator.complete or name_operator.exists
             aliases: mutable darray[sview] = []
-            proof_type_operator_impl_names(type_expression, report, &aliases, 0)
-            return "" if any alias in aliases where proof_report_builtin_operator_impl_exists(report, alias, "Eq")
+            return "" if not proof_type_operator_impl_names(type_expression, report, &aliases, 0, &source_work)
+            for alias in aliases |report, source_work|:
+                return "" if not proof_type_audit_work_charge(1 + sview_len(alias) + sview_len("Eq"), source_work)
+                alias_operator: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, alias, "Eq", source_work)
+                return "" if not alias_operator.complete or alias_operator.exists
             name
 
         def proof_add_plain_enum_comparison_result_witness(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
-            return if proof_expr_has_call(expression) or proof_report_builtin_operator_impl_exists(report, "bool", "Eq")
             match expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     return if operator != TokenKind.EqEq and operator != TokenKind.BangEq
-                    return if not proof_plain_enum_member_has_builtin_equality(left, "Eq", report) and not proof_plain_enum_member_has_builtin_equality(right, "Eq", report)
+                    source_work: mutable usize = report.source_effect_index.implicit_effect_work
+                    if not proof_replay_summary_expr_charge_with_work(expression, &source_work):
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    if proof_expr_has_call(expression):
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    boolean_impl: (complete: bool, exists: bool) = proof_report_builtin_operator_impl_exists_with_work(report, "bool", "Eq", &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if not boolean_impl.complete or boolean_impl.exists or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    left_builtin: bool = proof_plain_enum_member_has_builtin_equality_with_work(left, "Eq", report, &source_work)
+                    right_builtin: bool = proof_plain_enum_member_has_builtin_equality_with_work(right, "Eq", report, &source_work) if not left_builtin
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not left_builtin and not right_builtin
+                    if not proof_replay_summary_expr_charge_with_work(expression, &source_work):
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    report.source_effect_index.implicit_effect_work <- source_work
                     return if not (proof_runtime_operator_expression_witnessed(expression, facts, report, functions, 0) can Global.Read)
                     # Only the comparison result is Boolean. No enum operand gains a scalar witness.
                     marker: Ast::Expr = proof_scalar_term_marker(expression, position)
