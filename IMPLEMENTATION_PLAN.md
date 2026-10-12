@@ -11793,3 +11793,13 @@ source at `5fd8a73b` and Stage1 `7e125178`; reject it for current-tree qualifica
 build, test, or replay claim is made here, and performance timing remains skipped. The next gate is
 to wait for the active host-wide seed lock to clear, seed the exact pair, and then update pins only
 after provenance checks pass.
+
+### 23.27.208 Track the borrowed-nursery early-return blocker (2026-10-12)
+
+The first current-Core shared-pool smoke exposed invalid fixture ownership: the caller-created
+pool was not shut down. After the fixture was changed to use an enclosing pool scope, Core still
+reports the nursery-generated TaskGroup as pending at an early return, while the backend emits a
+join path. This is an unresolved semantic-flow mismatch, not a qualified compiler result. The
+compiler owner is isolating a minimal regression on a separate Core checkout; keep the proof pins
+unchanged and do not use this smoke to certify the current Core commit until the early-return case
+passes with the focused semantic/backend suites.
