@@ -8,261 +8,30 @@ only; nothing in the proof checker reads it.
 """
 
 import argparse
-import ast
 import hashlib
-import io
 import json
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import uuid
-from pathlib import Path
 from build_manifest_hashes import (INCLUDE_RE, dependency_digest,
     effective_environment, effective_environment_digest, file_digest, tree_digest)
-from compiler_recipe_inputs import committed_recipe_paths
-
-MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
-def git(repository: str, *arguments: str) -> str:
-    try:
-        result = subprocess.run(
-            ["git", "-C", repository, *arguments],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return ""
-    return result.stdout.strip()
-
-
-def committed_compiler_source_digest(repository: str, revision: str) -> str:
-    """Hash the compiler source/stdlib files exactly as Stage1 records them."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", repository, "archive", "--format=tar", revision,
-             "src", "elisacore_std"],
-            check=True,
-            capture_output=True,
-        )
-        digest = hashlib.sha256()
-        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
-            files = []
-            for member in archive.getmembers():
-                if member.isdir():
-                    continue
-                if not member.isfile():
-                    raise ValueError(
-                        f"unsupported non-file compiler source in pinned tree: {member.name}"
-                    )
-                name = member.name.rstrip("/")
-                if (name.startswith("/") or ".." in name.split("/")
-                        or not name.startswith(("src/", "elisacore_std/"))):
-                    raise ValueError(f"invalid compiler source path in pinned tree: {name}")
-                stream = archive.extractfile(member)
-                if stream is None:
-                    raise ValueError(f"cannot read compiler source in pinned tree: {name}")
-                files.append((name, stream.read()))
-        for name, contents in sorted(files):
-            digest.update(name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(contents)
-            digest.update(b"\0")
-        if not files:
-            raise ValueError("pinned compiler tree has no source files")
-        return digest.hexdigest()
-    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        raise ValueError(f"cannot inspect pinned compiler source tree: {error}") from error
-
-
-LEGACY_RECIPE_PATHS = (
-    "scripts/elisac_stage1.sh",
-    "scripts/elisac_stage1_seed.sh",
-    "scripts/build_runtime_object.sh",
-    "scripts/write_profiler_hook_fallbacks.sh",
+from stage1_provenance_validation import (
+    LEGACY_RECIPE_PATHS,
+    SUPPORTED_STAGE1_PROVENANCE_SCHEMAS,
+    committed_compiler_recipe_digest,
+    committed_compiler_source_digest,
+    committed_recipe_paths,
+    git,
+    stage1_provenance_revision,
+    stage1_source_tree_digest,
+    validated_stage1_provenance,
+    validated_stage1_snapshot_std_root,
 )
 
-
-def committed_recipe_paths(repository: str, revision: str) -> tuple:
-    """Read the recipe list Stage1 hashes from its pinned provenance script."""
-    try:
-        script = subprocess.run(
-            ["git", "-C", repository, "show", f"{revision}:scripts/stage1_provenance.py"],
-            check=True, capture_output=True, text=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return LEGACY_RECIPE_PATHS
-    for node in ast.parse(script).body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and node.targets[0].id == "BUILD_RECIPES"):
-            try:
-                paths = ast.literal_eval(node.value)
-            except ValueError as error:
-                raise ValueError(f"cannot evaluate pinned BUILD_RECIPES: {error}") from error
-            if (not isinstance(paths, (tuple, list)) or not paths
-                    or not all(isinstance(path, str) for path in paths)):
-                raise ValueError("pinned BUILD_RECIPES is not a non-empty list of paths")
-            return tuple(paths)
-    return LEGACY_RECIPE_PATHS
-
-
-def committed_compiler_recipe_digest(repository: str, revision: str) -> str:
-    """Hash the build recipes Stage1 records, directly from the pinned commit."""
-    recipe_paths = committed_recipe_paths(repository, revision)
-    try:
-        result = subprocess.run(
-            ["git", "-C", repository, "archive", "--format=tar", revision,
-             *recipe_paths],
-            check=True,
-            capture_output=True,
-        )
-        digest = hashlib.sha256()
-        files = []
-        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
-            for member in archive.getmembers():
-                if member.isdir():
-                    continue
-                if not member.isfile():
-                    raise ValueError(f"unsupported non-file compiler recipe: {member.name}")
-                name = member.name.rstrip("/")
-                if name not in recipe_paths:
-                    raise ValueError(f"unexpected compiler recipe path in pinned tree: {name}")
-                stream = archive.extractfile(member)
-                if stream is None:
-                    raise ValueError(f"cannot read compiler recipe in pinned tree: {name}")
-                files.append((name, stream.read()))
-        for name, contents in sorted(files):
-            digest.update(name.encode("utf-8"))
-            digest.update(b"\0")
-            digest.update(contents)
-            digest.update(b"\0")
-        if len(files) != len(recipe_paths):
-            raise ValueError("pinned compiler commit is missing one or more Stage1 build recipes")
-        return digest.hexdigest()
-    except (OSError, subprocess.CalledProcessError, tarfile.TarError) as error:
-        raise ValueError(f"cannot inspect pinned compiler build recipes: {error}") from error
-
-
-def validated_stage1_provenance(product: str, compiler_root: str,
-                                frontend_repo: str, frontend_revision: str) -> dict:
-    """Validate and return Stage1 provenance against the exact imported frontend commit."""
-    if not all((product, frontend_repo, frontend_revision)):
-        raise ValueError("Stage1 provenance requires product and pinned frontend inputs")
-    provenance_path = f"{product}.provenance.json"
-    try:
-        with open(provenance_path, encoding="utf-8") as handle:
-            provenance = json.load(handle)
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"Stage1 provenance unavailable at {provenance_path}: {error}") from error
-    if not isinstance(provenance, dict) or provenance.get("schema") != "elisa-stage1-provenance-v1":
-        raise ValueError("Stage1 provenance has an unknown or malformed schema")
-
-    source_revision = provenance.get("source_revision")
-    source_tree = provenance.get("source_tree_sha256")
-    build_recipe = provenance.get("build_recipe_sha256")
-    product_sha256 = provenance.get("product_sha256")
-    if not isinstance(source_revision, str) or re.fullmatch(r"[0-9a-f]{40}", source_revision) is None:
-        raise ValueError("Stage1 provenance is missing an exact committed source revision")
-    if not isinstance(source_tree, str) or re.fullmatch(r"[0-9a-f]{64}", source_tree) is None:
-        raise ValueError("Stage1 provenance is missing a valid source-tree digest")
-    if not isinstance(build_recipe, str) or re.fullmatch(r"[0-9a-f]{64}", build_recipe) is None:
-        raise ValueError("Stage1 provenance is missing a valid build-recipe digest")
-    if not isinstance(product_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", product_sha256) is None:
-        raise ValueError("Stage1 provenance is missing a valid product digest")
-    actual_product = file_digest(product)["sha256"]
-    if product_sha256 != actual_product:
-        raise ValueError("Stage1 product is stale: product digest differs from its provenance")
-
-    pinned_revision = git(frontend_repo, "rev-parse", "--verify",
-                          f"{frontend_revision}^{{commit}}")
-    if not pinned_revision:
-        raise ValueError(f"cannot resolve pinned frontend commit {frontend_revision!r}")
-    if source_revision != pinned_revision:
-        raise ValueError(
-            f"stage1/frontend provenance mismatch: stage1={source_revision} "
-            f"frontend={pinned_revision}"
-        )
-    expected_tree = committed_compiler_source_digest(frontend_repo, pinned_revision)
-    if source_tree != expected_tree:
-        raise ValueError("stage1/frontend provenance mismatch: source-tree digest differs from pinned frontend")
-    expected_recipe = committed_compiler_recipe_digest(frontend_repo, pinned_revision)
-    if build_recipe != expected_recipe:
-        raise ValueError("stage1/frontend provenance mismatch: build-recipe digest differs from pinned frontend")
-
-    if compiler_root:
-        snapshot_path = os.path.join(compiler_root, "SNAPSHOT")
-        if os.path.isfile(snapshot_path):
-            snapshot_values = {}
-            with open(snapshot_path, encoding="utf-8") as handle:
-                for line in handle:
-                    key, separator, value = line.partition(":")
-                    if separator:
-                        snapshot_values[key.strip()] = value.strip()
-            snapshot_revision = (snapshot_values.get("source_revision")
-                                 or snapshot_values.get("revision"))
-            if not snapshot_revision or not pinned_revision.startswith(snapshot_revision):
-                raise ValueError("Stage1 snapshot revision does not match the imported frontend pin")
-            if source_revision != pinned_revision:
-                raise ValueError("Stage1 product provenance does not match its installed snapshot")
-        else:
-            checkout_revision = git(compiler_root, "rev-parse", "--verify", "HEAD^{commit}")
-            if not checkout_revision or source_revision != checkout_revision:
-                raise ValueError("Stage1 product provenance does not match its source-worktree commit")
-    return provenance
-
-
-def stage1_provenance_revision(product: str, compiler_root: str,
-                               frontend_repo: str, frontend_revision: str) -> str:
-    """Return Stage1's source revision only after validating its full provenance."""
-    return validated_stage1_provenance(
-        product, compiler_root, frontend_repo, frontend_revision,
-    )["source_revision"]
-
-
-def stage1_source_tree_digest(root: str) -> str:
-    """Hash the Stage1 frontend and stdlib using its provenance algorithm."""
-    root_path = Path(root).resolve()
-    files = []
-    for directory in ("src", "elisacore_std"):
-        base = root_path / directory
-        if not base.is_dir() or base.is_symlink():
-            raise ValueError(f"compiler snapshot is missing a regular {directory} directory")
-        files.extend(candidate for candidate in base.rglob("*") if candidate.is_file())
-    digest = hashlib.sha256()
-    for path in sorted(set(files), key=lambda value: value.relative_to(root_path).as_posix()):
-        digest.update(path.relative_to(root_path).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    if not files:
-        raise ValueError("compiler snapshot has no source files")
-    return digest.hexdigest()
-
-
-def validated_stage1_snapshot_std_root(snapshot_root: str, product: str,
-                                       compiler_root: str, frontend_repo: str,
-                                       frontend_revision: str) -> str:
-    """Select snapshot stdlib only when its exact source tree matches Stage1 provenance."""
-    provenance = validated_stage1_provenance(
-        product, compiler_root, frontend_repo, frontend_revision,
-    )
-    root = os.path.realpath(snapshot_root)
-    revision_path = os.path.join(root, ".rev")
-    try:
-        with open(revision_path, encoding="ascii") as handle:
-            snapshot_revision = handle.read().strip()
-    except OSError as error:
-        raise ValueError(f"compiler snapshot revision is unavailable: {error}") from error
-    if snapshot_revision != provenance["source_revision"]:
-        raise ValueError("compiler snapshot revision differs from selected Stage1 provenance")
-    if stage1_source_tree_digest(root) != provenance["source_tree_sha256"]:
-        raise ValueError("compiler snapshot source tree differs from selected Stage1 provenance")
-    return os.path.join(root, "elisacore_std")
-
+MANIFEST_SCHEMA = "elisa-proof-build-manifest-v1"
 
 def target_triple(clang: str = "clang") -> str:
     try:
@@ -308,7 +77,7 @@ def main() -> int:
         "binary", "compiler", "stage", "stage1-revision", "runtime", "profile-hooks",
         "frontend-repo", "frontend-revision", "proof-root", "snapshot-root",
         "opt-level", "compile-mode", "contract-flag", "installed-as", "output",
-        "compiler-product", "compiler-root",
+        "compiler-product", "compiler-root", "stage0-revision",
     ):
         parser.add_argument(f"--{option}", default="")
     arguments = parser.parse_args()
@@ -326,6 +95,7 @@ def main() -> int:
             revision = stage1_provenance_revision(
                 arguments.compiler_product, arguments.compiler_root,
                 arguments.frontend_repo, arguments.frontend_revision,
+                pinned_stage0_revision=arguments.stage0_revision,
             )
         except (OSError, ValueError) as error:
             print(f"build manifest: {error}", file=sys.stderr)
@@ -339,6 +109,7 @@ def main() -> int:
                 arguments.snapshot_root, arguments.compiler_product,
                 arguments.compiler_root, arguments.frontend_repo,
                 arguments.frontend_revision,
+                pinned_stage0_revision=arguments.stage0_revision,
             )
         except (OSError, ValueError) as error:
             print(f"build manifest: {error}", file=sys.stderr)
@@ -494,6 +265,7 @@ def main() -> int:
             stage1_provenance = validated_stage1_provenance(
                 arguments.compiler_product, arguments.compiler_root,
                 arguments.frontend_repo, arguments.frontend_revision,
+                pinned_stage0_revision=arguments.stage0_revision,
             )
         except (OSError, ValueError) as error:
             print(f"build manifest: {error}", file=sys.stderr)

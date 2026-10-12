@@ -16,7 +16,8 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 BUILD_SCRIPTS = (
     "build.sh", "compiler_snapshot.sh", "compiler_provenance.sh", "link_flags.sh", "platform.sh", "runtime_inputs.sh",
-    "build_manifest.py", "build_manifest_hashes.py", "compiler_environment.py", "verify_product_pair.py",
+    "build_manifest.py", "build_manifest_hashes.py", "stage1_provenance_validation.py",
+    "compiler_environment.py", "verify_product_pair.py",
     "runtime_inputs.sh", "compiler_recipe_inputs.py",
     "runtime_inputs.sh", "compiler_recipe_inputs.py",
 )

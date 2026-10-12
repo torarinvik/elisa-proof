@@ -34,20 +34,92 @@ def commit(root: Path, message: str) -> str:
     ).stdout.strip()
 
 
-def write_provenance(root: Path, product: Path, revision: str, *, source_tree: str | None = None) -> None:
+def v5_artifact(path: str, digest: str) -> dict:
+    return {
+        "path": path,
+        "size": 1,
+        "mtime_ns": 1,
+        "ctime_ns": 1,
+        "device": 1,
+        "inode": 1,
+        "sha256": digest,
+    }
+
+
+def stage1_v5_fields(root: Path) -> dict:
+    clang = v5_artifact("/fixture/clang", "a" * 64)
+    llvm_config = v5_artifact("/fixture/llvm-config", "b" * 64)
+    linker_artifact = v5_artifact("/fixture/ld", "c" * 64)
+    bootstrap_path = root / "bin/elisac-stage0"
+    bootstrap_path.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap_path.write_bytes(b"mock Stage0 compiler")
+    bootstrap = v5_artifact(
+        str(bootstrap_path), hashlib.sha256(bootstrap_path.read_bytes()).hexdigest(),
+    )
+    toolchain = {
+        "llvm_config_path": llvm_config["path"],
+        "llvm_config_artifact": llvm_config,
+        "llvm_version": "fixture LLVM 1",
+        "llvm_bindir": "/fixture/bin",
+        "llvm_libdir": "/fixture/lib",
+        "llvm_config_libdir": "/fixture/lib",
+        "clang_path": clang["path"],
+        "clang_artifact": clang,
+        "clang_version": "fixture clang 1",
+        "external_linker": {
+            "command": "ld",
+            "path": linker_artifact["path"],
+            "artifact": linker_artifact,
+            "version": "fixture linker 1",
+            "link_command": ["ld", "-o", "/dev/null"],
+            "clang_artifact_sha256": clang["sha256"],
+            "linker_probe_cache_key": "e" * 64,
+        },
+        "link_mode": "dynamic",
+        "link_flags": "-lLLVM",
+        "dynamic_libraries": [],
+        "static_archives": [],
+        "link_libraries": [],
+    }
+    seed = {
+        "bootstrap_compiler": bootstrap,
+        "bootstrap_kind": "stage0",
+        "optimization_level": "-O3",
+        "bootstrap_runtime_object": None,
+        "bootstrap_runtime_expected_sha256": None,
+        "bootstrap_runtime_link_mode": "none",
+        "host_os": "fixture",
+        "elisa_host_os": "fixture",
+        "seed_link_flags": "",
+        "executable_link_flags": "",
+        "dead_strip_flags": "",
+        "stack_flags": "",
+        "llvm_link_flags": "-lLLVM",
+        "profiler_hook_mode": "fixture",
+        "clang_path": clang["path"],
+    }
+    return {"llvm_toolchain": toolchain, "seed_configuration": seed}
+
+
+def write_provenance(root: Path, product: Path, revision: str, *, source_tree: str | None = None,
+                     schema: str = "elisa-stage1-provenance-v1") -> None:
     if source_tree is None:
         source_tree = build_manifest.committed_compiler_source_digest(str(root), revision)
     product_digest = hashlib.sha256(product.read_bytes()).hexdigest()
-    (Path(str(product) + ".provenance.json")).write_text(json.dumps({
-        "schema": "elisa-stage1-provenance-v1",
+    provenance = {
+        "schema": schema,
         "source_revision": revision,
         "source_tree_sha256": source_tree,
         "build_recipe_sha256": build_manifest.committed_compiler_recipe_digest(str(root), revision),
         "product_sha256": product_digest,
-    }))
+    }
+    if schema == "elisa-stage1-provenance-v5":
+        provenance.update(stage1_v5_fields(root))
+    (Path(str(product) + ".provenance.json")).write_text(json.dumps(provenance))
 
 
-def make_compiler(root: Path, *, installed_snapshot: bool) -> tuple[str, Path]:
+def make_compiler(root: Path, *, installed_snapshot: bool,
+                  schema: str = "elisa-stage1-provenance-v1") -> tuple[str, Path]:
     (root / "src").mkdir(parents=True)
     (root / "elisacore_std").mkdir()
     (root / "src/front.elisa").write_text("frontend v1\n")
@@ -59,11 +131,23 @@ def make_compiler(root: Path, *, installed_snapshot: bool) -> tuple[str, Path]:
         path = root / recipe
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"# fixture: {recipe}\n")
-    (root / "scripts/stage1_provenance.py").write_text(
+    provenance_source = (
+        f"SCHEMA = {schema!r}\n"
         "BUILD_RECIPES = ('scripts/elisac_stage1.sh', "
         "'scripts/elisac_stage1_seed.sh', 'scripts/build_runtime_object.sh', "
-        "'scripts/write_profiler_hook_fallbacks.sh')\n"
+        "'scripts/write_profiler_hook_fallbacks.sh', 'scripts/stage1_provenance.py')\n"
     )
+    if schema == "elisa-stage1-provenance-v5":
+        provenance_source += (
+            "import json, pathlib, sys\n"
+            "if __name__ == '__main__' and len(sys.argv) == 4 and sys.argv[1] == 'check-exact':\n"
+            "    snapshot = pathlib.Path(sys.argv[2] + '/SNAPSHOT').read_text()\n"
+            "    if not any(line.startswith('source_revision: ') for line in snapshot.splitlines()):\n"
+            "        raise SystemExit(2)\n"
+            "    record = json.loads(pathlib.Path(sys.argv[3] + '.provenance.json').read_text())\n"
+            "    raise SystemExit(0 if 'llvm_toolchain' in record and 'seed_configuration' in record else 2)\n"
+        )
+    (root / "scripts/stage1_provenance.py").write_text(provenance_source)
     revision = commit(root, "frontend baseline")
     product = root / "bin/elisac-stage1"
     product.parent.mkdir()
@@ -93,7 +177,7 @@ def run_stage1_build(base: Path, *, installed_snapshot: bool) -> dict:
         directory.mkdir(parents=True, exist_ok=True)
     for name in ("build.sh", "compiler_snapshot.sh", "compiler_provenance.sh",
                  "link_flags.sh", "platform.sh", "build_manifest.py", "build_manifest_hashes.py", "compiler_environment.py",
-                 "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
+                 "stage1_provenance_validation.py", "verify_product_pair.py", "runtime_inputs.sh", "compiler_recipe_inputs.py"):
         shutil.copy2(ROOT / "scripts" / name, proof / "scripts" / name)
     (compiler / "src/front.elisa").write_text("pinned frontend\n")
     (compiler / "elisacore_std/prelude.elisa").write_text("pinned stdlib\n")
@@ -185,15 +269,118 @@ class Stage1BuildProvenanceTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def resolve(self, root: Path, revision: str, product: Path) -> str:
+    def resolve(self, root: Path, revision: str, product: Path, *,
+                pinned_stage0_revision: str = "", require_stage0_binding: bool = False) -> str:
         return build_manifest.stage1_provenance_revision(
             str(product), str(root), str(root), revision,
+            pinned_stage0_revision=pinned_stage0_revision,
+            require_stage0_binding=require_stage0_binding,
         )
 
     def test_source_worktree_without_snapshot_resolves_exact_full_commit(self) -> None:
         revision, product = make_compiler(self.root, installed_snapshot=False)
         self.assertFalse((self.root / "SNAPSHOT").exists())
         self.assertEqual(self.resolve(self.root, revision, product), revision)
+
+    def test_stage1_v5_provenance_keeps_the_content_addressed_core(self) -> None:
+        revision, product = make_compiler(
+            self.root, installed_snapshot=False, schema="elisa-stage1-provenance-v5",
+        )
+        write_provenance(self.root, product, revision, schema="elisa-stage1-provenance-v5")
+        stage0_revision = "f" * 40
+        go_directory = self.root / "test-bin"
+        go_directory.mkdir()
+        go = go_directory / "go"
+        go.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' 'build vcs.revision={stage0_revision} vcs.modified=false'\n"
+        )
+        go.chmod(go.stat().st_mode | stat.S_IXUSR)
+        with patch.dict(os.environ, {"PATH": str(go_directory) + os.pathsep + os.environ["PATH"]}):
+            self.assertEqual(self.resolve(
+                self.root, revision, product, pinned_stage0_revision=stage0_revision,
+                require_stage0_binding=True,
+            ), revision)
+            with self.assertRaisesRegex(ValueError, "does not match ELISA_STAGE0_REV"):
+                self.resolve(
+                    self.root, revision, product, pinned_stage0_revision="e" * 40,
+                    require_stage0_binding=True,
+                )
+        sidecar_path = Path(str(product) + ".provenance.json")
+        complete_record = json.loads(sidecar_path.read_text())
+        core_only_record = dict(complete_record)
+        core_only_record.pop("llvm_toolchain")
+        core_only_record.pop("seed_configuration")
+        sidecar_path.write_text(json.dumps(core_only_record))
+        with self.assertRaisesRegex(ValueError, "missing its LLVM toolchain record"):
+            self.resolve(self.root, revision, product)
+        write_provenance(self.root, product, revision, schema="elisa-stage1-provenance-v6")
+        with self.assertRaisesRegex(ValueError, "unknown or malformed schema"):
+            self.resolve(self.root, revision, product)
+
+    def test_v5_stage1_seed_chain_recurses_and_rejects_cycles(self) -> None:
+        revision, parent = make_compiler(
+            self.root, installed_snapshot=False, schema="elisa-stage1-provenance-v5",
+        )
+        seed = self.root / "bin/elisac-seed"
+        seed.write_bytes(b"mock Stage1 seed compiler")
+        write_provenance(self.root, seed, revision, schema="elisa-stage1-provenance-v5")
+        write_provenance(self.root, parent, revision, schema="elisa-stage1-provenance-v5")
+        stage0_revision = "f" * 40
+        go_directory = self.root / "test-bin"
+        go_directory.mkdir()
+        go = go_directory / "go"
+        go.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' 'build vcs.revision={stage0_revision} vcs.modified=false'\n"
+        )
+        go.chmod(go.stat().st_mode | stat.S_IXUSR)
+
+        def set_bootstrap(product: Path, bootstrap: Path, kind: str) -> None:
+            sidecar = Path(str(product) + ".provenance.json")
+            record = json.loads(sidecar.read_text())
+            record["seed_configuration"]["bootstrap_kind"] = kind
+            record["seed_configuration"]["bootstrap_compiler"] = v5_artifact(
+                str(bootstrap), hashlib.sha256(bootstrap.read_bytes()).hexdigest(),
+            )
+            sidecar.write_text(json.dumps(record))
+
+        set_bootstrap(parent, seed, "stage1")
+        with patch.dict(os.environ, {"PATH": str(go_directory) + os.pathsep + os.environ["PATH"]}):
+            self.assertEqual(self.resolve(
+                self.root, revision, parent, pinned_stage0_revision=stage0_revision,
+                require_stage0_binding=True,
+            ), revision)
+            set_bootstrap(seed, parent, "stage1")
+            with self.assertRaisesRegex(ValueError, "contains a cycle"):
+                self.resolve(
+                    self.root, revision, parent, pinned_stage0_revision=stage0_revision,
+                    require_stage0_binding=True,
+                )
+
+    def test_stage1_v5_artifact_stat_fields_reject_json_booleans(self) -> None:
+        revision, product = make_compiler(
+            self.root, installed_snapshot=False, schema="elisa-stage1-provenance-v5",
+        )
+        write_provenance(self.root, product, revision, schema="elisa-stage1-provenance-v5")
+        sidecar = Path(str(product) + ".provenance.json")
+        record = json.loads(sidecar.read_text())
+        record["seed_configuration"]["bootstrap_compiler"]["inode"] = True
+        sidecar.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "invalid bootstrap compiler identity"):
+            self.resolve(self.root, revision, product)
+
+    def test_stage1_v5_runtime_digest_requires_runtime_object(self) -> None:
+        revision, product = make_compiler(
+            self.root, installed_snapshot=False, schema="elisa-stage1-provenance-v5",
+        )
+        write_provenance(self.root, product, revision, schema="elisa-stage1-provenance-v5")
+        sidecar = Path(str(product) + ".provenance.json")
+        record = json.loads(sidecar.read_text())
+        record["seed_configuration"]["bootstrap_runtime_expected_sha256"] = "f" * 64
+        sidecar.write_text(json.dumps(record))
+        with self.assertRaisesRegex(ValueError, "runtime digest without a runtime object"):
+            self.resolve(self.root, revision, product)
 
     def test_installed_snapshot_and_product_provenance_must_agree(self) -> None:
         revision, product = make_compiler(self.root, installed_snapshot=True)

@@ -2,6 +2,10 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STAGE0_PINNED_REV=""
+if [[ -f "$ROOT_DIR/ELISA_STAGE0_REV" ]]; then
+    STAGE0_PINNED_REV="$(tr -d '[:space:]' < "$ROOT_DIR/ELISA_STAGE0_REV")"
+fi
 # O2 by default: the checker spends its time in tight term-comparison loops, and on the
 # mocap-cleaner corpus the O2 build gives identical reports in a fraction of the O0 time.
 # ELISA_OPT_LEVEL=O0 still gives a debug build.
@@ -196,11 +200,13 @@ if [[ "$COMPILER_IS_STAGE1" -eq 1 ]]; then
     stage1_revision="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
         --resolve-stage1-provenance --compiler-product "$COMPILER_PRODUCT" \
         --compiler-root "$stage1_root" --frontend-repo "$COMPILER_SRC" \
-        --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+        --frontend-revision "$ELISA_COMPILER_PINNED_REV" \
+        --stage0-revision "$STAGE0_PINNED_REV")" || exit $?
     snapshot_std_root="$(python3 "$ROOT_DIR/scripts/build_manifest.py" \
         --validate-stage1-snapshot-std-root --snapshot-root "$SNAPSHOT_COMPILER" \
         --compiler-product "$COMPILER_PRODUCT" --compiler-root "$stage1_root" \
-        --frontend-repo "$COMPILER_SRC" --frontend-revision "$ELISA_COMPILER_PINNED_REV")" || exit $?
+        --frontend-repo "$COMPILER_SRC" --frontend-revision "$ELISA_COMPILER_PINNED_REV" \
+        --stage0-revision "$STAGE0_PINNED_REV")" || exit $?
     if [[ -n "${ELISA_STAGE1_RUNTIME_STD_ROOT:-}" && \
           "$(cd "$ELISA_STAGE1_RUNTIME_STD_ROOT" 2>/dev/null && pwd -P || true)" != "$snapshot_std_root" ]]; then
         printf 'build: refusing runtime std root outside the provenance-checked compiler snapshot\n' >&2
@@ -233,6 +239,7 @@ fi
 OBJECT_CACHE="${ELISA_PROOF_OBJECT_CACHE:-$HOME/.cache/elisa-proof/objects}"
 BUILD_RECIPES=("$ROOT_DIR/scripts/build.sh" "$ROOT_DIR/scripts/compiler_snapshot.sh" \
     "$ROOT_DIR/scripts/build_manifest.py" "$ROOT_DIR/scripts/build_manifest_hashes.py" \
+    "$ROOT_DIR/scripts/stage1_provenance_validation.py" \
     "$ROOT_DIR/scripts/compiler_environment.py"
     "$ROOT_DIR/scripts/compiler_recipe_inputs.py")
 # The pair publisher participates only in the all-products workflow. Keeping it
@@ -491,6 +498,7 @@ for index in "${!PRODUCT_MAINS[@]}"; do
         --compiler-root "${stage1_root:-}" \
         --stage "$([[ "$COMPILER_IS_STAGE1" -eq 1 ]] && echo stage1 || echo stage0)" \
         --stage1-revision "${stage1_revision:-}" \
+        --stage0-revision "$STAGE0_PINNED_REV" \
         --runtime "${RUNTIME_OBJ:-}" \
         --profile-hooks "$PROFILE_HOOKS_OBJ" \
         --target-clang "$CLANG_TOOL" \
