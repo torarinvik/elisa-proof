@@ -10459,9 +10459,11 @@ and proof migrations remain dirty and were not included in this commit. No perfo
 run; the user directed us to skip the pending run.
 
 The proof and compiler repositories contain active dirty migrations and distinct worktrees. The
-temporary clean validation worktree created for `26c1106c` was removed after the tests; unrelated
-worktrees and branches were left intact because they are not established as disposable or fully
-superseded.
+temporary clean validation worktree created for `26c1106c` was removed after the tests. A branch
+audit found `codex/global-mutable-grants` clean but 204 commits behind and three commits ahead of
+Elisa-compiler `main`, with a 120-file divergence from its merge base. Its three unique commits have
+not been reviewed against the newer mainline implementation, so retain that branch/worktree and the
+other unrelated worktrees until their deltas are established as superseded.
 
 **Next high-return order:** (1) retry a clean Stage1/gen2 bootstrap from committed Elisa-compiler
 `e1361c201` using the exact clean Stage0 `26c1106c`, and isolate fatal diagnostics from warnings;
