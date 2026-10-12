@@ -10710,19 +10710,31 @@ deferred for this run.
 
 ### 23.27.124 Current compiler snapshot and integration gate (2026-10-12)
 
-The latest committed compiler source is now `550c4bc1aefa7451466443548bc023061aaef4d3` on both
-compiler `main` and `origin/main`, superseding the `d4d0507f4` snapshot recorded above. The proof
-repository remains at `d4a9d935`, with its compiler pin at `e1361c201` and Stage0 pin at `8070e39d`;
-do not advance either pin until a product is built and verified from the selected source/runtime pair.
+The latest committed compiler source is now `efcbb0915ab3a85df704d0acfd23ffe7208207fc` on both
+compiler `main` and `origin/main`, superseding the `550c4bc1` snapshot recorded above. This commit
+adds stricter benchmark admission and host-wide locks, dynamic name-chain indexing, semantic fixes,
+and focused regressions. The benchmark load-gate suite passes 10/10; shell/Python syntax and
+whitespace checks also pass. These checks do not qualify the compiler changes end to end. The last
+recorded proof snapshot is `d4a9d935`; current proof `main` and `origin/main` have advanced
+to `4d5ec414` (“Tighten structural replay and package auth”), which descends from that snapshot. The
+current proof worktree also contains uncommitted edits. The qualification compiler pin remains
+`e1361c201`, with Stage0 pin `8070e39d`; do not advance either pin until a product is built and
+verified from the selected source/runtime pair.
 The installed compiler Stage1 product still has provenance schema v1 while current verification
 requires v5. A clean seed attempt against compiler `550c4bc1` stopped before publication because the
-bootstrap backend declined `par_pass_run@220` as a call expression. There is no current-source Stage1
-product, so strict O2 proof qualification and compiler-dependent replay gates remain unrun.
+bootstrap backend declined `par_pass_run@220` as a call expression. No current-source Stage1 product
+is available, so strict O2 proof qualification and compiler-dependent replay gates remain unrun.
 The latest local Elisa-core Stage0 (`604cdf5388d974002d58da1213a47d88a2cf1d15`, VCS-clean) is also
 too old syntactically for compiler `550c4bc1`: its seed attempt reports parser failures in current
 compiler sources, including `when` forms and multiline expressions. This is a Stage0/source-language
 mismatch, not evidence that the current compiler source is invalid; do not bypass freshness checks.
 Use a provenance-verified Stage1 bootstrap after the `par_pass_run@220` emission failure is fixed.
+
+The earlier short hash `8d7cfca` resolves in this compiler repository to `8d7cfca2e` (“Exercise
+region owner fallback and avoid binding shadow”) on divergent branch
+`codex/mainline-consolidation-20261011`; it is not the reported `smc_error_binding_index` fix, and
+that identifier is absent from the available refs. Do not cherry-pick it as that fix without the
+correct full hash and its focused qualification results.
 
 The isolated pre-optimization shard-cache candidate passed 34 shard-cache unit tests, 17 whole-object
 cache tests, Python and shell syntax checks, and native Darwin mapped-image controls for malformed
@@ -10733,12 +10745,13 @@ ordinary-output parity, and one-/two-digit shard-count controls. The user's dire
 current timing run only; paired timing remains pending after correctness, provenance, and host-load
 gates pass.
 
-Current cleanup audit found 145 compiler worktrees, no prunable entries, and no clean branch worktree
-whose tip is already merged into `main`. All seven proof worktrees contain dirty changes. Preserve
-them until their owners finish and their changes are either integrated or explicitly discarded.
+Current cleanup audit found 145 compiler worktrees, seven proof worktrees, and no prunable entries.
+Every proof worktree and each compiler worktree attached to a merged branch has dirty changes. The
+disposable Stage0 seed worktree created for diagnosis has been removed. Preserve the remaining trees
+until their owners finish and their changes are either integrated or explicitly discarded.
 
 **Next high-return order:** (1) resolve the narrow `par_pass_run@220` self-host failure without
-weakening call-holder, region, or capture-lifetime checks; seed compiler `550c4bc1` with a
+weakening call-holder, region, or capture-lifetime checks; seed compiler `efcbb091` with a
 provenance-verified Stage1 bootstrap and verify the resulting product; (2) on that exact pair, pass compiler self-host/fixpoint and the pre-optimization
 cache correctness/parity controls; (3) qualify the current proof sources under strict O2, then run
 source-authenticated structural termination with exact recursive call-site, argument, default-value,
