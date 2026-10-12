@@ -10,14 +10,10 @@ if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
     # The portable package checker is its own small product built from the same snapshot; both
     # products build in one call, compiling side by side.
     ELISA_PROOF_PRODUCTS=all "$ROOT_DIR/scripts/build.sh"
-else
-    # Prebuilt binaries still need build/snapshot: the standalone compile probes read the
-    # frontend export and the examples from it. Exporting compiles nothing.
-    (
-        # shellcheck source=scripts/compiler_snapshot.sh
-        source "$ROOT_DIR/scripts/compiler_snapshot.sh"
-    )
 fi
+
+# Test reports count only when the actual pair matches the current source/toolchain snapshot.
+bash "$ROOT_DIR/scripts/qualify_prebuilt_test.sh"
 
 # ELISA_PROOF_JOBS>1 runs every literal run_json_report fixture in parallel first; the serial
 # assertions below then read those stored reports (scripts/prefetch_reports.py).
