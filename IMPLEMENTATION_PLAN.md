@@ -10,7 +10,7 @@ This section controls immediate work. The roadmaps and inventories below retain 
 
 3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `a9e318e9`; the latest source-length and whitespace gates pass, but parser, build, and replay qualification remain pending. Finish the exact-scope call-result resolver and signed-length safety review, then run their focused runtime controls on the same qualified Stage1. Keep resource accounting fail-closed and add a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace.
 
-4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Performance timing and A/B work is skipped under the latest user instruction; the earlier archived comparison is historical and does not justify an optimization.
+4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Skip performance timing and benchmark comparisons under the latest user instruction; static source, LLVM IR, and assembly-shape review can continue. Archived timing data is historical and does not justify an optimization.
 
 5. **Commit qualified work, then clean only proven-unused Git state.** Most branch-backed worktrees still contain edits or ignored artifacts. I removed `/private/tmp/codex-elisa-stage1-guard-bridge` after confirming it was detached, clean, merged, had no ignored files, and was not referenced by active tasks. The remaining clean detached worktree `/private/tmp/elisa-compiler-fastpush-1681cebd` is merged and has no ignored files, but recent history in active compiler and proof tasks still cites it, so retain it until those uses are ruled out. No merged compiler branch ref is unchecked-out; keep branch refs attached to dirty or evidence-bearing worktrees. Proof has no clean merged checkout to remove, and Core's `/Users/torarinvikbjarko/.elisac/stage0-ef042-source` remains useful Stage0 source. Preserve Stage0/Stage1 seed and provenance artifacts.
 
@@ -16102,24 +16102,23 @@ remain unexecuted against a matching proof product.
 A separate type-resolution audit found that compiler lookup resolves qualified module prefixes
 from the owning function's lexical module path, while the proof's qualified scalar-shape helper
 looked them up from root. A nested module and root module with the same prefix could therefore
-supply different scalar widths. Replay now fails closed for qualified type shapes in both call-
-result and local-fact witnesses until it can mirror lexical module precedence. This supersedes
-earlier plan entries describing qualified scalar aliases as admitted; restoring that
-expressiveness requires threading the selected declaration's module path and selecting the
-nearest module before resolving its leaf type.
+supply different scalar widths. The replay gap is addressed for call-result, parameter, and local
+type-bound witnesses by recovering the selected function's module scope and matching the complete
+written module path against each lexical prefix, deepest first. A partial nearer prefix does not
+prevent a complete parent or root path from resolving. The read-only scope and generic-binder
+walks charge declaration visits and compared bytes to the shared type-bound work budget. Visible
+module-alias heads still fail closed when no literal module matched; if both exist, the literal
+module wins. These source changes have static review only pending a matched Stage1.
 
 ### 23.27.607 Reopen lexical resolution for call-result widths (2026-10-13)
 
-The current shared diff now threads the selected callee module path into qualified call-result
-type lookup and matches source owner paths against that lexical context, restoring direct
-call-result width witnesses for lexical module paths. The compiler candidate order to preserve is:
-search literal child modules from the selected callee's deepest lexical scope through its parents
-and root; only when no literal first segment exists, consider a visible `__using_alias`; then
-resolve remaining module segments as exact children and the leaf in that selected owner.
-Qualified local parameter facts still
-return unknown until their owning function scope is threaded through their validator. The focused
-call-result harness now includes a counterexample where `Outer::M::Word = u8` shadows root
-`M::Word = u64`; it expects both local-parameter and call-result overflow claims to remain
-unproven. These are source changes and expected outcomes only: parser, build, and replay have not
-run against a source-matched Stage1. Keep §23.27.606's compiler precedence finding, but its
-statement that call-result paths still fail closed is superseded by this in-progress resolver.
+The replay resolver now matches the complete written module path against the owning function's
+deepest lexical module and each parent through root. This follows the compiler's type-path matcher:
+a nearer partial prefix does not block a complete parent or root match. A visible module-alias head is still
+unsupported and fails closed when no literal module matched; a literal module takes precedence
+when both spellings exist. Qualified parameter, local, and call-result scalar facts share this
+owner-scope behavior. Generic names are checked at the exact owner declaration line before a
+builtin width or scalar kind is admitted. The focused fixture covers root-qualified and nested
+width collisions, deeper scopes, parent-module fallback, module-alias refusal, and call results.
+`git diff --check` and the source-length gate pass; parser, build, and replay have not run against a
+source-matched Stage1.
