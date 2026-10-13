@@ -16008,15 +16008,56 @@ root function. The backend checks the module's matching shape before root fallba
 zero-arity candidate cannot be redirected by a differently shaped peer. For nonzero root calls,
 replay now admits a unique same-arity root declaration: `emit_direct_call` resolves within that
 root owner before peer-owner fallback. Other nonzero calls with competing names still require
-typed overload matching or global uniqueness. `git diff --check` passes; the current shared-tree
-source-length gate reports 18 over-limit files. Semantic qualification remains pending.
+typed overload matching or global uniqueness. Semantic qualification remains pending.
 
 ### 23.27.601 Exclude all direct bare-call dispatch collisions
 
 Bare call-result replay now excludes `dense_key/2` and `llvm_va_copy/2`, plus one-argument scalar
-prefix conversions. For one-argument names declared as packed structs or enums, it also declines
-the witness because the backend may dispatch through a matching prefix `__cast__` hook. These
-checks run before a declared function return type can be used. Static diff and source-length gates
-remain required; at this checkpoint `git diff --check` passes, but `scripts/check_source_length.py`
-reports 18 over-limit files elsewhere in the shared tree. Parser, build and replay qualification
-remain pending under the static-only hold.
+prefix conversions. For one-argument names declared as enums, it also declines the witness when
+a same-named enum may dispatch through a matching prefix `__cast__` hook. These
+checks run before a declared function return type can be used. Parser, build and replay
+qualification remain pending under the static-only hold.
+
+### 23.27.602 Mirror defaulted and variadic call-shape precedence
+
+Bare call-result replay now checks whether declarations accept the actual positional and named
+argument shape, including omitted default parameters and variadic annotations, before using a
+selected return type. A unique caller-module shape winner is admitted only when it matches the
+selected declaration; a root fallback additionally requires no current-module shape winner. The
+enum prefix-cast collision check excludes enum declarations, matching the backend's packed and
+payload enum target lookup without treating ordinary structs as cast targets. Static diff and
+source-length gates pass. Parser, build and replay qualification remain pending under the
+static-only hold. Shape matching prevents a defaulted or variadic competitor from redirecting a
+witness; the result witness still requires every formal to be supplied and does not independently
+type-check actual arguments.
+Imported lookup applies the same shape filter within the selected module before choosing a
+declaration line. Variadic markers are keyed by source line in the parser side table; replay uses
+one only when exactly one source function owns that line. Duplicate or malformed line metadata
+makes the witness incomplete. The parameter field match follows the AST's `(name, parameters,
+return type, ...)` order. Static gates pass; parser, build, and replay qualification remain pending
+under the static-only hold.
+
+### 23.27.603 Split over-limit proof implementation modules
+
+The 18 proof modules reported over the 600-line source limit were split along cohesive function
+groups into sibling implementation files, with include points kept next to their parent modules.
+`git diff --check` and `scripts/check_source_length.py` pass on the shared tree. No parser, build,
+test or replay ran under the static-only hold.
+
+### 23.27.604 Admit uniquely resolved root caller result witnesses
+
+Scalar call-result replay no longer rejects a caller solely because it is top-level and has an
+empty module path. The existing caller identity lookup still requires one exact name/line row,
+and bare callee resolution and emitter-shape guards remain in force. Root scope is already
+represented by the empty path throughout those helpers. Static diff and source-length gates pass;
+semantic qualification remains pending under the static-only toolchain hold.
+
+### 23.27.605 Prove typing-index ordering and bucket-chain bounds
+
+Typing-index construction now carries loop invariants that value and function-parameter source
+indices stay strictly ordered and parameter-bucket links point only backward or to the sentinel.
+Successful results expose these properties as postconditions, including bounds for bucket heads
+and links. The admission and scan-budget helpers moved to a sibling module to keep the builder
+under the 600-line source cap. Repaired twelve malformed work-budget calls across five replay
+modules. `git diff --check` and `scripts/check_source_length.py` pass; parser, build, and replay
+qualification remain pending under the pinned toolchain hold.
