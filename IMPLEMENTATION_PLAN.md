@@ -16578,3 +16578,13 @@ text and repeated child-scan work. Static review found these limits fail closed 
 split keeps shared path caps and scanners in one included module. No tests, builds, or timing runs were
 started per the current instruction; this source set remains runtime-unqualified with the newest
 compiler.
+
+### 23.27.637 Use guarded decreases for recursive specification calls (2026-10-13)
+
+Core commit `8a2bfa48` passes a contract call's evaluation path into the direct self-recursive numeric
+termination certificate. This lets a guarded recursive call in an implication use the same guard to
+prove its measure decreases; the already-verified certificate is reused instead of being recomputed
+without that path. Ordinary body calls still use the nil-path wrapper. Mutual SCC certificates remain
+path-independent and are documented as a separate expressiveness limit in `8b322c64`. Static review
+only; no tests or builds were run, so the previously observed recursive sview failure remains
+unverified against this change.
