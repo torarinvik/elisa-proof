@@ -1,7 +1,7 @@
 # Elisa-Proof implementation plan
 
 
-Read-only toolchain inventory (2026-10-13): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-qualification`; the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
+Read-only toolchain inventory (2026-10-13): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-exact-qualification`; `/private/tmp/elisa-stage1-b8eb-qualification` is the `16e04fd0ecc9214d9669cef9492948ae2e95339a` derivative, and the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
 
 Read-only cleanup audit (refreshed 2026-10-13): proof has eight worktrees including `main`; all eight are dirty, and its three merged branch refs are checked out in dirty trees. Elisa-compiler has 127 worktrees including `main`, 43 dirty; seven clean non-root worktrees point to commits already on `main` and retain Stage1 seed/source, proof-compiler, or profiler baseline state. The other clean compiler trees point to candidate commits not merged to `main`. Of 103 local compiler branch refs, only `main` is merged; the other 102 are unmerged. There are no non-main merged compiler branches to prune and no uncommitted-free proof worktrees. No branch or worktree is safe to remove without discarding live changes, unmerged candidate history, or bootstrap/profiler evidence.
 
@@ -14900,3 +14900,952 @@ global-constant replay validator now threads one work counter through candidate 
 lookup, function counting, and body-shadow checks. Existing caller preflights reserve the follow-on
 source traversals. Static gates pass; semantic qualification remains pending a provenance-matched
 Stage1 toolchain.
+
+### 23.27.486 Remove dead unmetered replay compatibility paths (2026-10-13)
+
+Removed the unused legacy local-initializer constant normalizer and its raw parameter-shadow
+wrappers, along with a dead recursive immutable-parameter query. All live initializer normalization
+callers already use the shared-work variant. Repository-wide call-site searches found no remaining
+references to the removed entry points. `git diff --check` and the source-length gate pass; semantic
+qualification remains pending the pinned Stage1.
+
+### 23.27.487 Treat unknown producer expression forms as call-bearing (2026-10-13)
+
+The producer's disjunction call scan now explicitly admits only known call-free literal and name
+leaves; any future or unsupported expression form is treated as call-bearing. This matches kernel
+replay's fail-closed behavior and prevents a new expression constructor from silently enabling
+syntactic call congruence. Static gates pass; semantic qualification remains pending the pinned
+Stage1.
+
+### 23.27.488 Meter module scope splitting in replay (2026-10-13)
+
+Global-constant, integer-constant, and enum-path replay reserve up to three reads per module-name
+byte before invoking the scope splitter, which scans bytes and peeks ahead for `::`. If the
+reservation or recursive depth check fails, each shared work counter is marked exhausted so
+callers cannot accept after skipping a module subtree. Static gates pass; semantic qualification
+remains pending the pinned Stage1.
+
+### 23.27.489 Remove dead unmetered global-constant validation wrapper (2026-10-13)
+
+Removed the compatibility wrapper that created a fresh counter around global-constant fact
+validation. All remaining callers pass their existing shared source-work counter to the metered
+entry point. Static gates pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.490 Close replay ambiguity and suffix-meter gaps (2026-10-13)
+
+Parameter-type lookup now returns incomplete when multiple formals or owner declarations match,
+preventing an ambiguous empty result from entering a widening-cast fallback. Qualified constant
+suffix matching charges both repeated string reads and the two separator-byte reads, with its
+length check expressed without addition overflow. Static gates pass; semantic qualification remains
+pending the pinned Stage1.
+
+### 23.27.495 Reject incomplete owner and same-module scans (2026-10-13)
+
+Certificate owner/module counters now return ambiguous counts for invalid or unknown declaration
+constructors. Same-module function counting does likewise, while both source-work reservation
+walks explicitly reject invalid or unknown forms. This prevents a partial declaration scan from
+hiding duplicate owners or callees. Static gates pass; semantic qualification remains pending the
+pinned Stage1.
+
+### 23.27.494 Reject truncated variant declaration scans (2026-10-13)
+
+Variant-exclusion replay now meters its enum-counting walk and propagates depth, work, invalid
+declaration, or unknown-constructor failures instead of accepting counts from a partial scan. The
+source-tree preflight remains charged separately, while the redundant reservation for the former
+unmetered second scan was removed. The scan permits the same depth bound as the validating
+preflight. Static gates pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.491 Fail closed on truncated namespace discovery (2026-10-13)
+
+Qualified-constant replay no longer reports a namespace as found when its recursive namespace
+search reaches the depth cap. It marks the shared counter exhausted and propagates incomplete
+status, preventing a partial namespace scan from suppressing local-shadow checks. Static gates
+pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.493 Meter widening-cast enum source scans (2026-10-13)
+
+Widening-cast replay now charges variant-path bytes, declaration and formal rows, identifier
+comparisons, and repeated type-expression classification to the caller's source-work counter.
+Ambiguous enum parameter matches fail closed. Removed a dead typed-call payload helper that still
+referenced the former unmetered pattern parser. Static gates pass; semantic qualification remains
+pending the pinned Stage1.
+
+### 23.27.492 Meter type-bound module scope splitting (2026-10-13)
+
+Type-bound replay now reserves three reads per module-name byte for the scope splitter's cursor
+and delimiter lookahead. Oversized names exhaust the shared counter, and scope-copy counts are
+charged separately so their addition cannot wrap before the bound check. Static gates pass;
+semantic qualification remains pending the pinned Stage1.
+
+### 23.27.489 Share work across parameter type lookups (2026-10-13)
+
+Replay's integer and unsigned parameter type lookups now charge declaration rows, name comparisons,
+formal rows, and repeated type-AST classification to the caller's shared counter. Literal-call,
+for-saturation, widening-cast, and branch-bound validation use the work-aware queries and reject
+incomplete scans. The mutable/reference fallback combines type lookup with owner and write checks
+in one bounded path. The remaining raw parameter-layer query is only in loop-entry replay, whose
+preflight explicitly reserves its declaration and type-AST scans. Static gates pass; semantic
+qualification remains pending the pinned Stage1.
+
+### 23.27.490 Count parameter type matches across nested scopes (2026-10-13)
+
+The shared-work parameter type scanner now aggregates matches across every nested module and scope,
+so a duplicate declaration cannot be hidden by an early return from the first matching subtree.
+Unknown declarations and depth or budget exhaustion make the scan incomplete. Active callers reject
+incomplete type queries; the loop-entry legacy walk remains behind its explicit preflight reserve.
+Static gates pass. No matching Stage1 product is available for semantic qualification.
+
+### 23.27.491 Fail closed on invalid declaration rows in constant replay (2026-10-13)
+
+Global-constant, qualified-namespace, qualified-function, and integer-constant source scans now
+skip only known nonmatching declaration variants. `Ast::Decl.Invalid` and unrecognized future
+variants exhaust the shared work counter, so truncated or extended ASTs cannot be interpreted as
+proof that a binding is unique or unshadowed. Static gates pass. The exact pinned compiler checkout
+is `/private/tmp/elisa-stage1-b8eb-exact-qualification` (clean at `b8ebc0a6`); its `bin` and `build`
+are empty, while the similarly named `...-qualification` directory is the `16e04fd0` derivative.
+
+### 23.27.492 Reject unknown declaration variants in enum replay (2026-10-13)
+
+Enum alias, uniqueness, aggregate and member-value traversals now explicitly skip known nonmatching
+source declaration kinds and reject invalid or unknown variants. This keeps alias resolution,
+member ownership and duplicate-enum checks fail closed even if a caller loses its whole-source
+preflight. `git diff --check` and the source-length gate pass; semantic replay is still pending a
+matching Stage1 product.
+
+### 23.27.494 Require the qualified-constant trace kind during replay (2026-10-13)
+
+Qualified constant facts whose left side is a scope expression now require the exact
+`global-constant-qualified` trace kind before source lookup. Scope-path depth exhaustion now marks
+the shared work counter incomplete rather than reporting a complete nonmatch. The affected files
+parse individually with pinned Stage0; aggregate proof parsing and semantic qualification remain
+pending the matching Stage1 product.
+
+
+### 23.27.506 Meter summary owner lookup (2026-10-13)
+
+Summary overload replay now finds a function's declaring module with a bounded source walk. It
+charges declaration rows and compared function/module spellings to the existing replay budget, and
+rejects invalid declarations or depth/work exhaustion instead of relying on the older unmetered
+owner lookup. Static gates pass; semantic qualification remains pending the matching Stage1 product.
+
+### 23.27.496 Refuse same-module call rewrites with unresolved imports (2026-10-13)
+
+Same-module bare-call replay now charges the annotation scan and rejects unresolved using/from
+metadata. Its declaration reservation also rejects `Ast::Decl.Import`, since no resolved-target
+witness is available to establish which same-spelled callee a bare call denotes. Static gates
+pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.497 Meter the enum exhaustiveness declaration collector (2026-10-13)
+
+Match-exhaustiveness replay now charges each declaration row, enum-name comparison, and copied
+variant name while collecting the declared constructor set. Its traversal uses the type-audit depth
+limit and fails closed on depth or work exhaustion. The prior duplicate reservation was removed;
+the source-tree preflight and pairwise-case reserve remain. Static gates pass; semantic
+qualification remains pending the pinned Stage1.
+
+### 23.27.498 Avoid overflow in scoped generic alias probe accounting (2026-10-13)
+
+Replay now charges each current/query name and owner spelling separately when probing the scoped
+generic alias index, so a combined length sum cannot wrap before the shared work limit check.
+Static gates pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.499 Record the pinned Stage1 bootstrap blocker (2026-10-13)
+
+Attempted to seed Stage1 from the exact pinned b8ebc0a6 compiler checkout using the pinned
+fa65ef62 Stage0 binary. The seed reached semantic compilation, then failed on four missing
+`can[Global{Read,Write}]` grants in `src/semantic/check_borrow_after_move.elisa`. The existing
+5cda9 or 16e04fd compiler derivatives do not qualify the b8ebc0a6 pin.
+
+### 23.27.500 Match import metadata fields during same-module replay (2026-10-13)
+
+The import detector now checks `name` for `using`/`from_decl` markers and `owner` for
+`from_member`/`from_src`, matching the compiler's annotation encoding. It meters each compared
+spelling independently and rejects unresolved imports before rewriting a qualified call to a
+bare call. The affected source parses with pinned Stage0; the matching Stage1 build remains
+unavailable.
+
+### 23.27.501 Refuse enum replay when import resolution is unavailable (2026-10-13)
+
+Variant exclusion, const-enum exclusion/member checks, and match exhaustiveness share a source
+preflight that rejects import declarations and meters unresolved using/from annotation checks.
+Replay no longer treats a local same-spelled enum as proof of the source-resolved type when import
+targets are absent. Static gates pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.502 Treat invalid expressions as effectful in deterministic replay (2026-10-13)
+
+The deterministic-call effect walker now classifies `Ast::Expr.Invalid` as unsafe instead of
+side-effect-free. `Ast::Expr.Absent` remains the intentional opaque-value placeholder used by
+state havoc. Pinned Stage0 parses the changed file; diff and source-length gates pass.
+
+### 23.27.503 Check import sentinel fields in summary replay (2026-10-13)
+
+The shared unresolved-import scan now recognizes `__from_member` and `__from_src` in annotation
+owners, matching parser encoding, and charges annotation rows plus scanned name/owner bytes against
+each caller's active replay budget, including every marker comparison the detector may perform.
+Summary, literal-call, type-bound, call-result, runtime-fact and branch-guard paths all use the
+bounded scan. Static gates pass; semantic qualification remains
+pending the matching Stage1 product.
+
+### 23.27.504 Meter summary declaration-import scans (2026-10-13)
+
+The shared summary import walk now charges declaration rows against its caller's replay budget and
+fails closed on row-budget or depth exhaustion. Literal-call, call-result, runtime-fact,
+branch-guard and overload checks pass their active counters and limits, preventing repeated source
+tree scans from escaping the configured work caps. Static gates pass; semantic qualification remains
+pending the matching Stage1 product.
+
+### 23.27.505 Refuse global-constant replay when imports are unresolved (2026-10-13)
+
+Global-constant trace replay, integer-constant type-bound source replay, and global mutable-array
+type replay now run the shared bounded import annotation and declaration scans before source
+binding lookup. They refuse using/from metadata, explicit import declarations, invalid declarations,
+and incomplete scans, charging the work to the active replay counter. Pinned Stage0 parses the
+changed files; diff and source-length gates pass. The exact pinned b8ebc0a6 compiler checkout still
+has no Stage1 binary or build outputs, so semantic qualification remains pending.
+
+### 23.27.507 Share the field-copy replay work budget (2026-10-13)
+
+Field-copy local-binding replay now consumes the report-wide source work counter instead of
+starting a fresh per-check budget. Its declaration-cost sizing pass is charged directly, then its
+three reserved declaration walks, source-touch scans, and candidate comparisons consume the same
+limit. Name lengths are charged separately to avoid overflow in combined-cost arithmetic. Static
+gates pass; semantic qualification remains pending the matching Stage1 product.
+
+### 23.27.508 Fail closed on field-copy imports and unknown declarations (2026-10-13)
+
+Field-copy witness replay now uses the bounded shared import guards before source reconstruction.
+Its declaration-sizing walk rejects import, invalid and unrecognized declaration variants rather
+than treating them as nonmatching rows. Static gates pass; semantic qualification remains pending
+the matching Stage1 product.
+
+### 23.27.509 Refuse unresolved imports in general type-bound source replay (2026-10-13)
+
+General type-bound source replay now checks the shared bounded annotation and declaration import
+scans before owner or type lookup. Without resolved import targets, a same-spelled local type,
+constant, or binding cannot establish the source identity used by these witnesses. Pinned Stage0
+parses the changed file; diff and source-length gates pass. Semantic qualification remains pending
+the exact pinned Stage1 product.
+
+### 23.27.510 Refuse unresolved imports in local-binding source replay (2026-10-13)
+
+All local-binding source witnesses now run the shared bounded import annotation and declaration
+scans before examining initializer, alias, and type evidence. This prevents an imported name from
+being silently treated as the local source binding when the report lacks a resolved-target
+witness. Pinned Stage0 parses the changed file; diff and source-length gates pass. Full semantic
+qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.511 Remove duplicate local-binding owner-scan reserve (2026-10-13)
+
+Local-binding fact liveness no longer multiplies its initial owner-preflight cost by a fixed 32
+passes plus the certificate fact count. Each downstream validator receives and accounts for the
+shared work counter; trace-wide repetition remains separately reserved for the liveness scan.
+Renamed the dispatcher to reflect that its validation handlers are work-aware. Static gates pass;
+semantic qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.512 Avoid overflow in local-binding name work charges (2026-10-13)
+
+Local-binding parameter, global-constant, entry-count, value-block and typed-return source scans
+now charge fixed row costs and each compared spelling separately. This avoids overflow in a
+combined string-length sum before the shared replay budget can reject the scan. Pinned Stage0 parses
+all changed files; diff and source-length gates pass. Semantic qualification remains pending the
+exact pinned Stage1 product.
+
+### 23.27.514 Meter literal-call replay name comparisons (2026-10-13)
+
+Literal-call argument provenance now charges the trace and candidate names before equality, then
+charges summary/formal names, bound identifiers, and positional or named argument labels before
+comparison. Summary expressions are sized before inspecting them. This keeps byte work for
+repeated argument scans inside the same replay counter. Static diff and source-length gates pass;
+semantic qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.513 Avoid overflow in name-equality closure charges (2026-10-13)
+
+Name-bound insertion and lookup, alias-name scans, and equality-edge collection now charge fixed
+row costs and each compared spelling separately. This avoids overflow in a combined string-length
+sum before the replay budget can reject the scan. Pinned Stage0 parses the changed file; diff and
+source-length gates pass. Semantic qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.515 Meter kernel equality-closure name entries (2026-10-13)
+
+Kernel equality-closure bound insertion and alias-node insertion now charge both the row and the
+name bytes without pre-check length addition. A successful charge has an explicit postcondition
+that the shared work counter remains within its limit. Pinned Stage0 parses the changed kernel
+source; diff and source-length gates pass. Semantic qualification remains pending the exact pinned
+Stage1 product.
+
+### 23.27.516 Align proof primitive typing with pinned unsigned names (2026-10-13)
+
+Proof scalar sort, machine-word width, cast, widening, operator, and type-bound helpers now use
+`uintptr` instead of `uint`, matching the pinned backend's target-width unsigned primitive map.
+Compiler-specific `uint` policies remain untouched outside proof primitive modeling. Static diff
+and source-length gates pass; no parser, build, or replay was run.
+
+### 23.27.517 Resolve bare summary callees in caller scope (2026-10-13)
+
+Bare call replay now uses the cached source declaration index and deterministic lexical resolver
+to identify the function selected at the caller's declaration line, then checks that it is the
+summary's exact dependency and line. This rejects cross-module same-name summaries and colliding
+non-callable declarations, while keeping declaration-index work shared across each replay path.
+Module-alias imports remain supported only through their paired source markers. Static diff and
+source-length gates pass; semantic qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.518 Charge paired import markers before comparison (2026-10-13)
+
+Deterministic replay now charges both paired alias annotations' owner, label and module strings
+before comparing marker names or checking pair identity. Failed malformed-pair paths therefore
+consume the same bounded work as accepted pairs. Static diff and source-length gates pass;
+semantic qualification remains pending the exact pinned Stage1 product.
+
+### 23.27.519 Specify checked integer replay operations (2026-10-13)
+
+Producer constant folding and independent kernel replay now specify checked addition and subtraction
+validity domains and exact returned values. Multiplication, division, remainder and shifts specify
+result encodings, domains and values as applicable, so kernel replay arithmetic is guarded by
+contracts rather than implementation-only checks. The available Stage1 product parses both changed
+files individually. Whole-project semantic discharge remains pending a Stage1 product matching the
+proof repository's current compiler pin; older Stage0 and Stage1 builds reject syntax in unrelated
+proof modules before reaching these contracts.
+
+### 23.27.520 Retry a clean Stage1 seed against Core main (2026-10-13)
+
+The clean compiler source checkout at `e6a51624b96f94f9ab7575a7862f0a65289864f9` was retried
+against the provenance-checked Core Stage0 at `257d92e944e4ef2f9e5d2752e671554db4663935`. An
+initial isolated attempt failed before compilation because its task-specific `TMPDIR` directory did
+not exist; creating that private directory cleared the Clang linker-probe failure. The subsequent
+Stage0 bootstrap still exited with status 1 while checking compiler sources, including reference
+escape diagnostics in `src/backend/codegen_stmt_assign_place.elisa` and contract/termination
+diagnostics in `elisacore_std/elisacore_fnv1a_spec.elisa`. It produced no Stage1 binary. No tracked
+source in the clean compiler checkout changed, and the proof repository's `b8ebc0a6`/`fa65ef62`
+pins remain unchanged. This pair therefore does not qualify the current proof candidate.
+
+### 23.27.525 Match bare-call replay to executable source scope (2026-10-13)
+
+Bare-call replay now uses the executable-function candidate set and the live local-binding scope at
+the exact source position. It compares the complete call AST in that walk, preserving calls before
+later declarations and in sibling scopes while rejecting shadowed indirect calls. Same-module
+qualified-to-bare rewrites use the same scoped lookup. Call-result scalar types use the cached,
+metered declaration index, and paired import marker owner/module comparisons are charged before
+comparison. Literal-call and call-result provenance allow unrelated same-name functions in other
+modules after their same-module signature checks identify the candidate. Static diff and source-
+length gates pass; semantic qualification remains pending a Stage1 product matching the proof
+repository's compiler pin.
+
+### 23.27.521 Specify multiplication overflow completeness (2026-10-13)
+
+Producer and kernel replay multiplication contracts now specify the complete signed `i64` safe
+region, including the `-1 * i64::MIN` cases and quotient-based limits for each operand-sign pair.
+Together with the value postcondition, the kernel may neither invent a product nor classify an
+overflowing product as known. Available Stage1 parses both files; the exact-pinned whole-project
+contract discharge remains unavailable because unrelated current proof sources exceed the pinned
+parser's syntax.
+
+### 23.27.522 Keep frame call lookup aligned with complete event admission (2026-10-13)
+
+An exploratory extension of `frame_source_calls.call_expression_at` to expression-level `if` and
+slice nodes was withdrawn after tracing its callers. `source_events_impl` does not yet inventory
+calls in those forms: conditional branches need path-sensitive effect accounting, and slice
+expressions need a source/type model that distinguishes element reads from calls in bounds.
+Similarly, `call_statements_at` declines plain assignments, while `source_events_impl` currently
+admits only direct `<-` writes. Relaxing lookup in isolation would advertise capabilities the
+complete event admission path still rejects. Resume this work only as a cross-layer change with
+branch-sensitive effect inventory, exact source positions, replayed event ordering, and positive
+and negative runtime controls. No semantic tests were run; current static gates pass.
+
+### 23.27.523 Discharge checked arithmetic helper contracts in isolation (2026-10-13)
+
+The producer and kernel now specify the exact values returned by their `i64` min/max helpers.
+Temporary strict Stage1 harnesses extracted the checked arithmetic helper bodies from both source
+files, replacing only external core-bound constants with their literal values. Both `-emit obj
+-O0` builds succeeded, discharging the arithmetic contracts on the extracted bodies. This does not
+qualify the whole proof build or its configured compiler pin; those remain pending. Diff and source-
+length gates pass.
+
+### 23.27.525 Specify bounded collection-literal counts (2026-10-13)
+
+The expression producer and independent kernel replay now specify the exact 0–8 collection-count
+lookup: it succeeds exactly for counts at most eight, returns the matching count, and returns the
+zero sentinel on failure. The producer's comparison classifiers also state their exact operator
+sets. An isolated strict Stage1 compile of the exact count-helper bodies discharged both contracts.
+The complete proof project remains unqualified against its configured compiler pin.
+
+### 23.27.524 Reconstruct frame effects from direct scalar return calls (2026-10-13)
+
+Frame event admission now reconstructs calls inside a direct scalar return expression from the
+original return-statement ordinal, reuses exact source call identity and callee change clauses, and
+emits the corresponding allow/preserve events at each recovered call position. Unsupported return
+shapes and incomplete call walks still fail closed. The CLI harness now includes positive and
+negative controls for allowed changes, writes outside the declared frame, and preservation overlap.
+Pinned Stage0 parses both changed Elisa modules; Python syntax, diff, and source-length checks pass.
+The CLI controls and full semantic build remain unrun because no Stage1 matching the proof pins is
+available.
+
+### 23.27.526 Specify unsigned fixed-width maxima (2026-10-13)
+
+The kernel replay's unsigned-width maximum lookup now specifies each supported width's exact bound
+and the zero result for every unsupported width. An isolated strict Stage1 compile of the exact
+helper body, with core constants replaced by their declared literal values, discharged these
+contracts. The full proof project remains unqualified against its configured compiler pin.
+
+### 23.27.527 Specify producer and replay unsigned-width maxima (2026-10-13)
+
+The proof producer and kernel replay now specify the same exact mapping for supported unsigned
+widths, including the conservative i64 ceiling at machine-word width and zero for unsupported
+widths. A strict Stage1 harness extracted both exact helper bodies and replaced only references to
+shared core constants with their declared literal values; both contracts discharged.
+
+### 23.27.528 Specify signed fixed-width bounds (2026-10-13)
+
+The kernel core now specifies the exact supported signed widths, minimums, and maximums; unsupported
+widths return zero for the bound helpers. An isolated strict Stage1 harness extracted all three exact
+helpers and substituted their declared core constant values. The contracts discharged.
+
+### 23.27.529 Fail closed on unknown declarations in type-bound callee lookup (2026-10-13)
+
+The type-bound callee census now rejects invalid imports and unknown declaration variants instead
+of silently skipping them before accepting a same-named function. Only current known non-callable
+declaration kinds are ignored. Diff and source-length gates pass; no parser or build was run.
+
+### 23.27.530 Align qualified replay with executable-function resolution (2026-10-13)
+
+Qualified deterministic-call replay now considers only executable function rows when matching a
+module path. Same-named type, value, import, extern, law, and lemma rows no longer create false
+ambiguity in a resolver whose checker candidate table contains executable functions. Diff and
+source-length gates pass; no parser or build was run.
+
+### 23.27.531 Replay frame calls in conditional return expressions (2026-10-13)
+
+Frame source replay now traverses the condition and both alternatives of `Ast::Expr.If`, while the
+exact source call locator traverses the same three children. Each possible call arm is checked as
+its own frame event; replay uses a conservative event union and does not treat an unselected arm as
+an unconditional state update. CLI controls cover a call in each alternative and reject an
+out-of-frame write in the else arm. Pinned Stage0 parses all three changed Elisa modules; Python
+syntax, source-length, and diff checks pass. Runtime controls and whole-project semantic discharge
+remain pending a matching Stage1 product.
+
+### 23.27.532 Specify kernel constant-operator semantics (2026-10-13)
+
+Unary constant replay now states its exact supported domain and result; binary replay specifies each
+checked arithmetic delegation, both shift directions, bitwise results, and the zero sentinel for
+unknown outcomes. The two helpers moved into `kernel_replay/constant_operator_semantics.elisa` to keep
+`term_arithmetic.elisa` below the 600-line source cap. An isolated strict Stage1 compile of the exact
+helpers and their arithmetic dependencies discharged the contracts.
+
+### 23.27.533 Specify source and replay constant-operator dispatch (2026-10-13)
+
+The source AST constant folder now routes unary and binary operators through specified helpers that
+mirror kernel replay. Contracts require unknown inputs and rejected operations to use the zero
+sentinel, constrain known unary results, and match each binary arithmetic result to its checked helper
+while specifying bitwise and shift results. Both producer and replay helpers were extracted with their
+checked arithmetic dependencies and compiled in one strict Stage1 harness; all contracts discharged.
+
+### 23.27.534 Reject frame-call names shadowed by admitted locals (2026-10-13)
+
+Frame source call recovery now checks nested conditional bodies for `=` assignment binders and local
+variable declarations that reuse the candidate callee name. Calls in assignment targets and values
+remain locatable by exact source span. Compound assignments do not introduce names and are not
+classified as binders. The shadow scan is conservative across both conditional arms; unsupported
+loop and pattern scopes continue to fail closed. Diff and source-length gates pass; no parser or
+build was run.
+
+### 23.27.535 Specify unsigned literal-bound replay (2026-10-13)
+
+The kernel replay's unsigned literal-bound predicate now has an exact iff contract. It accepts only
+a valid root whose node is an ordinary untagged integer leaf with zeroed non-value fields, a supported
+width, and a nonnegative value at or below that width's maximum. An isolated strict Stage1 harness
+compiled the exact predicate with its validity and width helpers; shared core constants were replaced
+by their declared values, and the contract discharged.
+
+### 23.27.536 Specify kernel arena token and scalar tags (2026-10-13)
+
+Kernel arena admission now specifies the exact operator allowlist, scalar-kind encoding, supported
+integer tags, and tagged-integer predicate. These contracts make the serialized token boundary
+explicit. An isolated strict Stage1 harness compiled the exact helper bodies with a minimal node type;
+all four contracts discharged.
+
+### 23.27.535 Guard frame calls in binding conditions (2026-10-13)
+
+Frame source replay now fails closed when the exact target call appears in a conditional value branch,
+short-circuit RHS, or statement branch whose condition may introduce bindings. This covers `is`/`as`
+patterns and condition calls until the frame walker models their path-specific names. Refuting-finding
+kind classification now charges each string comparison, including the report-admission fallback.
+Diff and source-length gates pass; no parser or build was run.
+
+### 23.27.537 Specify arena scalar shape admission (2026-10-13)
+
+Arena scalar validation now specifies the kind-code map, exact operator and integer-tag allowlists,
+scalar field predicates, and the composite scalar-shape result. The `scalar_shape_for_kind` helper
+requires the caller's kind code to match the node, and both existing call patterns satisfy that
+precondition in an isolated strict harness. The exact helper bodies and call patterns compiled with a
+minimal node model and a typed-literal stub; the contracts discharged.
+
+### 23.27.538 Specify core arena node-shape classes (2026-10-13)
+
+The arena leaf, unary, access, projection, and control shape classifiers now specify exactly which
+node kinds they recognize and the full field predicate that determines validity. Their contracts
+compiled in an isolated strict Stage1 harness with the exact operator allowlist and node field model.
+This strengthens the kernel's untrusted-arena boundary; broader assembled-project qualification remains
+pending the configured compiler pin.
+
+### 23.27.539 Admit frame calls in ordinary value-conditionals (2026-10-13)
+
+Exact frame-call lookup now distinguishes conditional evaluation from branch-local name ambiguity.
+Calls in either arm of an `if` value are admitted when the condition has no recognized binder or call;
+their effects remain a conservative union of independently checked call sites. Calls in short-circuit
+right operands and branches whose conditions may introduce names still fail closed. Diff and source-
+length gates pass; semantic CLI controls remain pending a matching Stage1 product.
+
+### 23.27.543 Confirm frame-source parsing under pinned Stage0 (2026-10-13)
+
+The configured Stage0 binary at `/private/tmp/elisa-stage0-fa65ef/bin/elisac` embeds the exact
+`fa65ef625c4217cf54486821a6aa9348f5f04ec6` revision with unmodified sources. A full proof build
+using it reported no diagnostics in `frame_source_calls.elisa`, `frame_source_condition_effects.elisa`,
+`frame_source_events.elisa`, or `frame_source_owners.elisa`. The aggregate build still exits before
+producing an executable because older Stage0 reports parser errors in unrelated proof modules, so
+this is scoped parse evidence only; matching Stage1 semantic qualification remains open.
+
+### 23.27.540 Compose arena node shape contracts (2026-10-13)
+
+The arena shape contracts now cover leaf, unary, access, projection, control, aggregate, and effect
+nodes. The simple-shape head/tail dispatchers specify how those classifications compose, including
+unknown-kind rejection. Exact helper bodies and their operator predicate compiled in isolated strict
+Stage1 harnesses. The source-length and diff gates pass; resource and structural node families remain
+for continued coverage.
+
+### 23.27.536 Resolve replay calls by caller module scope (2026-10-13)
+
+Frame source and type-bound call replay now share scoped bare-function resolution. A globally unique
+executable function remains eligible; repeated names resolve through the caller's module, nearest
+parent module, then root, with ambiguity or a relevant same-name import failing closed. Type-bound
+return-type recovery keys the selected function by module path and declaration line, avoiding false
+ambiguity when source line numbers repeat in separate modules. Frame condition-binding guards now
+recognize pattern checks and filter-shaped calls, and only propagate possible binders through
+short-circuit RHS expressions. Diff and source-length gates pass; parser/build/runtime qualification
+remains pending.
+
+### 23.27.541 Reconcile the October 11 review with the current static checkpoint (2026-10-13)
+
+Static audit of the current proof tree confirms that the three review priorities have source work
+already in place: pattern-collision controls cover report, theorem, package, and focused CLI routes;
+source-authorized status flows through the private `ProofCheckedView` receipt snapshot while the raw
+replay API is explicitly low trust; and `fact_trace_validation` invokes structural source replay,
+which rebuilds the supported call graph, checks exact call-site identity, and compares each owner's
+full certificate set before kernel witness-shape validation. Portable packages reject
+`structural-safety` because they carry no authenticated source. A previous audit note claiming that
+structural replay had no source validator is stale relative to this tree. These controls are still
+unqualified under the active static-only toolchain hold. The local `build/elisa-proof` is dated
+October 11 (SHA-256 `97e654deb493a17bfb8f95d6c732b7182f99adbf1fcb4c7a694db333810676f0`), and
+`bash scripts/qualify_prebuilt_test.sh --json` refuses it because it was built from a different
+proof HEAD. No parser, build, test, or replay was run; exact pinned toolchain qualification remains
+the blocker.
+
+### 23.27.542 Specify resource-region arena admission (2026-10-13)
+
+Resource-region flags now have an exact admissibility predicate, and the extent, named, discard, and
+binding node shapes specify their complete field constraints. Resource-region dispatch, resource-event
+shapes, and resource-call shapes now state their recognized kinds and exact valid predicates. The exact
+helper bodies compiled together in an isolated strict Stage1 harness with declared flag constants
+substituted; contracts discharged.
+
+### 23.27.537 Preserve selected declaration identity across replay scopes (2026-10-13)
+
+Scoped callee resolution now returns the selected module path with its source line. Type-bound return
+recovery matches both fields, so line directives or separate modules with repeated line numbers cannot
+redirect the recovered return type to another same-named function. Static review confirmed the
+checker call graph gives executable source functions precedence over same-named externs, while a
+separate reachability analysis rejects unsafe callable-extern paths. Diff and source-length gates
+pass; no parser/build/runtime run was performed.
+
+### 23.27.544 Specify the complete arena shape dispatch (2026-10-13)
+
+Resource binding, summary, event, call, and structural node shapes now have exact recognized-kind
+and validity contracts. Resource head/tail dispatchers specify their composition, and the top-level
+arena validator plus general/late fallbacks specify the exact routing among all shape families. A strict
+Stage1 compile of the full extracted arena-shape module discharged the combined contracts. The harness
+used only local type stubs for typed-literal decoding and the separate frame-policy validator; the full
+proof project remains unqualified against its configured compiler pin.
+
+### 23.27.538 Fail closed on frame imports and scope callee recovery (2026-10-13)
+
+Frame producer preparation now skips frame-event extraction when report annotations contain an
+unresolved import, and frame report replay refuses to validate frame rows under those annotations.
+Type-bound call return recovery supplies source annotations to the scoped resolver, which excludes
+lemma-marked callees and matches the selected module path plus declaration line. The resolver's
+caller-module precedence is implemented and statically inspected against the checker. Remaining:
+frame event generation still invokes some name-and-line owner/policy lookups after resolving a callee,
+so same-line duplicate functions in different modules can still be conservatively rejected; propagate
+the selected module path through those lookups. The type-bound caller's smaller work ceiling also
+needs to be enforced by the scoped resolver itself. Diff and source-length gates pass; parser/build
+qualification remains pending.
+
+Superseded for frame identity safety by §23.27.545: frame recovery now fails closed when the later
+name-and-line owner lookup is ambiguous. The type-bound caller budget was addressed in §23.27.539.
+
+### 23.27.539 Bound scoped resolution by the type-bound caller budget (2026-10-13)
+
+Type-bound replay seeds the shared frame resolver meter at the offset corresponding to the caller's
+remaining 1 MiB allowance, then debits the measured resolver work back into the caller counter. This
+makes the resolver stop at the caller's ceiling rather than its larger standalone frame ceiling.
+Diff and source-length gates pass; no parser/build qualification was run.
+
+### 23.27.545 Close replay identity ambiguity; keep type witnesses about types (2026-10-13)
+
+Frame source-call recovery now validates that the selected name and line still identify exactly one
+owner before downstream name-and-line-only policy/event helpers run. This conservatively rejects
+same-line declarations in separate modules instead of allowing the later lookup to select or
+conflate another owner. Type-bound call-result facts resolve the exact function declaration and use
+its declared return type only. They make no claim about purity, totality, or value. Positional and
+named arguments are mapped to source formals; labels must be unique and known, positional arguments
+must precede named arguments, and every omitted formal must have a default. Type-only lookup may use
+a lemma caller's module scope while still excluding lemma callees. Static diff and source-length
+checks pass; parser/build/runtime qualification remains pending.
+
+### 23.27.547 Separate type-query caller policy from frame caller policy (2026-10-13)
+
+The shared scoped resolver now exposes an explicit caller-kind policy. Frame source-call recovery
+retains its lemma-caller rejection; type-bound return-type lookup may resolve from a lemma's module
+scope, while lemma callees remain excluded. This supports type-only facts in lemma bodies without
+claiming that those calls are executable or pure. Diff and source-length checks pass; parser/build
+qualification remains pending.
+
+### 23.27.548 Reject cross-module nominal and generic return-name collisions (2026-10-13)
+
+Type-bound call-result replay now rejects a return identifier that is a generic binder on the
+selected callee declaration, and its legacy file-wide scalar alias lookup refuses any same-spelled
+struct or enum anywhere in the source. This prevents an unrelated scalar alias from reclassifying
+a nominal return type. The aggregate scan is intentionally conservative until the type resolver
+uses the selected module path; valid cross-module aliases with colliding names may still be
+refused. Source diff and length checks remain the only qualification performed here.
+
+### 23.27.549 Use live lexical scope for frame call shadowing (2026-10-13)
+
+Frame source-call recovery now reuses the replay call-site scope walker. A local callable declared
+after the occurrence or inside a sibling branch no longer shadows that earlier call, while a
+parameter or local live at the exact call remains a hard rejection. The legacy whole-body binder
+scan was removed. Diff and source-length checks pass; parser/build qualification remains pending.
+
+### 23.27.546 Specify bounded postorder arena admission (2026-10-13)
+
+Arena admission now specifies its node and child budgets, the validity of every admitted node
+shape, and the child-table range and postorder constraints for every node family that stores a
+child slice. It also states that every fixed child index used by unary, binary, conditional,
+slice, and resource nodes precedes its parent. The child-root validator separately specifies
+that every accepted edge is in range and points to an earlier node. A strict Stage1 compile of
+the extracted shape and admission functions discharged these contracts. The isolated harness
+stubs typed-literal decoding, frame policy shape validation, and the separate semantic child
+validator; the full proof project remains unqualified against its configured compiler pin. Diff
+and source-length gates pass.
+
+### 23.27.550 Validate replay roots with empty fact sets (2026-10-13)
+
+Arena traversal previously placed the goal on its worklist but drained that list only inside the
+fact loop, so an empty fact array skipped the goal traversal altogether. The seed loop now
+processes the goal and each fact separately, including when there are no facts. The workspace
+validator and both wrappers specify node, child, and fact budgets plus in-range accepted goal and
+fact roots. A strict Stage1 compile of the exact extracted walker, push helper, accessors, and
+wrappers discharged those contracts; unrelated shape and child traversal helpers were stubbed.
+Diff and source-length gates pass.
+
+### 23.27.551 Meter lemma-name resolution once per call (2026-10-13)
+
+Scoped frame call resolution now checks the caller and callee lemma markers once each, then passes
+the callee classification through the declaration walk. This removes a full annotation scan for
+every same-named function candidate while preserving the same fail-closed behavior. Diff and
+source-length checks pass; parser/build qualification remains pending.
+
+### 23.27.552 Resolve frame calls inside conditional expressions at the exact site (2026-10-13)
+
+Frame call discovery no longer rejects a call merely because it occurs in a short-circuit
+operand or an `if` value arm. It records the exact occurrence, then relies on the shared
+live-scope call-site validator to reject a callee name that is actually shadowed at that point.
+This restores calls on unshadowed conditional paths without treating a possible branch call as
+an unconditional state update; event inventory continues to model effects conservatively.
+Static diff and source-length checks pass. Runtime qualification remains pending. Local scalar
+fact helpers still use a conservative file-wide fallback because their callers do not yet carry
+the active function module path.
+
+### 23.27.553 Thread source annotations through frame event replay (2026-10-13)
+
+Report-backed frame producer and validator paths now pass `source_annotations` into event
+inventory generation and event decisions. Condition and return call discovery, call-change
+mapping, callee-body lowering, nested event replay, and allowance/preservation replay carry the
+same annotations. The legacy standalone wrappers retain empty annotations for compatibility.
+This lets scoped resolution consistently exclude lemma callers and callees across nested frame
+calls instead of rejecting cases where annotation-aware and legacy resolution disagree. Diff and
+source-length checks pass; parser/build qualification remains pending.
+
+### 23.27.554 Specify replay worklist budget transitions (2026-10-13)
+
+The arena work charge now guarantees that successful charges leave the counter at or below the
+limit and failed charges leave it at the limit or above. Successful worklist pushes specify the
+budget bound and the exact root, depth, and enter/exit marker appended. Child-range and node-child
+push helpers require an in-budget counter and preserve that bound on success; the workspace
+validator exposes the same bound for every accepted replay. Child-range success also specifies
+that every selected table offset resolves to an in-range child. Strict Stage1 harnesses compiled
+the exact worklist helpers, child-range helper, and validator contracts, using stubs for node
+shape and semantic child checks. The full proof build remains unqualified: the available Stage1
+product has an obsolete provenance schema, and the pinned Stage0 cannot seed the pinned Stage1
+because of effect-permission errors in compiler sources. Diff and source-length checks pass.
+
+### 23.27.555 Resolve call-result aliases in the selected module path (2026-10-13)
+
+Type-bound call-result witnesses now classify the selected callee's declared return type in its
+full module path. The bounded lookup chooses the nearest visible alias or nominal declaration,
+rejects same-scope ambiguity and generic aliases, follows alias targets in their declaring
+scope, and detects cycles by declaration offset. It returns signed width, unsigned width, and
+scalar kind together, replacing three independent file-wide scans on this path. Diff and
+source-length checks pass; parser/build/runtime qualification remains pending. Raw fully rooted
+qualified return aliases are supported. Module-import-qualified return aliases and local
+parameter/local-binding type facts remain to be resolved.
+
+
+### 23.27.556 Specify exact replay text-work charge transitions (2026-10-13)
+
+Text-work charging now takes an explicit entry counter and requires it to equal the mutable
+counter at entry. Its postconditions specify the exact successful increment, the available-budget
+precondition for success, saturation on a failed in-budget charge, and no mutation when called
+with an already-over-budget counter. The shape-text caller snapshots the counter before each
+charge. A strict Stage1 compile of the exact extracted helpers with minimal core stubs discharged
+the contracts; the full proof build remains unqualified because the available Stage1 provenance
+is stale. Diff and source-length checks pass.
+
+### 23.27.557 Keep call-result primitive names scope- and import-aware (2026-10-13)
+
+The call-result return-shape resolver now checks visible source declarations before treating
+`i64`, `u64`, and the other primitive spellings as builtins. This preserves nearest-scope
+shadowing while leaving unrelated peer-module declarations out of the decision. Before the
+builtin fallback, primitive names are checked through individually metered comparisons and
+import annotations are filtered by the selected caller or callee module scope. References and
+mutable references carry no scalar width, so they cannot satisfy signed or unsigned width
+markers. `git diff --check` and `python3 scripts/check_source_length.py` pass; parser/build/runtime
+qualification remains pending. Qualified return types through module-import aliases or relative
+module prefixes and local parameter/local-binding type facts remain open.
+
+### 23.27.558 Reject reference and shadowed-primitive local scalar facts (2026-10-13)
+
+Local type-bound width replay no longer treats `&T` or `Lmut T` as carrying T's integer width,
+and scalar-kind replay excludes both reference forms. Primitive classification now checks for
+source aliases and nominal declarations before accepting a builtin spelling, preventing a
+file-wide peer declaration from changing a local builtin into a scalar fact. Const-enum scalar
+classification now passes through only when the unique aggregate with that name is the unique
+const enum; aliases to const enums can reach this path as well. These local helpers still use
+conservative file-wide declaration scans because they do not yet carry the owning module path.
+`git diff --check` and `python3 scripts/check_source_length.py` pass; parser/build/runtime
+qualification remains pending.
+
+### 23.27.559 Retry the pinned Stage1 seed from a preserved Core Stage0 (2026-10-13)
+
+Retried the exact b8ebc0a6 Stage1 source seed using a preserved Core Stage0 binary at
+revision 55fb293de91cc0263972b1d87a1aa0702938ad7a. The Core binary provenance check passed,
+and the seed reached semantic compilation, but still exited with status 1 on four missing
+`can[Global{Read,Write}]` grants in `src/semantic/check_borrow_after_move.elisa`. This confirms
+the qualification blocker is independent of the previously tried pinned fa65ef62 Stage0. The
+compiler permission fix is in the separate compiler repository; proof-project diff and source-
+length gates pass, but the full proof build remains unqualified.
+
+
+### 23.27.560 Specify bounded replay child append semantics (2026-10-13)
+
+The replay child-array append helper now specifies exact count growth and the appended suffix on
+success, its maximum-size conditions, and count preservation on failure. Quantifier rewriting and
+all substitution append sites pass their existing `start` count as the entry snapshot. A strict
+Stage1 compile of the extracted helper and a caller using that snapshot discharged the contracts.
+Diff and source-length checks pass; the full proof build is not qualified by this focused harness.
+
+
+### 23.27.561 Specify scalar arena dispatch results (2026-10-13)
+
+The arena scalar dispatcher now specifies that its known/valid pair matches the kind-directed
+scalar validator. This exposes the helper's classification guarantee to arena traversal without
+repeating its scalar-shape formula. A strict Stage1 compile of the exact dispatcher with decoder
+and helper stubs discharged the contract. The child-append contract from the prior entry also
+compiled with its actual extracted helper and a snapshotting caller. Diff and source-length checks
+pass; the installed Stage1 snapshot is dated 2026-10-11, so neither focused harness qualifies the
+full proof build.
+
+### 23.27.562 Recheck the pinned Stage1 compiler permission blocker (2026-10-13)
+
+Inspected compiler history after a further Stage1 seed attempt. The exact pinned compiler commit
+b8ebc0a6 still declares `bam_remember_local_callable` with only `Memory.Allocate, Abort.Panic`,
+while later commit 16e04fd0 adds the required `Global{Read,Write}` grant. The latter is not an
+ancestor of the pin. The seed attempt used a compiler worktree whose `check_borrow_after_move.elisa`
+contains extensive uncommitted changes; it reported many unrelated semantic errors, so that run
+cannot qualify either the one-line effect fix or the proof sources. Reverted the temporary
+one-line edit made during the attempt, preserving the pre-existing compiler worktree contents.
+The pinned Stage1 build remains unqualified. Proof-project `git diff --check` and source-length
+gates pass.
+
+
+### 23.27.563 Specify exact arena metadata work charges (2026-10-13)
+
+The arena metadata work helper now requires an explicit entry counter and specifies exact
+successful charges for quantifier and structural-argument names, unchanged work for nodes that
+need no text charge, and budget saturation on failure. The arena validator snapshots and passes
+the counter at the call site. A strict Stage1 compile of the exact charge helpers and a caller
+with minimal core stubs discharged the contracts. Diff and source-length checks pass; whole-project
+qualification remains pending.
+
+
+### 23.27.564 Specify clean replay workspace initialization (2026-10-13)
+
+The replay workspace constructor now guarantees that all DFS and trace-memo arrays start empty,
+all cumulative work counters start at zero, and both trace-state flags start false. This makes
+the fresh-batch boundary explicit in the contract consumed by replay callers. A strict Stage1
+compile of the exact workspace module passed. Diff and source-length checks pass; full package
+qualification remains pending.
+
+
+### 23.27.565 Specify accepted arena workspace state (2026-10-13)
+
+Successful iterative arena validation now guarantees that the visitation, validity, and deepest-
+visit arrays are sized to the node arena and that the DFS work stack is empty. These postconditions
+expose the final state of the accepted traversal in addition to the existing budget and root bounds.
+A strict Stage1 compile of the exact validator body with traversal dependencies stubbed discharged
+the contracts. Diff and source-length checks pass; full package qualification remains pending.
+
+### 23.27.566 Scope call-result import rejection to visible modules (2026-10-13)
+
+Call-result type-bound replay no longer rejects every witness when any import annotation exists
+anywhere in the source file. It now derives the exact caller module path and considers only
+ancestor-scope imports: visible wildcards remain unsupported; same-named selective imports and
+module aliases shadow bare names. Paired `__using_member`/`__from_member` metadata is checked for
+matching identity and importer scope; orphan selective-import markers fail closed. Before using
+a root-scope type declaration as fallback, the resolver also rejects any visible same-name import.
+Primitive result-type fallback applies the same scoped check in the selected callee's module path,
+so unrelated module imports no longer suppress scalar resolution. Each annotation row,
+marker/name comparison, module-path split, and scope segment comparison is charged to the shared
+work budget; missing or exhausted evidence still fails closed. Static diff and source-length
+gates pass; no Elisa parser, build, or runtime replay was run under the pinned toolchain hold.
+
+
+### 23.27.567 Specify canonical kernel node creation (2026-10-13)
+
+Kernel arena node creation now specifies the capacity sentinel and the exact fields of every
+appended node. Reuse specifies the childless canonical record returned and now checks
+`children_start == 0` before reusing an entry, closing a gap where a malformed childless node
+could match the old reuse key. A strict Stage1 compile of the exact builder helpers and node type
+discharged the contracts. Diff and source-length checks pass; whole-project qualification remains
+pending.
+
+### 23.27.568 Reject generic call-result types through transparent wrappers (2026-10-13)
+
+Call-result scalar-width replay now checks generic parameter names through the same transparent
+parenthesis, refinement, and unary type wrappers accepted by the type-shape resolver. This closes
+the case where a generic parameter named like a primitive (for example `u32`) could be mistaken
+for the builtin under `mutable` or another transparent wrapper. Root-level named type fallbacks
+now also defer to visible scoped imports, and module-alias evidence requires its paired target
+annotation before it can shadow a name. Diff and source-length gates pass; parser/build/runtime
+qualification remains unavailable under the pinned toolchain hold.
+
+### 23.27.569 Specify mirrored constant operator semantics (2026-10-13)
+
+The source constant evaluator and independent kernel replay now expose postconditions for their
+unary and binary operator dispatch: unsupported or rejected values use the unknown/zero sentinel,
+accepted arithmetic agrees with the checked overflow-safe helpers, and bitwise/shift operations
+are constrained to their explicit operator cases. Both new modules are included before consumers.
+Diff and source-length gates pass; full compiler and proof replay qualification remains pending.
+
+### 23.27.570 Match visible module aliases by parser identity (2026-10-13)
+
+Corrected the scoped import guard to pair a visible module alias with exactly one target row by
+line, offset, and importer module. The parser stores the alias spelling and target module in
+different fields, so the pair check now requires a nonempty target instead of equating those
+values. Pair validation happens after scope visibility is established, so malformed or unrelated
+out-of-scope aliases cannot disable independent lookups. Static diff and source-length gates pass;
+parser/build/runtime qualification remains pending.
+
+### 23.27.571 Specify completeness of constant operator dispatch (2026-10-13)
+
+Extended the mirrored source and kernel binary-operator contracts from soundness alone to exact
+known-result characterization: a result is known precisely when both inputs are known and the
+operator is supported with a representable arithmetic/shift result, or is a bitwise operator.
+This makes unexpected evaluator regressions visible to callers of the helpers. Static diff and
+source-length gates pass; compiler qualification is pending.
+
+### 23.27.572 Specify type-environment binding writes (2026-10-13)
+
+The bounded type-environment appenders now specify the row written on success and the full-table
+failure condition. Contracts cover metadata bindings, reference/value bindings, function
+signatures, owned signatures, parameters, and their compatibility wrappers, including type-owner
+identity and reference/default flags. A strict Stage1 compile of the exact writer stack with its
+record type passed. Diff and source-length checks pass; whole-project qualification remains pending.
+
+### 23.27.573 Preserve mutation access and charge generic path scans (2026-10-13)
+
+The recursive generic-return-type scan now passes its `ProofReport` mutably to the report-owned
+generic-parameter index builder. Its qualified-scope branch also charges the full expression walk
+before collecting path segments, so recursive path work is covered by the shared per-fact budget.
+Diff and source-length checks pass; compiler qualification remains pending.
+
+### 23.27.574 Charge qualified generic type path flattening (2026-10-13)
+
+The generic-return-type guard now charges both the sizing traversal and raw qualified-path segment
+collection after its outer-node charge. The type-bound and summary source-work budgets are both
+1,048,576, so all repeated path work is covered by the same per-fact ceiling and exhaustion fails closed. Diff and
+source-length checks pass; compiler qualification remains pending.
+
+### 23.27.576 Admit scoped imports for call-result replay and fix mirrored multiplication bounds (2026-10-13)
+
+The generic file-wide unresolved-import precheck now runs after call-result witness replay, allowing
+that resolver's module-scoped shadow checks to decide whether visible imports affect the call.
+Import annotation pairing now checks adjacent parser rows in one pass, avoiding repeated full-array
+rescans for module aliases and selective `using` members while retaining fail-closed identity checks. The
+remaining type-bound witnesses retain the conservative import gate. Generic return-type inspection
+now charges the repeated AST walk used by qualified-path extraction. Corrected the both-negative
+multiplication overflow test in source constant evaluation, proof replay, and kernel replay to
+divide the positive maximum by the negative left operand, preserving safe products at the signed boundary.
+`git diff --check` and `scripts/check_source_length.py` pass. Parser/build/runtime checks remain
+unrun under the static-only toolchain constraint.
+
+### 23.27.575 Reuse module alias index during certificate owner replay (2026-10-13)
+
+Scoped executable-summary owner checks now validate alias/import declaration consistency once
+through the shared deterministic-call cache and reuse its report-scoped module-alias index. This
+removes repeated full annotation-index construction across certificate calls and makes the
+resolution path use the same validated import evidence as deterministic-call replay. Static diff
+and source-length gates pass; full compiler qualification remains held by the pinned toolchain.
+
+### 23.27.577 Reuse declaration index for certificate owner identity (2026-10-13)
+
+Scoped certificate owner checks now resolve both caller and callee declaration rows through the
+cached source declaration index instead of rescanning all declarations. The owner-specific lookup
+includes lemma functions, preserving the previous identity behavior while using the index's
+source-work accounting. Static diff and source-length gates pass; full compiler qualification
+remains held by the pinned toolchain.
+
+### 23.27.579 Fail closed on exhausted type-binding lookup work (2026-10-13)
+
+Type-text comparison and work consumption now expose exact budget outcomes, and container descriptor
+lookup specifies the selected type identity. General typing and owned-value scans reject the result
+if a final name comparison crosses the shared work budget, so an earlier match cannot survive a
+late exhaustion. Added the missing global match and ambiguity state declarations required by the
+owned-value scan. Strict compilation of the exact extracted lookup helpers passed with the F7b6
+Stage1 harness; source-length and diff checks pass. Whole-project proof qualification remains
+pending.
+### 23.27.578 Reuse deterministic declaration index in type-bound call witnesses (2026-10-13)
+- Route batched boundary `type-bound` validation through the structural replay cache's deterministic declaration index. Thread the cache to call-result and unsigned local-rebind witnesses so repeated type-bound facts do not rebuild the owner index.
+- Preserve the existing owner-line, visibility, local-shadow, import-shadow, and callee type checks; resolver semantics are unchanged in this optimization.
+- Validation: source length gate and whitespace diff check; full build/replay remains unavailable under the pinned compiler blocker recorded above.
+### 23.27.580 Specify type-binding lookup result soundness (2026-10-13)
+
+Successful owned-value lookups now specify that the returned binding has the requested name and
+owner identity and is one of the accepted value-like kinds. General typing-binding lookup now
+specifies that all returned key fields match its query. Strict compilation of the exact lookup
+harnesses passed with the F7b6 Stage1 compiler; source-length and diff checks pass. Full-project
+proof qualification remains pending.
+
+### 23.27.581 Share kernel tactic transition work budget (2026-10-13)
+
+Kernel tactic transitions now carry one bounded work counter through effect-free term walks,
+proposition and fact equality, and assumption containment searches. Expression equality is called
+with only the remaining transition budget and debits its observed node/string work; repeated fact
+scans also charge each candidate. This prevents shared DAG fan-out and long fact lists from resetting
+a fresh equality or effect budget at each step. `git diff --check` and `scripts/check_source_length.py`
+pass; parser/build/runtime qualification remains unavailable under the pinned toolchain hold.
+
+### 23.27.582 Specify bounded type-environment reads
+
+Type-environment row counting now specifies the exact total for in-budget inputs and the bounded
+over-budget sentinel otherwise. Indexed row access specifies exact correspondence to the global or
+local row and the canonical empty binding outside both ranges. A fieldwise binding equality lemma
+supports that contract. Strict compilation of the exact extracted helpers passed with the F7b6
+Stage1 compiler; source-length and diff checks pass. Whole-project qualification remains pending.

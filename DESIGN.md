@@ -421,7 +421,7 @@ adapter's mapping from compiler-checked declarations to this environment remains
     kernel never compares a selector name in isolation, because doing so would let a certificate
     transfer a fact between distinct storage paths.
 21. The checker imports only the compiler's exact lower-bound guarantee for bare unsigned primitive
-    types (`u8`, `u16`, `u32`, `u64`, `usize`, and `uint`) and records it as `type-bound` provenance.
+    types (`u8`, `u16`, `u32`, `u64`, `usize`, and `uintptr`) and records it as `type-bound` provenance.
     This narrow type fact survives call, assignment, and control-flow havoc because the binding's
     static type still guarantees it; all other symbolic facts retain the ordinary pure-call/frame
     rules. Shadowed loop, pattern, and scoped bindings remove inherited bounds, and ownership

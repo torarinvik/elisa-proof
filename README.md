@@ -591,7 +591,7 @@ The native checker currently supports:
   inequality is emitted and independently replayed; unsupported dynamic selectors still widen to
   the whole root; and
 - compiler-defined lower bounds for bare unsigned primitive types (`u8`, `u16`, `u32`, `u64`,
-  `usize`, and `uint`) enter the proof context as traced `type-bound` facts. This narrow typing
+  `usize`, and `uintptr`) enter the proof context as traced `type-bound` facts. This narrow typing
   fact survives call, assignment, and control-flow havoc, while shadowed loop/pattern/scoped
   bindings and ownership moves remove inherited bounds; and
 - a *call-stable* fact — a proposition built only from literals and by-value scalar locals and
