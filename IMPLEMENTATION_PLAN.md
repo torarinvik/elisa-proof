@@ -16409,19 +16409,6 @@ fit, the counter latches at its ceiling so repeated rejected actions cannot redo
 preflight without consuming budget. Static gates only; parser/build/replay qualification remains
 pending under the toolchain hold.
 
-### 23.27.623 Bound nested CLI JSON parser scans (2026-10-13)
-
-The tactic CLI now performs one bounded scan before each JSON parse, accounts for parser work over
-the input plus the sum of all container subtree spans, and reserves additional input-sized work
-for parsing and DOM construction. This covers the core parser's per-container subtree pre-scan,
-whose cost grows with nesting depth, for both imported scripts and exported source-state JSON.
-Inputs deeper than the parser's 256-level ceiling fail closed during preflight. Static gates only;
-parser/build/replay qualification remains pending under the provenance mismatch recorded above.
-The first source-length check caught the concurrently changing `src/app/theorem_output.elisa` at
-602 lines; it has since settled at 600 lines. Both `git diff --check` and the source-length gate
-pass on the current tree. An independent static review confirmed the container-span accounting
-covers the parser's nested pre-scans, including malformed/truncated input boundaries.
-
 ### 23.27.623 Resume qualification without timing (2026-10-13)
 
 The latest O0 Stage1 seed attempt exited during Stage0 bootstrap with proof and dangling-reference
@@ -16456,3 +16443,100 @@ writing a candidate. Suggestion exhaustion is exposed as `suggestions_complete: 
 the endpoint return incomplete without changing theorem verification. `git diff --check` and
 `python3 scripts/check_source_length.py` pass. Parser/build/replay qualification remains pending
 until the exact proof/compiler/runtime provenance tuple matches.
+
+### 23.27.626 Bound nested CLI JSON parser scans (2026-10-13)
+
+The tactic CLI now performs one bounded scan before each JSON parse, accounts for parser work over
+the input plus the sum of all container subtree spans, and reserves additional input-sized work
+for parsing and DOM construction. This covers the core parser's per-container subtree pre-scan,
+whose cost grows with nesting depth, for both imported scripts and exported source-state JSON.
+Inputs deeper than the parser's 256-level ceiling fail closed during preflight. Static gates only;
+parser/build/replay qualification remains pending under the provenance mismatch recorded above.
+The first source-length check caught the concurrently changing `src/app/theorem_output.elisa` at
+602 lines; it has since settled at 600 lines. Both `git diff --check` and the source-length gate
+pass on the current tree. An independent static review confirmed the container-span accounting
+covers the parser's nested pre-scans, including malformed/truncated input boundaries.
+
+### 23.27.627 Latch suggestion exhaustion and preflight premise inputs (2026-10-13)
+
+The suggestions endpoint now checks the shared source/solver/preflight counters after search and
+before reporting completion. It charges and preflights fact and premise expression sizes against
+the solver's expression ceiling before treating an unproved premise as a complete result. Static
+diff and source-length gates pass; parser/build/replay remain held by the provenance mismatch.
+
+A separate generic-scope limitation remains: parser generic metadata is keyed by remappable line
+and spelling, so distinct declarations can collide under repeated `#line` directives. Audited
+consumers use these matches to fail closed (declining alias/conversion classification or adding
+conservative effects), so the observed impact is lost expressiveness/reliability rather than proof
+admission unsoundness. Exact resolution needs a stable declaration key, such as the enclosing
+function's source offset/identity, recorded alongside each generic row and threaded through checker
+and replay queries. The compiler checkout inspected during this audit is at `94b1645e`, with
+unrelated local test changes; the recorded `6ea26f37` compiler commit is an ancestor, not the
+checkout HEAD. Do not claim exact tuple qualification from that checkout.
+
+### 23.27.628 Charge theorem suggestion JSON structure (2026-10-13)
+
+Before writing a candidate, the suggestions endpoint now charges fixed JSON structure work per
+binding, per premise, and per candidate in addition to the escaped text and expression payloads.
+This keeps large candidate arrays within the shared output budget and preserves staged emission:
+budget exhaustion skips the candidate and marks the response incomplete. Static diff and
+source-length gates pass; runtime qualification remains pending for the current proof/compiler
+tuple.
+
+### 23.27.629 Reject line-only generic bound evidence (2026-10-13)
+
+Static review of the dirty `Elisa-compiler-latest-protocol-bound-fix` checkout found that its new
+`type_param_satisfies_bound` searches generic `(line, name)` rows and encoded `(line + 2^31, bound)`
+rows. Repeated `#line` values can therefore let an unbounded caller parameter appear to satisfy a
+protocol bound declared on another function at the same remapped line, suppressing the required
+`GenericInterfaceBoundUnsatisfied` diagnostic. This is a potential false acceptance in that
+unqualified compiler candidate. Keep the candidate unqualified until both parser metadata and bound
+lookup use stable declaration identity and a repeated-`#line` positive/negative pair is checked.
+
+### 23.27.630 Isolate the Core regression and recheck the compiler seed (2026-10-13)
+
+Core `1f37df40` still fails the full `go test ./src/semantic`: the run reports 20 metamorphic false
+proofs, unsigned and signed overflow acceptances, failed relational/short-circuit proofs, and an
+sview-index shadowing acceptance. The exact parent `4670b143` passes selected overflow and
+metamorphic soundness tests. This confirms a regression in the intervening analyzer work; it is
+not qualified. Leave the concurrent free-identifier analyzer edit intact until its owner finishes
+validation, and review it for fail-closed handling of every expression form.
+
+The in-flight O0 Stage1 seed has now exited with status 1. Its tail contains StoreThrough lifetime
+diagnostics in `codegen_stmt_assign_place.elisa` and `check_append_only_store_body.elisa`; no
+Stage1 product was produced. Compiler `main` has advanced to `94b1645e2d` with additional dirty
+backend/semantic changes, so the previous `6ea26f37` snapshot is stale. The proof static gates pass,
+but no provenance-matched end-to-end compiler tuple is available.
+
+### 23.27.631 Isolate typed local substitution in pure-return lowering (2026-10-13)
+
+A controlled Core worktree based on `4670b143` was modified with only the new
+`analyzer_recursive_pure_returns.go`; this reproduced the signed/unsigned overflow failures and
+20 metamorphic false proofs. On `1f37df40`, substituting the prior pure-return module restored the
+selected overflow and metamorphic tests, but the full semantic package still failed in the new
+recursive sview proof and two match-contract cases. This narrows the soundness regression to the
+local-inlining path (or its interaction with equation typing): cloned return expressions must retain
+correct fixed-width typing before they can become SMT equations. Do not ship the local inlining as-is;
+rework it with explicit type preservation, then require the whole semantic package to pass.
+
+### 23.27.632 Preserve typed AST identity in pure-return equations (2026-10-13)
+
+The immediate false proofs came from cloning pure-return expressions when the substitution map was
+empty: `substituteLemmaEnsure` creates fresh arithmetic nodes, while `exprTypes` is keyed by node
+identity. The SMT equation then lost the analyzed fixed-width type. A no-op fast path now returns the
+original expression unchanged when there are no local aliases to substitute. On Core `1f37df40` plus
+this isolated change, the targeted signed/unsigned overflow, relational-underflow, align-up, and
+metamorphic soundness tests pass; two additional local-return overflow probes also reject the false
+claims. The full semantic package no longer reports the prior arithmetic false proofs, but still
+fails in guarded recursive sview reasoning. Type-preserving behavior for nonempty substitutions
+still needs dedicated tests; keep the broader recursive proof changes unqualified until the full
+semantic package passes.
+
+### 23.27.633 Merge the isolated fixed-width identity fix (2026-10-13)
+
+Core commit `39bd2241` now preserves analyzed AST identity in pure-return equations when no alias
+substitution is needed. Its regression test confirms that an `i64` increment may wrap and therefore
+cannot prove `result > x`; selected overflow checks and the isolated test pass. The full semantic
+suite still has one failure in the separate guarded recursive sview proof, so that recursive proof
+work remains unqualified and timing remains skipped. Follow-up ROI is to fix that single proof path,
+then rerun the full semantic package before integrating the pending recursive analyzer changes.
