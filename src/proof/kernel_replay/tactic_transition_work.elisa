@@ -1,0 +1,84 @@
+extend ElisaProofKernelReplay:
+    private:
+        # Source-neutral transition checks for the interactive tactic protocol. The caller
+        # supplies complete before/after snapshots; this kernel never re-runs an AST tactic.
+        # Structural actions are checked by their exact term shape, while closing actions are
+        # discharged through the same independent logical replay used for report certificates.
+        # Tactic transitions may compare many shared DAG subterms. Debit each expression
+        # equality's actual bounded work into one per-transition budget.
+        def proof_kernel_replay_tactic_expr_equal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: usize, right: usize, step_work: mutable usize&) -> bool:
+            return false if step_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            remaining: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - step_work
+            equality_work: mutable usize = 0
+            equal: bool = proof_kernel_replay_expr_equal_with_work(nodes, children, left, right, 0, remaining, &equality_work)
+            return false if equality_work > remaining
+            step_work <- step_work + equality_work
+            equal
+
+        def proof_kernel_replay_tactic_facts_equal(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, left: darray[usize], right: darray[usize], step_work: mutable usize&) -> bool:
+            return false if left.count != right.count
+            for index in 0..<left.count |index, left, right, nodes, children, step_work|:
+                return false if not proof_kernel_replay_tactic_expr_equal_with_work(nodes, children, left[index], right[index], step_work)
+            return true
+
+        def proof_kernel_replay_tactic_same_state(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, step_work: mutable usize&) -> bool:
+            return proof_kernel_replay_tactic_expr_equal_with_work(nodes, children, before_goal, after_goal, step_work) and proof_kernel_replay_tactic_facts_equal(nodes, children, before_facts, after_facts, step_work)
+
+        def proof_kernel_replay_tactic_appended(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, before_facts: darray[usize], after_facts: darray[usize], appended: usize, step_work: mutable usize&) -> bool:
+            return false if after_facts.count != before_facts.count + 1
+            for index in 0..<before_facts.count |index, before_facts, after_facts, nodes, children, step_work|:
+                return false if not proof_kernel_replay_tactic_expr_equal_with_work(nodes, children, before_facts[index], after_facts[index], step_work)
+            return proof_kernel_replay_tactic_expr_equal_with_work(nodes, children, appended, after_facts[after_facts.count - 1], step_work)
+
+        def proof_kernel_replay_tactic_binary(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, operator: sview) -> (known: bool, node: ElisaProofKernelCore::ProofKernelNode):
+            empty: ElisaProofKernelCore::ProofKernelNode = ElisaProofKernelCore::ProofKernelNode{kind: "", operator: "", left: 0, right: 0, auxiliary: 0, children_start: 0, children_count: 0, value: 0, name: "", secondary_name: ""}
+            return (false, empty) if not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return (false, empty) if node.kind != "binary" or node.operator != operator
+            return (true, node)
+
+        def proof_kernel_replay_tactic_goal_depth_with_work(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, facts: darray[usize], goal_root: usize, step_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if step_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            proven: bool = (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, facts, goal_root, 0, 0, step_work, remaining: ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT) can Global{Read,Write})
+            return false if step_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            proven
+
+        def proof_kernel_replay_tactic_effect_free_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize, step_work: mutable usize&) -> bool:
+            requires depth <= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            return false if step_work >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            step_work <- step_work + 1
+            return false if not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not proof_kernel_replay_valid(nodes, root)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            # Dispatch comparisons scan node labels; typed-literal decoding also compares its
+            # sort spelling against the admitted integer types. Charge those byte scans on every
+            # visit, including repeated visits to shared DAGs.
+            return false if:
+                not proof_kernel_replay_goal_search_charge_product(step_work, sview_len(node.kind), 16)
+                not proof_kernel_replay_goal_search_charge_product(step_work, sview_len(node.operator), 4)
+            if node.kind == "typed-int":
+                return false if:
+                    not proof_kernel_replay_goal_search_charge_product(step_work, sview_len(node.name), 16)
+                    not proof_kernel_replay_goal_search_charge_product(step_work, sview_len(node.secondary_name), 4)
+            return false if:
+                node.kind in {"call", "move"}
+                node.kind == "unsupported"
+            return ElisaProofKernelCore::typed_literal_value(node).known if node.kind == "typed-int"
+            return true if node.kind in {"int", "bool", "float", "opaque-float-literal", "string", "char", "ident", "shorthand", "absent"}
+            if node.kind in {"unary", "field", "scope", "call_arg", "field-init", "checked-get"}:
+                return proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.left, depth + 1, step_work)
+            if node.kind in {"binary", "index", "dict_entry", "checked-index"}:
+                return proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.left, depth + 1, step_work) and proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.right, depth + 1, step_work)
+            if node.kind in {"slice", "if"}:
+                return proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.left, depth + 1, step_work) and proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.right, depth + 1, step_work) and proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.auxiliary, depth + 1, step_work)
+            if node.kind in {"index-n", "array", "tuple", "set", "dict", "construct", "record-update", "call"}:
+                return false if:
+                    node.children_start > children.count or node.children_count > children.count - node.children_start
+                    not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                    node.kind != "array" and node.kind != "tuple" and node.kind != "set" and node.kind != "dict" and not proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.left, depth + 1, step_work)
+                for index in 0..<node.children_count |index, node, children, nodes, depth, step_work|:
+                    return false if not proof_kernel_replay_tactic_effect_free_with_work(nodes, children, children[node.children_start + index], depth + 1, step_work)
+                return true
+            if node.kind == "quantifier":
+                return proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.left, depth + 1, step_work) and proof_kernel_replay_tactic_effect_free_with_work(nodes, children, node.right, depth + 1, step_work)
+            return false
