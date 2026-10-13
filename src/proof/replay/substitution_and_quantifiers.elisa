@@ -36,15 +36,19 @@ extend ElisaProof:
             return (false, Ast::Expr.Absent, Ast::Expr.Absent)
 
         def proof_replay_exact_int(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> ProofReplayInt:
-            constant: ProofReplayInt = proof_replay_constant_int(expression)
-            return constant if constant.known
+            work: mutable usize = 0
+            constant_check: (complete: bool, constant: ProofReplayInt) = proof_replay_constant_int_with_equality_work(expression, work)
+            return ProofReplayInt{known: false, value: 0} if not constant_check.complete
+            return constant_check.constant if constant_check.constant.known
             bounds: mutable darray[ProofReplayBound] = []
-            for fact in facts |bounds|:
-                proof_replay_collect_bounds(fact, facts, &bounds)
-            proof_replay_close_equalities(facts, &bounds)
-            name: sview = proof_replay_ident_name(expression)
-            return ProofReplayInt{known: false, value: 0} if name == ""
-            bound: ProofReplayBound = proof_replay_bound_for(bounds, name)
+            for fact in facts |bounds, work|:
+                return ProofReplayInt{known: false, value: 0} if not proof_replay_collect_bounds(fact, facts, &bounds, work)
+            return ProofReplayInt{known: false, value: 0} if not proof_replay_close_equalities_with_work(facts, &bounds, work)
+            name_lookup: (complete: bool, name: sview) = proof_replay_equality_ident_name(expression, work, 0)
+            return ProofReplayInt{known: false, value: 0} if not name_lookup.complete or name_lookup.name == ""
+            bound_lookup: (complete: bool, index: usize) = proof_replay_bound_index_with_work(bounds, name_lookup.name, work)
+            return ProofReplayInt{known: false, value: 0} if not bound_lookup.complete or bound_lookup.index == bounds.count
+            bound: ProofReplayBound = bounds[bound_lookup.index]
             return ProofReplayInt{known: true, value: bound.lower} if bound.has_lower and bound.has_upper and bound.lower == bound.upper
             return ProofReplayInt{known: false, value: 0}
 
@@ -429,43 +433,57 @@ extend ElisaProof:
             return false
 
         def proof_replay_goal_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize) -> bool:
-            return proof_replay_goal_at_depth(facts, goal, split_depth, 0)
+            work: mutable usize = 0
+            return proof_replay_goal_with_work(facts, goal, split_depth, work)
 
-        def proof_replay_goal_at_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for fact in facts:
+        def proof_replay_goal_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize, work: mutable usize&) -> bool:
+            proof_replay_goal_at_depth(facts, goal, split_depth, work, 0)
+
+        def proof_replay_goal_at_depth(facts: darray[Ast::Expr]&, goal: Ast::Expr, split_depth: usize, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or not proof_replay_equality_work_charge(1, work)
+            for fact in facts |work|:
+                fact_size: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(fact, work)
+                goal_size: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(goal, work)
+                return false if not fact_size.complete or not goal_size.complete
+                return false if fact_size.cost > 0 and goal_size.cost > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / fact_size.cost
+                return false if not proof_replay_equality_work_charge(fact_size.cost * goal_size.cost, work)
                 return true if proof_replay_fact_contains(fact, goal)
+            return false if not proof_replay_charge_expr_repetitions_with_work(goal, 10, work)
             return true if proof_closed_formula_width_uniform(goal) and proof_closed_formula_at_width(goal, 64, true, 0).value
+            return false if not proof_replay_charge_expr_repetitions_with_work(goal, (facts.count + 1) * 8, work)
             return false if proof_has_ambiguous_integer_constant_in(goal, facts, 0)
             # Mirrors the search: an ambiguous premise is dropped, never read as a number.
             admitted_facts: mutable darray[Ast::Expr] = []
             dropped_fact: mutable bool = false
-            for fact in facts |fact, facts, admitted_facts, dropped_fact|:
+            for fact in facts |fact, facts, admitted_facts, dropped_fact, work|:
+                return false if not proof_replay_charge_expr_repetitions_with_work(fact, (facts.count + 1) * 8, work)
                 if proof_has_ambiguous_integer_constant_in(fact, facts, 0):
                     dropped_fact <- true
                 else:
                     admitted_facts.push(fact)
-            return proof_replay_goal_at_depth(admitted_facts, goal, split_depth, depth + 1) if dropped_fact
-            return true if proof_replay_facts_inconsistent(facts)
+            return proof_replay_goal_at_depth(admitted_facts, goal, split_depth, work, depth + 1) if dropped_fact
+            return true if proof_replay_facts_inconsistent(facts, work)
             if split_depth < PROOF_REPLAY_CASE_SPLIT_DEPTH_LIMIT:
-                for index in 0..<facts.count |index, facts, goal, split_depth|:
+                for index in 0..<facts.count |index, facts, goal, split_depth, work|:
+                    return false if not proof_replay_charge_expr_repetitions_with_work(facts[index], 1, work)
                     candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_replay_find_disjunction(facts[index])
                     if candidate.known:
                         left_facts: mutable darray[Ast::Expr] = []
                         right_facts: mutable darray[Ast::Expr] = []
-                        for fact_index in 0..<facts.count |fact_index, facts, index, candidate, left_facts, right_facts|:
+                        for fact_index in 0..<facts.count |fact_index, facts, index, candidate, left_facts, right_facts, work|:
+                            return false if not proof_replay_equality_work_charge(1, work)
                             if fact_index == index:
                                 left_facts.push(candidate.left)
                                 right_facts.push(candidate.right)
                             else:
                                 left_facts.push(facts[fact_index])
                                 right_facts.push(facts[fact_index])
-                        return proof_replay_goal_at_depth(left_facts, goal, split_depth + 1, depth + 1) and proof_replay_goal_at_depth(right_facts, goal, split_depth + 1, depth + 1)
+                        return proof_replay_goal_at_depth(left_facts, goal, split_depth + 1, work, depth + 1) and proof_replay_goal_at_depth(right_facts, goal, split_depth + 1, work, depth + 1)
             match goal:
                 Ast::Expr.BoolLit(value, _):
                     return value
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_goal_at_depth(facts, inner, split_depth, depth + 1)
+                    return proof_replay_goal_at_depth(facts, inner, split_depth, work, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
                     match operand:
                         Ast::Expr.BoolLit(value, _):
@@ -476,9 +494,9 @@ extend ElisaProof:
                         _:
                             pass
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_replay_goal_at_depth(facts, left, split_depth, depth + 1) and proof_replay_goal_at_depth(facts, right, split_depth, depth + 1)
+                    return proof_replay_goal_at_depth(facts, left, split_depth, work, depth + 1) and proof_replay_goal_at_depth(facts, right, split_depth, work, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.Or, right, position):
-                    return true if proof_replay_goal_at_depth(facts, left, split_depth, depth + 1) or proof_replay_goal_at_depth(facts, right, split_depth, depth + 1)
+                    return true if proof_replay_goal_at_depth(facts, left, split_depth, work, depth + 1) or proof_replay_goal_at_depth(facts, right, split_depth, work, depth + 1)
                     # Mirror: `A or B` is `not A => B`, with `P` itself as the premise when the
                     # left disjunct is `not P`; the premise spends the split budget.
                     return false if split_depth >= PROOF_REPLAY_CASE_SPLIT_DEPTH_LIMIT
@@ -491,22 +509,26 @@ extend ElisaProof:
                         _:
                             pass
                     negated_facts.push(negated_left)
-                    return proof_replay_goal_at_depth(negated_facts, right, split_depth + 1, depth + 1)
+                    return proof_replay_goal_at_depth(negated_facts, right, split_depth + 1, work, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.FatArrow, right, _):
                     implication_facts: mutable darray[Ast::Expr] = []
                     implication_facts.extend(facts)
                     implication_facts.push(left)
-                    return proof_replay_goal_at_depth(implication_facts, right, split_depth, depth + 1)
+                    return proof_replay_goal_at_depth(implication_facts, right, split_depth, work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     negated_operator: TokenKind = proof_replay_comparison_negation(operator)
-                    if negated_operator != TokenKind.Eof and proof_replay_primitive_comparison(left, right, facts) and proof_replay_definitionally_equal(left, right):
-                        return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq
+                    primitive: (complete: bool, matches: bool) = proof_replay_primitive_comparison_with_work(left, right, facts, work)
+                    if negated_operator != TokenKind.Eof and primitive.complete and primitive.matches:
+                        return false if not proof_replay_charge_expr_pair_repetitions_with_work(left, right, 8, work)
+                        return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq if proof_replay_definitionally_equal(left, right)
                     return proof_replay_constant_comparison(left, operator, right) if negated_operator != TokenKind.Eof and proof_replay_constant_comparison(left, operator, right)
-                    return true if proof_replay_interval_comparison(left, operator, right, facts)
-                    return true if proof_replay_interval_goal(left, operator, right, facts)
-                    return true if proof_replay_affine_comparison(left, operator, right, facts)
-                    return true if proof_replay_difference_comparison(left, operator, right, facts)
-                    for fact in facts:
+                    return true if proof_replay_interval_comparison(left, operator, right, facts, work)
+                    return true if proof_replay_interval_goal(left, operator, right, facts, work)
+                    return true if proof_replay_affine_comparison(left, operator, right, facts, work)
+                    return true if proof_replay_difference_comparison(left, operator, right, facts, work)
+                    for fact in facts |work|:
+                        return false if not proof_replay_charge_expr_pair_repetitions_with_work(fact, left, 2, work)
+                        return false if not proof_replay_charge_expr_repetitions_with_work(right, 2, work)
                         return true if proof_replay_negative_fact(fact, left, operator, right)
                 _:
                     pass

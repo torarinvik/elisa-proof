@@ -28,26 +28,42 @@ extend ElisaProof:
 
         # Source offsets remain monotone across `#line` directives, unlike source line numbers.
         # Use the outermost end offset when checking whether a consumer stays inside a scope.
-        def proof_replay_body_last_offset(body: darray[Ast::Stmt]&, depth: usize) -> u32:
-            return 4294967295 if depth >= ProofReplayLocalAlias::DEPTH_LIMIT
+        def proof_replay_body_last_offset(body: darray[Ast::Stmt]&, source_work: mutable usize&, complete: mutable bool&, depth: usize) -> u32:
+            if depth >= ProofReplayLocalAlias::DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                complete <- false
+                return 0
             last: mutable u32 = 0
-            for statement in body |last, depth|:
+            for statement in body |last, source_work, complete, depth|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    complete <- false
+                    return 0
+                source_work <- source_work + 1
                 position: Ast::Pos = proof_replay_statement_position(statement)
                 last <- position.end_offset if position.end_offset > last
                 nested: mutable u32 = 0
                 match statement:
                     Ast::Stmt.If(_, yes, no, _):
-                        nested <- proof_replay_body_last_offset(yes, depth + 1)
-                        no_last: u32 = proof_replay_body_last_offset(no, depth + 1)
+                        nested <- proof_replay_body_last_offset(yes, source_work, complete, depth + 1)
+                        return 0 if not complete
+                        no_last: u32 = proof_replay_body_last_offset(no, source_work, complete, depth + 1)
+                        return 0 if not complete
                         nested <- no_last if no_last > nested
                     Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _) | Ast::Stmt.Block(_, _, _, inner, _):
-                        nested <- proof_replay_body_last_offset(inner, depth + 1)
+                        nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
+                        return 0 if not complete
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |nested, depth|:
-                            arm_last: u32 = proof_replay_body_last_offset(arm.body, depth + 1)
+                        if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                            proof_replay_mutable_local_work_exhaust(source_work)
+                            complete <- false
+                            return 0
+                        source_work <- source_work + arms.count
+                        for arm in arms |nested, source_work, complete, depth|:
+                            arm_last: u32 = proof_replay_body_last_offset(arm.body, source_work, complete, depth + 1)
+                            return 0 if not complete
                             nested <- arm_last if arm_last > nested
                     Ast::Stmt.Expr(Ast::Expr.Block(inner, _, _, _), _):
-                        nested <- proof_replay_body_last_offset(inner, depth + 1)
+                        nested <- proof_replay_body_last_offset(inner, source_work, complete, depth + 1)
+                        return 0 if not complete
                     _:
                         pass
                 last <- nested if nested > last
@@ -210,8 +226,7 @@ extend ElisaProof:
                 return proof_replay_mutable_local_work_exhaust(work) if not proof_replay_local_alias_call_slot_declaration_cost(report.source_declarations, candidate_callees, &declaration_census_cost, &declaration_lookup_cost, &declaration_selected_type_cost, &callable_name_slots, &parameter_slots, &parameter_name_bytes, work, 0)
                 return proof_replay_mutable_local_work_exhaust(work) if declaration_census_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                 work <- work + declaration_census_cost
-            # Site/control matching and the nested body-bound query are separate from the
-            # expression/statement touch wrappers, so charge one bounded body pass for them.
+            # Site/control matching is separate from the expression/statement touch wrappers.
             return proof_replay_mutable_local_work_exhaust(work) if body_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + body_cost
             # The depth census is a separate unmetered source-tree walk from the AST sizing pass.
@@ -291,7 +306,10 @@ extend ElisaProof:
         def proof_replay_local_alias_live(report: ProofReport&, body: darray[Ast::Stmt]&, index: usize, local_name: sview, binding_position: Ast::Pos, consumer_position: Ast::Pos, nested: bool, source_work: mutable usize&) -> bool:
             return false if index >= body.count or consumer_position.offset == 0 or binding_position.offset == 0
             return false if consumer_position.offset < binding_position.offset
-            return false if nested and consumer_position.offset >= proof_replay_body_last_offset(body, 0)
+            if nested:
+                body_bound_complete: mutable bool = true
+                body_last: u32 = proof_replay_body_last_offset(body, source_work, &body_bound_complete, 0)
+                return false if not body_bound_complete or consumer_position.offset >= body_last
             first_later: usize = index + 1
             for later in first_later..<body.count |later, body, report, local_name, consumer_position, source_work|:
                 later_position: Ast::Pos = proof_replay_statement_position(body[later])

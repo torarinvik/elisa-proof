@@ -14428,8 +14428,26 @@ unparenthesized `ensure`. I updated the binding and added a genuine `--source-on
 after validating production shapes, theorem inventories, and the three-file proof include closure,
 without requiring or invoking a proof product. The positive suite now also proves that the scalar
 byte count is the least whole-byte count covering any requested `u32` bit width; a false control
-claims a nine-bit value can be truncated to fewer than nine storage bits.
+claims a nine-bit value can be truncated to fewer than nine storage bits. A second quantified bound
+keeps the result at or below 536,870,912 bytes for every `u32` bit width, with a rejected control
+claiming that the maximum width exceeds this ceiling.
 
-Source-only admission reports 14 positive declarations and 6 false controls. Python syntax,
+Source-only admission reports 15 positive declarations and 7 false controls. Python syntax,
 source-length, and both repositories' whitespace checks pass. The pinned toolchain hold remains
 active, so Elisa-Proof elaboration and certificate replay were not run.
+
+### 23.27.456 Specify scalar DArray pointer-walk lowering (2026-10-13)
+
+A new source-bound proof models the pointer-walk dispatch for scalar DArray iteration. Its exact
+guard requires the DArray branch, a named source, immutable forward iteration, no drain, non-fixed
+array storage, and a scalar element. Positive cases establish each exclusion and model the
+snapshot's initial cursor/count state, a single synchronized cursor/countdown step, empty-loop
+behavior, and recursive countdown to the snapshot end. Six rejected controls try to route fixed
+arrays, mutable or reversed iteration, draining, aggregate elements, or temporary sources through
+the pointer path. The source checker binds those claims to the current lowering branch, guarded
+initialization and element load, nonzero countdown test, unit-stride GEP, countdown decrement, and
+step-block continuation.
+
+Source-only admission reports 13 positive declarations and 6 false controls over the two-file
+proof closure. Python syntax and whitespace checks pass. The toolchain hold remains active; no
+Elisa parsing, compiler build, test, or proof replay was run.
