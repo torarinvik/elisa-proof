@@ -16607,7 +16607,7 @@ names from being mistaken for callee formals and avoids attempting a selective s
 match form the scalar translator cannot consume. Static diff review only; tests and builds were not
 run under the current instruction.
 
-### 23.27.639 Keep overloaded inferred protocol bounds unqualified (2026-10-13)
+### 23.27.640 Keep overloaded inferred protocol bounds unqualified (2026-10-13)
 
 Static audit of the dirty compiler candidate found that `walk_expression_for_firm_arg_type_mismatch`
 skips `check_firm_call_arguments` when a direct call name has multiple function declarations, and
@@ -16621,3 +16621,47 @@ Positive and negative overload fixtures have been added to the candidate parity 
 been run. The candidate remains unqualified until semantic bound checking and backend emission share
 one candidate-selection result (including named/default argument mapping), ambiguous candidates fail
 closed, and matched Stage0/Stage1 gates run on a provenance-matched build.
+
+### 23.27.641 Align arena work admission with advertised node and child caps (2026-10-13)
+
+Static accounting found a possible mismatch between the 12,000,000-unit ceiling
+(`PROOF_KERNEL_CHILD_BUDGET + 8 * PROOF_KERNEL_NODE_BUDGET`) and the declared 1,000,000-node and
+4,000,000-child caps. The full-arena postorder pass now combines child-root and child-kind
+validation in one pass, removing the earlier duplicate scan. The selected-root DFS has a separate
+counter, however, and charges four node-sized workspace initializations, pushes serialized child
+edges, pushes one exit marker per visited node, and rechecks child ranges on exit, in addition to
+root work and shape text. For a fully reachable DAG with N nodes, C child edges, and F fact roots, the simple terms can
+reach roughly `6N + F + 2C + T`, where T is charged shape-text length: four node-sized workspace
+initializations, node shape visits, root/child/exit work-item pushes, and one semantic edge scan
+plus one push scan. Since F can approach N, this can exceed the 12,000,000 ceiling even for a
+shallow DAG within the array caps. Shared-DAG depth revisits can add more work. Such arenas may be
+refused for work exhaustion before reaching their serialized size caps. This is a fail-closed effective-cap/completeness issue, not a
+soundness failure. Avoid raising the global ceiling without a matching adversarial-cost argument.
+Prefer computing selected-root maximum depth in one postorder-aware propagation pass, or otherwise
+derive and document an upper bound covering every charged operation and confirm which capped shapes
+are admissible. This is static review only; no build or runtime qualification was run.
+
+### 23.27.642 Reconfirm the active proof/compiler provenance hold (2026-10-13)
+
+The current proof checkout is at `764154a1b77164d9862057e1235c5949aeb7eff0` with four dirty
+paths, and the compiler candidate is at `dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23
+dirty paths. The available `build/elisa-proof.manifest.json` names proof HEAD
+`5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and clean compiler source `7e1251785276c539c98dbe33a12e610e2338cbf4`;
+the replay manifest names a different proof HEAD and compiler revision again. Neither artifact
+qualifies the current dirty sources. Keep parser, build, test, and replay qualification on hold
+until a frozen proof snapshot and provenance-matched compiler/runtime product exist. This check
+read manifest metadata only; it ran no proof binary or build.
+
+### 23.27.643 Record typed overload selection in proposition replay (2026-10-13)
+
+The overload limitation recorded under item 23.27.247 is superseded by Core commit `756de384`.
+`call_result_overloads.elisa` scans the indexed candidate group, maps positional and named
+arguments and defaults per candidate, checks argument sorts (including contextual numeric literals
+and reference parameters), and uses a candidate return sort only when the typed or unique-shape match
+is unambiguous. Proposition formation also reuses the scoped typing index for its local binding
+overlay. This removes the earlier source-level behavior that rejected duplicate names before
+checking argument compatibility. The implementation is not runtime-qualified: the installed
+Stage0/Core provenance is mismatched, and parser/build/test/replay gates remain pending. The
+current test inventory has overload controls for deterministic call summaries, but no dedicated
+kernel proposition typing control was found in this static search. Add positive typed-overload and
+negative ambiguous-overload cases to matched qualification before marking overload replay complete.
