@@ -1,48 +1,5 @@
 extend ElisaProof:
-    public:
-        struct ProofTacticStep:
-            action: sview
-            accepted: bool
-            goal: Ast::Expr
-            facts_start: usize
-            facts_count: usize
-            solved: bool
-            reason: sview
-            argument: Ast::Expr
-            secondary: Ast::Expr
-            has_argument: bool
-            has_secondary: bool
-            argument_index: usize
-            has_argument_index: bool
-            detail: sview
-
-        struct ProofTacticState:
-            facts: mutable darray[Ast::Expr]
-            goal: mutable Ast::Expr
-            solved: mutable bool
-            action_count: mutable usize
-            last_action: mutable sview
-            last_reason: mutable sview
-            initial_facts: mutable darray[Ast::Expr]
-            initial_goal: mutable Ast::Expr
-            trace: mutable darray[ProofTacticStep]
-            trace_facts: mutable darray[Ast::Expr]
-            pending_argument: mutable Ast::Expr
-            pending_secondary: mutable Ast::Expr
-            pending_has_argument: mutable bool
-            pending_has_secondary: mutable bool
-            pending_argument_index: mutable usize
-            pending_has_argument_index: mutable bool
-            pending_detail: mutable sview
-
-        def proof_tactic_copy_facts(source: darray[Ast::Expr]&) -> darray[Ast::Expr]:
-            copied: mutable darray[Ast::Expr] = []
-            copied.extend(source)
-            return copied
-
-        def proof_tactic_state(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> ProofTacticState:
-            return ProofTacticState{facts: proof_tactic_copy_facts(facts), goal: goal, solved: false, action_count: 0, last_action: "start", last_reason: "state initialized", initial_facts: proof_tactic_copy_facts(facts), initial_goal: goal, trace: [], trace_facts: [], pending_argument: Ast::Expr.Absent, pending_secondary: Ast::Expr.Absent, pending_has_argument: false, pending_has_secondary: false, pending_argument_index: 0, pending_has_argument_index: false, pending_detail: ""}
-
+    private:
         def proof_tactic_prepare(state: mutable ProofTacticState&, argument: Ast::Expr, secondary: Ast::Expr, argument_index: usize, has_argument_index: bool, has_secondary: bool) -> void:
             state.pending_argument <- argument
             state.pending_secondary <- secondary
@@ -52,24 +9,71 @@ extend ElisaProof:
             state.pending_has_argument_index <- has_argument_index
             state.pending_detail <- ""
 
-        def proof_tactic_record(state: mutable ProofTacticState&, action: sview, accepted: bool, reason: sview) -> bool:
-            state.action_count <- state.action_count + 1
-            state.last_action <- action
-            state.last_reason <- reason
-            facts_start: usize = state.trace_facts.count
-            state.trace_facts.extend(state.facts)
-            state.trace.push(ProofTacticStep{action: action, accepted: accepted, goal: state.goal, facts_start: facts_start, facts_count: state.facts.count, solved: state.solved, reason: reason, argument: state.pending_argument, secondary: state.pending_secondary, has_argument: state.pending_has_argument, has_secondary: state.pending_has_secondary, argument_index: state.pending_argument_index, has_argument_index: state.pending_has_argument_index, detail: state.pending_detail})
-            state.pending_argument <- Ast::Expr.Absent
-            state.pending_secondary <- Ast::Expr.Absent
-            state.pending_has_argument <- false
-            state.pending_has_secondary <- false
-            state.pending_argument_index <- 0
-            state.pending_has_argument_index <- false
-            state.pending_detail <- ""
-            return accepted
+        # Source-bound rewrites inspect the source operator index while walking terms. Keep
+        # these scans inside the state's source-work ledger; exhaustion must refuse the action.
+        def proof_tactic_state_overloaded_operator_with_work(state: mutable ProofTacticState&, expression: Ast::Expr, operator_mask: usize) -> (complete: bool, overloaded: bool):
+            return (false, false) if state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or state.source_work_used > state.source_quota
+            remaining: usize = state.source_quota - state.source_work_used
+            allowance: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT if remaining > PROOF_LINEAR_SAFETY_WORK_LIMIT else remaining
+            if allowance == 0:
+                state.source_work_used <- state.source_quota
+                return (false, false)
+            start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - allowance
+            work: mutable usize = start
+            exhausted: mutable bool = false
+            overloaded: bool = proof_source_expression_has_overloaded_operator_with_work(expression, operator_mask, &work, &exhausted)
+            if work < start or work > PROOF_LINEAR_SAFETY_WORK_LIMIT or exhausted:
+                state.source_work_used <- state.source_quota
+                return (false, false)
+            spent: usize = work - start
+            return (false, false) if spent > remaining
+            state.source_work_used <- state.source_work_used + spent
+            return (true, overloaded)
 
+        def proof_tactic_state_charge_source_work(state: mutable ProofTacticState&, amount: usize) -> bool:
+            return false if state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or state.source_work_used > state.source_quota
+            if amount > state.source_quota - state.source_work_used:
+                state.source_work_used <- state.source_quota
+                return false
+            state.source_work_used <- state.source_work_used + amount
+            return true
+
+        # `proof_quantifier_equal` may scan the complete annotation list twice per candidate.
+        # Charge the one-pass reservation itself, then reserve every possible candidate scan
+        # before an assumption/apply loop starts. This keeps work bounded even when the goal is
+        # not a quantifier and the checks all return false.
+        def proof_tactic_state_quantifier_annotation_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, candidate_count: usize) -> bool:
+            annotation_work: mutable usize = 0
+            for annotation in annotations |annotation, state, annotation_work|:
+                owner_length: usize = sview_len(annotation.owner)
+                name_length: usize = sview_len(annotation.name)
+                if owner_length >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    state.source_work_used <- state.source_quota
+                    return false
+                row_work: usize = owner_length + 1
+                if name_length > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - row_work:
+                    state.source_work_used <- state.source_quota
+                    return false
+                row_work <- row_work + name_length
+                if annotation_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - row_work:
+                    state.source_work_used <- state.source_quota
+                    return false
+                annotation_work <- annotation_work + row_work
+                return false if not proof_tactic_state_charge_source_work(state, row_work)
+            return true if candidate_count == 0 or annotation_work == 0
+            if candidate_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2:
+                state.source_work_used <- state.source_quota
+                return false
+            repetitions: usize = candidate_count * 2
+            if annotation_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / repetitions:
+                state.source_work_used <- state.source_quota
+                return false
+            return proof_tactic_state_charge_source_work(state, annotation_work * repetitions)
+    public:
         def proof_tactic_assumption(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "assumption", false, "a solved goal cannot accept another action") if state.solved
+            return proof_tactic_record(state, "assumption", false, "quantifier annotation checks exhausted the source-work budget") if not proof_tactic_state_quantifier_annotation_work(state, annotations, state.facts.count)
             matched: mutable bool = false
             for fact in state.facts |fact, state, annotations, matched|:
                 if proof_expr_equal(fact, state.goal) or proof_quantifier_equal(fact, state.goal, annotations):
@@ -86,16 +90,20 @@ extend ElisaProof:
         # prover used by the source checker. This is a tactic API, not a second acceptance
         # path, so a successful state still has the same proof fragment and limits.
         def proof_tactic_decision(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, action: sview) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, action, false, "a solved goal cannot accept another action") if state.solved
-            proven: bool = (proof_goal(state.facts, state.goal, annotations) can Global{Read,Write})
+            solver_work: mutable usize = 0
+            preflight_work: mutable usize = 0
+            proven: bool = (proof_tactic_state_goal_with_work(state, state.goal, annotations, 0, &solver_work, &preflight_work) can Global{Read,Write})
             if proven:
                 state.solved <- true
                 return proof_tactic_record(state, action, true, "the existing proof kernel entailed the goal")
             return proof_tactic_record(state, action, false, "the existing proof kernel could not entail the goal")
 
-        def proof_tactic_decision_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, action: sview, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_decision_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, action: sview, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, action, false, "a solved goal cannot accept another action") if state.solved
-            proven: bool = (proof_goal_with_shared_work(state.facts, state.goal, annotations, &solver_work) can Global{Read,Write})
+            proven: bool = (proof_tactic_state_goal_with_work(state, state.goal, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write})
             if proven:
                 state.solved <- true
                 return proof_tactic_record(state, action, true, "the existing proof kernel entailed the goal")
@@ -184,21 +192,25 @@ extend ElisaProof:
         # close the resulting goal only through the same bounded kernel used by `exact`; if no
         # supported rewrite exists, the original goal and solved bit remain unchanged.
         def proof_tactic_simplify(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "simp", false, "a solved goal cannot accept another action") if state.solved
             rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(state.goal)
             return proof_tactic_record(state, "simp", false, "the goal has no supported safe simplification") if not rewritten.changed
             state.goal <- rewritten.value
-            if (proof_goal(state.facts, state.goal, annotations) can Global{Read,Write}):
+            solver_work: mutable usize = 0
+            preflight_work: mutable usize = 0
+            if (proof_tactic_state_goal_with_work(state, state.goal, annotations, 0, &solver_work, &preflight_work) can Global{Read,Write}):
                 state.solved <- true
                 return proof_tactic_record(state, "simp", true, "the goal was simplified and discharged by the existing proof kernel")
             return proof_tactic_record(state, "simp", true, "the goal was simplified; it remains to be discharged")
 
-        def proof_tactic_simplify_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_simplify_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "simp", false, "a solved goal cannot accept another action") if state.solved
             rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression(state.goal)
             return proof_tactic_record(state, "simp", false, "the goal has no supported safe simplification") if not rewritten.changed
             state.goal <- rewritten.value
-            if (proof_goal_with_shared_work(state.facts, state.goal, annotations, &solver_work) can Global{Read,Write}):
+            if (proof_tactic_state_goal_with_work(state, state.goal, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}):
                 state.solved <- true
                 return proof_tactic_record(state, "simp", true, "the goal was simplified and discharged by the existing proof kernel")
             return proof_tactic_record(state, "simp", true, "the goal was simplified; it remains to be discharged")
@@ -207,21 +219,27 @@ extend ElisaProof:
         # evaluate value-level operators. Elisa permits source implementations of primitive
         # protocols, while this tactic's constant folder has only built-in semantics.
         def proof_tactic_simplify_source_bound(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "simp", false, "a solved goal cannot accept another action") if state.solved
+            source_operator_mask: (complete: bool, mask: usize) = proof_tactic_state_operator_mask(state, annotations)
+            return proof_tactic_record(state, "simp", false, "source-bound simplification could not validate the primitive operator index") if not source_operator_mask.complete
             rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(state.goal, true)
             return proof_tactic_record(state, "simp", false, "source-bound simplification does not evaluate value-level operators") if not rewritten.changed
             state.goal <- rewritten.value
-            if (proof_goal(state.facts, state.goal, annotations) can Global{Read,Write}):
+            solver_work: mutable usize = 0
+            preflight_work: mutable usize = 0
+            if (proof_tactic_state_goal_with_work(state, state.goal, annotations, source_operator_mask.mask, &solver_work, &preflight_work) can Global{Read,Write}):
                 state.solved <- true
                 return proof_tactic_record(state, "simp", true, "the source-safe logical simplification discharged the goal")
             return proof_tactic_record(state, "simp", true, "the source-safe logical simplification changed the goal")
 
-        def proof_tactic_simplify_source_bound_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_simplify_source_bound_with_shared_work(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "simp", false, "a solved goal cannot accept another action") if state.solved
             rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_simplify_expression_mode(state.goal, true)
             return proof_tactic_record(state, "simp", false, "source-bound simplification does not evaluate value-level operators") if not rewritten.changed
             state.goal <- rewritten.value
-            if (proof_goal_with_shared_work(state.facts, state.goal, annotations, &solver_work) can Global{Read,Write}):
+            if (proof_tactic_state_goal_with_work(state, state.goal, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}):
                 state.solved <- true
                 return proof_tactic_record(state, "simp", true, "the source-safe logical simplification discharged the goal")
             return proof_tactic_record(state, "simp", true, "the source-safe logical simplification changed the goal")
@@ -230,9 +248,11 @@ extend ElisaProof:
         # the goal is syntactically an implication; no arbitrary expression is promoted to a
         # hypothesis.
         def proof_tactic_intro(state: mutable ProofTacticState&) -> bool:
+            return false if not proof_tactic_state_action_available_with_growth(state, 1)
             return proof_tactic_record(state, "intro", false, "a solved goal cannot accept another action") if state.solved
             match state.goal:
                 Ast::Expr.Binary(antecedent, TokenKind.FatArrow, consequent, _):
+                    return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                     state.facts.push(antecedent)
                     state.goal <- consequent
                     return proof_tactic_record(state, "intro", true, "introduced the implication antecedent as a hypothesis")
@@ -244,7 +264,9 @@ extend ElisaProof:
         # when B is the current goal. It never treats an arbitrary caller-supplied implication
         # as an axiom and leaves the state untouched when no matching theorem is present.
         def proof_tactic_apply(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "apply", false, "a solved goal cannot accept another action") if state.solved
+            return proof_tactic_record(state, "apply", false, "quantifier annotation checks exhausted the source-work budget") if not proof_tactic_state_quantifier_annotation_work(state, annotations, state.facts.count)
             found: mutable bool = false
             premise: mutable Ast::Expr = Ast::Expr.Absent
             for fact in state.facts |fact, state, annotations, found, premise|:
@@ -273,6 +295,7 @@ extend ElisaProof:
         # when more than one hypothesis concludes the current goal: callers can try each bounded
         # candidate without relying on context order or silently skipping a later usable premise.
         def proof_tactic_apply_from_fact(state: mutable ProofTacticState&, fact_index: usize, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             state.pending_argument <- Ast::Expr.Absent
             state.pending_secondary <- Ast::Expr.Absent
             state.pending_has_argument <- false
@@ -282,6 +305,7 @@ extend ElisaProof:
             state.pending_detail <- ""
             return proof_tactic_record(state, "apply", false, "a solved goal cannot accept another action") if state.solved
             return proof_tactic_record(state, "apply", false, "the implication fact index is out of range") if fact_index >= state.facts.count
+            return proof_tactic_record(state, "apply", false, "quantifier annotation checks exhausted the source-work budget") if not proof_tactic_state_quantifier_annotation_work(state, annotations, 1)
             selected_fact: Ast::Expr = state.facts[fact_index]
             return proof_tactic_record(state, "apply", false, "effectful implications cannot be applied") if proof_expr_has_call(selected_fact) or proof_expr_has_move(selected_fact)
             implication: Ast::Expr = proof_strip_parens(selected_fact)
@@ -312,10 +336,12 @@ extend ElisaProof:
         # member. Dynamic collections and existential instantiation stay outside this action:
         # selecting from either would require assumptions not represented in this proof state.
         def proof_tactic_instantiate(state: mutable ProofTacticState&, fact_index: usize, value: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return false if not proof_tactic_state_action_available_with_terms(state, 1, value, true, Ast::Expr.Absent, false)
             return proof_tactic_record(state, "instantiate", false, "a solved goal cannot accept another action") if state.solved
             proof_tactic_prepare(state, value, Ast::Expr.Absent, fact_index, true, false)
             state.pending_detail <- "forall"
             return proof_tactic_record(state, "instantiate", false, "the quantified fact index is out of range") if fact_index >= state.facts.count
+            return proof_tactic_record(state, "instantiate", false, "quantifier annotation checks exhausted the source-work budget") if not proof_tactic_state_quantifier_annotation_work(state, annotations, 0)
             return proof_tactic_record(state, "instantiate", false, "only a universal quantified fact can be instantiated") if proof_quantifier_kind(state.facts[fact_index], annotations) != "forall"
             quantifier: mutable Ast::Expr = state.facts[fact_index]
             match quantifier:
@@ -346,6 +372,7 @@ extend ElisaProof:
                                             return proof_tactic_record(state, "instantiate", false, "the quantified body could not be represented after substitution")
                                         _:
                                             pass
+                                    return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                                     state.facts.push(instance)
                                     return proof_tactic_record(state, "instantiate", true, "added a universally quantified instance after checking range membership")
                                 _:
@@ -354,16 +381,19 @@ extend ElisaProof:
                                 Ast::Expr.Array(elements, _):
                                     candidate: (known: bool, instance: Ast::Expr) = proof_tactic_collection_instance(body, binder, value, elements)
                                     if candidate.known:
+                                        return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                                         state.facts.push(candidate.instance)
                                         return proof_tactic_record(state, "instantiate", true, "added a universally quantified instance after checking literal-array membership")
                                 Ast::Expr.Tuple(elements, _):
                                     candidate: (known: bool, instance: Ast::Expr) = proof_tactic_collection_instance(body, binder, value, elements)
                                     if candidate.known:
+                                        return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                                         state.facts.push(candidate.instance)
                                         return proof_tactic_record(state, "instantiate", true, "added a universally quantified instance after checking literal-tuple membership")
                                 Ast::Expr.SetLit(elements, _):
                                     candidate: (known: bool, instance: Ast::Expr) = proof_tactic_collection_instance(body, binder, value, elements)
                                     if candidate.known:
+                                        return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                                         state.facts.push(candidate.instance)
                                         return proof_tactic_record(state, "instantiate", true, "added a universally quantified instance after checking literal-set membership")
                                 _:
@@ -377,89 +407,33 @@ extend ElisaProof:
         # Add a local derived fact only after the current proof kernel has established it.
         # This is the tactic analogue of an asserted proof step; it never acts as an axiom.
         def proof_tactic_have(state: mutable ProofTacticState&, fact: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available_with_terms(state, 1, fact, true, Ast::Expr.Absent, false)
             return proof_tactic_record(state, "have", false, "a solved goal cannot accept another action") if state.solved
             proof_tactic_prepare(state, fact, Ast::Expr.Absent, 0, false, false)
             return proof_tactic_record(state, "have", false, "effectful expressions cannot enter a tactic proof context") if proof_expr_has_call(fact) or proof_expr_has_move(fact)
-            proven: bool = (proof_goal(state.facts, fact, annotations) can Global{Read,Write})
+            solver_work: mutable usize = 0
+            preflight_work: mutable usize = 0
+            proven: bool = (proof_tactic_state_goal_with_work(state, fact, annotations, 0, &solver_work, &preflight_work) can Global{Read,Write})
             if proven:
+                return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                 state.facts.push(fact)
                 return proof_tactic_record(state, "have", true, "the derived fact was entailed by the current hypotheses")
             return proof_tactic_record(state, "have", false, "the proposed fact is not entailed by the current hypotheses")
 
-        def proof_tactic_have_with_shared_work(state: mutable ProofTacticState&, fact: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_have_with_shared_work(state: mutable ProofTacticState&, fact: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if not proof_tactic_state_action_available_with_terms(state, 1, fact, true, Ast::Expr.Absent, false)
             return proof_tactic_record(state, "have", false, "a solved goal cannot accept another action") if state.solved
             proof_tactic_prepare(state, fact, Ast::Expr.Absent, 0, false, false)
             return proof_tactic_record(state, "have", false, "effectful expressions cannot enter a tactic proof context") if proof_expr_has_call(fact) or proof_expr_has_move(fact)
-            proven: bool = (proof_goal_with_shared_work(state.facts, fact, annotations, &solver_work) can Global{Read,Write})
+            proven: bool = (proof_tactic_state_goal_with_work(state, fact, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write})
             if proven:
+                return false if not proof_tactic_state_snapshot_reserve(state, state.facts.count + 1)
                 state.facts.push(fact)
                 return proof_tactic_record(state, "have", true, "the derived fact was entailed by the current hypotheses")
             return proof_tactic_record(state, "have", false, "the proposed fact is not entailed by the current hypotheses")
 
-        # Replace one exact subexpression at every supported expression node. The equality
-        # itself must be an explicit fact; this keeps rewrite provenance visible and avoids
-        # treating an arbitrary caller-supplied pair as a theorem.
-        def proof_tactic_replace(expression: Ast::Expr, from: Ast::Expr, replacement: Ast::Expr) -> (changed: bool, value: Ast::Expr):
-            return (true, replacement) if proof_expr_equal(expression, from)
-            match expression:
-                Ast::Expr.Paren(inner, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_replace(inner, from, replacement)
-                    return (true, Ast::Expr.Paren(rewritten.value, position)) if rewritten.changed
-                Ast::Expr.Unary(operator, operand, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_replace(operand, from, replacement)
-                    return (true, Ast::Expr.Unary(operator, rewritten.value, position)) if rewritten.changed
-                Ast::Expr.Binary(left, operator, right, position):
-                    rewritten_left: (changed: bool, value: Ast::Expr) = proof_tactic_replace(left, from, replacement)
-                    return (true, Ast::Expr.Binary(rewritten_left.value, operator, right, position)) if rewritten_left.changed
-                    rewritten_right: (changed: bool, value: Ast::Expr) = proof_tactic_replace(right, from, replacement)
-                    return (true, Ast::Expr.Binary(left, operator, rewritten_right.value, position)) if rewritten_right.changed
-                Ast::Expr.Call(callee, arguments, argument_names, position):
-                    rewritten_callee: (changed: bool, value: Ast::Expr) = proof_tactic_replace(callee, from, replacement)
-                    return (true, Ast::Expr.Call(rewritten_callee.value, arguments, argument_names, position)) if rewritten_callee.changed
-                    rewritten_arguments: mutable darray[Ast::Expr] = []
-                    for argument in arguments |argument, rewritten_arguments, from, replacement|:
-                        rewritten_argument: (changed: bool, value: Ast::Expr) = proof_tactic_replace(argument, from, replacement)
-                        rewritten_arguments.push(rewritten_argument.value)
-                        return (true, Ast::Expr.Call(callee, rewritten_arguments, argument_names, position)) if rewritten_argument.changed
-                    return (false, expression)
-                Ast::Expr.Field(object, field, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_replace(object, from, replacement)
-                    return (true, Ast::Expr.Field(rewritten.value, field, position)) if rewritten.changed
-                Ast::Expr.Scope(base, field, position):
-                    rewritten: (changed: bool, value: Ast::Expr) = proof_tactic_replace(base, from, replacement)
-                    return (true, Ast::Expr.Scope(rewritten.value, field, position)) if rewritten.changed
-                Ast::Expr.Index(object, index, position):
-                    rewritten_object: (changed: bool, value: Ast::Expr) = proof_tactic_replace(object, from, replacement)
-                    return (true, Ast::Expr.Index(rewritten_object.value, index, position)) if rewritten_object.changed
-                    rewritten_index: (changed: bool, value: Ast::Expr) = proof_tactic_replace(index, from, replacement)
-                    return (true, Ast::Expr.Index(object, rewritten_index.value, position)) if rewritten_index.changed
-                Ast::Expr.Slice(object, low, high, position):
-                    rewritten_object: (changed: bool, value: Ast::Expr) = proof_tactic_replace(object, from, replacement)
-                    return (true, Ast::Expr.Slice(rewritten_object.value, low, high, position)) if rewritten_object.changed
-                    rewritten_low: (changed: bool, value: Ast::Expr) = proof_tactic_replace(low, from, replacement)
-                    return (true, Ast::Expr.Slice(object, rewritten_low.value, high, position)) if rewritten_low.changed
-                    rewritten_high: (changed: bool, value: Ast::Expr) = proof_tactic_replace(high, from, replacement)
-                    return (true, Ast::Expr.Slice(object, low, rewritten_high.value, position)) if rewritten_high.changed
-                Ast::Expr.IndexN(object, arguments, position):
-                    rewritten_object: (changed: bool, value: Ast::Expr) = proof_tactic_replace(object, from, replacement)
-                    return (true, Ast::Expr.IndexN(rewritten_object.value, arguments, position)) if rewritten_object.changed
-                    rewritten_arguments: mutable darray[Ast::Expr] = []
-                    for argument in arguments |argument, rewritten_arguments, from, replacement|:
-                        rewritten_argument: (changed: bool, value: Ast::Expr) = proof_tactic_replace(argument, from, replacement)
-                        rewritten_arguments.push(rewritten_argument.value)
-                        return (true, Ast::Expr.IndexN(object, rewritten_arguments, position)) if rewritten_argument.changed
-                Ast::Expr.If(condition, then_expression, else_expression, position):
-                    rewritten_condition: (changed: bool, value: Ast::Expr) = proof_tactic_replace(condition, from, replacement)
-                    return (true, Ast::Expr.If(rewritten_condition.value, then_expression, else_expression, position)) if rewritten_condition.changed
-                    rewritten_then: (changed: bool, value: Ast::Expr) = proof_tactic_replace(then_expression, from, replacement)
-                    return (true, Ast::Expr.If(condition, rewritten_then.value, else_expression, position)) if rewritten_then.changed
-                    rewritten_else: (changed: bool, value: Ast::Expr) = proof_tactic_replace(else_expression, from, replacement)
-                    return (true, Ast::Expr.If(condition, then_expression, rewritten_else.value, position)) if rewritten_else.changed
-                _:
-                    pass
-            return (false, expression)
-
-        def proof_tactic_rewrite(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr) -> bool can[Global.Read]:
+    private:
+        def proof_tactic_rewrite_after_preflight(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr) -> bool can[Global.Read]:
             proof_tactic_prepare(state, from, replacement, 0, false, true)
             # +0 == -0 and NaN make equality rewriting unsound over floats.
             return proof_tactic_record(state, "rewrite", false, "floating-point equality is not a rewrite witness") if (proof_float_mode can Global.Read)
@@ -478,9 +452,15 @@ extend ElisaProof:
             state.goal <- rewritten.value
             return proof_tactic_record(state, "rewrite", true, "rewrote the goal using an explicit equality hypothesis")
 
+    public:
+        def proof_tactic_rewrite(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr) -> bool can[Global.Read]:
+            return false if not proof_tactic_state_action_available_with_terms(state, 0, from, true, replacement, true)
+            return proof_tactic_rewrite_after_preflight(state, from, replacement)
+
+    private:
         # Replay an indexed rewrite against the exact equality selected by the script. Keeping
         # the index in the trace lets the independent kernel transition validate that same witness.
-        def proof_tactic_rewrite_selected_fact(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr, fact_index: usize) -> bool can[Global.Read]:
+        def proof_tactic_rewrite_selected_fact_after_preflight(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr, fact_index: usize) -> bool can[Global.Read]:
             proof_tactic_prepare(state, from, replacement, fact_index, true, true)
             return proof_tactic_record(state, "rewrite", false, "a solved goal cannot accept another action") if state.solved
             return proof_tactic_record(state, "rewrite", false, "floating-point equality is not a rewrite witness") if (proof_float_mode can Global.Read)
@@ -497,6 +477,11 @@ extend ElisaProof:
             state.goal <- rewritten.value
             return proof_tactic_record(state, "rewrite", true, "rewrote the goal using an explicit equality hypothesis")
 
+    public:
+        def proof_tactic_rewrite_selected_fact(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr, fact_index: usize) -> bool can[Global.Read]:
+            return false if not proof_tactic_state_action_available_with_terms(state, 0, from, true, replacement, true)
+            return proof_tactic_rewrite_selected_fact_after_preflight(state, from, replacement, fact_index)
+
         # Source-bound rewrite is stricter than the source-neutral tactic language. Elisa's
         # equality operator may be a user protocol on a named value, so an equality hypothesis
         # over that value is not a Leibniz equality and cannot rewrite a field, index, call, or
@@ -504,24 +489,34 @@ extend ElisaProof:
         # by the congruence kernel: it admits only primitive values and language-owned former
         # expressions, never a struct receiver or an overloaded operator result.
         def proof_tactic_rewrite_source_bound(state: mutable ProofTacticState&, from: Ast::Expr, replacement: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read]:
+            return false if not proof_tactic_state_action_available_with_terms(state, 0, from, true, replacement, true)
             proof_tactic_prepare(state, from, replacement, 0, false, true)
             # +0 == -0 and NaN make equality rewriting unsound over floats.
             return proof_tactic_record(state, "rewrite", false, "floating-point equality is not a rewrite witness") if (proof_float_mode can Global.Read)
-            return (proof_tactic_rewrite(state, from, replacement) can Global.Read) if state.solved
+            return (proof_tactic_rewrite_after_preflight(state, from, replacement) can Global.Read) if state.solved
             # A primitive literal is structurally scalar, but its source `==` may still be a
             # user-defined protocol implementation. Refusing the whole rewrite when any source
             # operator is overloaded keeps a custom equality from being used as Leibniz equality
             # merely because both endpoints happen to be closed literals.
-            source_operator_mask: usize = proof_source_primitive_operator_mask(annotations)
-            return proof_tactic_record(state, "rewrite", false, "source-bound rewrite cannot use source-overloaded equality") if proof_source_expression_has_overloaded_operator(state.goal, source_operator_mask, 0) or proof_source_expression_has_overloaded_operator(from, source_operator_mask, 0) or proof_source_expression_has_overloaded_operator(replacement, source_operator_mask, 0)
+            source_mask: (complete: bool, mask: usize) = proof_tactic_state_operator_mask(state, annotations)
+            return proof_tactic_record(state, "rewrite", false, "source-bound rewrite could not validate the primitive operator index") if not source_mask.complete
+            source_operator_mask: usize = source_mask.mask
+            goal_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, state.goal, source_operator_mask)
+            from_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, from, source_operator_mask)
+            replacement_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, replacement, source_operator_mask)
+            return proof_tactic_record(state, "rewrite", false, "source-bound rewrite could not validate the primitive operator index") if not goal_operator.complete or not from_operator.complete or not replacement_operator.complete
+            return proof_tactic_record(state, "rewrite", false, "source-bound rewrite cannot use source-overloaded equality") if goal_operator.overloaded or from_operator.overloaded or replacement_operator.overloaded
             unsafe_match: mutable bool = false
             safe_match: mutable bool = false
             for fact in state.facts |fact, from, replacement, state, unsafe_match, safe_match|:
+                return proof_tactic_record(state, "rewrite", false, "source-bound rewrite exhausted its source-work budget") if not proof_tactic_state_charge_source_work(state, 1)
                 match fact:
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                         matches: bool = not proof_expr_has_call(fact) and not proof_expr_has_move(fact) and ((proof_expr_equal(left, from) and proof_expr_equal(right, replacement)) or (proof_expr_equal(left, replacement) and proof_expr_equal(right, from)))
                         if matches:
-                            if not proof_source_expression_has_overloaded_operator(fact, source_operator_mask, 0) and proof_scalar_term_witnessed(left, state.facts, 0) and proof_scalar_term_witnessed(right, state.facts, 0):
+                            fact_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, fact, source_operator_mask)
+                            return proof_tactic_record(state, "rewrite", false, "source-bound rewrite could not validate the primitive operator index") if not fact_operator.complete
+                            if not fact_operator.overloaded and proof_scalar_term_witnessed(left, state.facts, 0) and proof_scalar_term_witnessed(right, state.facts, 0):
                                 safe_match <- true
                             else:
                                 unsafe_match <- true
@@ -530,51 +525,35 @@ extend ElisaProof:
             if unsafe_match and not safe_match:
                 proof_tactic_prepare(state, from, replacement, 0, false, true)
                 return proof_tactic_record(state, "rewrite", false, "source-bound rewrite requires a primitive-scalar equality witness")
-            return (proof_tactic_rewrite(state, from, replacement) can Global.Read)
+            return (proof_tactic_rewrite_after_preflight(state, from, replacement) can Global.Read)
 
         # Repair scripts may name an equality fact instead of serializing both terms. The selected
         # fact and orientation remain in the tactic trace and are independently replayed.
         def proof_tactic_rewrite_from_fact(state: mutable ProofTacticState&, fact_index: usize, reverse: bool, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read]:
             proof_tactic_prepare(state, Ast::Expr.Absent, Ast::Expr.Absent, fact_index, true, true)
-            return proof_tactic_record(state, "rewrite", false, "the equality fact index is out of range") if fact_index >= state.facts.count
+            if fact_index >= state.facts.count:
+                return false if not proof_tactic_state_action_available(state)
+                return proof_tactic_record(state, "rewrite", false, "the equality fact index is out of range")
+            # Charge the selected source expression before unwrapping it. Its full shape is an
+            # upper bound for both rewrite terms later copied into the trace.
+            return false if not proof_tactic_state_action_available_with_terms(state, 0, state.facts[fact_index], true, Ast::Expr.Absent, false)
             match proof_strip_parens(state.facts[fact_index]):
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                     from: Ast::Expr = right if reverse else left
                     replacement: Ast::Expr = left if reverse else right
-                    return (proof_tactic_rewrite_selected_fact(state, from, replacement, fact_index) can Global.Read) if state.solved
+                    return (proof_tactic_rewrite_selected_fact_after_preflight(state, from, replacement, fact_index) can Global.Read) if state.solved
                     proof_tactic_prepare(state, from, replacement, fact_index, true, true)
                     return proof_tactic_record(state, "rewrite", false, "effectful goals cannot be rewritten without a purity certificate") if proof_expr_has_call(state.goal) or proof_expr_has_move(state.goal)
-                    source_operator_mask: usize = proof_source_primitive_operator_mask(annotations)
-                    return proof_tactic_record(state, "rewrite", false, "source-bound rewrite cannot use source-overloaded equality") if proof_source_expression_has_overloaded_operator(state.goal, source_operator_mask, 0) or proof_source_expression_has_overloaded_operator(from, source_operator_mask, 0) or proof_source_expression_has_overloaded_operator(replacement, source_operator_mask, 0) or proof_source_expression_has_overloaded_operator(state.facts[fact_index], source_operator_mask, 0)
+                    source_mask: (complete: bool, mask: usize) = proof_tactic_state_operator_mask(state, annotations)
+                    return proof_tactic_record(state, "rewrite", false, "source-bound rewrite could not validate the primitive operator index") if not source_mask.complete
+                    source_operator_mask: usize = source_mask.mask
+                    goal_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, state.goal, source_operator_mask)
+                    from_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, from, source_operator_mask)
+                    replacement_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, replacement, source_operator_mask)
+                    fact_operator: (complete: bool, overloaded: bool) = proof_tactic_state_overloaded_operator_with_work(state, state.facts[fact_index], source_operator_mask)
+                    return proof_tactic_record(state, "rewrite", false, "source-bound rewrite could not validate the primitive operator index") if not goal_operator.complete or not from_operator.complete or not replacement_operator.complete or not fact_operator.complete
+                    return proof_tactic_record(state, "rewrite", false, "source-bound rewrite cannot use source-overloaded equality") if goal_operator.overloaded or from_operator.overloaded or replacement_operator.overloaded or fact_operator.overloaded
                     return proof_tactic_record(state, "rewrite", false, "source-bound rewrite requires a primitive-scalar equality witness") if proof_expr_has_call(state.facts[fact_index]) or proof_expr_has_move(state.facts[fact_index]) or not proof_scalar_term_witnessed(left, state.facts, 0) or not proof_scalar_term_witnessed(right, state.facts, 0)
-                    return (proof_tactic_rewrite_selected_fact(state, from, replacement, fact_index) can Global.Read)
+                    return (proof_tactic_rewrite_selected_fact_after_preflight(state, from, replacement, fact_index) can Global.Read)
                 _:
                     return proof_tactic_record(state, "rewrite", false, "the selected fact is not an equality")
-
-        def proof_tactic_initialize_child[@r](parent: ProofTacticState&, goal: Ast::Expr, skip_fact: usize, branch_fact: Ast::Expr, child: mutable ProofTacticState& @r) -> void:
-            child.facts <- []
-            child.initial_facts <- []
-            for index in 0..<parent.facts.count |index, parent, child, skip_fact|:
-                child.facts.push(parent.facts[index]) if index != skip_fact
-                child.initial_facts.push(parent.facts[index]) if index != skip_fact
-            child.facts.push(branch_fact) if skip_fact < parent.facts.count
-            child.initial_facts.push(branch_fact) if skip_fact < parent.facts.count
-            child.goal <- goal
-            child.initial_goal <- goal
-            child.solved <- false
-            child.action_count <- 0
-            child.last_action <- "branch"
-            child.last_reason <- "child state created by a structural proof rule"
-            child.trace <- []
-            child.trace_facts <- []
-            child.pending_argument <- Ast::Expr.Absent
-            child.pending_secondary <- Ast::Expr.Absent
-            child.pending_has_argument <- false
-            child.pending_has_secondary <- false
-            child.pending_argument_index <- 0
-            child.pending_has_argument_index <- false
-            child.pending_detail <- ""
-
-        # Conjunction splitting creates two independent states. Both branches must later be
-        # solved; returning two states makes that obligation explicit to callers rather than
-        # silently choosing one side.

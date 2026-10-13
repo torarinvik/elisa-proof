@@ -66,6 +66,55 @@ extend ElisaProof:
                         return false
             return true
 
+        # Resolve a visible module alias when the caller is represented as path segments rather
+        # than the serialized module string used by the enum resolver. Select the nearest alias
+        # scope explicitly, then require the source-visible and backend-global chains to agree.
+        def proof_replay_type_bound_call_module_alias_owner_at_scope_with_work(report: ProofReport&, caller_scope: darray[sview]&, segments: darray[sview]&, work: mutable usize&) -> (complete: bool, owner: darray[sview]):
+            return (false, []) if segments.count < 2
+            aliases: mutable ProofModuleAliasIndex = ProofModuleAliasIndex{names: [], targets: [], scopes: [], lines: [], offsets: [], alias_lookup_hashes: [], alias_lookup_values: [], alias_lookup_ambiguous: [], global_alias_lookup_hashes: [], global_alias_lookup_values: [], function_lookup_hashes: [], function_lookup_values: [], function_lookup_ambiguous: [], function_lookup_complete: false, complete: false}
+            built: (complete: bool, reason: sview, observed: usize, limit: usize) = proof_build_module_alias_index(report.source.source_annotations, &aliases, work)
+            return (false, []) if not built.complete
+            return (false, []) if aliases.names.count != aliases.targets.count or aliases.names.count != aliases.scopes.count
+            backend: (complete: bool, matched: bool, valid: bool, row: usize) = proof_module_alias_lookup_global(aliases, segments[0], work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+            return (false, []) if not backend.complete or not backend.matched or not backend.valid or backend.row >= aliases.targets.count
+            selected: mutable usize = aliases.names.count
+            selected_depth: mutable usize = 0
+            selected_matches: mutable usize = 0
+            for row in 0..<aliases.names.count |row, aliases, segments, caller_scope, work, selected, selected_depth, selected_matches|:
+                return (false, []) if not proof_replay_type_bound_local_work_charge(1, work)
+                return (false, []) if not proof_replay_type_bound_local_text_compare_charge(aliases.names[row], segments[0], work)
+                continue if aliases.names[row] != segments[0]
+                empty_scope: darray[sview] = []
+                alias_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_scope, aliases.scopes[row], work)
+                return (false, []) if not alias_scope.complete or alias_scope.scope.count > caller_scope.count
+                visible: mutable bool = true
+                for index in 0..<alias_scope.scope.count |index, alias_scope, caller_scope, work, visible|:
+                    return (false, []) if not proof_replay_type_bound_local_text_compare_charge(alias_scope.scope[index], caller_scope[index], work)
+                    visible <- false if alias_scope.scope[index] != caller_scope[index]
+                continue if not visible
+                if selected_matches == 0 or alias_scope.scope.count > selected_depth:
+                    selected <- row
+                    selected_depth <- alias_scope.scope.count
+                    selected_matches <- 1
+                elif alias_scope.scope.count == selected_depth:
+                    selected_matches <- selected_matches + 1
+            return (false, []) if selected >= aliases.names.count or selected_matches != 1
+            return (false, []) if:
+                not proof_replay_type_bound_local_work_charge(sview_len(aliases.targets[selected]), work)
+                not proof_replay_type_bound_local_work_charge(sview_len(aliases.targets[backend.row]), work)
+                aliases.targets[selected] == "" or aliases.targets[selected] != aliases.targets[backend.row]
+            compatible: (complete: bool, compatible: bool, target: sview) = proof_module_alias_targets_compatible(aliases, aliases.scopes[selected], aliases.targets[selected], work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+            return (false, []) if not compatible.complete or not compatible.compatible
+            owner: mutable darray[sview] = []
+            empty_owner: darray[sview] = []
+            target_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(empty_owner, compatible.target, work)
+            return (false, []) if not target_scope.complete
+            owner.extend(target_scope.scope)
+            for index in 1..<segments.count - 1 |index, segments, owner, work|:
+                return (false, []) if not proof_replay_type_bound_local_work_charge(sview_len(segments[index]), work)
+                owner.push(segments[index])
+            return (true, owner)
+
         # Match the complete written module path against each lexical prefix, deepest first.
         # This mirrors compiler type-path resolution: a partial deeper prefix does not prevent
         # a complete match from an enclosing module or root.
@@ -86,11 +135,23 @@ extend ElisaProof:
                 return (true, true, candidate_scope) if matches == 1
                 prefix_count <- prefix_count - 1
             # Stage0 tries module-alias rewrites after lexical candidates and before the raw
-            # root spelling. Alias expansion is not replayed here, so do not let a root literal
-            # win when the same head is a visible module alias.
+            # root spelling. Resolve a visible alias with the caller's exact module path, and
+            # do not let a root literal win if that alias cannot be authenticated.
             alias_shadow: (complete: bool, shadowed: bool) = proof_replay_type_bound_import_name_shadowed_with_work(report.source.source_annotations, resolution_scope, written_scope[0], true, work)
             return (false, false, []) if not alias_shadow.complete
-            return (true, false, []) if alias_shadow.shadowed
+            if alias_shadow.shadowed:
+                qualified_segments: mutable darray[sview] = []
+                return (false, false, []) if not proof_replay_type_bound_local_work_charge(written_scope.count + 1, work)
+                qualified_segments.extend(written_scope)
+                qualified_segments.push(wanted_name)
+                qualified_owner: (complete: bool, owner: darray[sview]) = proof_replay_type_bound_call_module_alias_owner_at_scope_with_work(report, resolution_scope, qualified_segments, work)
+                return (false, false, []) if not qualified_owner.complete
+                alias_matches: mutable usize = 0
+                alias_current_scope: mutable darray[sview] = []
+                alias_complete: bool = proof_replay_type_bound_call_type_owner_scan_with_work(report.source.source_declarations, &alias_current_scope, qualified_owner.owner, wanted_name, &alias_matches, work, 0)
+                return (false, false, []) if not alias_complete or alias_matches > 1
+                return (true, true, qualified_owner.owner) if alias_matches == 1
+                return (true, false, [])
             root_scope: mutable darray[sview] = []
             return (false, false, []) if not proof_replay_type_bound_local_work_charge(written_scope.count, work)
             root_scope.extend(written_scope)

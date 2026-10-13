@@ -1,11 +1,21 @@
 extend ElisaProof:
     public:
         def proof_tactic_split[@r](state: mutable ProofTacticState& @r, left_state: mutable ProofTacticState& @r, right_state: mutable ProofTacticState& @r) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             match state.goal:
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    proof_tactic_initialize_child(state, left, state.facts.count, Ast::Expr.Absent, left_state)
-                    proof_tactic_initialize_child(state, right, state.facts.count, Ast::Expr.Absent, right_state)
-                    return proof_tactic_record(state, "split", true, "created independent states for both conjunction branches")
+                    quota: ProofTacticBranchQuota = proof_tactic_branch_quota(state, state.facts.count, state.facts.count, state.action_count, state.trace_facts.count)
+                    if not quota.valid:
+                        return proof_tactic_record(state, "split", false, quota.reason)
+                    left_shape: ProofTacticChildShapeBudget = proof_tactic_child_shape_budget(state, left, state.facts.count, Ast::Expr.Absent, quota.left_action_ast_quota)
+                    right_shape: ProofTacticChildShapeBudget = proof_tactic_child_shape_budget(state, right, state.facts.count, Ast::Expr.Absent, quota.right_action_ast_quota)
+                    if not left_shape.valid or not right_shape.valid:
+                        return proof_tactic_record(state, "split", false, "branch child AST copies exceed the remaining direct tactic budget")
+                    return false if not proof_tactic_initialize_child(state, left, state.facts.count, Ast::Expr.Absent, quota, true, left_shape, left_state)
+                    return false if not proof_tactic_initialize_child(state, right, state.facts.count, Ast::Expr.Absent, quota, false, right_shape, right_state)
+                    accepted: bool = proof_tactic_record(state, "split", true, "created independent states for both conjunction branches")
+                    state.branch_terminal <- true if accepted
+                    return accepted
                 _:
                     return proof_tactic_record(state, "split", false, "the goal is not a conjunction")
 
@@ -13,6 +23,7 @@ extend ElisaProof:
         # operation only performs the constructive introduction rule and cannot manufacture a
         # proof of either branch.
         def proof_tactic_left(state: mutable ProofTacticState&) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "left", false, "a solved goal cannot accept another action") if state.solved
             match state.goal:
                 Ast::Expr.Binary(left, TokenKind.Or, _, _):
@@ -22,6 +33,7 @@ extend ElisaProof:
                     return proof_tactic_record(state, "left", false, "the goal is not a disjunction")
 
         def proof_tactic_right(state: mutable ProofTacticState&) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             return proof_tactic_record(state, "right", false, "a solved goal cannot accept another action") if state.solved
             match state.goal:
                 Ast::Expr.Binary(_, TokenKind.Or, right, _):
@@ -33,12 +45,22 @@ extend ElisaProof:
         # Disjunction case analysis is similarly explicit. The selected disjunct is removed
         # from each child context and replaced by one branch hypothesis.
         def proof_tactic_cases[@r](state: mutable ProofTacticState& @r, left_state: mutable ProofTacticState& @r, right_state: mutable ProofTacticState& @r) -> bool:
+            return false if not proof_tactic_state_action_available(state)
             for index in 0..<state.facts.count |index, state, left_state, right_state|:
                 match state.facts[index]:
                     Ast::Expr.Binary(left, TokenKind.Or, right, _):
-                        proof_tactic_initialize_child(state, state.goal, index, left, left_state)
-                        proof_tactic_initialize_child(state, state.goal, index, right, right_state)
-                        return proof_tactic_record(state, "cases", true, "created independent states for both disjunction branches")
+                        quota: ProofTacticBranchQuota = proof_tactic_branch_quota(state, state.facts.count, state.facts.count, state.action_count, state.trace_facts.count)
+                        if not quota.valid:
+                            return proof_tactic_record(state, "cases", false, quota.reason)
+                        left_shape: ProofTacticChildShapeBudget = proof_tactic_child_shape_budget(state, state.goal, index, left, quota.left_action_ast_quota)
+                        right_shape: ProofTacticChildShapeBudget = proof_tactic_child_shape_budget(state, state.goal, index, right, quota.right_action_ast_quota)
+                        if not left_shape.valid or not right_shape.valid:
+                            return proof_tactic_record(state, "cases", false, "branch child AST copies exceed the remaining direct tactic budget")
+                        return false if not proof_tactic_initialize_child(state, state.goal, index, left, quota, true, left_shape, left_state)
+                        return false if not proof_tactic_initialize_child(state, state.goal, index, right, quota, false, right_shape, right_state)
+                        accepted: bool = proof_tactic_record(state, "cases", true, "created independent states for both disjunction branches")
+                        state.branch_terminal <- true if accepted
+                        return accepted
                     _:
                         pass
             return proof_tactic_record(state, "cases", false, "no disjunction hypothesis is available")
@@ -50,12 +72,15 @@ extend ElisaProof:
             return false if:
                 left.action != right.action or left.accepted != right.accepted or left.facts_start != right.facts_start or left.facts_count != right.facts_count or left.solved != right.solved or left.reason != right.reason or left.has_argument != right.has_argument or left.has_secondary != right.has_secondary or left.argument_index != right.argument_index or left.has_argument_index != right.has_argument_index or left.detail != right.detail
                 not proof_expr_equal(left.goal, right.goal)
-                not proof_expr_equal(left.argument, right.argument)
-            return proof_expr_equal(left.secondary, right.secondary)
+                (left.has_argument and not proof_expr_equal(left.argument, right.argument))
+                (left.has_secondary and not proof_expr_equal(left.secondary, right.secondary))
+            return true
 
         def proof_tactic_state_equal(left: ProofTacticState&, right: ProofTacticState&) -> bool:
             return false if:
-                left.solved != right.solved or left.action_count != right.action_count or left.last_action != right.last_action or left.last_reason != right.last_reason
+                left.solved != right.solved or left.action_count != right.action_count or left.last_action != right.last_action or left.last_reason != right.last_reason or left.budget_exhausted != right.budget_exhausted or left.branch_terminal != right.branch_terminal
+                left.action_quota != right.action_quota or left.snapshot_quota != right.snapshot_quota or left.solver_quota != right.solver_quota or left.preflight_quota != right.preflight_quota or left.source_quota != right.source_quota or left.action_ast_quota != right.action_ast_quota
+                left.solver_work_used != right.solver_work_used or left.preflight_work_used != right.preflight_work_used or left.source_work_used != right.source_work_used or left.action_ast_work_used != right.action_ast_work_used
                 not proof_expr_equal(left.initial_goal, right.initial_goal)
                 not proof_expr_array_equal(left.initial_facts, right.initial_facts)
                 not proof_expr_equal(left.goal, right.goal)
@@ -74,13 +99,27 @@ extend ElisaProof:
         # certificate work.
         def proof_tactic_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
             solver_work: mutable usize = 0
-            return (proof_tactic_replay_impl(state, annotations, &solver_work, false) can Global{Read,Write})
+            preflight_work: mutable usize = 0
+            # The public standalone entry point also shares solver and preflight ceilings across the
+            # entire trace. Resetting those counters for each replayed action would let a bounded
+            # tactic step be repeated up to the action quota.
+            return (proof_tactic_replay_impl(state, annotations, 0, false, &solver_work, &preflight_work, true) can Global{Read,Write})
 
-        def proof_tactic_replay_with_shared_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
-            return (proof_tactic_replay_impl(state, annotations, &solver_work, true) can Global{Read,Write})
+        def proof_tactic_replay_with_shared_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, source_bound: bool, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return (proof_tactic_replay_impl(state, annotations, operator_mask, source_bound, &solver_work, &preflight_work, true) can Global{Read,Write})
 
-        def proof_tactic_replay_impl(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&, shared_work: bool) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_replay_impl(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, source_bound: bool, solver_work: mutable usize&, preflight_work: mutable usize&, shared_work: bool) -> bool can[Global.Read, Global.Write]:
+            shape_cost: mutable usize = 0
+            return false if not proof_tactic_state_budget_well_formed(state)
+            return false if not proof_tactic_state_replay_ast_shape_reserve(state, &shape_cost, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)
+            return false if not proof_tactic_state_replay_comparison_reserve(state, shape_cost, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT)
             replay_state: mutable ProofTacticState = proof_tactic_state(state.initial_facts, state.initial_goal)
+            replay_state.action_quota <- state.action_quota
+            replay_state.snapshot_quota <- state.snapshot_quota
+            replay_state.solver_quota <- state.solver_quota
+            replay_state.preflight_quota <- state.preflight_quota
+            replay_state.source_quota <- state.source_quota
+            replay_state.action_ast_quota <- state.action_ast_quota
             empty: mutable darray[Ast::Expr] = []
             for expected in state.trace |expected, replay_state, annotations, empty|:
                 before_count: usize = replay_state.trace.count
@@ -88,10 +127,10 @@ extend ElisaProof:
                 if expected.action == "assumption":
                     accepted <- proof_tactic_assumption(&replay_state, annotations)
                 elif expected.action == "exact":
-                    accepted <- (proof_tactic_decision_with_shared_work(&replay_state, annotations, "exact", &solver_work) can Global{Read,Write}) if shared_work
+                    accepted <- (proof_tactic_decision_with_shared_work(&replay_state, annotations, "exact", operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if shared_work
                     accepted <- (proof_tactic_exact(&replay_state, annotations) can Global{Read,Write}) if not shared_work
                 elif expected.action == "decide":
-                    accepted <- (proof_tactic_decision_with_shared_work(&replay_state, annotations, "decide", &solver_work) can Global{Read,Write}) if shared_work
+                    accepted <- (proof_tactic_decision_with_shared_work(&replay_state, annotations, "decide", operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if shared_work
                     accepted <- (proof_tactic_decide(&replay_state, annotations) can Global{Read,Write}) if not shared_work
                 elif expected.action == "intro":
                     accepted <- proof_tactic_intro(&replay_state)
@@ -102,10 +141,11 @@ extend ElisaProof:
                     else:
                         accepted <- proof_tactic_apply(&replay_state, annotations)
                 elif expected.action == "simp":
-                    accepted <- (proof_tactic_simplify_with_shared_work(&replay_state, annotations, &solver_work) can Global{Read,Write}) if shared_work
+                    accepted <- (proof_tactic_simplify_source_bound_with_shared_work(&replay_state, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if shared_work and source_bound
+                    accepted <- (proof_tactic_simplify_with_shared_work(&replay_state, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if shared_work and not source_bound
                     accepted <- (proof_tactic_simplify(&replay_state, annotations) can Global{Read,Write}) if not shared_work
                 elif expected.action == "have":
-                    accepted <- (proof_tactic_have_with_shared_work(&replay_state, expected.argument, annotations, &solver_work) can Global{Read,Write}) if shared_work
+                    accepted <- (proof_tactic_have_with_shared_work(&replay_state, expected.argument, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if shared_work
                     accepted <- (proof_tactic_have(&replay_state, expected.argument, annotations) can Global{Read,Write}) if not shared_work
                 elif expected.action == "instantiate":
                     accepted <- proof_tactic_instantiate(&replay_state, expected.argument_index, expected.argument, annotations)
@@ -195,7 +235,10 @@ extend ElisaProof:
         # arena terms with the reparsed state, preserving the ordered hypotheses as well as
         # the goal. A matching fact count alone does not bind a proof to a source obligation.
         # The CLI uses this kernel-only relation after reparsing the source state in a fresh store.
-        def proof_tactic_source_state_kernel_matches(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+        # Cross-store source-state binding for JSON import shares the tree's kernel meter. Charge
+        # the report arena copy before allocation, encode imported AST under the metered trace
+        # encoder, and compare every ordered fact and the goal with the kernel's work-aware API.
+        def proof_tactic_source_state_kernel_matches_with_trace_work(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool:
             return false if goal_id >= report.results.goal_attempts.count
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
             match attempt.rule:
@@ -210,25 +253,48 @@ extend ElisaProof:
                 attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.facts_count > report.analysis_1.certificate_facts.count - attempt.facts_start
                 attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count or attempt.kernel_facts_count > report.analysis_1.kernel.certificate_facts.count - attempt.kernel_facts_start
                 attempt.kernel_goal >= report.analysis_1.kernel.nodes.count
+            # Bound the temporary duplicate arena before allocating it. Charge conservative
+            # storage units (256 per fixed-size node record, 8 per child index) alongside the
+            # subsequent encoder/comparison work, so large imported source states fail closed.
+            node_count: usize = report.analysis_1.kernel.nodes.count
+            child_count: usize = report.analysis_1.kernel.children.count
+            if node_count > ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT / 256:
+                trace_work <- ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT + 1
+                return false
+            node_storage_work: usize = node_count * 256
+            if child_count > (ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT - node_storage_work) / 8:
+                trace_work <- ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT + 1
+                return false
+            storage_work: usize = node_storage_work + child_count * 8
+            return false if:
+                not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(&trace_work, storage_work)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             nodes.extend(report.analysis_1.kernel.nodes)
             children.extend(report.analysis_1.kernel.children)
-            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, report.source.source_annotations)
-            return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(nodes, children, attempt.kernel_goal, goal_root, 0)
-            for index in 0..<facts.count |index, report, attempt, facts, nodes, children|:
+            goal_root: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(goal, annotations, &nodes, &children, trace_work)
+            return false if not goal_root.known
+            return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_expr_equal(&nodes, &children, attempt.kernel_goal, goal_root.root, 0, &trace_work)
+            for index in 0..<facts.count |index, report, attempt, facts, nodes, children, annotations, trace_work|:
                 expected: usize = report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + index]
                 return false if expected >= report.analysis_1.kernel.nodes.count
-                actual: usize = proof_kernel_encode_annotated(facts[index], &nodes, &children, report.source.source_annotations)
-                return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(nodes, children, expected, actual, 0)
+                actual: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(facts[index], annotations, &nodes, &children, trace_work)
+                return false if not actual.known
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(&trace_work, 1)
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_expr_equal(&nodes, &children, expected, actual.root, 0, &trace_work)
             return true
 
-        # Same-store clients can bind the exact source AST in addition to its kernel encoding. Keep
-        # this stronger API separate from the cross-store CLI path so an unavailable imported AST
-        # can never be mistaken for a real source value.
+        def proof_tactic_source_state_kernel_matches(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
+            trace_work: mutable usize = 0
+            return proof_tactic_source_state_kernel_matches_with_trace_work(report, goal_id, facts, goal, report.source.source_annotations, &trace_work)
+
+        # Same-store clients bind the exact source AST in addition to its kernel encoding. Reuse
+        # the same meter for both relations so this stronger check stays within one call budget.
         def proof_tactic_source_state_matches(report: ProofReport&, goal_id: usize, facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
-            return false if not proof_tactic_source_state_kernel_matches(report, goal_id, facts, goal)
+            trace_work: mutable usize = 0
+            return false if not proof_tactic_source_state_kernel_matches_with_trace_work(report, goal_id, facts, goal, report.source.source_annotations, &trace_work)
             attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+            return false if not proof_tactic_source_ast_comparison_reserve(facts, report.analysis_1.certificate_facts, attempt.facts_start, attempt.facts_count, goal, attempt.goal, &trace_work, ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT)
             return false if not proof_expr_equal(goal, attempt.goal)
             for index in 0..<facts.count |index, facts, attempt, report|:
                 return false if not proof_expr_equal(facts[index], report.analysis_1.certificate_facts[attempt.facts_start + index])
@@ -239,7 +305,9 @@ extend ElisaProof:
             return (proof_tactic_kernel_replay_with_trace_work(state, annotations, &trace_work) can Global{Read,Write})
 
         def proof_tactic_kernel_replay_with_trace_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
-            return false if not state.solved
+            shape_cost: mutable usize = 0
+            return false if not proof_tactic_state_budget_well_formed(state) or not state.solved
+            return false if not proof_tactic_state_replay_ast_shape_reserve(state, &shape_cost, &trace_work, ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             facts: mutable darray[usize] = []
@@ -275,7 +343,9 @@ extend ElisaProof:
             return (proof_tactic_kernel_trace_replay_with_work(state, annotations, &trace_work) can Global{Read,Write})
 
         def proof_tactic_kernel_trace_replay_with_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
-            return false if state.action_count != state.trace.count
+            shape_cost: mutable usize = 0
+            return false if not proof_tactic_state_budget_well_formed(state)
+            return false if not proof_tactic_state_replay_ast_shape_reserve(state, &shape_cost, &trace_work, ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             before_facts: mutable darray[usize] = []
@@ -297,7 +367,7 @@ extend ElisaProof:
                     expected.facts_start > state.trace_facts.count
                     expected.facts_count > state.trace_facts.count - expected.facts_start
                 after_facts: mutable darray[usize] = []
-                for index in 0..<expected.facts_count |index, expected, state, nodes, children, after_facts, annotations|:
+                for index in 0..<expected.facts_count |index, expected, state, nodes, children, after_facts, annotations, trace_work|:
                     fact: Ast::Expr = state.trace_facts[expected.facts_start + index]
                     encoded_fact: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(fact, annotations, nodes, children, trace_work)
                     return false if not encoded_fact.known
@@ -328,7 +398,7 @@ extend ElisaProof:
             return false if:
                 not proof_tactic_kernel_encode_facts_with_trace_work(state.facts, annotations, nodes, children, final_facts, trace_work)
                 final_facts.count != before_facts.count
-            for index in 0..<final_facts.count |index, final_facts, before_facts, nodes, children|:
+            for index in 0..<final_facts.count |index, final_facts, before_facts, nodes, children, trace_work|:
                 return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_expr_equal(&nodes, &children, final_facts[index], before_facts[index], 0, &trace_work)
             encoded_final_goal: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(state.goal, annotations, nodes, children, trace_work)
             return false if not encoded_final_goal.known
@@ -353,9 +423,14 @@ extend ElisaProof:
         def proof_tactic_kernel_branch_transition_replay_with_work(parent: ProofTacticState&, left: ProofTacticState&, right: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if parent.trace.count == 0
             branch: ProofTacticStep = parent.trace[parent.trace.count - 1]
+            left_shape_cost: mutable usize = 0
+            right_shape_cost: mutable usize = 0
             return false if:
                 not branch.accepted or (branch.action != "split" and branch.action != "cases")
+                not proof_tactic_state_replay_ast_shape_reserve(left, &left_shape_cost, &trace_work, ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT)
+                not proof_tactic_state_replay_ast_shape_reserve(right, &right_shape_cost, &trace_work, ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT)
                 not (proof_tactic_kernel_trace_replay_with_work(parent, annotations, trace_work) can Global{Read,Write})
+                not proof_tactic_branch_quota_matches(parent, branch, left, right)
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             parent_facts: mutable darray[usize] = []

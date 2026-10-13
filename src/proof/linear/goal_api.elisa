@@ -5,7 +5,50 @@
 global mutable proof_float_mode: bool
 
 extend ElisaProof:
+    public:
+        const PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT: usize = 1073741824
     private:
+        def proof_goal_tactic_preflight_charge(work: mutable usize&, amount: usize) -> bool:
+            return false if work > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            if amount > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - work:
+                work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                return false
+            work <- work + amount
+            return true
+
+        def proof_goal_tactic_preflight_charge_scaled(work: mutable usize&, amount: usize, multiplier: usize) -> bool:
+            return false if work > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            return true if amount == 0 or multiplier == 0
+            if amount > (PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - work) / multiplier:
+                work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                return false
+            return proof_goal_tactic_preflight_charge(&work, amount * multiplier)
+
+        # Find potential literal-width probes in one bottom-up walk. The previous detector
+        # rescanned each nested comparison's subtrees and queried literal annotations before
+        # reserving cubic work; a deeply nested expression could therefore spend quadratic work
+        # outside the budget. This deliberately over-approximates closed literals, so it only
+        # reserves extra fuel and cannot change proof acceptance.
+        def proof_goal_literal_width_probe(expression: Ast::Expr, depth: usize) -> (contains_integer: bool, required: bool):
+            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_goal_literal_width_probe(inner, depth + 1)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    condition_result: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(condition, depth + 1)
+                    then_result: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(then_expression, depth + 1)
+                    else_result: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(else_expression, depth + 1)
+                    return (condition_result.contains_integer or then_result.contains_integer or else_result.contains_integer, condition_result.required or then_result.required or else_result.required)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_result: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(left, depth + 1)
+                    right_result: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(right, depth + 1)
+                    candidate: bool = proof_is_comparison(operator) or proof_literal_width_arithmetic(operator)
+                    return (left_result.contains_integer or right_result.contains_integer, left_result.required or right_result.required or (candidate and (left_result.contains_integer or right_result.contains_integer)))
+                Ast::Expr.IntLit(_, _):
+                    return (true, false)
+                _:
+                    return (false, false)
+
         def proof_float_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> bool:
             for fact in facts:
                 return true if proof_fact_contains(fact, goal)
@@ -78,26 +121,71 @@ extend ElisaProof:
 
         # Imported tactic trees pass one counter through every solver-backed action and its
         # deterministic replay. Keeping this overload separate preserves ordinary checker fuel.
-        def proof_goal_with_shared_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_goal_with_shared_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, budget: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             # The legacy preflight readers (literal validation, disjunction filtering, and
             # float-safe containment) are pure recursive scans. Reserve their worst-case
             # repeated traversal cost before invoking them, then let proof_goal_depth continue
             # from the same counter. This bounds repeated action calls as well as enumeration.
-            return false if budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT
+            return false if budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
             exhausted: mutable bool = false
             goal_cost: mutable usize = 0
             return false if not proof_replay_summary_expr_cost_with_limit(goal, &goal_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
-            return false if not proof_linear_safety_work_charge_scaled(&budget, &exhausted, goal_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
-            for fact in facts |fact, budget, exhausted|:
+            return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, goal_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            shape_cost: mutable usize = goal_cost
+            for fact in facts |fact, preflight_work, shape_cost|:
                 fact_cost: mutable usize = 0
                 return false if not proof_replay_summary_expr_cost_with_limit(fact, &fact_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
-                return false if not proof_linear_safety_work_charge_scaled(&budget, &exhausted, fact_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
-            operator_mask: usize = proof_source_primitive_operator_mask(annotations)
+                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, fact_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+                return false if fact_cost > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - shape_cost
+                shape_cost <- shape_cost + fact_cost
+            for annotation in annotations |annotation, shape_cost, preflight_work|:
+                return false if not proof_goal_tactic_preflight_charge(&preflight_work, 1)
+                owner_cost: usize = sview_len(annotation.owner)
+                name_cost: usize = sview_len(annotation.name)
+                return false if:
+                    not proof_goal_tactic_preflight_charge(&preflight_work, owner_cost)
+                    not proof_goal_tactic_preflight_charge(&preflight_work, name_cost)
+                if shape_cost >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT:
+                    preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                remaining_shape: usize = PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - shape_cost
+                if owner_cost >= remaining_shape or name_cost > remaining_shape - owner_cost - 1:
+                    preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                shape_cost <- shape_cost + owner_cost + name_cost + 1
+            if (proof_float_mode can Global.Read):
+                if shape_cost == 0 or shape_cost > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT / shape_cost:
+                    preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                float_square_cost: usize = shape_cost * shape_cost
+                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, shape_cost)
+                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_cost, 2)
+                return true if proof_float_goal(facts, goal)
+                return (proof_float_propositional_goal_with_shared_work(facts, goal, operator_mask, &preflight_work, PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT) can Global.Read)
+            goal_width_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(goal, 0)
+            width_probe_required: mutable bool = goal_width_probe.required
+            for fact in facts |fact, width_probe_required|:
+                fact_width_probe: (contains_integer: bool, required: bool) = proof_goal_literal_width_probe(fact, 0)
+                width_probe_required <- width_probe_required or fact_width_probe.required
+            if width_probe_required:
+                # Literal-width validation nests AST walks over facts and typed markers. Bound
+                # expression × fact × marker comparisons for both the plain and full attempts.
+                if shape_cost == 0 or shape_cost > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT / shape_cost:
+                    preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                square_cost: usize = shape_cost * shape_cost
+                if square_cost > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT / shape_cost:
+                    preflight_work <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                    return false
+                cubic_cost: usize = square_cost * shape_cost
+                return false if not proof_goal_tactic_preflight_charge_scaled(&preflight_work, cubic_cost, 2)
             plain: mutable darray[Ast::Expr] = []
             for fact in facts |plain|:
                 plain.push(fact) if not proof_goal_fact_is_disjunction(fact)
-            if plain.count < facts.count and (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write}):
-                return true
+            if plain.count < facts.count:
+                plain_proven: bool = (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
+                return true if plain_proven
+                return false if exhausted or budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
             return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
 
         def proof_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:

@@ -4,17 +4,17 @@
 
 This section controls immediate work. The roadmaps and inventories below retain design history; use this order until a new audit supersedes it.
 
-1. **Fix the Stage0 ReturnBorrow/StoreFlow summary blocking every Stage1 seed.** The 17 local-storage retention diagnostics recur at `codegen_stmt_assign_place.elisa` lines 260/261/581/586/587. Source tracing places them in Core Go `returnBorrowCallArgStoreFlow` → `callArgNeverReaches` (`region_store_flow_summary.go`), not Stage1 StoreThrough. The diagnostic trace shows dense may-reach relations among helper arguments, with `written=true` and `returned=false` for each reported destination. An initial lead was that DArray `.push` calls in generic helpers were treated as unresolved; the receiver classifier now distinguishes irrelevant overloads from applicable generic/DArray UFCS overloads, and focused StoreFlow tests pass, but the patched Stage0 seed still reports all 17 escapes with no unresolved-call markers. Its trace still shows `expression_type(expression, local_scope, fns, structs, generics)` as a full reach clique. Trace the source of that summary while keeping user-defined UFCS calls conservative and retaining a real-reference-retention rejection control. Do not add call-site exceptions. Re-run the focused and full semantic regressions, build a clean provenance-stamped Stage0, then seed the frozen current compiler at O3 through completed object emission, including parallel object emission. Current Core main is `3e6a01ca` with diagnostic probing present; current compiler main is `2221023781`, which narrows LLVM alias metadata to proven formal-parameter disjointness and passes its source policy check. Its full object/codegen qualification is still blocked by the Stage1 seed; `codegen_stmt_for_shapes.elisa` and three backend regression files remain uncommitted. No matching Stage1 exists.
+1. **Fix the Stage0 borrow/region model blocking every Stage1 seed.** Earlier runs reported 17 local-storage retention diagnostics at `codegen_stmt_assign_place.elisa` lines 260/261/581/586/587. Source tracing placed those in Core Go `returnBorrowCallArgStoreFlow` → `callArgNeverReaches` (`region_store_flow_summary.go`), not Stage1 StoreThrough. The DArray `.push` classifier and body-derived StoreFlow summaries are committed on Core `main` as `4670b143`; it preserves builtin DArray and its `DynArray[T]` bridge while excluding unrelated concrete UFCS receivers such as `InlineVec[T,N]`, and removes temporary trace printing. A clean detached checkout of `4670b143` passes `go test ./src/semantic`; the last full semantic run on the dirty Core worktree failed multiple soundness/regression tests, and further analyzer edits have since landed in that worktree without a full rerun. None of those edits qualify for merge. Core `main` is one local commit ahead of `origin/main`; the worktree also contains uncommitted permission-validation/concurrency-test edits whose ownership and qualification are separate. A Stage0 rebuilt from this commit has bootstrap SHA `3d210a90…`; its latest O0 Stage1 seed and a separate `byvalue` retry both reported the same 17 StoreThrough errors and emitted no object. New source tracing points to a broader Stage0 type/region issue: valid multi-region calls are rejected, mutability is lost on borrowed context arguments, and views are invalidated after unrelated mutations to a containing table. Separate these diagnostic families and add paired positive/negative regressions for each before changing summary rules; keep genuine retention, `lmut`, and unresolved-callee rejection conservative. The broad Go suite also hit generated snapshot-package setup errors (C files mixed into Go packages and a missing generated `OptimizationLevel`). Current compiler main is `273318c5`; it includes the `02bea167` fix removing an unsound `arena_alloc` return-noalias promise, plus cursor reservation and alias proofs on top of noalias boundaries, fast-fill, and UTF-8 support. A new uncommitted DArray fast-fill gate tracks freshness for local literal backing. Its source-bound alias audit passes, but static review found a second-order hole: a branch condition can expose the array before a nested fill is emitted, before post-statement invalidation runs. The compiler agent is tightening fact invalidation for compound statements and after each loop decision. The checker also stops at the provenance gate because `/private/tmp/elisa-compiler-proof-pin.a59wvz` is missing. A syntactic `.reserve(literal)` call still needs an exact builtin-binding proof or conservative invalidation. Treat this work as unqualified until those source checks and runtime behavior are verified with the current compiler. Several additional backend/semantic edits and regression fixtures are uncommitted; preserve them until their source checks and semantic review finish. `git show --check` still flags trailing blank lines in four committed Elisa fixtures. Full object/codegen qualification remains open.
 
 2. **Qualify Global.Read/Write enforcement at runtime.** The checker and parity matrix are already on compiler `main`; the source-only authority audit passes with 29 positive declarations, 18 false-control declarations, `source_bound=true`, and three closure files. Once a provenance-matched Stage1 exists, run `test/parity/mutable_global_authority_smoke.sh`, `test/parity/mutable_global_cli_smoke.sh`, and `test/parity/global_permissions_smoke.sh`. Preserve direct read, write, read-modify-write requiring both grants, exact-grant success, wrong-member rejection, alias/reference access, and transitive propagation as explicit controls. Do not mark the feature complete from source-only checks.
 
-3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `cc570d20`; lexical type-resolution, captured-block write, and loop-binder source changes remain uncommitted and static-only. `git diff --check` and the source-length gate pass, but parser, build, and replay qualification remain pending. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls on a matching Stage1. Keep resource accounting fail-closed and add a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace.
+3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `8285b732`, which adds shared solver work budgeting. Lexical type-resolution, captured-block write, loop-binder, and tactic trace-budget changes remain uncommitted and static-only. Tactic state and rewrite helpers are split into ordered `state.elisa` and `rewrite_helpers.elisa` modules; `operations.elisa` is 559 lines, within the 600-line source limit. The pending state API adds per-state action, snapshot, solver, preflight, source-summary, and action-AST quotas plus proportional child-branch budgets. `git diff --check` and the source-length gate pass, but parser, build, and replay qualification remain pending. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls on a matching Stage1. Keep resource accounting fail-closed and retain a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace.
 
 4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Skip performance timing and benchmark comparisons under the latest user instruction; static source, LLVM IR, and assembly-shape review can continue. Archived timing data is historical and does not justify an optimization.
 
-5. **Commit qualified work, then clean only proven-unused Git state.** Most branch-backed worktrees still contain edits or ignored artifacts. I removed `/private/tmp/codex-elisa-stage1-guard-bridge` and my temporary Core/compiler qualification worktrees after preserving the clean Stage0 binary and failed-seed log. I also removed the stale `fix/bootstrap-main` ref because compiler `main` already contains the stronger randomized-linker-probe normalization and regression, and `codex/bootstrap-global-grants` after confirming its unique patch is already in `main`. This pass removed two clean, merged source snapshots (`/private/tmp/elisa-compiler-stage1-e6a-clean` and `/private/tmp/elisa-proof-stage1-a35.4si3i0/compiler`) with no ignored or untracked files; the archived 46b qualification target remains preserved. The remaining clean detached worktree `/private/tmp/elisa-compiler-fastpush-1681cebd` is merged and has no ignored files, but recent history in active compiler and proof tasks still cites it, so retain it until those uses are ruled out. No other merged compiler branch ref is unchecked-out; keep branch refs attached to dirty or evidence-bearing worktrees. Proof has no clean merged checkout to remove, and Core's `/Users/torarinvikbjarko/.elisac/stage0-ef042-source` remains useful Stage0 source. Preserve Stage0/Stage1 seed and provenance artifacts.
+5. **Commit qualified work, then clean only proven-unused Git state.** Most branch-backed worktrees still contain edits or ignored artifacts. I removed `/private/tmp/codex-elisa-stage1-guard-bridge` and my temporary Core/compiler qualification worktrees after preserving the clean Stage0 binary and failed-seed log. I also removed the stale `fix/bootstrap-main` ref because compiler `main` already contains the stronger randomized-linker-probe normalization and regression, and `codex/bootstrap-global-grants` after confirming its unique patch is already in `main`. This pass removed two clean, merged source snapshots (`/private/tmp/elisa-compiler-stage1-e6a-clean` and `/private/tmp/elisa-proof-stage1-a35.4si3i0/compiler`) with no ignored or untracked files; the archived 46b qualification target remains preserved. I then removed `/private/tmp/elisa-compiler-fastpush-1681cebd`, a clean detached snapshot already merged into `main`, after confirming it had no ignored/untracked files or active process users; the user has directed that timing and A/B comparison be skipped. A fresh audit found 133 compiler worktrees, zero additional clean/merged/ignored-free snapshots, and zero merged unchecked-out branch refs. Proof has no clean merged checkout to remove; its seven auxiliary worktrees are dirty or contain ignored files. Core's remaining worktrees contain ignored build artifacts or active evidence, except `/Users/torarinvikbjarko/.elisac/stage0-ef042-source`, which remains useful Stage0 source. Preserve Stage0/Stage1 seed and provenance artifacts.
 
-Current evidence: the latest diagnostic seed, built from the patched but dirty Core source, still failed with all 17 Go Stage0 ReturnBorrow/StoreFlow errors and no Stage1 object; the `expression_type` summary remains a full may-reach clique. The earlier clean compiler `ebbe605ee0` / Stage0 `8a571cdf` seed failed identically, and a separate retry used stale, dirty Stage0. None is a qualified Stage1. Compiler commit `2221023781` is on `main`; its alias-policy check passes, and the compiler owner reports object/shard cache suites passing 30/30 and 34/34. No matching Stage1 product exists. Global.Read/Write source audit passes, but runtime tests remain unrun. Proof parser/replay qualification remains unrun. Performance timing is skipped per user instruction; correctness and object-emission gates remain open. The goal is active.
+Current evidence: Core `main` is at `4670b143` (one local commit ahead of `origin/main`); its DArray/StoreFlow classification fix passes the semantic package and removes temporary tracing, but both the exact Stage0 seed and a byvalue retry ended with the same 17 StoreThrough errors and no object. The Core owner is tracing a broader type/region failure involving multi-region calls, borrowed-context mutability, and view invalidation. Separate permission-validation/concurrency-test edits remain uncommitted in the Core worktree. Compiler `main` is `273318c5`, synchronized with `origin/main`; it includes `02bea167`, which removes an unsound `arena_alloc` return-noalias promise, and later cursor-reservation and alias-proof work. The fast cursor still has a concrete shared-header counterexample, so its eligibility must prove unique backing ownership or fall back. The compiler working tree now has several additional backend/semantic edits and regression fixtures under review. `git show --check` flags trailing blank lines in four committed Elisa fixtures. Prior cache/provenance suites passed, but full codegen qualification remains open. I reviewed the requested `8d7cfca` cherry-pick: its shadowing fix targets an old `error_family_binding_index` path that current `main` has replaced with `resolved_error_family`, and its region-owner fixture is superseded by the current nested-table fixture and Stage1-aware smoke script, so no unique change remains to merge from that commit. Global.Read/Write source audit passes, but runtime tests remain unrun. Proof `main` is `8285b732`; pending proof source changes now pass whitespace and source-length gates, but parser/replay qualification remains unrun. Performance timing is skipped per the user’s direct instruction; correctness and object-emission gates remain open. The goal is active.
 
 
 Historical toolchain inventory (earlier 2026-10-13 snapshot): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-exact-qualification`; `/private/tmp/elisa-stage1-b8eb-qualification` is the `16e04fd0ecc9214d9669cef9492948ae2e95339a` derivative, and the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
@@ -16124,11 +16124,16 @@ owning function's deepest lexical module and each parent through root. Pinned St
 complete relative paths in type-path and binding-capability checks. Its `ga_module` helper commits
 to a nearest first segment only in the separate Global Authority alias/struct analysis, so that
 helper alone does not establish a type-lookup mismatch. The fixture checks fallback when
-`Outer::N::M::Sub` exists but has no `Word`, while `Outer::M::Sub::Word` does. Alias-qualified paths
-remain fail-closed: Stage0 tries visible alias rewrites before the raw root spelling, while replay
-does not expand them and refuses a visible alias before considering root. A fixture also places a
-literal root `Alias::Word` beside `using M as Alias`. Qualified parameter, local, and call-result
-scalar facts share the owner-scope behavior. Generic names are checked at the exact owner
+`Outer::N::M::Sub` exists but has no `Word`, while `Outer::M::Sub::Word` does. Stage0 tries visible
+alias rewrites before raw root spelling. Scalar-width replay now expands a visible alias only after
+selecting its nearest caller-visible declaration, requiring the source and backend-global targets
+to agree, validating chained targets, and appending the remaining module suffix. If that visible
+alias cannot be authenticated, replay fails closed instead of falling through to a root literal.
+The existing fixture places a literal root `Alias::Word` beside `using M as Alias`, but the focused
+test script has no positive alias-qualified width assertion yet. Add runtime coverage for the
+compiler-proven alias precedence while retaining a root-collision or malformed-alias refusal.
+Qualified parameter, local, and call-result scalar facts share the owner-scope behavior. Generic
+names are checked at the exact owner
 declaration line before a builtin width or scalar kind is admitted. Other fixture cases cover
 root-qualified and nested width collisions, parent fallback, and call results.
 `git diff --check` and the source-length gate pass; parser, build, and replay have not run against a
@@ -16178,5 +16183,184 @@ kernel-work counter now spans state transitions, closure search, branch transiti
 tree audit. The per-step search allowance shrinks to the remaining shared budget, so the last
 transition cannot run past the tree ceiling. Certificate checks reuse already computed outcomes
 where possible. The AST structural-cost walk uses the core kernel depth limit, including syntax
-erased during encoding. Only static diff and source-length gates have been run for these changes;
+erased during encoding. Imported action execution and deterministic source replay now share the
+65,536-unit search budget through exact, decide, simp discharge, and have. A separate checked
+1,073,741,824-unit preflight budget bounds nested literal-width lookups with a cubic expression,
+fact, and annotation shape estimate only when integer literals occur under comparisons or
+arithmetic; pure symbolic Boolean goals avoid this compatibility ceiling. When the guard applies,
+the cubic estimate admits combined shape costs only up to roughly 812 units, so larger literal-heavy
+queries can return resource exhaustion before solver search. Float proposition evaluation is
+bounded with its measured model allowance. The primitive operator mask is built once from imported annotations with the
+source scanner's own work counter and then reused for execution and replay. A 16,777,216-unit
+action-AST budget precharges AST-pair work plus AST-by-annotation scans before each imported action,
+reserving both execution and deterministic replay. JSON schema field lookups charge the object
+member count before each runtime scan; field lookup charges twice because the JSON wrapper performs
+a presence scan and a value scan. This covers action rows, branch descriptors, annotations, and
+expression objects, bounding unknown and duplicate members with the same tree-owned decode counter.
+The counter begins after JSON text has been parsed into the runtime value tree. The proof-owned
+boundary now exposes the pinned runtime's indexed key accessor; field scans charge every key's
+bytes as well as its member slot, including repeated has/get scans. The CLI caps input files at
+64 MiB before parsing and retains one parsed tactic-script DOM across target extraction and replay,
+avoiding a duplicate parse and duplicate script tree. The pinned Stage1 JSON parser also rejects nesting deeper than 256 with
+`DEPTH_EXCEEDED` before recursive descent can overflow the host stack; runtime qualification on the
+frozen compiler tuple remains pending. Source-state binding charges
+256 units per copied kernel node and 8 per child index before duplicating the report arena, bounding
+the temporary copy by the shared kernel budget; the exact struct footprint still needs toolchain
+confirmation. Direct non-JSON state APIs now charge bounded AST-pair work before actions,
+accumulate solver, preflight, and source-scan work per state, reserve fact snapshots before growth,
+and partition remaining action, snapshot, and work quotas between branch children before copying
+their contexts. The branch child shape charge includes copied facts, the branch fact, and its goal.
+Direct `assumption`, `apply`, and indexed `apply` also reserve repeated enum-annotation scans
+performed by quantifier equality before examining candidate facts. The reservation charges
+annotation owner/name bytes and caps the candidate-by-annotation product against the state's
+shared source-work quota, closing a scan path outside the imported-action AST budget. Universal
+instantiation reserves its annotation scan too. Failed direct AST-shape preflights latch budget
+exhaustion and saturate the AST quota, including branch-child context failures, so repeated
+oversized actions cannot restart an uncharged walk.
+This remains a static implementation claim pending toolchain/runtime qualification. Tactic-state
+replay reconstructs transitions from the initial state and compares the recomputed solver,
+preflight, source, and action-AST usage ledgers with the recorded state. Public state snapshots,
+cross-include visibility, and mutation behavior still need runtime qualification. A static adversarial
+review also found that callers can mutate the public AST/trace fields while kernel-only trace and
+branch replay trusts the unchanged private action-AST ledger; the kernel still checks proof soundness,
+but this can bypass the direct API AST quota. Replay admission needs a measured public-state shape
+check before those encodings. `git diff --check` and the source-length gate pass; parser, build, tests,
+and replay qualification remain pending under the toolchain hold.
+
+### 23.27.610 Bound branch-join candidate and operator-mask work (2026-10-13)
+
+Branch implied-fact joins now reserve the quadratic equal-renaming candidate expansion and its
+pairwise deduplication before materializing candidates. The primitive operator mask is derived once
+per join from the current shared counter, so the scan itself cannot exceed the remaining budget;
+both arm-goal checks reuse it through a mask-accepting goal-reporting helper. The repeated-name
+charge expression was corrected.
+Only `git diff --check` and the source-length gate are permitted under the exact-toolchain hold;
 parser, build, and replay qualification remain pending.
+
+### 23.27.611 Gate proof qualification on one immutable toolchain tuple (2026-10-13)
+
+The next end-to-end proof gate must use one frozen proof source snapshot and one provenance-matched
+compiler tuple: proof HEAD and source-tree fingerprint, compiler source revision and clean-tree
+fingerprint, Stage0 revision and binary SHA-256, and Stage1 compiler revision, provenance schema,
+and binary SHA-256. Record the exact commands and runtime-library identities beside these values.
+Do not combine parser, build, or replay results from different snapshots. Stage0 commit `4670b143`
+passes the semantic package, but its latest reported Stage1 seed did not produce a qualified
+product. The current diagnostic run reports roughly 2,673 nonwarning errors, led by 775 unproved
+postconditions, 479 call-argument diagnostics, and 184 preconditions. The Stage0 owner is tracing
+broader region-model failures, including multi-region calls, lost mutability through borrowed
+contexts, and views invalidated by unrelated containing-table mutation. These results are diagnostic
+only; the compiler tree is changing and no clean provenance tuple exists. The proof
+parser/build/replay gate is not currently qualified.
+
+Once the tuple exists, run parser and strict build qualification, the full `scripts/test.sh` suite,
+and the focused obligations/admission controls on that same snapshot. The focused evidence must
+include independent required-obligation inventory and omitted-obligation rejection
+(`scripts/test.d/05-05-admission-completeness.sh`), incorrect source-binding rejection
+(`scripts/test_open_attempt_fact_admission.py` and the focused source-binding harness), pattern and
+literal collision controls (`scripts/test_pattern_literal_collisions.py`), forged replay evidence
+rejection (`scripts/test_direct_api_semantic_admission.py` plus `scripts/test_portable_replay.py`),
+and report/admission invariants (`scripts/test_admission_invariant_diagnostics.py` and
+`scripts/test_source_admission_matrix.py`). Static runner inspection confirms these focused scripts
+are wired into `scripts/test.sh`; the portable replay wrapper also includes kernel-forgery, package,
+structure-fuzz, raw-byte-mutation, and package-atomicity attack suites. The runner has no consolidated
+per-case result manifest, so capture each named suite's raw output and exit status. Record per-suite
+pass/fail counts, exact failing cases,
+and unsupported or skipped cases; a passing process exit without the obligation/case counts is
+insufficient evidence. All source-only changes in this interval remain unqualified until this gate
+passes. Do not expand automation or solver scope before the trust gate is green.
+
+### 23.27.612 Recheck available proof qualification artifacts (2026-10-13)
+
+The current read-only qualification attempt, `bash scripts/qualify_prebuilt_test.sh --json`, refuses
+the installed proof executable because it was built from a different proof HEAD. The current proof
+HEAD is `8285b73206d23ebdb50b1203da05ac3e1d20ab18`; its available manifest names proof HEAD
+`5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and records a dirty source tree. The compiler checkout
+is at `273318c5d6d3da09b3388465e27f5275d55ab817` with 24 tracked/untracked source changes; it has
+no `bin/elisac-stage0`. Its available Stage1 product's provenance names source revision
+`f7b6c4a21704f4d3f1b13849d4cd0b6d9ae18b88`, not the current compiler HEAD. Therefore the
+parser/build/replay gate remains unqualified; no proof regression suite was run.
+The focused call-result/type-width harness now contains both a positive nested `Widths as W`
+scalar-alias case (`examples/module_alias_type_bound_u64.elisa`) and positive assertions for
+`using M as Alias` when a root `Alias::Word` also exists. The latter matches pinned Stage0's
+alias-before-root precedence and replaces the stale refusal expectations in
+`rejected_relative_module_type_width.elisa`. These cases have static-gate coverage only so far;
+they have not run against a matched proof product.
+
+### 23.27.613 Bound replay admission for mutable public tactic states (2026-10-13)
+
+Direct tactic replay now reserves a bounded structural walk over public state and trace ASTs
+against its shared preflight counter before recursive equality. It also reserves the repeated AST
+comparison and trace/status text work before replay starts. Kernel solved-state, trace, and branch
+replay charge the same shape walk to their shared kernel-trace counter before encoding; branch
+children share that counter. Absent step arguments are excluded from both shape admission and
+direct equality because replay does not consume them. The private action ledger remains the
+per-state shape cap, while the caller-wide meter prevents repeated branch scans from resetting
+work. Only source gates are allowed until a matching toolchain tuple is available.
+
+The same-store source-state matcher now uses the same bounded kernel-copy, encoding, and
+comparison path as cross-store CLI binding. Its additional AST equality pass reserves a bounded
+shape walk and the established five comparison passes against the selected goal and ordered source facts before
+calling `proof_expr_equal`. The repair API therefore cannot reach the former unmetered full-arena
+clone path. Static source gates pass; runtime behavior remains unqualified under the compiler
+tuple hold.
+
+The tactic CLI now reuses one parsed script DOM for target metadata and charges target/fingerprint
+scans, source-state export preflight, conservative serialized-byte allowance, and later tactic JSON
+decode to one aggregate expression-work counter. Export shape is checked before serialization at
+the kernel AST depth limit; unsupported AST forms fail closed. The emitted source state is also
+checked against its preflight byte bound. `git diff --check` and the source-length gate pass after
+this change; parser/build/replay qualification remains pending.
+
+### 23.27.614 Reuse typed-overload call-shape admission (2026-10-13)
+
+The concrete-signature overload scan now carries its validated arity/label/default shape result
+out of typed argument matching. Shape validation records each argument's formal slot once, checks
+all required defaults, and then performs typed matching from that mapping. A typed mismatch can
+therefore reuse the validated shape for unique-shape fallback without rescanning labels/defaults.
+Typed overload matching requires exact fixed-width numeric sort identity after Ref adjustment;
+the separate scalar-reference representation check retains the stage1 char/i64 allowance.
+Incomplete or depth-limited typed matches still fail closed. Static gates pass; selector parity is
+still unqualified without the pinned runtime gate.
+
+### 23.27.615 Scope generic shadow checks and align typed overload identity (2026-10-13)
+
+The source conversion generic-name guard now uses the active declaration line through the bounded
+`(line, name)` index. Replay conversion passes the active function's line to the same scoped query,
+so unrelated generic binders no longer shadow a type name globally. Alias declaration lines remain
+separate while expanding aliases. Typed overload sort matching no longer treats `char` and `i64` as
+interchangeable; the compatibility branch is restricted to the scalar-reference caller. Cross-width
+typed integers remain known mismatches, while direct untyped numeric literals retain their explicit
+backend contextual-typing path. Static gates pass; parser/build/replay remain unqualified under the
+toolchain hold.
+
+### 23.27.616 Apply the tactic JSON budget before parsing input (2026-10-13)
+
+The tactic CLI now reads scripts with the JSON expression-work ceiling as its byte limit, so
+oversized JSON never reaches the DOM parser. Human-readable scripts are capped on read too, and
+their translated JSON size is checked before parsing; an oversized translation returns the
+aggregate-budget refusal. Other file readers retain the shared 64 MiB limit. `git diff --check`
+and `scripts/check_source_length.py` pass; parser/build/replay remain unavailable under the
+toolchain hold.
+
+### 23.27.617 Document the typing-context trust boundary (2026-10-13)
+
+The public source-neutral kernel takes `ProofKernelTypeEnvironment` as an explicit typing context.
+Its environment-report API validates structural well-formedness only; it cannot prove that the
+rows came from a particular source program. The core type, typed proposition API, and typed tactic
+transition APIs now state that source-facing callers must authenticate and bind the context
+separately. This clarifies the trust contract without adding a second kernel-internal source
+adapter. Static source gates only; source provenance remains the responsibility of the report/source
+boundary.
+
+
+### 23.27.618 Meter CLI target-fingerprint identity expansion (2026-10-13)
+
+The CLI's computed target fingerprint now shares the aggregate metadata/decode-work counter. Before
+serializing the canonical kernel sequent identity, it preflights every expanded node occurrence,
+including shared DAG expansion. Raw `kind` and `operator` text is charged by its byte length;
+`name` and `secondary_name` are charged at sixfold worst-case JSON string expansion. This bounds
+identity traversal and serialized growth before serializer allocation. The existing standalone
+fingerprint API remains as a wrapper with a fresh local counter. The CLI seeds the tactic tree again
+after fingerprint preflight so subsequent JSON decoding sees the updated aggregate allowance. Only
+`git diff --check` and the source-length gate were run; compiler and runtime qualification remain
+on hold for the provenance-matched tuple.

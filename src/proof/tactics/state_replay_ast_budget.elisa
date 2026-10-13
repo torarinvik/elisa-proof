@@ -1,0 +1,126 @@
+# A caller can mutate public tactic-state AST rows after the private action ledger was set.
+# Replay therefore reserves a structural walk before recursive equality or kernel encoding.
+extend ElisaProof:
+    private:
+        def proof_tactic_state_replay_ast_add(expression: Ast::Expr, total: mutable usize&, limit: usize) -> bool:
+            return false if total >= limit
+            cost: mutable usize = 0
+            return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(expression, &cost, limit - total)
+            return false if cost > limit - total
+            total <- total + cost
+            return true
+
+        def proof_tactic_state_replay_ast_add_array(expressions: darray[Ast::Expr]&, total: mutable usize&, limit: usize) -> bool:
+            return false if expressions.count > limit - total
+            for expression in expressions |expression, total, limit|:
+                return false if not proof_tactic_state_replay_ast_add(expression, total, limit)
+            return true
+
+        # Charge the actual bounded shape walk to the caller-wide replay meter. The private
+        # action ledger caps this one state's public AST surface; `work` prevents a branch tree
+        # from repeating the full scan independently at every node.
+        def proof_tactic_state_replay_ast_shape_reserve(state: ProofTacticState&, shape_cost: mutable usize&, work: mutable usize&, limit: usize) -> bool:
+            return false if state.action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT or state.action_ast_work_used == 0 or state.action_ast_work_used > state.action_ast_quota
+            return false if work > limit
+            remaining: usize = limit - work
+            shape_limit: usize = state.action_ast_work_used if state.action_ast_work_used < remaining else remaining
+            if shape_limit == 0:
+                work <- limit
+                return false
+            total: mutable usize = 0
+            if not proof_tactic_state_replay_ast_add_array(state.initial_facts, &total, shape_limit) or not proof_tactic_state_replay_ast_add(state.initial_goal, &total, shape_limit) or not proof_tactic_state_replay_ast_add_array(state.facts, &total, shape_limit) or not proof_tactic_state_replay_ast_add(state.goal, &total, shape_limit):
+                work <- limit
+                return false
+            if state.trace.count > shape_limit - total:
+                work <- limit
+                return false
+            for step in state.trace |step, total, shape_limit|:
+                if total >= shape_limit:
+                    work <- limit
+                    return false
+                total <- total + 1
+                if not proof_tactic_state_replay_ast_add(step.goal, &total, shape_limit):
+                    work <- limit
+                    return false
+                if step.has_argument and not proof_tactic_state_replay_ast_add(step.argument, &total, shape_limit):
+                    work <- limit
+                    return false
+                if step.has_secondary and not proof_tactic_state_replay_ast_add(step.secondary, &total, shape_limit):
+                    work <- limit
+                    return false
+            if not proof_tactic_state_replay_ast_add_array(state.trace_facts, &total, shape_limit):
+                work <- limit
+                return false
+            work <- work + total
+            shape_cost <- total
+            return true
+
+        def proof_tactic_state_replay_text_add(total: mutable usize&, value: sview, limit: usize) -> bool:
+            length: usize = sview_len(value)
+            return false if total > limit or length > limit - total
+            total <- total + length
+            return true
+
+        # Same-store source binding runs one additional `proof_expr_equal` per goal/fact after
+        # canonical kernel binding. Existing exact-division budgeting uses five structural passes
+        # for that helper; reserve those five plus this shape preflight before starting equality.
+        def proof_tactic_source_ast_comparison_reserve(left_facts: darray[Ast::Expr]&, right_facts: darray[Ast::Expr]&, right_start: usize, right_count: usize, left_goal: Ast::Expr, right_goal: Ast::Expr, work: mutable usize&, limit: usize) -> bool:
+            if left_facts.count != right_count or work > limit:
+                work <- limit
+                return false
+            if right_start > right_facts.count:
+                work <- limit
+                return false
+            if right_count > right_facts.count - right_start:
+                work <- limit
+                return false
+            remaining: usize = limit - work
+            shape_limit: usize = remaining / 6
+            if shape_limit == 0:
+                work <- limit
+                return false
+            shape_cost: mutable usize = 0
+            if not proof_tactic_state_replay_ast_add(left_goal, &shape_cost, shape_limit) or not proof_tactic_state_replay_ast_add(right_goal, &shape_cost, shape_limit) or not proof_tactic_state_replay_ast_add_array(left_facts, &shape_cost, shape_limit):
+                work <- limit
+                return false
+            for index in right_start..<right_start + right_count |index, right_facts, shape_cost, shape_limit|:
+                if not proof_tactic_state_replay_ast_add(right_facts[index], &shape_cost, shape_limit):
+                    work <- limit
+                    return false
+            if remaining < shape_cost * 6 + 2:
+                work <- limit
+                return false
+            if left_facts.count > (remaining - shape_cost * 6 - 2) / 3:
+                work <- limit
+                return false
+            comparison_work: usize = shape_cost * 5 + left_facts.count * 3 + 2
+            work <- work + shape_cost + comparison_work
+            return true
+
+        # Direct tactic replay compares each trace row once during step replay and again in the
+        # final state comparison. `proof_expr_equal` reserves five passes over both operands;
+        # trace AST roots are compared twice, so twenty times the admitted shape covers both
+        # comparisons against reconstructed terms. Text fields are charged for both trace
+        # comparisons plus fixed row checks.
+        def proof_tactic_state_replay_comparison_reserve(state: ProofTacticState&, shape_cost: usize, work: mutable usize&, limit: usize) -> bool:
+            if work > limit or shape_cost > (limit - work) / 20:
+                work <- limit
+                return false
+            comparison_work: mutable usize = shape_cost * 20
+            if not proof_tactic_state_replay_text_add(comparison_work, state.last_action, limit - work) or not proof_tactic_state_replay_text_add(comparison_work, state.last_reason, limit - work):
+                work <- limit
+                return false
+            trace_text: mutable usize = 0
+            for step in state.trace |step, trace_text|:
+                if not proof_tactic_state_replay_text_add(trace_text, step.action, limit) or not proof_tactic_state_replay_text_add(trace_text, step.reason, limit) or not proof_tactic_state_replay_text_add(trace_text, step.detail, limit):
+                    work <- limit
+                    return false
+            if comparison_work > limit - work or trace_text > (limit - work - comparison_work) / 2:
+                work <- limit
+                return false
+            if state.trace.count > (limit - work - comparison_work - trace_text * 2) / 3:
+                work <- limit
+                return false
+            comparison_work <- comparison_work + trace_text * 2 + state.trace.count * 3
+            work <- work + comparison_work
+            return true

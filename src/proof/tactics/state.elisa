@@ -1,0 +1,466 @@
+extend ElisaProof:
+    public:
+        const PROOF_TACTIC_STATE_ACTION_LIMIT: usize = 65536
+        const PROOF_TACTIC_STATE_SNAPSHOT_LIMIT: usize = 1048576
+        const PROOF_TACTIC_STATE_ACTION_AST_LIMIT: usize = 16777216
+
+        struct ProofTacticStep:
+            action: sview
+            accepted: bool
+            goal: Ast::Expr
+            facts_start: usize
+            facts_count: usize
+            solved: bool
+            reason: sview
+            argument: Ast::Expr
+            secondary: Ast::Expr
+            has_argument: bool
+            has_secondary: bool
+            argument_index: usize
+            has_argument_index: bool
+            detail: sview
+
+        struct ProofTacticState:
+            facts: mutable darray[Ast::Expr]
+            goal: mutable Ast::Expr
+            solved: mutable bool
+            action_count: mutable usize
+            last_action: mutable sview
+            last_reason: mutable sview
+            initial_facts: mutable darray[Ast::Expr]
+            initial_goal: mutable Ast::Expr
+            trace: mutable darray[ProofTacticStep]
+            trace_facts: mutable darray[Ast::Expr]
+            pending_argument: mutable Ast::Expr
+            pending_secondary: mutable Ast::Expr
+            pending_has_argument: mutable bool
+            pending_has_secondary: mutable bool
+            pending_argument_index: mutable usize
+            pending_has_argument_index: mutable bool
+            pending_detail: mutable sview
+            private:
+            budget_exhausted: mutable bool
+            branch_terminal: mutable bool
+            action_quota: mutable usize
+            snapshot_quota: mutable usize
+            solver_quota: mutable usize
+            preflight_quota: mutable usize
+            source_quota: mutable usize
+            solver_work_used: mutable usize
+            preflight_work_used: mutable usize
+            source_work_used: mutable usize
+            action_ast_quota: mutable usize
+            action_ast_work_used: mutable usize
+
+        struct ProofTacticBranchQuota:
+            valid: bool
+            reason: sview
+            left_action_quota: usize
+            right_action_quota: usize
+            left_snapshot_quota: usize
+            right_snapshot_quota: usize
+            left_solver_quota: usize
+            right_solver_quota: usize
+            left_preflight_quota: usize
+            right_preflight_quota: usize
+            left_source_quota: usize
+            right_source_quota: usize
+            left_action_ast_quota: usize
+            right_action_ast_quota: usize
+
+        struct ProofTacticChildShapeBudget:
+            valid: bool
+            charge: usize
+
+        def proof_tactic_copy_facts(source: darray[Ast::Expr]&) -> darray[Ast::Expr]:
+            copied: mutable darray[Ast::Expr] = []
+            copied.extend(source)
+            return copied
+
+        def proof_tactic_state_add_action_shape(expression: Ast::Expr, total: mutable usize, limit: usize) -> bool:
+            return false if total >= limit
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(expression, &cost, 0, limit - total)
+            return false if cost > limit - total
+            total <- total + cost
+            true
+
+        def proof_tactic_state_action_ast_preflight_exhausted(state: mutable ProofTacticState&) -> bool:
+            state.action_ast_work_used <- state.action_ast_quota
+            state.budget_exhausted <- true
+            state.last_reason <- "direct tactic AST preflight exhausted its work budget"
+            return false
+
+        def proof_tactic_state_initial_shape_budget(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> (valid: bool, charge: usize):
+            total: mutable usize = 0
+            limit: usize = PROOF_TACTIC_STATE_ACTION_AST_LIMIT / 3
+            for fact in facts |fact, total|:
+                return (false, 0) if not proof_tactic_state_add_action_shape(fact, &total, limit)
+            return (false, 0) if not proof_tactic_state_add_action_shape(goal, &total, limit)
+            return (true, total * 3)
+
+        def proof_tactic_state(facts: darray[Ast::Expr]&, goal: Ast::Expr) -> ProofTacticState:
+            if facts.count > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2:
+                empty_facts: mutable darray[Ast::Expr] = []
+                empty_initial_facts: mutable darray[Ast::Expr] = []
+                return ProofTacticState{facts: empty_facts, goal: goal, solved: false, action_count: 0, last_action: "start", last_reason: "initial facts exceed the direct tactic snapshot budget", initial_facts: empty_initial_facts, initial_goal: goal, trace: [], trace_facts: [], pending_argument: Ast::Expr.Absent, pending_secondary: Ast::Expr.Absent, pending_has_argument: false, pending_has_secondary: false, pending_argument_index: 0, pending_has_argument_index: false, pending_detail: "", budget_exhausted: true, branch_terminal: false, action_quota: 0, snapshot_quota: 0, solver_quota: 0, preflight_quota: 0, source_quota: 0, solver_work_used: 0, preflight_work_used: 0, source_work_used: 0, action_ast_quota: 0, action_ast_work_used: 0}
+            initial_shape: (valid: bool, charge: usize) = proof_tactic_state_initial_shape_budget(facts, goal)
+            if not initial_shape.valid:
+                empty_facts: mutable darray[Ast::Expr] = []
+                empty_initial_facts: mutable darray[Ast::Expr] = []
+                return ProofTacticState{facts: empty_facts, goal: goal, solved: false, action_count: 0, last_action: "start", last_reason: "initial expressions exceed the direct tactic AST budget", initial_facts: empty_initial_facts, initial_goal: goal, trace: [], trace_facts: [], pending_argument: Ast::Expr.Absent, pending_secondary: Ast::Expr.Absent, pending_has_argument: false, pending_has_secondary: false, pending_argument_index: 0, pending_has_argument_index: false, pending_detail: "", budget_exhausted: true, branch_terminal: false, action_quota: 0, snapshot_quota: 0, solver_quota: 0, preflight_quota: 0, source_quota: 0, solver_work_used: 0, preflight_work_used: 0, source_work_used: 0, action_ast_quota: 0, action_ast_work_used: 0}
+            snapshot_quota: usize = PROOF_TACTIC_STATE_SNAPSHOT_LIMIT - facts.count * 2
+            return ProofTacticState{facts: proof_tactic_copy_facts(facts), goal: goal, solved: false, action_count: 0, last_action: "start", last_reason: "state initialized", initial_facts: proof_tactic_copy_facts(facts), initial_goal: goal, trace: [], trace_facts: [], pending_argument: Ast::Expr.Absent, pending_secondary: Ast::Expr.Absent, pending_has_argument: false, pending_has_secondary: false, pending_argument_index: 0, pending_has_argument_index: false, pending_detail: "", budget_exhausted: false, branch_terminal: false, action_quota: PROOF_TACTIC_STATE_ACTION_LIMIT, snapshot_quota: snapshot_quota, solver_quota: PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS, preflight_quota: PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT, source_quota: PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, solver_work_used: 0, preflight_work_used: 0, source_work_used: 0, action_ast_quota: PROOF_TACTIC_STATE_ACTION_AST_LIMIT, action_ast_work_used: initial_shape.charge}
+
+        def proof_tactic_json_initialize_state[@r](state: mutable ProofTacticState& @r, facts: darray[Ast::Expr]&, goal: Ast::Expr, reason: sview) -> void:
+            state.facts <- []
+            state.initial_facts <- []
+            state.trace <- []
+            state.trace_facts <- []
+            valid_facts: bool = facts.count <= PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2
+            if not valid_facts:
+                state.goal <- goal
+                state.initial_goal <- goal
+                state.last_action <- "start"
+                state.last_reason <- "initial facts exceed a direct tactic budget"
+                state.solved <- false
+                state.action_count <- 0
+                state.budget_exhausted <- true
+                state.branch_terminal <- false
+                state.action_quota <- 0
+                state.snapshot_quota <- 0
+                state.solver_quota <- 0
+                state.preflight_quota <- 0
+                state.source_quota <- 0
+                state.solver_work_used <- 0
+                state.preflight_work_used <- 0
+                state.source_work_used <- 0
+                state.action_ast_quota <- 0
+                state.action_ast_work_used <- 0
+                state.pending_argument <- Ast::Expr.Absent
+                state.pending_secondary <- Ast::Expr.Absent
+                state.pending_has_argument <- false
+                state.pending_has_secondary <- false
+                state.pending_argument_index <- 0
+                state.pending_has_argument_index <- false
+                state.pending_detail <- ""
+                return
+            initial_shape: (valid: bool, charge: usize) = proof_tactic_state_initial_shape_budget(facts, goal)
+            if not initial_shape.valid:
+                state.goal <- goal
+                state.initial_goal <- goal
+                state.last_action <- "start"
+                state.last_reason <- "initial expressions exceed a direct tactic budget"
+                state.solved <- false
+                state.action_count <- 0
+                state.budget_exhausted <- true
+                state.branch_terminal <- false
+                state.action_quota <- 0
+                state.snapshot_quota <- 0
+                state.solver_quota <- 0
+                state.preflight_quota <- 0
+                state.source_quota <- 0
+                state.solver_work_used <- 0
+                state.preflight_work_used <- 0
+                state.source_work_used <- 0
+                state.action_ast_quota <- 0
+                state.action_ast_work_used <- 0
+                state.pending_argument <- Ast::Expr.Absent
+                state.pending_secondary <- Ast::Expr.Absent
+                state.pending_has_argument <- false
+                state.pending_has_secondary <- false
+                state.pending_argument_index <- 0
+                state.pending_has_argument_index <- false
+                state.pending_detail <- ""
+                return
+            state.facts.extend(facts)
+            state.initial_facts.extend(facts)
+            state.goal <- goal
+            state.initial_goal <- goal
+            state.solved <- false
+            state.action_count <- 0
+            state.last_action <- "start"
+            state.last_reason <- reason
+            state.pending_argument <- Ast::Expr.Absent
+            state.pending_secondary <- Ast::Expr.Absent
+            state.pending_has_argument <- false
+            state.pending_has_secondary <- false
+            state.pending_argument_index <- 0
+            state.pending_has_argument_index <- false
+            state.pending_detail <- ""
+            state.budget_exhausted <- false
+            state.branch_terminal <- false
+            state.action_quota <- PROOF_TACTIC_STATE_ACTION_LIMIT
+            state.snapshot_quota <- PROOF_TACTIC_STATE_SNAPSHOT_LIMIT - facts.count * 2
+            state.solver_quota <- PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
+            state.preflight_quota <- PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            state.source_quota <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            state.solver_work_used <- 0
+            state.preflight_work_used <- 0
+            state.source_work_used <- 0
+            state.action_ast_quota <- PROOF_TACTIC_STATE_ACTION_AST_LIMIT
+            state.action_ast_work_used <- initial_shape.charge
+
+        def proof_tactic_state_action_base_available(state: ProofTacticState&, fact_growth: usize) -> bool:
+            return false if state.budget_exhausted
+            return false if state.action_count != state.trace.count
+            return false if state.branch_terminal or state.action_count >= state.action_quota or state.action_quota > PROOF_TACTIC_STATE_ACTION_LIMIT
+            return false if state.snapshot_quota > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT
+            return false if state.solver_quota > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or state.solver_work_used > state.solver_quota
+            return false if state.preflight_quota > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT or state.preflight_work_used > state.preflight_quota
+            return false if state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or state.source_work_used > state.source_quota
+            return false if state.facts.count < state.initial_facts.count
+            return false if state.trace_facts.count > state.snapshot_quota
+            remaining_snapshots: usize = state.snapshot_quota - state.trace_facts.count
+            return false if fact_growth > remaining_snapshots or state.facts.count > remaining_snapshots - fact_growth
+            live_growth: usize = state.facts.count - state.initial_facts.count
+            post_snapshot_room: usize = remaining_snapshots - fact_growth - state.facts.count
+            return live_growth + fact_growth <= post_snapshot_room
+
+        def proof_tactic_state_action_available_with_terms(state: mutable ProofTacticState&, fact_growth: usize, first: Ast::Expr, has_first: bool, second: Ast::Expr, has_second: bool) -> bool:
+            return false if not proof_tactic_state_action_base_available(state, fact_growth)
+            return false if state.action_ast_work_used > state.action_ast_quota or state.action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT
+            remaining: usize = state.action_ast_quota - state.action_ast_work_used
+            shape_limit: usize = remaining / 2
+            return proof_tactic_state_action_ast_preflight_exhausted(state) if shape_limit == 0
+            total_cost: mutable usize = 0
+            for fact in state.facts |fact, total_cost, shape_limit|:
+                return proof_tactic_state_action_ast_preflight_exhausted(state) if not proof_tactic_state_add_action_shape(fact, &total_cost, shape_limit)
+            return proof_tactic_state_action_ast_preflight_exhausted(state) if not proof_tactic_state_add_action_shape(state.goal, &total_cost, shape_limit)
+            return proof_tactic_state_action_ast_preflight_exhausted(state) if has_first and not proof_tactic_state_add_action_shape(first, &total_cost, shape_limit)
+            return proof_tactic_state_action_ast_preflight_exhausted(state) if has_second and not proof_tactic_state_add_action_shape(second, &total_cost, shape_limit)
+            if total_cost != 0:
+                return proof_tactic_state_action_ast_preflight_exhausted(state) if total_cost > remaining / 2 / total_cost
+            charge: usize = total_cost * total_cost * 2
+            state.action_ast_work_used <- state.action_ast_work_used + charge
+            true
+
+        def proof_tactic_state_action_available_with_growth(state: mutable ProofTacticState&, fact_growth: usize) -> bool:
+            return proof_tactic_state_action_available_with_terms(state, fact_growth, Ast::Expr.Absent, false, Ast::Expr.Absent, false)
+
+        def proof_tactic_state_action_available(state: mutable ProofTacticState&) -> bool:
+            return proof_tactic_state_action_available_with_growth(state, 0)
+
+        def proof_tactic_state_record_available(state: ProofTacticState&) -> bool:
+            return false if state.budget_exhausted or state.branch_terminal or state.action_count >= state.action_quota or state.action_quota > PROOF_TACTIC_STATE_ACTION_LIMIT
+            return false if state.action_count != state.trace.count
+            return false if state.facts.count < state.initial_facts.count
+            return false if state.trace_facts.count > state.snapshot_quota
+            remaining: usize = state.snapshot_quota - state.trace_facts.count
+            return false if state.facts.count > remaining
+            live_growth: usize = state.facts.count - state.initial_facts.count
+            return live_growth <= remaining - state.facts.count
+
+        def proof_tactic_state_budget_well_formed(state: ProofTacticState&) -> bool:
+            return false if state.budget_exhausted
+            return false if state.action_quota == 0 or state.action_count != state.trace.count or state.action_count > state.action_quota or state.action_quota > PROOF_TACTIC_STATE_ACTION_LIMIT
+            return false if state.initial_facts.count > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2 or state.snapshot_quota > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT - state.initial_facts.count * 2
+            return false if state.trace_facts.count > state.snapshot_quota or state.facts.count < state.initial_facts.count
+            remaining: usize = state.snapshot_quota - state.trace_facts.count
+            return false if state.facts.count > remaining
+            live_growth: usize = state.facts.count - state.initial_facts.count
+            return false if live_growth > remaining - state.facts.count
+            return false if state.solver_quota > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or state.solver_work_used > state.solver_quota
+            return false if state.preflight_quota > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT or state.preflight_work_used > state.preflight_quota
+            return false if state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or state.source_work_used > state.source_quota
+            return false if state.action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT or state.action_ast_work_used > state.action_ast_quota
+            last: mutable bool = false
+            if state.trace.count != 0:
+                final_step: ProofTacticStep = state.trace[state.trace.count - 1]
+                last <- final_step.accepted and (final_step.action == "split" or final_step.action == "cases")
+            return state.branch_terminal == last
+
+        # Compute disjoint quotas before the branch action is recorded or either child context
+        # is copied. The parent's current trace usage and both child base-copy costs are charged
+        # before the remaining work is split deterministically between siblings.
+        def proof_tactic_branch_quota(parent: ProofTacticState&, left_fact_count: usize, right_fact_count: usize, prior_action_count: usize, prior_snapshot_count: usize) -> ProofTacticBranchQuota:
+            rejected: ProofTacticBranchQuota = ProofTacticBranchQuota{valid: false, reason: "branch child construction exceeds the remaining direct tactic budget", left_action_quota: 0, right_action_quota: 0, left_snapshot_quota: 0, right_snapshot_quota: 0, left_solver_quota: 0, right_solver_quota: 0, left_preflight_quota: 0, right_preflight_quota: 0, left_source_quota: 0, right_source_quota: 0, left_action_ast_quota: 0, right_action_ast_quota: 0}
+            return rejected if prior_action_count >= parent.action_quota or prior_snapshot_count > parent.snapshot_quota
+            return rejected if parent.action_quota > PROOF_TACTIC_STATE_ACTION_LIMIT or parent.snapshot_quota > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT
+            return rejected if parent.solver_work_used > parent.solver_quota or parent.preflight_work_used > parent.preflight_quota or parent.source_work_used > parent.source_quota
+            return rejected if parent.solver_quota > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or parent.preflight_quota > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT or parent.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return rejected if parent.action_ast_work_used > parent.action_ast_quota or parent.action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT
+            return rejected if parent.facts.count < parent.initial_facts.count
+            return rejected if parent.facts.count > parent.snapshot_quota - prior_snapshot_count
+            live_growth: usize = parent.facts.count - parent.initial_facts.count
+            return rejected if live_growth > parent.snapshot_quota - prior_snapshot_count - parent.facts.count
+            remaining_actions: usize = parent.action_quota - prior_action_count - 1
+            return rejected if remaining_actions < 2
+            action_left: usize = remaining_actions / 2
+            action_right: usize = remaining_actions - action_left
+            remaining_snapshots: usize = parent.snapshot_quota - prior_snapshot_count - parent.facts.count - live_growth
+            return rejected if left_fact_count > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2
+            return rejected if right_fact_count > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2 - left_fact_count
+            child_copy_cost: usize = (left_fact_count + right_fact_count) * 2
+            return rejected if child_copy_cost > remaining_snapshots
+            child_snapshot_capacity: usize = remaining_snapshots - child_copy_cost
+            return rejected if child_snapshot_capacity < 2
+            snapshot_left: usize = child_snapshot_capacity / 2
+            snapshot_right: usize = child_snapshot_capacity - snapshot_left
+            remaining_solver: usize = parent.solver_quota - parent.solver_work_used
+            remaining_preflight: usize = parent.preflight_quota - parent.preflight_work_used
+            remaining_source: usize = parent.source_quota - parent.source_work_used
+            remaining_action_ast: usize = parent.action_ast_quota - parent.action_ast_work_used
+            solver_left: usize = remaining_solver / 2
+            preflight_left: usize = remaining_preflight / 2
+            source_left: usize = remaining_source / 2
+            action_ast_left: usize = remaining_action_ast / 2
+            return ProofTacticBranchQuota{valid: true, reason: "", left_action_quota: action_left, right_action_quota: action_right, left_snapshot_quota: snapshot_left, right_snapshot_quota: snapshot_right, left_solver_quota: solver_left, right_solver_quota: remaining_solver - solver_left, left_preflight_quota: preflight_left, right_preflight_quota: remaining_preflight - preflight_left, left_source_quota: source_left, right_source_quota: remaining_source - source_left, left_action_ast_quota: action_ast_left, right_action_ast_quota: remaining_action_ast - action_ast_left}
+
+        def proof_tactic_branch_quota_matches(parent: ProofTacticState&, branch: ProofTacticStep, left: ProofTacticState&, right: ProofTacticState&) -> bool:
+            return false if parent.action_count == 0 or not parent.branch_terminal
+            expected: ProofTacticBranchQuota = proof_tactic_branch_quota(parent, left.initial_facts.count, right.initial_facts.count, parent.action_count - 1, branch.facts_start)
+            return false if not expected.valid
+            return false if:
+                left.action_quota != expected.left_action_quota or right.action_quota != expected.right_action_quota
+                left.snapshot_quota != expected.left_snapshot_quota or right.snapshot_quota != expected.right_snapshot_quota
+                left.solver_quota != expected.left_solver_quota or right.solver_quota != expected.right_solver_quota
+                left.preflight_quota != expected.left_preflight_quota or right.preflight_quota != expected.right_preflight_quota
+                left.source_quota != expected.left_source_quota or right.source_quota != expected.right_source_quota
+                left.action_ast_quota != expected.left_action_ast_quota or right.action_ast_quota != expected.right_action_ast_quota
+            return true
+
+        # Fact-growing actions reserve the complete post-state snapshot before mutating the
+        # state. This keeps a failed budget check from leaving an unrecorded transition behind.
+        def proof_tactic_state_snapshot_reserve(state: mutable ProofTacticState&, resulting_fact_count: usize) -> bool:
+            return false if state.budget_exhausted or state.trace_facts.count > state.snapshot_quota
+            return false if resulting_fact_count < state.facts.count or state.facts.count < state.initial_facts.count
+            remaining_snapshots: usize = state.snapshot_quota - state.trace_facts.count
+            return false if resulting_fact_count > remaining_snapshots or resulting_fact_count < state.initial_facts.count
+            resulting_growth: usize = resulting_fact_count - state.initial_facts.count
+            return resulting_growth <= remaining_snapshots - resulting_fact_count
+
+        def proof_tactic_child_shape_budget(parent: mutable ProofTacticState&, goal: Ast::Expr, skip_fact: usize, branch_fact: Ast::Expr, action_ast_quota: usize) -> ProofTacticChildShapeBudget:
+            rejected: ProofTacticChildShapeBudget = ProofTacticChildShapeBudget{valid: false, charge: 0}
+            return rejected if skip_fact > parent.facts.count or action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT
+            limit: usize = action_ast_quota / 3
+            if limit == 0:
+                _ = proof_tactic_state_action_ast_preflight_exhausted(parent)
+                return rejected
+            total: mutable usize = 0
+            for index in 0..<parent.facts.count |index, parent, total, limit, skip_fact|:
+                if index != skip_fact and not proof_tactic_state_add_action_shape(parent.facts[index], &total, limit):
+                    _ = proof_tactic_state_action_ast_preflight_exhausted(parent)
+                    return rejected
+            if skip_fact < parent.facts.count and not proof_tactic_state_add_action_shape(branch_fact, &total, limit):
+                _ = proof_tactic_state_action_ast_preflight_exhausted(parent)
+                return rejected
+            if not proof_tactic_state_add_action_shape(goal, &total, limit):
+                _ = proof_tactic_state_action_ast_preflight_exhausted(parent)
+                return rejected
+            return ProofTacticChildShapeBudget{valid: true, charge: total * 3}
+
+        def proof_tactic_state_operator_mask(state: mutable ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> (complete: bool, mask: usize):
+            return (false, 0) if state.source_work_used > state.source_quota or state.source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            remaining: usize = state.source_quota - state.source_work_used
+            return (false, 0) if remaining == 0
+            start: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - remaining
+            source_work: mutable usize = start
+            result: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_with_work(annotations, &source_work)
+            if source_work < start or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                state.source_work_used <- state.source_quota
+                return (false, 0)
+            spent: usize = source_work - start
+            state.source_work_used <- state.source_work_used + spent
+            return (false, 0) if not result.complete
+            return result
+
+        # Intersect caller-wide and per-state solver fuel. Offsetting the temporary counters
+        # limits this one proof attempt to the smaller remaining quota while preserving the
+        # solver's existing hard caps; only the consumed delta is added to both ledgers.
+        def proof_tactic_state_goal_with_work(state: mutable ProofTacticState&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            return false if:
+                state.solver_work_used > state.solver_quota or state.solver_quota > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS
+                state.preflight_work_used > state.preflight_quota or state.preflight_quota > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+                solver_work > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or preflight_work > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            state_solver_remaining: usize = state.solver_quota - state.solver_work_used
+            caller_solver_remaining: usize = PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS - solver_work
+            state_preflight_remaining: usize = state.preflight_quota - state.preflight_work_used
+            caller_preflight_remaining: usize = PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - preflight_work
+            solver_allowance: usize = state_solver_remaining if state_solver_remaining < caller_solver_remaining else caller_solver_remaining
+            preflight_allowance: usize = state_preflight_remaining if state_preflight_remaining < caller_preflight_remaining else caller_preflight_remaining
+            return false if solver_allowance == 0 or preflight_allowance == 0
+            solver_start: usize = PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS - solver_allowance
+            preflight_start: usize = PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT - preflight_allowance
+            bounded_solver_work: mutable usize = solver_start
+            bounded_preflight_work: mutable usize = preflight_start
+            proven: bool = (proof_goal_with_shared_work(state.facts, goal, annotations, operator_mask, &bounded_solver_work, &bounded_preflight_work) can Global{Read,Write})
+            return false if bounded_solver_work < solver_start or bounded_preflight_work < preflight_start
+            return false if bounded_solver_work > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or bounded_preflight_work > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            solver_spent: usize = bounded_solver_work - solver_start
+            preflight_spent: usize = bounded_preflight_work - preflight_start
+            state.solver_work_used <- state.solver_work_used + solver_spent
+            state.preflight_work_used <- state.preflight_work_used + preflight_spent
+            solver_work <- solver_work + solver_spent
+            preflight_work <- preflight_work + preflight_spent
+            proven
+
+    private:
+        def proof_tactic_record(state: mutable ProofTacticState&, action: sview, accepted: bool, reason: sview) -> bool:
+            return false if not proof_tactic_state_record_available(state)
+            state.action_count <- state.action_count + 1
+            state.last_action <- action
+            state.last_reason <- reason
+            facts_start: usize = state.trace_facts.count
+            state.trace_facts.extend(state.facts)
+            state.trace.push(ProofTacticStep{action: action, accepted: accepted, goal: state.goal, facts_start: facts_start, facts_count: state.facts.count, solved: state.solved, reason: reason, argument: state.pending_argument, secondary: state.pending_secondary, has_argument: state.pending_has_argument, has_secondary: state.pending_has_secondary, argument_index: state.pending_argument_index, has_argument_index: state.pending_has_argument_index, detail: state.pending_detail})
+            state.pending_argument <- Ast::Expr.Absent
+            state.pending_secondary <- Ast::Expr.Absent
+            state.pending_has_argument <- false
+            state.pending_has_secondary <- false
+            state.pending_argument_index <- 0
+            state.pending_has_argument_index <- false
+            state.pending_detail <- ""
+            state.budget_exhausted <- false
+            return accepted
+
+        def proof_tactic_initialize_child[@r](parent: ProofTacticState&, goal: Ast::Expr, skip_fact: usize, branch_fact: Ast::Expr, quota: ProofTacticBranchQuota, left_side: bool, shape_budget: ProofTacticChildShapeBudget, child: mutable ProofTacticState& @r) -> bool:
+            return false if not quota.valid or skip_fact > parent.facts.count
+            fact_count: usize = parent.facts.count
+            return false if fact_count > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT / 2
+            action_quota: usize = quota.left_action_quota if left_side else quota.right_action_quota
+            snapshot_quota: usize = quota.left_snapshot_quota if left_side else quota.right_snapshot_quota
+            solver_quota: usize = quota.left_solver_quota if left_side else quota.right_solver_quota
+            preflight_quota: usize = quota.left_preflight_quota if left_side else quota.right_preflight_quota
+            source_quota: usize = quota.left_source_quota if left_side else quota.right_source_quota
+            action_ast_quota: usize = quota.left_action_ast_quota if left_side else quota.right_action_ast_quota
+            return false if action_quota == 0 or action_quota > PROOF_TACTIC_STATE_ACTION_LIMIT
+            return false if snapshot_quota == 0 or snapshot_quota > PROOF_TACTIC_STATE_SNAPSHOT_LIMIT
+            return false if solver_quota > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or preflight_quota > PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
+            return false if source_quota > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or action_ast_quota > PROOF_TACTIC_STATE_ACTION_AST_LIMIT
+            return false if not shape_budget.valid or shape_budget.charge > action_ast_quota
+            child.facts <- []
+            child.initial_facts <- []
+            for index in 0..<parent.facts.count |index, parent, child, skip_fact|:
+                child.facts.push(parent.facts[index]) if index != skip_fact
+                child.initial_facts.push(parent.facts[index]) if index != skip_fact
+            child.facts.push(branch_fact) if skip_fact < parent.facts.count
+            child.initial_facts.push(branch_fact) if skip_fact < parent.facts.count
+            child.goal <- goal
+            child.initial_goal <- goal
+            child.solved <- false
+            child.action_count <- 0
+            child.last_action <- "branch"
+            child.last_reason <- "child state created by a structural proof rule"
+            child.trace <- []
+            child.trace_facts <- []
+            child.pending_argument <- Ast::Expr.Absent
+            child.pending_secondary <- Ast::Expr.Absent
+            child.pending_has_argument <- false
+            child.pending_has_secondary <- false
+            child.pending_argument_index <- 0
+            child.pending_has_argument_index <- false
+            child.pending_detail <- ""
+            child.budget_exhausted <- false
+            child.branch_terminal <- false
+            child.action_quota <- action_quota
+            child.snapshot_quota <- snapshot_quota
+            child.solver_quota <- solver_quota
+            child.preflight_quota <- preflight_quota
+            child.source_quota <- source_quota
+            child.solver_work_used <- 0
+            child.preflight_work_used <- 0
+            child.source_work_used <- 0
+            child.action_ast_quota <- action_ast_quota
+            child.action_ast_work_used <- shape_budget.charge
+            return true

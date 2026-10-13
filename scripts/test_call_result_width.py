@@ -34,7 +34,7 @@ for name, minimum in (("call_result_width.elisa", 19), ("returned_call_local.eli
     assert data["replay"]["certificates"] >= minimum, (name, data["replay"])
 
 for name in ("call_result_module_alias_u32.elisa", "call_result_local_precedence.elisa",
-             "call_result_bare_imports_u16_u32.elisa"):
+             "call_result_bare_imports_u16_u32.elisa", "module_alias_type_bound_u64.elisa"):
     code, data = check(name)
     assert code == 0 and data["status"] == "proved", (name, code, data["findings"])
     assert data["findings"] == [], (name, data["findings"])
@@ -81,8 +81,6 @@ assert sorted((finding["kind"], finding["line"], finding["name"])
     ("ensure-unproven", 26, "call_result_scope_collision"),
     ("ensure-unproven", 59, "deep_local_parameter_scope_collision"),
     ("ensure-unproven", 63, "deep_call_result_scope_collision"),
-    ("ensure-unproven", 119, "module_alias_type_path_refusal"),
-    ("ensure-unproven", 123, "module_alias_parameter_type_path_refusal"),
     ("ensure-unproven", 133, "generic_result_primitive_name_shadow"),
 ], data["findings"]
 assert any(row["name"] == "root_qualified_type_positive" and row["proved"]
@@ -98,6 +96,10 @@ assert any(row["name"] == "deep_call_result_width_positive" and row["proved"]
 assert any(row["name"] == "partial_parent_module_parameter_fallback" and row["proved"]
            for row in data["functions"]), data["functions"]
 assert any(row["name"] == "partial_parent_module_call_result_fallback" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "module_alias_type_path_precedence_positive" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "module_alias_parameter_type_path_precedence_positive" and row["proved"]
            for row in data["functions"]), data["functions"]
 assert any(row["name"] == "root_overload_after_incompatible_generic" and row["proved"]
            for row in data["functions"]), data["functions"]

@@ -135,6 +135,44 @@ extend ElisaProof:
                 index.hashes.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return true
 
+        def proof_replay_dependency_owner_cache_initialize(owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row_count: usize, source_work: mutable usize&) -> bool:
+            return false if row_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2
+            return false if not proof_replay_dependency_work_charge(row_count * 2, source_work)
+            owner_lines.resize(row_count)
+            owner_resolved.resize(row_count)
+            for row in 0..<row_count |row, owner_lines, owner_resolved|:
+                owner_lines[row] <- 0
+                owner_resolved[row] <- false
+            return true
+
+        def proof_replay_dependency_attempt_owner_line(report: ProofReport&, index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row: usize, attempt: ProofGoalAttempt, source_work: mutable usize&) -> u32:
+            return 0 if row >= index.names.count or owner_lines.count != index.names.count or owner_resolved.count != index.names.count
+            if not owner_resolved[row]:
+                owner_lines[row] <- proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, source_work)
+                owner_resolved[row] <- true
+            return owner_lines[row]
+
+        def proof_replay_dependency_attempt_owner_cache_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return cache.dependency_attempt_owner_cache_complete if cache.dependency_attempt_owner_cache_attempted
+            cache.dependency_attempt_owner_cache_attempted <- true
+            return false if not proof_replay_dependency_owner_cache_initialize(&cache.dependency_attempt_owner_lines, &cache.dependency_attempt_owner_resolved, report.results.goal_attempts.count, source_work)
+            cache.dependency_attempt_owner_cache_complete <- true
+            return true
+
+        def proof_replay_dependency_certificate_owner_line(report: ProofReport&, index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, row: usize, certificate: ProofGoalCertificate, source_work: mutable usize&) -> u32:
+            return 0 if row >= index.names.count or owner_lines.count != index.names.count or owner_resolved.count != index.names.count
+            if not owner_resolved[row]:
+                owner_lines[row] <- proof_replay_trace_owner_source_position_line_with_work(report, certificate, source_work)
+                owner_resolved[row] <- true
+            return owner_lines[row]
+
+        def proof_replay_dependency_certificate_owner_cache_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
+            return cache.dependency_certificate_owner_cache_complete if cache.dependency_certificate_owner_cache_attempted
+            cache.dependency_certificate_owner_cache_attempted <- true
+            return false if not proof_replay_dependency_owner_cache_initialize(&cache.dependency_certificate_owner_lines, &cache.dependency_certificate_owner_resolved, report.analysis_1.certificates.count, source_work)
+            cache.dependency_certificate_owner_cache_complete <- true
+            return true
+
         def proof_replay_dependency_indexes_build(report: ProofReport&, source_work: mutable usize&, cache: mutable ProofReplayStructuralValidationCache&) -> bool:
             return cache.dependency_indexes_complete if cache.dependency_indexes_attempted
             cache.dependency_indexes_attempted <- true
@@ -212,20 +250,21 @@ extend ElisaProof:
         # Dependency records are classified by their exact source span. Logical line ordering
         # can pair a #line-rewound sibling function's proof with another module's declaration.
         # Unknown findings veto the dependency; unknown goals/certificates never vouch for it.
-        def proof_replay_dependency_attempt_row_matches_with_work(report: ProofReport&, dependency: sview, attempt: ProofGoalAttempt, owner_line: u32, unknown_matches: bool, source_work: mutable usize&) -> bool:
+        def proof_replay_dependency_attempt_row_matches_with_work(report: ProofReport&, dependency: sview, attempt: ProofGoalAttempt, attempt_index: usize, owner_index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, owner_line: u32, unknown_matches: bool, source_work: mutable usize&) -> bool:
             return true if owner_line == 0
             return false if attempt.name != dependency
-            row: u32 = proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, source_work)
+            row: u32 = proof_replay_dependency_attempt_owner_line(report, owner_index, &owner_lines, &owner_resolved, attempt_index, attempt, source_work)
             return unknown_matches if row == 0
             return row == owner_line
 
-        def proof_replay_dependency_finding_row_matches_with_work(report: ProofReport&, dependency: sview, finding: ProofFinding, owner_line: u32, source_work: mutable usize&) -> bool:
+        def proof_replay_dependency_finding_row_matches_with_work(report: ProofReport&, dependency: sview, finding: ProofFinding, owner_line: u32, attempt_index: ProofReplayDependencyRowIndex, owner_lines: mutable darray[u32]&, owner_resolved: mutable darray[bool]&, source_work: mutable usize&) -> bool:
             return true if:
                 owner_line == 0
                 not finding.has_goal or finding.goal_id >= report.results.goal_attempts.count
-            attempt: ProofGoalAttempt = report.results.goal_attempts[finding.goal_id]
+            attempt_index_value: usize = finding.goal_id
+            attempt: ProofGoalAttempt = report.results.goal_attempts[attempt_index_value]
             return true if attempt.name != dependency
-            return proof_replay_dependency_attempt_row_matches_with_work(report, dependency, attempt, owner_line, true, source_work)
+            return proof_replay_dependency_attempt_row_matches_with_work(report, dependency, attempt, attempt_index_value, attempt_index, owner_lines, owner_resolved, owner_line, true, source_work)
 
         def proof_replay_dependency_is_checked[@r](report: mutable ProofReport& @r, dependency: sview, owner_line: u32, dependency_stack: darray[sview]&, dependency_depth: usize, active_certificates: darray[usize]&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
             return false if:
@@ -233,6 +272,7 @@ extend ElisaProof:
                 not proof_replay_dependency_indexes_build(report, validation_workspace.source_scan_work_used, &structural_cache)
                 not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_attempt_rows, report.results.goal_attempts.count)
                 not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_finding_rows, report.results.findings.count)
+            return false if owner_line != 0 and not proof_replay_dependency_attempt_owner_cache_build(report, validation_workspace.source_scan_work_used, &structural_cache)
             found_goal: mutable bool = false
             all_goals_proven: mutable bool = true
             # A function-summary dependency names one declaration row (`owner_line`, the callee's
@@ -251,7 +291,7 @@ extend ElisaProof:
                     not proof_replay_dependency_row_matches(structural_cache.dependency_attempt_rows, attempt_index, attempt.name, dependency, validation_workspace.source_scan_work_used)
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
                 attempt_owner_line: u32 = owner_line
-                attempt_owner_line <- proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, validation_workspace.source_scan_work_used) if owner_line != 0
+                attempt_owner_line <- proof_replay_dependency_attempt_owner_line(report, structural_cache.dependency_attempt_rows, &structural_cache.dependency_attempt_owner_lines, &structural_cache.dependency_attempt_owner_resolved, attempt_index, attempt, validation_workspace.source_scan_work_used) if owner_line != 0
                 # An unresolved same-name attempt could be an unproven goal owned by this
                 # dependency. It must not disappear just because its source owner could not
                 # be authenticated; failed attempts need not have a finding or certificate.
@@ -277,7 +317,7 @@ extend ElisaProof:
                 return false if:
                     not proof_replay_dependency_row_matches(structural_cache.dependency_finding_rows, finding_index, finding.name, dependency, validation_workspace.source_scan_work_used)
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
-                if proof_replay_dependency_finding_row_matches_with_work(report, dependency, finding, owner_line, validation_workspace.source_scan_work_used):
+                if proof_replay_dependency_finding_row_matches_with_work(report, dependency, finding, owner_line, structural_cache.dependency_attempt_rows, &structural_cache.dependency_attempt_owner_lines, &structural_cache.dependency_attempt_owner_resolved, validation_workspace.source_scan_work_used):
                     return false if not proof_replay_finding_only_widens_state(finding.kind)
                 next_finding: usize = structural_cache.dependency_finding_rows.next_indices[finding_index]
                 return false if next_finding != report.results.findings.count and (next_finding <= finding_index or next_finding >= report.results.findings.count)
@@ -295,6 +335,7 @@ extend ElisaProof:
             return false if:
                 not proof_replay_dependency_certificate_index_build(report, validation_workspace.source_scan_work_used, &structural_cache)
                 not proof_replay_dependency_row_index_shape_valid(structural_cache.dependency_certificate_rows, report.analysis_1.certificates.count)
+            return false if owner_line != 0 and not proof_replay_dependency_certificate_owner_cache_build(report, validation_workspace.source_scan_work_used, &structural_cache)
             certificate_lookup: (complete: bool, head: usize) = proof_replay_dependency_row_lookup(structural_cache.dependency_certificate_rows, dependency, validation_workspace.source_scan_work_used)
             return false if not certificate_lookup.complete
             certificate_index: mutable usize = certificate_lookup.head
@@ -305,7 +346,7 @@ extend ElisaProof:
                     not proof_replay_dependency_row_matches(structural_cache.dependency_certificate_rows, certificate_index, certificate.name, dependency, validation_workspace.source_scan_work_used)
                     not proof_replay_dependency_work_charge(1, validation_workspace.source_scan_work_used)
                 certificate_owner_line: u32 = owner_line
-                certificate_owner_line <- proof_replay_trace_owner_source_position_line_with_work(report, certificate, validation_workspace.source_scan_work_used) if owner_line != 0
+                certificate_owner_line <- proof_replay_dependency_certificate_owner_line(report, structural_cache.dependency_certificate_rows, &structural_cache.dependency_certificate_owner_lines, &structural_cache.dependency_certificate_owner_resolved, certificate_index, certificate, validation_workspace.source_scan_work_used) if owner_line != 0
                 return false if owner_line != 0 and certificate_owner_line == 0
                 if owner_line == 0 or certificate_owner_line == owner_line:
                     found_certificate <- true

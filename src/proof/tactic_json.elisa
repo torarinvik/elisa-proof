@@ -42,7 +42,10 @@ extend ElisaProof:
             total_expression_work: mutable usize
             total_kernel_replay_work: mutable usize
             total_solver_work: mutable usize
+            total_solver_preflight_work: mutable usize
             total_action_ast_work: mutable usize
+            primitive_operator_mask: mutable usize
+            primitive_operator_mask_initialized: mutable bool
 
         # One slot owns both branch states as distinct fields, making their non-aliasing
         # structural instead of relying on arithmetic analysis of adjacent array indices.
@@ -57,7 +60,7 @@ extend ElisaProof:
 
         def proof_tactic_tree_in_arena[@r](arena: mutable Arena& @r) -> mutable ProofTacticJsonTree& @r:
             in arena:
-                return new[r] ProofTacticJsonTree{states: [], left: [], right: [], has_branch: [], total_actions: 0, total_trace_fact_snapshots: 0, total_expression_work: 0, total_kernel_replay_work: 0, total_solver_work: 0, total_action_ast_work: 0}
+                return new[r] ProofTacticJsonTree{states: [], left: [], right: [], has_branch: [], total_actions: 0, total_trace_fact_snapshots: 0, total_expression_work: 0, total_kernel_replay_work: 0, total_solver_work: 0, total_solver_preflight_work: 0, total_action_ast_work: 0, primitive_operator_mask: 0, primitive_operator_mask_initialized: false}
 
         def proof_tactic_json_field[@r](value: JsonValueHandle[r], key: sview) -> (known: bool, value: JsonValueHandle[r]):
             return ElisaProofJson::field(value, key)
@@ -132,7 +135,7 @@ extend ElisaProof:
             return false if not ElisaProofJson::is_array(field.value)
             count: i64 = ElisaProofJson::array_len(field.value)
             return false if count < 0 or count > PROOF_JSON_MAX_ACTIONS
-            for index in 0..<count |index, field, annotations|:
+            for index in 0..<count |index, field, annotations, work_used|:
                 item: JsonValueHandle[r] = try ElisaProofJson::at(field.value, index) else ElisaProofJson::null_value(field.value)
                 return false if not proof_tactic_json_expression_charge(work_used, 1)
                 name_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(item, "name", work_used)
@@ -146,7 +149,7 @@ extend ElisaProof:
                     return false if not parsed_line.known
                     line <- parsed_line.value
                 annotations.push(Ast::EnumAnnotation{owner: "__contract_quantifier", name: name.value, line: line})
-            return true
+            return work_used <= PROOF_JSON_EXPRESSION_WORK_LIMIT
 
         def proof_tactic_json_action_fields_valid(action: sview, has_argument: bool, has_secondary: bool, has_argument_index: bool) -> bool:
             if action == "have":
@@ -163,21 +166,21 @@ extend ElisaProof:
             return false if has_argument or has_secondary or has_argument_index
             return action in {"assumption", "exact", "decide", "intro", "simp", "split", "cases", "left", "right"}
 
-        def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&, source_bound: bool, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&, source_bound: bool, operator_mask: usize, solver_work: mutable usize&, preflight_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if:
                 action in {"split", "cases"}
                 (proof_float_mode can Global.Read) and action != "assumption" and action != "exact"
                 (action in {"rewrite", "rewriteback"}) and has_argument_index and (has_argument or has_secondary)
             return proof_tactic_assumption(state, annotations) if action == "assumption"
-            return (proof_tactic_decision_with_shared_work(state, annotations, "exact", &solver_work) can Global{Read,Write}) if action == "exact"
-            return (proof_tactic_decision_with_shared_work(state, annotations, "decide", &solver_work) can Global{Read,Write}) if action == "decide"
+            return (proof_tactic_decision_with_shared_work(state, annotations, "exact", operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if action == "exact"
+            return (proof_tactic_decision_with_shared_work(state, annotations, "decide", operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if action == "decide"
             return proof_tactic_intro(state) if action == "intro"
             return false if action == "apply" and (has_argument or has_secondary)
             return proof_tactic_apply_from_fact(state, argument_index, annotations) if action == "apply" and has_argument_index
             return proof_tactic_apply(state, annotations) if action == "apply"
-            return (proof_tactic_simplify_source_bound_with_shared_work(state, annotations, &solver_work) can Global{Read,Write}) if source_bound and action == "simp"
-            return (proof_tactic_simplify_with_shared_work(state, annotations, &solver_work) can Global{Read,Write}) if action == "simp"
-            return (proof_tactic_have_with_shared_work(state, argument, annotations, &solver_work) can Global{Read,Write}) if action == "have" and has_argument
+            return (proof_tactic_simplify_source_bound_with_shared_work(state, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if source_bound and action == "simp"
+            return (proof_tactic_simplify_with_shared_work(state, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if action == "simp"
+            return (proof_tactic_have_with_shared_work(state, argument, annotations, operator_mask, &solver_work, &preflight_work) can Global{Read,Write}) if action == "have" and has_argument
             return proof_tactic_instantiate(state, argument_index, argument, annotations) if action == "instantiate" and has_argument and has_argument_index
             return (proof_tactic_rewrite_from_fact(state, argument_index, false, annotations) can Global.Read) if source_bound and action == "rewrite" and has_argument_index and not has_argument and not has_secondary
             return (proof_tactic_rewrite_from_fact(state, argument_index, true, annotations) can Global.Read) if source_bound and action == "rewriteback" and has_argument_index and not has_argument and not has_secondary
@@ -187,36 +190,57 @@ extend ElisaProof:
             return proof_tactic_right(state) if action == "right"
             return false
 
-        # Tactic action equality/substitution/rewrite walkers are AST-recursive too. Reserve a
-        # quadratic combined-shape allowance before dispatch to cover fact-by-goal matching,
-        # collection membership and replacement scans. The factor of two covers deterministic
-        # source replay, which re-executes the same action sequence.
-        def proof_tactic_json_charge_action_ast_work(state: ProofTacticState&, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, total_work: mutable usize&) -> bool:
+        # Tactic action equality/substitution/rewrite walkers are AST-recursive too. Reserve AST
+        # pair work for matching and replacement scans, plus AST-by-annotation probes. The factor
+        # of two covers deterministic replay without charging annotation pairs.
+        def proof_tactic_json_charge_action_ast_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, annotations: darray[Ast::EnumAnnotation]&, total_work: mutable usize&) -> bool:
             return false if total_work >= PROOF_JSON_ACTION_AST_WORK_LIMIT
             remaining: usize = PROOF_JSON_ACTION_AST_WORK_LIMIT - total_work
-            total_cost: mutable usize = 0
-            for fact in state.facts |fact, total_cost, remaining|:
+            ast_cost: mutable usize = 0
+            for fact in facts |fact, ast_cost, remaining|:
                 cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(fact, &cost, remaining - total_cost)
-                return false if cost > remaining - total_cost
-                total_cost <- total_cost + cost
+                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(fact, &cost, remaining - ast_cost)
+                return false if cost > remaining - ast_cost
+                ast_cost <- ast_cost + cost
             goal_cost: mutable usize = 0
-            return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(state.goal, &goal_cost, remaining - total_cost)
-            return false if goal_cost > remaining - total_cost
-            total_cost <- total_cost + goal_cost
+            return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(goal, &goal_cost, remaining - ast_cost)
+            return false if goal_cost > remaining - ast_cost
+            ast_cost <- ast_cost + goal_cost
             if has_argument:
                 argument_cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(argument, &argument_cost, remaining - total_cost)
-                return false if argument_cost > remaining - total_cost
-                total_cost <- total_cost + argument_cost
+                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(argument, &argument_cost, remaining - ast_cost)
+                return false if argument_cost > remaining - ast_cost
+                ast_cost <- ast_cost + argument_cost
             if has_secondary:
                 secondary_cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(secondary, &secondary_cost, remaining - total_cost)
-                return false if secondary_cost > remaining - total_cost
-                total_cost <- total_cost + secondary_cost
-            return true if total_cost == 0
-            return false if total_cost > remaining / 2 / total_cost
-            total_work <- total_work + total_cost * total_cost * 2
+                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(secondary, &secondary_cost, remaining - ast_cost)
+                return false if secondary_cost > remaining - ast_cost
+                ast_cost <- ast_cost + secondary_cost
+            annotation_cost: mutable usize = 0
+            for annotation in annotations |annotation, annotation_cost, remaining|:
+                owner_cost: usize = sview_len(annotation.owner)
+                name_cost: usize = sview_len(annotation.name)
+                return false if owner_cost >= remaining - annotation_cost
+                return false if name_cost > remaining - annotation_cost - owner_cost - 1
+                annotation_row_cost: usize = owner_cost + name_cost + 1
+                annotation_cost <- annotation_cost + annotation_row_cost
+            return true if ast_cost == 0
+            return false if ast_cost > remaining / ast_cost
+            quadratic_cost: usize = ast_cost * ast_cost
+            return false if quadratic_cost > remaining
+            remaining_cross_cost: usize = remaining - quadratic_cost
+            return false if annotation_cost > remaining_cross_cost / ast_cost
+            action_cost: usize = quadratic_cost + ast_cost * annotation_cost
+            return false if action_cost > remaining / 2
+            total_work <- total_work + action_cost * 2
+            return true
+
+        def proof_tactic_json_prepare_operator_mask(tree: mutable ProofTacticJsonTree&, annotations: darray[Ast::EnumAnnotation]&) -> bool:
+            return true if tree.primitive_operator_mask_initialized
+            mask: (complete: bool, value: usize) = proof_source_primitive_operator_mask_with_work(annotations, &tree.total_solver_preflight_work)
+            return false if not mask.complete
+            tree.primitive_operator_mask <- mask.value
+            tree.primitive_operator_mask_initialized <- true
             return true
 
         def proof_tactic_json_branch_scripts[@r](item: JsonValueHandle[r]) -> (known: bool, left: JsonValueHandle[r], right: JsonValueHandle[r]):
@@ -268,6 +292,7 @@ extend ElisaProof:
 
         def proof_tactic_json_source_fingerprint_with_work[@r](root: JsonValueHandle[r], work_used: mutable usize&) -> (present: bool, valid: bool, value: u32):
             field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "source_fingerprint", work_used)
+            return (false, false, 0) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return (false, true, 0) if not field.known
             parsed: (known: bool, value: i64) = proof_tactic_json_integer(field.value)
             return (true, parsed.known and parsed.value >= 0 and parsed.value <= ElisaProofKernelCore::PROOF_KERNEL_U32_MAX, parsed.value.u32())
@@ -278,6 +303,7 @@ extend ElisaProof:
 
         def proof_tactic_json_target_with_work[@r](root: JsonValueHandle[r], work_used: mutable usize&) -> (present: bool, valid: bool, goal_id: usize):
             field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "target", work_used)
+            return (false, false, 0) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return (false, true, 0) if not field.known
             goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(field.value, "goal_id", work_used)
             return (false, false, 0) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
@@ -290,6 +316,7 @@ extend ElisaProof:
 
         def proof_tactic_json_target_fingerprint_with_work[@r](root: JsonValueHandle[r], work_used: mutable usize&) -> (present: bool, valid: bool, value: u32):
             target_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "target", work_used)
+            return (false, false, 0) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return (false, true, 0) if not target_field.known
             fingerprint_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(target_field.value, "goal_fingerprint", work_used)
             return (false, false, 0) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
@@ -297,33 +324,14 @@ extend ElisaProof:
             parsed: (known: bool, value: i64) = proof_tactic_json_integer(fingerprint_field.value)
             return (true, parsed.known and parsed.value >= 0 and parsed.value <= ElisaProofKernelCore::PROOF_KERNEL_U32_MAX, parsed.value.u32())
 
-        def proof_tactic_json_initialize_state[@r](state: mutable ProofTacticState& @r, facts: darray[Ast::Expr]&, goal: Ast::Expr, reason: sview) -> void:
-            state.facts <- []
-            state.facts.extend(facts)
-            state.initial_facts <- []
-            state.initial_facts.extend(facts)
-            state.goal <- goal
-            state.initial_goal <- goal
-            state.solved <- false
-            state.action_count <- 0
-            state.last_action <- "start"
-            state.last_reason <- reason
-            state.trace <- []
-            state.trace_facts <- []
-            state.pending_argument <- Ast::Expr.Absent
-            state.pending_secondary <- Ast::Expr.Absent
-            state.pending_has_argument <- false
-            state.pending_has_secondary <- false
-            state.pending_argument_index <- 0
-            state.pending_has_argument_index <- false
-            state.pending_detail <- ""
-
         def proof_tactic_json_run_actions[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, depth: usize, allow_branch: bool, source_bound: bool) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid proof script"}
             # Budget exhaustion is its own non-proof outcome, distinct from a malformed document.
-            exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "tactic script exhausted its branch depth or tree node budget"}
+            exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "tactic script exhausted an aggregate JSON, solver, replay, or tree work budget"}
             return exhausted if tree.states.count >= PROOF_JSON_MAX_TREE_NODES
+            return exhausted if depth == 0 and not proof_tactic_json_prepare_operator_mask(tree, annotations)
             actions_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "actions", &tree.total_expression_work)
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return invalid if not actions_field.known or not ElisaProofJson::is_array(actions_field.value)
             count: i64 = ElisaProofJson::array_len(actions_field.value)
             return invalid if count < 0 or count > PROOF_JSON_MAX_ACTIONS
@@ -338,6 +346,7 @@ extend ElisaProof:
             for index in 0..<count |index, actions_field, state, annotations, accepted_count, source_bound|:
                 item: JsonValueHandle[r] = try ElisaProofJson::at(actions_field.value, index) else ElisaProofJson::null_value(actions_field.value)
                 action_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(item, "action", &tree.total_expression_work)
+                return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
                 action: (known: bool, value: sview) @r = proof_tactic_json_text(action_field.value)
                 return invalid if not action_field.known or not action.known
                 return exhausted if not proof_tactic_json_expression_charge(&tree.total_expression_work, sview_len(action.value))
@@ -349,7 +358,7 @@ extend ElisaProof:
                 parsed_index: (known: bool, value: i64) = proof_tactic_json_integer(index_field.value) if index_field.known else (false, 0)
                 expected_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(item, "accepted", &tree.total_expression_work)
                 expected: (known: bool, value: bool) = proof_tactic_json_bool(expected_field.value) if expected_field.known else (true, true)
-                return invalid if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
                 return invalid if:
                     (argument_field.known and not argument.known) or (secondary_field.known and not secondary.known) or (index_field.known and (not parsed_index.known or parsed_index.value < 0 or parsed_index.value > ElisaProofKernelCore::PROOF_KERNEL_U32_MAX)) or (expected_field.known and not expected.known)
                     not proof_tactic_json_action_fields_valid(action.value, argument_field.known, secondary_field.known, index_field.known)
@@ -362,7 +371,7 @@ extend ElisaProof:
                 return exhausted if snapshot_charge > PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS - tree.total_trace_fact_snapshots
                 tree.total_actions <- tree.total_actions + 1
                 tree.total_trace_fact_snapshots <- tree.total_trace_fact_snapshots + snapshot_charge
-                return exhausted if not proof_tactic_json_charge_action_ast_work(state, argument.value, argument_field.known, secondary.value, secondary_field.known, &tree.total_action_ast_work)
+                return exhausted if not proof_tactic_json_charge_action_ast_work(state.facts, state.goal, argument.value, argument_field.known, secondary.value, secondary_field.known, annotations, &tree.total_action_ast_work)
                 before_action_count: usize = state.action_count
                 actual: mutable bool = false
                 if action.value in {"split", "cases"}:
@@ -371,6 +380,7 @@ extend ElisaProof:
                         index + 1 != count
                     return exhausted if depth >= PROOF_JSON_BRANCH_DEPTH_LIMIT
                     branches: (known: bool, left: JsonValueHandle[r], right: JsonValueHandle[r]) = proof_tactic_json_branch_scripts_with_work(item, &tree.total_expression_work)
+                    return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
                     return invalid if not branches.known
                     # Borrow distinct fields from one preallocated region-owned slot. Stack
                     # child values cannot satisfy the shared @r lifetime of recursive calls.
@@ -385,7 +395,7 @@ extend ElisaProof:
                         left_target_present: bool = proof_tactic_json_has_with_work(branches.left, "target", &tree.total_expression_work)
                         right_initial_present: bool = proof_tactic_json_has_with_work(branches.right, "initial", &tree.total_expression_work)
                         right_target_present: bool = proof_tactic_json_has_with_work(branches.right, "target", &tree.total_expression_work)
-                        return invalid if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                        return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
                         return invalid if left_initial_present or left_target_present or right_initial_present or right_target_present
                         left_result: ProofTacticJsonResult = (proof_tactic_json_run_actions(branches.left, annotations, left_branch_state, tree, scratch, depth + 1, true, source_bound) can Global{Read,Write})
                         # An invalid child invalidates the whole script and keeps its own reason; a
@@ -400,7 +410,7 @@ extend ElisaProof:
                         branch_right_node <- right_result.tree_node
                         branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and (proof_tactic_kernel_branch_transition_replay_with_work(state, left_branch_state, right_branch_state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
                 else:
-                    actual <- (proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound, &tree.total_solver_work) can Global{Read,Write})
+                    actual <- (proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound, tree.primitive_operator_mask, &tree.total_solver_work, &tree.total_solver_preflight_work) can Global{Read,Write})
                 # Every well-formed action, including a rejected one, must leave a replayable
                 # trace entry. Otherwise an unknown action paired with `accepted: false` could
                 # be silently treated as a no-op and disappear from both replay passes.
@@ -410,7 +420,7 @@ extend ElisaProof:
                 contradicted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, action_count: state.action_count, accepted_count: accepted_count, reason: "tactic action outcome contradicted the script's expected acceptance"}
                 return contradicted if actual != expected.value
                 accepted_count <- accepted_count + 1 if actual
-            trace_ok: mutable bool = (proof_tactic_replay_with_shared_work(state, annotations, &tree.total_solver_work) can Global{Read,Write})
+            trace_ok: mutable bool = (proof_tactic_replay_with_shared_work(state, annotations, tree.primitive_operator_mask, source_bound, &tree.total_solver_work, &tree.total_solver_preflight_work) can Global{Read,Write})
             kernel_trace_ok: mutable bool = (proof_tactic_kernel_trace_replay_with_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
             kernel_ok: mutable bool = (proof_tactic_kernel_replay_with_trace_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
             # The combined certificate predicate is exactly these two independent kernel
@@ -435,7 +445,7 @@ extend ElisaProof:
             snapshot_trace.extend(state.trace)
             snapshot_trace_facts: mutable darray[Ast::Expr] @r = []
             snapshot_trace_facts.extend(state.trace_facts)
-            tree.states.push(ProofTacticState{facts: snapshot_facts, goal: state.goal, solved: state.solved, action_count: state.action_count, last_action: state.last_action, last_reason: state.last_reason, initial_facts: snapshot_initial_facts, initial_goal: state.initial_goal, trace: snapshot_trace, trace_facts: snapshot_trace_facts, pending_argument: state.pending_argument, pending_secondary: state.pending_secondary, pending_has_argument: state.pending_has_argument, pending_has_secondary: state.pending_has_secondary, pending_argument_index: state.pending_argument_index, pending_has_argument_index: state.pending_has_argument_index, pending_detail: state.pending_detail})
+            tree.states.push(ProofTacticState{facts: snapshot_facts, goal: state.goal, solved: state.solved, action_count: state.action_count, last_action: state.last_action, last_reason: state.last_reason, initial_facts: snapshot_initial_facts, initial_goal: state.initial_goal, trace: snapshot_trace, trace_facts: snapshot_trace_facts, pending_argument: state.pending_argument, pending_secondary: state.pending_secondary, pending_has_argument: state.pending_has_argument, pending_has_secondary: state.pending_has_secondary, pending_argument_index: state.pending_argument_index, pending_has_argument_index: state.pending_has_argument_index, pending_detail: state.pending_detail, budget_exhausted: state.budget_exhausted, branch_terminal: state.branch_terminal, action_quota: state.action_quota, snapshot_quota: state.snapshot_quota, solver_quota: state.solver_quota, preflight_quota: state.preflight_quota, source_quota: state.source_quota, solver_work_used: state.solver_work_used, preflight_work_used: state.preflight_work_used, source_work_used: state.source_work_used, action_ast_quota: state.action_ast_quota, action_ast_work_used: state.action_ast_work_used})
             tree.left.push(branch_left_node)
             tree.right.push(branch_right_node)
             tree.has_branch.push(branch_present)
@@ -446,7 +456,9 @@ extend ElisaProof:
                 tree_certificate_ok: bool = (proof_tactic_json_tree_certificate_replay(tree, tree_node, annotations) can Global{Read,Write})
                 certificate_ok <- tree_certificate_ok
                 branch_certificate_ok <- tree_certificate_ok if branch_present
-            return ProofTacticJsonResult{valid: true, solved: state.solved or branch_certificate_ok, trace_replayed: trace_ok, kernel_trace_replayed: kernel_trace_ok, kernel_replayed: kernel_ok, certificate_replayed: certificate_ok, branch_present: branch_present, branch_certificate_replayed: branch_certificate_ok, action_count: state.action_count, accepted_count: accepted_count, reason: "portable tactic script admitted" if certificate_ok else "portable tactic script did not close an independently replayable goal", tree_node: tree_node}
+            work_exhausted: bool = state.budget_exhausted or tree.total_actions >= PROOF_JSON_MAX_TOTAL_ACTIONS or tree.total_trace_fact_snapshots >= PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS or tree.total_expression_work >= PROOF_JSON_EXPRESSION_WORK_LIMIT or tree.total_kernel_replay_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT or tree.total_solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or tree.total_solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT or tree.total_action_ast_work >= PROOF_JSON_ACTION_AST_WORK_LIMIT
+            result_reason: sview = "portable tactic script admitted" if certificate_ok else "portable tactic script exhausted an aggregate work budget" if work_exhausted else "portable tactic script did not close an independently replayable goal"
+            return ProofTacticJsonResult{valid: true, solved: state.solved or branch_certificate_ok, trace_replayed: trace_ok, kernel_trace_replayed: kernel_trace_ok, kernel_replayed: kernel_ok, certificate_replayed: certificate_ok, branch_present: branch_present, branch_certificate_replayed: branch_certificate_ok, action_count: state.action_count, accepted_count: accepted_count, reason: result_reason, tree_node: tree_node}
 
     private:
         # Candidate engine for the checked-view wrapper below. Keep the report-taking form
@@ -454,14 +466,23 @@ extend ElisaProof:
         # authority, even when its kernel roots happen to match the imported JSON state.
         def proof_tactic_json_run_source_candidate[@r](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid source-bound proof script"}
-            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_expression_work != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0 or tree.total_action_ast_work != 0
-            format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
+            kernel_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{reason: "source-bound tactic import exhausted the aggregate kernel work budget"}
+            json_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "source-bound script exhausted its JSON decode-work budget"}
+            action_exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "source-bound tactic import exhausted its aggregate action work budget"}
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0 or tree.total_solver_preflight_work != 0 or tree.total_action_ast_work != 0 or tree.primitive_operator_mask != 0 or tree.primitive_operator_mask_initialized
+            format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "format", &tree.total_expression_work)
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
-            return invalid if:
-                not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
-                ElisaProofJson::has(root, "initial")
-                goal_id >= report.results.goal_attempts.count
-                not proof_tactic_json_parse_annotations(root, annotations)
+            initial_present: bool = proof_tactic_json_has_with_work(root, "initial", &tree.total_expression_work)
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
+            return json_exhausted if not proof_tactic_json_expression_charge(&tree.total_expression_work, sview_len(format.value))
+            return invalid if initial_present or goal_id >= report.results.goal_attempts.count
+            if not proof_tactic_json_parse_annotations_with_work(root, annotations, &tree.total_expression_work):
+                return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return invalid
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             # The JSON annotations are syntax-validated input only. In source-bound mode the
             # imported compiler annotations are authoritative; otherwise a script could relabel
             # an erased `exists` block as `forall` and unlock universal-only instantiation.
@@ -475,19 +496,25 @@ extend ElisaProof:
             return invalid if attempt.rule == "resource-safety"
             facts: mutable darray[Ast::Expr] = []
             return invalid if attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.facts_count > report.analysis_1.certificate_facts.count - attempt.facts_start
-            facts_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(source_state, "facts")
-            goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(source_state, "goal")
-            return invalid if:
-                not facts_field.known or not goal_field.known
-                not proof_tactic_json_expr_list_with_work(source_state, "facts", 0, &facts, &tree.total_expression_work, 0)
+            facts_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(source_state, "facts", &tree.total_expression_work)
+            goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(source_state, "goal", &tree.total_expression_work)
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if not facts_field.known or not goal_field.known
+            if not proof_tactic_json_expr_list_with_work(source_state, "facts", 0, &facts, &tree.total_expression_work, 0):
+                return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return invalid
             goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(goal_field.value, &tree.total_expression_work, 0)
+            return json_exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             return invalid if not goal.known or facts.count != attempt.facts_count
             # Source-bound tactics share the contract checker’s operator boundary: an imported
             # source overload must never be reinterpreted by the source-neutral tactic kernel.
+            return action_exhausted if not proof_tactic_json_charge_action_ast_work(facts, goal.value, Ast::Expr.Absent, false, Ast::Expr.Absent, false, report.source.source_annotations, &tree.total_action_ast_work)
             return invalid if proof_source_expression_has_overloaded_operator(goal.value, report.source.source_primitive_operator_mask, 0)
             for fact in facts |fact, report|:
                 return invalid if proof_source_expression_has_overloaded_operator(fact, report.source.source_primitive_operator_mask, 0)
-            return invalid if not proof_tactic_source_state_kernel_matches(report, goal_id, facts, goal.value)
+            source_state_matches: bool = proof_tactic_source_state_kernel_matches_with_trace_work(report, goal_id, facts, goal.value, report.source.source_annotations, &tree.total_kernel_replay_work)
+            return kernel_exhausted if not source_state_matches and tree.total_kernel_replay_work >= ElisaProofKernelReplay::PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
+            return invalid if not source_state_matches
             proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from imported source goal")
             return (proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true, true) can Global{Read,Write})
 
@@ -507,19 +534,31 @@ extend ElisaProof:
     public:
         def proof_tactic_json_run[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid proof script"}
-            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_expression_work != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0 or tree.total_action_ast_work != 0
-            format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
+            exhausted: ProofTacticJsonResult = ProofTacticJsonResult{..invalid, reason: "tactic script exhausted its JSON decode-work budget"}
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0 or tree.total_solver_preflight_work != 0 or tree.total_action_ast_work != 0 or tree.primitive_operator_mask != 0 or tree.primitive_operator_mask_initialized
+            format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "format", &tree.total_expression_work)
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
             return invalid if not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
-            initial_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "initial")
-            facts_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(initial_field.value, "facts")
-            goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(initial_field.value, "goal")
-            return invalid if not initial_field.known or not facts_field.known or not goal_field.known
+            return exhausted if not proof_tactic_json_expression_charge(&tree.total_expression_work, sview_len(format.value))
+            initial_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(root, "initial", &tree.total_expression_work)
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if not initial_field.known
+            facts_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(initial_field.value, "facts", &tree.total_expression_work)
+            goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(initial_field.value, "goal", &tree.total_expression_work)
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if not facts_field.known or not goal_field.known
             facts: mutable darray[Ast::Expr] = []
-            return invalid if not proof_tactic_json_expr_list_with_work(initial_field.value, "facts", 0, &facts, &tree.total_expression_work, 0)
+            if not proof_tactic_json_expr_list_with_work(initial_field.value, "facts", 0, &facts, &tree.total_expression_work, 0):
+                return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return invalid
             goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(goal_field.value, &tree.total_expression_work, 0)
-            return invalid if:
-                not goal.known
-                not proof_tactic_json_parse_annotations(root, annotations)
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return invalid if not goal.known
+            if not proof_tactic_json_parse_annotations_with_work(root, annotations, &tree.total_expression_work):
+                return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                return invalid
+            return exhausted if tree.total_expression_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
             proof_tactic_json_initialize_state(state, facts, goal.value, "state initialized from portable proof script")
             return (proof_tactic_json_run_actions(root, annotations, state, tree, scratch, 0, true, false) can Global{Read,Write})
