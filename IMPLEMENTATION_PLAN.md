@@ -16637,6 +16637,16 @@ been run. The candidate remains unqualified until semantic bound checking and ba
 one candidate-selection result (including named/default argument mapping), ambiguous candidates fail
 closed, and matched Stage0/Stage1 gates run on a provenance-matched build.
 
+Re-audit of compiler main `c29c5f6730a34aa7089db8d62d4208a119a014a3` confirms the gap persists.
+`check_inferred_protocol_argument` uses `find_symbol` to select a same-name function, while the
+firm-argument walker calls it only when `direct_function_count == 1`. Explicit specialization
+checking also starts from `find_symbol` and line-count metadata. Backend `overload_index_for_args`
+selects from normalized positional arguments with Backend `ValueType`; it does not return a
+semantic `DeclId` plus formal-to-actual mapping. These independent selection paths must be unified
+before overload-bound diagnostics are enabled; duplicating a partial Semantic matcher would risk
+false diagnostics and disagreement with emitted calls. Current compiler main also has dirty
+semantic and proof-test files, so it is not a qualification product.
+
 Re-audit of the live candidate at `dfaeb45c6ff6532b59d2a3183557413172f23d6f` confirms this remains
 open: `check_inferred_protocol_argument` and `check_inferred_generic_bound_argument` still return
 when `direct_function_count != 1`, and `walk_expression_for_firm_arg_type_mismatch` still invokes
@@ -16732,3 +16742,29 @@ kernel projection and function summary collector both receive its validity bit. 
 the same invalid state and refuses generic shadow queries. This is conservative at file scope;
 carrying parser owner offsets through the proof/replay protocol would preserve more valid generic
 programs. Static review only; no parser, build, test, or replay ran under the provenance hold.
+The compiler parser sources reviewed in the candidate checkout emit generic rows for function-like
+declarations and structs; impl rows are keyed to member `def`s, and protocol-lowered parameter rows
+also belong to `Func`. Bound rows use the high-bit line flag and the scan normalizes it before
+lookup. The stored snapshot work subtotal seeds `name_index_work` in `proof_check_core`, so the
+scan is metered once by that later source-index pipeline; source-kernel formation retains its own
+bounded counter.
+
+### 23.27.648 Refresh compiler source pin to current main (2026-10-13)
+
+Elisa-compiler `main` and `origin/main` advanced to
+`c29c5f6730a34aa7089db8d62d4208a119a014a3`; `ELISA_COMPILER_REV` records that revision. The
+checkout is currently dirty in three semantic source files (`check_append_only_store.elisa`,
+`check_append_only_store_body.elisa`, and `check_append_only_store_walk.elisa`), `semantic_api.elisa`,
+and four `test/proofs/` files: the positive and negative DArray pointer step-bound fixtures, their
+checker, and `check_runtime_dict_key_policy.py`. The pinned commit
+includes DArray indexing/codegen changes, append-only-store and store-through analysis updates,
+and corresponding bounds proofs. The available proof manifest is from proof HEAD
+`5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and compiler source `7e1251785276c539c98dbe33a12e610e2338cbf4`;
+the replay manifest is from proof HEAD `a1a8f2cd75a65755f4bed8574a1e75b7678b8c0c` and compiler
+source `ac2b23ef4d9590e77b40503c0d90df59837d542a`. Neither manifest matches proof HEAD
+`894e870f11f3a29f75cc79f0d9e2b3364dd616f6` or the new compiler pin. The source pin is current, but
+no matching proof/compiler product qualifies. No build, parser, test, or replay was run.
+
+### 23.27.649 Include protocol default method owners in generic identity scan (2026-10-13)
+
+The parser stores runnable protocol default method declarations in `Ast::File.protocol_default_methods`, outside `top_decls`, while `function_declaration` still records their generic binders in the shared generic side tables. The source identity scan now checks both retained top-level declarations and this parser-owned method list. This prevents represented default-method binder lines from being mistaken for missing owners and invalidating all generic metadata. Diff and source-length gates pass; parser/build/test/replay remain unrun under the provenance hold.
