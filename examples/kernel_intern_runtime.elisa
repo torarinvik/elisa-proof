@@ -10,6 +10,8 @@ module ElisaProof:
             children: mutable darray[usize]
             intern_slots: mutable darray[usize]
             intern_used: mutable usize
+            intern_work_used: mutable usize
+            intern_work_exhausted: mutable bool
             interned_nodes: mutable usize
 
         struct ProofReport:
@@ -52,6 +54,8 @@ const module Failure:
     LOADED_TABLE_MISSED_TERM: i64 = 18
     SHARED_CHILDREN_WRONG: i64 = 19
     UNSETTLED_NODE_ANSWERED: i64 = 20
+    WORK_BUDGET_CHANGED_TERM: i64 = 21
+    INDEX_COUNT_CHANGED_TERM: i64 = 22
 
 const module Fixture:
     LOAD_TERMS: usize = 3000
@@ -65,7 +69,7 @@ def push(report: mutable ProofReport&, kind: sview, operator: sview, left: usize
     return report.kernel.nodes.count - 1
 
 def main() -> i64 can[Memory.Allocate, Abort.Panic]:
-    report: mutable ProofReport = ProofReport{kernel: ProofKernelArena{nodes: [], children: [], intern_slots: [], intern_used: 0, interned_nodes: 0}}
+    report: mutable ProofReport = ProofReport{kernel: ProofKernelArena{nodes: [], children: [], intern_slots: [], intern_used: 0, intern_work_used: 0, intern_work_exhausted: false, interned_nodes: 0}}
 
     # x + 1, encoded into an empty arena, is kept exactly as encoded.
     x0: usize = push(&report, "ident", "", 0, 0, 0, 0, 0, 0, "x", "")
@@ -235,4 +239,19 @@ def main() -> i64 can[Memory.Allocate, Abort.Panic]:
         found: usize = proof_kernel_intern_encoded(&report, term, report.kernel.children.count, term)
         missed <- true if found != load_start + offset
     return Failure::LOADED_TABLE_MISSED_TERM if missed or report.kernel.nodes.count != load_start + Fixture::LOAD_TERMS
+
+    # Exhaust the optional producer budget during table growth. The fresh encoding must survive
+    # intact even though no sharing index can be prepared for it.
+    budget_report: mutable ProofReport = ProofReport{kernel: ProofKernelArena{nodes: [], children: [], intern_slots: [], intern_used: 0, intern_work_used: PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT - 1, intern_work_exhausted: false, interned_nodes: 0}}
+    budget_term: usize = push(&budget_report, "int", "", 0, 0, 0, 0, 0, 4242, "", "")
+    budget_root: usize = proof_kernel_intern_encoded(&budget_report, 0, 0, budget_term)
+    return Failure::WORK_BUDGET_CHANGED_TERM if budget_root != budget_term or budget_report.kernel.nodes.count != 1
+    return Failure::WORK_BUDGET_CHANGED_TERM if budget_report.kernel.nodes[budget_term].value != 4242 or not budget_report.kernel.intern_work_exhausted
+
+    # Inconsistent producer counters must be rejected before they can overflow table sizing.
+    index_report: mutable ProofReport = ProofReport{kernel: ProofKernelArena{nodes: [], children: [], intern_slots: [], intern_used: PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT + 1, intern_work_used: 0, intern_work_exhausted: false, interned_nodes: 0}}
+    index_term: usize = push(&index_report, "int", "", 0, 0, 0, 0, 0, 5150, "", "")
+    index_root: usize = proof_kernel_intern_encoded(&index_report, 0, 0, index_term)
+    return Failure::INDEX_COUNT_CHANGED_TERM if index_root != index_term or index_report.kernel.nodes.count != 1 or index_report.kernel.intern_slots.count != 0
+    return Failure::INDEX_COUNT_CHANGED_TERM if index_report.kernel.nodes[index_term].value != 5150 or not index_report.kernel.intern_work_exhausted
     return 0
