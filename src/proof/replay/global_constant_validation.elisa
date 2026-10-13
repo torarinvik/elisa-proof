@@ -63,20 +63,38 @@ extend ElisaProof:
 
         def proof_replay_global_constant_scope_with_module_and_work(current: darray[sview]&, module_name: sview, work: mutable usize&) -> (complete: bool, scope: darray[sview]):
             return (false, []) if not proof_replay_global_constant_work_charge(current.count, work)
-            return (false, []) if not proof_replay_global_constant_work_charge(sview_len(module_name), work)
+            module_bytes: usize = sview_len(module_name)
+            # The splitter reads each byte once and peeks one byte ahead when it
+            # encounters a colon. Reserve three reads per byte for the worst case.
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, [])
+            if module_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, [])
+            return (false, []) if not proof_replay_global_constant_work_charge(module_bytes * 3, work)
             (true, proof_replay_global_constant_scope_with_module(current, module_name))
 
         # A literal constant replays only for a supported integer type whose source initializer is the
         # expected value: a u8 literal must fit the byte range, and a negated literal is accepted only
         # for i64 with a magnitude that is representable before negation.
-        def proof_replay_global_constant_initializer_matches(candidate_type: Ast::Expr, candidate_initializer: Ast::Expr, expected_value: i64) -> bool:
+        def proof_replay_global_constant_initializer_matches_with_work(candidate_type: Ast::Expr, candidate_initializer: Ast::Expr, expected_value: i64, work: mutable usize&) -> bool:
             type_name: sview = match candidate_type:
                 Ast::Expr.Ident(name, _): name
                 _: ""
+            return false if not proof_replay_global_constant_work_charge(sview_len(type_name), work)
+            # The legacy classifier compares this spelling against several builtin names, so
+            # reserve the repeated identifier reads before those comparisons.
+            return false if not proof_replay_summary_expr_repeat_charge_with_work(candidate_type, 8, work)
+            return false if not proof_replay_summary_expr_repeat_charge_with_work(candidate_initializer, 0, work)
             return false if type_name != "i64" and type_name != "usize" and type_name != "u8" and type_name != "u64" and type_name != "u32"
             match candidate_initializer:
                 Ast::Expr.IntLit(candidate_value, _):
                     return false if type_name == "u64" and candidate_value < 0
+                    # The producer keeps a negative usize payload as type-only evidence because
+                    # the signed i64 AST pin cannot distinguish a negative value from a
+                    # high-bit unsigned machine word. Replay must not turn it into a scalar fact.
+                    return false if type_name == "usize" and candidate_value < 0
                     return false if type_name == "u32" and (candidate_value < 0 or candidate_value > 4294967295)
                     return candidate_value == expected_value and (type_name != "u8" or (candidate_value >= 0 and candidate_value <= 255))
                 Ast::Expr.Unary(TokenKind.Minus, Ast::Expr.IntLit(magnitude, _), _):
@@ -86,7 +104,10 @@ extend ElisaProof:
 
         def proof_replay_global_constant_scope_path_matches_with_work(expression: Ast::Expr, expected_scope: darray[sview]&, last_index: usize, work: mutable usize&, depth: usize) -> (matches: bool, complete: bool):
             return (false, false) if not proof_replay_global_constant_work_charge(1, work)
-            return (false, true) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or last_index >= expected_scope.count
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, false)
+            return (false, true) if last_index >= expected_scope.count
             if last_index == 0:
                 match expression:
                     Ast::Expr.Ident(name, _):
@@ -116,7 +137,9 @@ extend ElisaProof:
                     return (false, true)
 
         def proof_replay_global_constant_lookup_with_work(declarations: darray[Ast::Decl]&, wanted_scope: darray[sview]&, current_scope: darray[sview]&, constant_name: sview, constant_line: u32, expected_value: i64, visible: mutable bool&, valid: mutable bool&, matches: mutable usize&, work: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
             scope_comparison = proof_replay_global_constant_scope_equal_with_work(wanted_scope, current_scope, work)
             return if not scope_comparison.complete
             in_scope: bool = scope_comparison.equal
@@ -131,17 +154,21 @@ extend ElisaProof:
                             matches <- matches + 1
                             valid <- false
                             if not candidate_mutable and candidate_position.line == constant_line:
-                                return if not proof_replay_summary_expr_charge_with_work(candidate_type, work)
-                                return if not proof_replay_summary_expr_charge_with_work(candidate_initializer, work)
-                                valid <- proof_replay_global_constant_initializer_matches(candidate_type, candidate_initializer, expected_value)
+                                valid <- proof_replay_global_constant_initializer_matches_with_work(candidate_type, candidate_initializer, expected_value, work)
                     Ast::Decl.Module(module_name, body, _):
                         next_scope = proof_replay_global_constant_scope_with_module_and_work(current_scope, module_name, work)
                         return if not next_scope.complete
                         proof_replay_global_constant_lookup_with_work(body, wanted_scope, &next_scope.scope, constant_name, constant_line, expected_value, visible, valid, matches, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
                         proof_replay_global_constant_lookup_with_work(body, wanted_scope, current_scope, constant_name, constant_line, expected_value, visible, valid, matches, work, depth + 1)
-                    _:
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    _:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
 
         # A parameter or any local of the owner function spelled like the constant (or like the
         # first segment of a qualified path) may shadow it at the use, so the fact is refused:
@@ -174,7 +201,9 @@ extend ElisaProof:
             root_matches == 1 and root_valid
 
         def proof_replay_global_constant_find_candidates_with_work(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, function_name: sview, constant_name: sview, constant_reference: Ast::Expr, constant_line: u32, expected_value: i64, owner_line: u32, current_scope: darray[sview]&, function_matches: mutable usize&, candidates: mutable usize&, work: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
             for declaration in declarations |declarations, all_declarations, function_name, constant_name, constant_reference, constant_line, expected_value, owner_line, current_scope, function_matches, candidates, work, depth|:
                 return if not proof_replay_global_constant_work_charge(1, work)
                 match declaration:
@@ -199,8 +228,14 @@ extend ElisaProof:
                         proof_replay_global_constant_find_candidates_with_work(body, all_declarations, function_name, constant_name, constant_reference, constant_line, expected_value, owner_line, &next_scope.scope, function_matches, candidates, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
                         proof_replay_global_constant_find_candidates_with_work(body, all_declarations, function_name, constant_name, constant_reference, constant_line, expected_value, owner_line, current_scope, function_matches, candidates, work, depth + 1)
-                    _:
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    _:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
 
         def proof_replay_qualified_path(expression: Ast::Expr, path: mutable darray[sview]&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
@@ -223,8 +258,11 @@ extend ElisaProof:
             return (true, true) if comparison.equal
             declared_length: usize = sview_len(declared)
             name_length: usize = sview_len(name)
-            return (false, true) if name_length == 0 or declared_length < name_length + 2
+            return (false, true) if name_length == 0 or declared_length < 2
+            return (false, true) if name_length > declared_length - 2
             return (false, false) if not proof_replay_global_constant_work_charge(name_length, work)
+            return (false, false) if not proof_replay_global_constant_work_charge(name_length, work)
+            return (false, false) if not proof_replay_global_constant_work_charge(2, work)
             start: usize = declared_length - name_length
             return (false, true) if sview_at(declared, start - 1) != 58 or sview_at(declared, start - 2) != 58
             for offset in 0..<name_length |offset, declared, name, start|:
@@ -233,12 +271,16 @@ extend ElisaProof:
 
         # Independent of the producer: a module, enum or struct named `name` below the root.
         def proof_replay_nested_namespace_with_work(declarations: darray[Ast::Decl]&, name: sview, nested: bool, work: mutable usize&, depth: usize) -> (found: bool, complete: bool):
-            return (true, true) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (false, false)
             for declaration in declarations |name, nested, work, depth|:
                 return (false, false) if not proof_replay_global_constant_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Module(module_name, body, _):
-                        if nested or module_name != name:
+                        module_comparison = proof_replay_global_constant_text_equal_with_work(module_name, name, work)
+                        return (false, false) if not module_comparison.complete
+                        if nested or not module_comparison.equal:
                             segment = proof_replay_qualified_segment_matches_with_work(module_name, name, work)
                             return (false, false) if not segment.complete
                             return (true, true) if segment.matches
@@ -248,17 +290,25 @@ extend ElisaProof:
                         child = proof_replay_nested_namespace_with_work(body, name, nested, work, depth + 1)
                         return child if child.found or not child.complete
                     Ast::Decl.Enum(enum_name, _, _, _, _):
-                        if nested or enum_name != name:
+                        enum_comparison = proof_replay_global_constant_text_equal_with_work(enum_name, name, work)
+                        return (false, false) if not enum_comparison.complete
+                        if nested or not enum_comparison.equal:
                             segment = proof_replay_qualified_segment_matches_with_work(enum_name, name, work)
                             return (false, false) if not segment.complete
                             return (true, true) if segment.matches
                     Ast::Decl.Struct(struct_name, _, _, _, _, _, _):
-                        if nested or struct_name != name:
+                        struct_comparison = proof_replay_global_constant_text_equal_with_work(struct_name, name, work)
+                        return (false, false) if not struct_comparison.complete
+                        if nested or not struct_comparison.equal:
                             segment = proof_replay_qualified_segment_matches_with_work(struct_name, name, work)
                             return (false, false) if not segment.complete
                             return (true, true) if segment.matches
-                    _:
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        return (false, false)
+                    _:
+                        return (false, false)
             (false, true)
 
         # A qualified constant resolves from the root for the sole function of its name with no
@@ -266,7 +316,9 @@ extend ElisaProof:
         # the segment names no nested namespace that could be nearer.
         # A function inside a module counts only when `first` names no nested namespace.
         def proof_replay_qualified_function_count_with_work(declarations: darray[Ast::Decl]&, function_name: sview, owner_line: u32, first: sview, in_module: bool, shadowable: bool, total: mutable usize&, rooted: mutable usize&, work: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return
             for declaration in declarations |function_name, owner_line, first, in_module, shadowable, total, rooted, work, depth|:
                 return if not proof_replay_global_constant_work_charge(1, work)
                 match declaration:
@@ -288,8 +340,14 @@ extend ElisaProof:
                         proof_replay_qualified_function_count_with_work(body, function_name, owner_line, first, true, shadowable, total, rooted, work, depth + 1)
                     Ast::Decl.Scoped(body, _):
                         proof_replay_qualified_function_count_with_work(body, function_name, owner_line, first, in_module, shadowable, total, rooted, work, depth + 1)
-                    _:
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
+                    _:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return
 
         def proof_replay_qualified_constant_fact_is_valid_with_work(report: ProofReport&, trace: ProofFactTrace, path: darray[sview]&, expected_value: i64, work: mutable usize&) -> bool:
             return false if path.count < 2
@@ -313,20 +371,20 @@ extend ElisaProof:
         # A constant fact stamped with its owner's declaration line is valid only for that owner:
         # while a certificate is replayed, `replay_owner_line` names the certificate's function,
         # so a same-named function in another module cannot borrow the fact.
-        def proof_replay_global_constant_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
-            work: mutable usize = 0
-            proof_replay_global_constant_fact_is_valid_with_work(report, trace, &work)
-
         def proof_replay_global_constant_fact_is_valid_with_work(report: ProofReport&, trace: ProofFactTrace, work: mutable usize&) -> bool:
             return false if trace.owner_line != 0 and report.replay_owner_line != 0 and trace.owner_line != report.replay_owner_line
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
             match trace.expression:
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    return false if proof_replay_summary_has_unresolved_import(report.source_annotations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
                     qualified_path: mutable darray[sview] = []
                     qualified_left: bool = match left:
                         Ast::Expr.Scope(_, _, _): proof_replay_qualified_path(left, &qualified_path, 0)
                         _: false
                     if qualified_left:
+                        kind_comparison = proof_replay_global_constant_text_equal_with_work(trace.kind, "global-constant-qualified", work)
+                        return false if not kind_comparison.complete or not kind_comparison.equal
                         decoded = proof_replay_global_constant_fact_value(right)
                         return decoded.known and proof_replay_qualified_constant_fact_is_valid_with_work(report, trace, &qualified_path, decoded.value, work)
                     constant_name: sview = match left:
@@ -338,8 +396,10 @@ extend ElisaProof:
                     decoded = proof_replay_global_constant_fact_value(right)
                     expected_value: i64 = decoded.value
                     return false if constant_name == ""
-                    return false if qualified and trace.kind != "global-constant-qualified"
-                    return false if not qualified and trace.kind != "global-constant"
+                    expected_kind: mutable sview = "global-constant"
+                    expected_kind <- "global-constant-qualified" if qualified
+                    kind_comparison = proof_replay_global_constant_text_equal_with_work(trace.kind, expected_kind, work)
+                    return false if not kind_comparison.complete or not kind_comparison.equal
                     return false if not decoded.known
                     function_matches: mutable usize = 0
                     candidates: mutable usize = 0

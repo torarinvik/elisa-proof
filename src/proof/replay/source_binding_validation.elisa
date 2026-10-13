@@ -63,27 +63,6 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_replay_local_binding_unsigned_parameter_type_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> sview:
-            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, parameter_name, depth|:
-                match declaration:
-                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
-                        if name == owner and position.line == owner_line:
-                            matches: mutable usize = 0
-                            type_name: mutable sview = ""
-                            for parameter in parameters |parameter_name, matches, type_name|:
-                                if parameter.name == parameter_name:
-                                    matches <- matches + 1
-                                    type_name <- proof_replay_local_binding_unsigned_type_name(parameter.type_expression, 0)
-                            return "" if matches != 1
-                            return type_name
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        nested_type: sview = proof_replay_local_binding_unsigned_parameter_type_name(nested, owner, owner_line, parameter_name, depth + 1)
-                        return nested_type if nested_type != ""
-                    _:
-                        pass
-            return ""
-
         # Initializers in this rule are literals or a plain value read. Calls, indexing, fields,
         # and compound expressions are deliberately outside this rule.
         def proof_replay_local_binding_simple_initializer(expression: Ast::Expr, depth: usize) -> bool:
@@ -108,16 +87,21 @@ extend ElisaProof:
 
         def proof_replay_local_binding_parameter_name_present_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, work_limit: usize, depth: usize) -> bool:
             return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or owner == "" or owner_line == 0 or parameter_name == ""
-            return true if not proof_replay_local_binding_parameter_name_present_work_charge(1 + sview_len(owner) + sview_len(parameter_name), source_work, work_limit)
+            return true if not proof_replay_local_binding_parameter_name_present_work_charge(1, source_work, work_limit)
+            return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(owner), source_work, work_limit)
+            return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(parameter_name), source_work, work_limit)
             return true if not proof_replay_local_binding_parameter_name_present_work_charge(declarations.count, source_work, work_limit)
             for declaration in declarations |owner, owner_line, parameter_name, source_work, work_limit, depth|:
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, position):
-                        return true if not proof_replay_local_binding_parameter_name_present_work_charge(1 + sview_len(name), source_work, work_limit)
+                        return true if not proof_replay_local_binding_parameter_name_present_work_charge(1, source_work, work_limit)
+                        return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(name), source_work, work_limit)
                         if name == owner and position.line == owner_line:
                             return true if not proof_replay_local_binding_parameter_name_present_work_charge(parameters.count, source_work, work_limit)
                             for parameter in parameters |parameter_name, source_work, work_limit|:
-                                return true if not proof_replay_local_binding_parameter_name_present_work_charge(1 + sview_len(parameter.name) + sview_len(parameter_name), source_work, work_limit)
+                                return true if not proof_replay_local_binding_parameter_name_present_work_charge(1, source_work, work_limit)
+                                return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(parameter.name), source_work, work_limit)
+                                return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(parameter_name), source_work, work_limit)
                                 return true if parameter.name == parameter_name
                             return false
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
@@ -134,7 +118,8 @@ extend ElisaProof:
         # callers cannot accept a generated local when collision freedom is unknown.
         def proof_replay_local_binding_global_constant_named_with_work(declarations: darray[Ast::Decl]&, target: sview, source_work: mutable usize&, work_limit: usize, depth: usize) -> bool:
             return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            return true if not proof_replay_local_binding_parameter_name_present_work_charge(1 + sview_len(target), source_work, work_limit)
+            return true if not proof_replay_local_binding_parameter_name_present_work_charge(1, source_work, work_limit)
+            return true if not proof_replay_local_binding_parameter_name_present_work_charge(sview_len(target), source_work, work_limit)
             return true if not proof_replay_local_binding_parameter_name_present_work_charge(declarations.count, source_work, work_limit)
             for declaration in declarations |target, source_work, work_limit, depth|:
                 return true if not proof_replay_local_binding_parameter_name_present_work_charge(1, source_work, work_limit)
@@ -347,8 +332,7 @@ extend ElisaProof:
             return false if consumer_line == 0 or target == ""
             function_body: mutable darray[Ast::Stmt] = []
             owner_matches: mutable usize = 0
-            proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
-            return false if owner_matches != 1
+            return false if not proof_replay_local_binding_find_owner_with_work(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
             candidates: mutable usize = 0
             prefix_unambiguous: mutable bool = true
             for index in 0..<function_body.count |index, function_body, consumer_line, report, trace, target, source_value, require_rebind, candidates, prefix_unambiguous, source_work|:
@@ -463,6 +447,10 @@ extend ElisaProof:
             replay_owner_line: u32 = report.replay_owner_line
             trace_owner_line: u32 = report.trace_owner_line
             return false if trace.name == "" or replay_owner_line == 0 or trace_owner_line == 0
+            # Local-binding reconstruction consults source names and aliases without a resolved
+            # import witness. Refuse it when an imported declaration may change that identity.
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(_, _), TokenKind.EqEq, _, _):
                     return proof_replay_local_binding_fact_live_with_cache(report, trace, source_work, cache)

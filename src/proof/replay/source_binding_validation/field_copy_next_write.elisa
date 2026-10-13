@@ -29,8 +29,10 @@ extend ElisaProof:
                         return false if not proof_replay_field_copy_declaration_scan_cost(nested, cost, depth + 1)
                     Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _) | Ast::Decl.Law(name, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
                         return false if not proof_replay_field_copy_work_charge(sview_len(name), cost)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
+                        return false
                     _:
-                        pass
+                        return false
             return true
 
         def proof_replay_field_copy_expr_cost(expression: Ast::Expr, work: usize) -> (complete: bool, cost: usize):
@@ -77,7 +79,9 @@ extend ElisaProof:
                             origin: usize = report.traces.origin_indices[certificate.facts_start + fact_index]
                             continue if origin >= report.traces.records.count
                             source_trace: ProofFactTrace = report.traces.records[origin]
-                            return false if not proof_replay_field_copy_work_charge(sview_len(source_trace.kind) + sview_len(source_trace.name) + sview_len(trace.name), work)
+                            return false if not proof_replay_field_copy_work_charge(sview_len(source_trace.kind), work)
+                            return false if not proof_replay_field_copy_work_charge(sview_len(source_trace.name), work)
+                            return false if not proof_replay_field_copy_work_charge(sview_len(trace.name), work)
                             if source_trace.kind == "type-bound" and source_trace.name == trace.name:
                                 fact: Ast::Expr = report.certificate_facts[certificate.facts_start + fact_index]
                                 fact_cost: (complete: bool, cost: usize) = proof_replay_field_copy_expr_cost(fact, work)
@@ -121,11 +125,14 @@ extend ElisaProof:
                         pass
             return false
 
-        def proof_replay_field_copy_next_write_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_field_copy_next_write_source(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
-            work: mutable usize = 0
-            return false if not proof_replay_field_copy_work_charge(sview_len(certificate.name) + sview_len(trace.name) + sview_len(certificate.rule), &work)
+            return false if not proof_replay_field_copy_work_charge(sview_len(certificate.name), source_work)
+            return false if not proof_replay_field_copy_work_charge(sview_len(trace.name), source_work)
+            return false if not proof_replay_field_copy_work_charge(sview_len(certificate.rule), source_work)
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line or (certificate.rule != "index-lower" and certificate.rule != "index-upper")
             return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
@@ -137,29 +144,34 @@ extend ElisaProof:
                             root <- receiver
                         _:
                             return false
-                    return false if not proof_replay_field_copy_work_charge(sview_len(target) + sview_len(root), &work)
+                    return false if not proof_replay_field_copy_work_charge(sview_len(target), source_work)
+                    return false if not proof_replay_field_copy_work_charge(sview_len(root), source_work)
                     return false if target == "" or proof_internal_name_is_rebind(target) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), Ast::expr_pos(trace.expression))
-                    declaration_cost: mutable usize = 0
+                    declaration_start: usize = source_work
+                    declaration_cost: mutable usize = declaration_start
                     return false if not proof_replay_field_copy_declaration_scan_cost(report.source_declarations, &declaration_cost, 0)
-                    return false if declaration_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3
-                    return false if not proof_replay_field_copy_work_charge(declaration_cost * 3, &work)
+                    declaration_scan_cost: usize = declaration_cost - declaration_start
+                    source_work <- declaration_cost
+                    return false if declaration_scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 3
+                    return false if not proof_replay_field_copy_work_charge(declaration_scan_cost * 3, source_work)
                     context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
                     return false if not context.known
-                    return false if not proof_replay_field_copy_work_charge(context.formals.count, &work)
-                    for formal in context.formals |formal, root, target, work|:
-                        formal_compare_cost: usize = sview_len(formal) + sview_len(root) + sview_len(target)
-                        return false if formal_compare_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3
-                        return false if not proof_replay_field_copy_work_charge(formal_compare_cost * 3, &work)
+                    return false if not proof_replay_field_copy_work_charge(context.formals.count, source_work)
+                    for formal in context.formals |formal, root, target, source_work|:
+                        for compare_pass in 0..<3 |compare_pass, formal, root, target, source_work|:
+                            return false if not proof_replay_field_copy_work_charge(sview_len(formal), source_work)
+                            return false if not proof_replay_field_copy_work_charge(sview_len(root), source_work)
+                            return false if not proof_replay_field_copy_work_charge(sview_len(target), source_work)
                     return false if any formal in context.formals where formal == target
                     return false if not any formal in context.formals where formal == root
                     body_cost: mutable usize = 0
-                    return false if not proof_replay_summary_expr_cost_body(context.body, &body_cost, work, 0)
-                    return false if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2
-                    return false if not proof_replay_field_copy_work_charge(body_cost * 2, &work)
-                    return false if body_cost != 0 and declaration_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / body_cost
-                    return false if not proof_replay_field_copy_work_charge(body_cost * declaration_cost, &work)
-                    return false if not proof_replay_local_binding_parameter_source_unshadowed_with_work(report.source_declarations, trace.name, report.replay_owner_line, root, work)
-                    return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    return proof_replay_field_copy_next_write_body(report, trace, certificate, context.body, target, source_value, declaration_cost, 0, &work)
+                    return false if not proof_replay_summary_expr_cost_body(context.body, &body_cost, source_work, 0)
+                    return false if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 2
+                    return false if not proof_replay_field_copy_work_charge(body_cost * 2, source_work)
+                    return false if body_cost != 0 and declaration_scan_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / body_cost
+                    return false if not proof_replay_field_copy_work_charge(body_cost * declaration_scan_cost, source_work)
+                    return false if not proof_replay_local_binding_parameter_source_unshadowed_with_work(report.source_declarations, trace.name, report.replay_owner_line, root, source_work)
+                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return proof_replay_field_copy_next_write_body(report, trace, certificate, context.body, target, source_value, declaration_scan_cost, 0, source_work)
                 _:
                     return false

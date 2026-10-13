@@ -18,44 +18,60 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_local_binding_variant_enum_name(pattern: Ast::Pattern) -> sview:
+        def proof_replay_local_binding_variant_enum_name_with_work(pattern: Ast::Pattern, source_work: mutable usize&) -> (complete: bool, name: sview):
             match pattern:
                 Ast::Pattern.Variant(path, _):
+                    return (false, "") if not proof_replay_source_work_charge_or_exhaust(sview_len(path), source_work)
                     split: mutable usize = 0
                     dots: mutable usize = 0
                     for offset in 0..<sview_len(path) |offset, path, split, dots|:
                         if sview_at(path, offset) == PROOF_ASCII_DECIMAL_POINT:
                             split <- offset
                             dots <- dots + 1
-                    return "" if dots != 1 or split == 0
-                    return string_view_slice(path, 0, split.i64())
+                    return (true, "") if dots != 1 or split == 0
+                    return (true, string_view_slice(path, 0, split.i64()))
                 _:
-                    return ""
+                    return (true, "")
 
-        def proof_replay_local_binding_enum_parameter_type_name(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize) -> sview:
-            return "" if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, parameter_name, depth|:
+        def proof_replay_local_binding_enum_parameter_type_name_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, type_name: sview):
+            scanned: (complete: bool, matches: usize, type_name: sview) = proof_replay_local_binding_enum_parameter_type_scan_with_work(declarations, owner, owner_line, parameter_name, source_work, depth)
+            return (false, "") if scanned.complete and scanned.matches > 1
+            return (scanned.complete, scanned.type_name) if scanned.complete and scanned.matches == 1
+            return (scanned.complete, "")
+
+        def proof_replay_local_binding_enum_parameter_type_scan_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, source_work: mutable usize&, depth: usize) -> (complete: bool, matches: usize, type_name: sview):
+            return (false, 0, "") if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or owner == "" or owner_line == 0 or parameter_name == ""
+            matches: mutable usize = 0
+            type_name: mutable sview = ""
+            for declaration in declarations |owner, owner_line, parameter_name, depth, matches, type_name, source_work|:
+                return (false, 0, "") if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        return (false, 0, "") if not proof_replay_mutable_local_text_compare_work_charge(name, owner, source_work)
                         if name == owner and position.line == owner_line:
-                            matches: mutable usize = 0
-                            type_name: mutable sview = ""
-                            for parameter in parameters |parameter_name, matches, type_name|:
+                            for parameter in parameters |parameter_name, matches, type_name, source_work|:
+                                return (false, 0, "") if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                                return (false, 0, "") if not proof_replay_mutable_local_text_compare_work_charge(parameter.name, parameter_name, source_work)
                                 if parameter.name == parameter_name:
                                     matches <- matches + 1
+                                    return (false, 0, "") if not proof_replay_summary_expr_repeat_charge_with_limit(parameter.type_expression, 1, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                                     match parameter.type_expression:
                                         Ast::Expr.Ident(found, _):
                                             type_name <- found if not proof_replay_local_binding_mutable_integer_type(parameter.type_expression)
                                         _:
                                             type_name <- ""
-                            return "" if matches != 1
-                            return type_name
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        nested_type: sview = proof_replay_local_binding_enum_parameter_type_name(nested, owner, owner_line, parameter_name, depth + 1)
-                        return nested_type if nested_type != ""
-                    _:
+                        nested_result: (complete: bool, matches: usize, type_name: sview) = proof_replay_local_binding_enum_parameter_type_scan_with_work(nested, owner, owner_line, parameter_name, source_work, depth + 1)
+                        return nested_result if not nested_result.complete
+                        matches <- matches + nested_result.matches
+                        type_name <- nested_result.type_name if nested_result.matches == 1
+                    Ast::Decl.Invalid:
+                        return (false, 0, "")
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
-            return ""
+                    _:
+                        return (false, 0, "")
+            (true, matches, type_name)
 
         def proof_replay_local_binding_arm_prefix_safe(arm: Ast::MatchArm) -> bool:
             match arm.guard:
@@ -140,10 +156,13 @@ extend ElisaProof:
                             candidate_matches <- candidate_matches + target_count
                             continue if target_count != 1
                             subject_name: sview = proof_ident_name(subject)
-                            pattern_enum: sview = proof_replay_local_binding_variant_enum_name(arm.pattern)
+                            pattern_enum_result: (complete: bool, name: sview) = proof_replay_local_binding_variant_enum_name_with_work(arm.pattern, source_work)
+                            return false if not pattern_enum_result.complete
+                            pattern_enum: sview = pattern_enum_result.name
                             return false if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, source_work)
                             return false if pattern_enum == "" or not proof_replay_local_binding_parameter_source_unshadowed_with_work(report.source_declarations, trace.name, report.replay_owner_line, subject_name, source_work)
-                            return false if proof_replay_local_binding_enum_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, subject_name, 0) != pattern_enum
+                            enum_parameter_type: (complete: bool, type_name: sview) = proof_replay_local_binding_enum_parameter_type_name_with_work(report.source_declarations, trace.name, report.replay_owner_line, subject_name, source_work, 0)
+                            return false if not enum_parameter_type.complete or enum_parameter_type.type_name != pattern_enum
                             return false if not prefix_unambiguous
                             names: mutable darray[sview] = []
                             types: mutable darray[Ast::Expr] = []
@@ -231,8 +250,11 @@ extend ElisaProof:
                                     target_type: sview = proof_replay_local_binding_integer_type_name(type_expression, 0)
                                     match initializer:
                                         Ast::Expr.Call(Ast::Expr.Field(Ast::Expr.Ident(source_name, _), method, _), arguments, _, _):
-                                            source_type: mutable sview = proof_replay_local_binding_integer_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name, 0)
+                                            source_type_result: (complete: bool, type_name: sview) = proof_replay_local_binding_integer_parameter_type_name_with_work(report.source_declarations, trace.name, report.replay_owner_line, source_name, source_work, 0)
+                                            return false if not source_type_result.complete
+                                            source_type: mutable sview = source_type_result.type_name
                                             source_type <- proof_replay_local_binding_unwritten_parameter_type_name(report.source_declarations, trace.name, report.replay_owner_line, source_name, source_work) if source_type == ""
+                                            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                                             source_expression: Ast::Expr = Ast::Expr.Ident(source_type, position)
                                             target_unsigned: i64 = proof_unsigned_type_width_with_work(type_expression, report.source_declarations, 0, source_work)
                                             target_signed: i64 = proof_signed_type_width_with_work(type_expression, report.source_declarations, 0, source_work)

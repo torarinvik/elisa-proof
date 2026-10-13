@@ -26,7 +26,9 @@ extend ElisaProof:
             (true, true)
 
         def proof_replay_integer_constant_lookup(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, wanted: darray[sview]&, current: darray[sview]&, name: sview, line: u32, work: mutable usize&, depth: usize) -> (visible: bool, valid: bool, matches: usize):
-            return (true, false, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (true, false, 0)
             visible: mutable bool = false
             valid: mutable bool = false
             matches: mutable usize = 0
@@ -56,7 +58,13 @@ extend ElisaProof:
                                     _: false
                     Ast::Decl.Module(module_name, body, _):
                         scope_copy_work: usize = current.count
-                        if not proof_replay_integer_constant_work_charge(scope_copy_work, work) or not proof_replay_integer_constant_work_charge(sview_len(module_name), work):
+                        module_bytes: usize = sview_len(module_name)
+                        if not proof_replay_integer_constant_work_charge(scope_copy_work, work):
+                            return (true, false, matches)
+                        if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or module_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
+                            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return (true, false, matches)
+                        if not proof_replay_integer_constant_work_charge(module_bytes * 3, work):
                             return (true, false, matches)
                         next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(current, module_name)
                         child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, next_scope, name, line, work, depth + 1)
@@ -68,12 +76,20 @@ extend ElisaProof:
                         visible <- visible or child.visible
                         valid <- child.valid if child.visible
                         matches <- matches + child.matches
-                    _:
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (true, false, matches)
+                    _:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (true, false, matches)
             (visible, valid, matches)
 
         def proof_replay_integer_constant_owner(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, scope: darray[sview]&, trace: ProofFactTrace, name: sview, owner_line: u32, work: mutable usize&, depth: usize) -> (matches: usize, candidates: usize):
-            return (0, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return (0, 0)
             matches: mutable usize = 0
             candidates: mutable usize = 0
             for declaration in declarations |all_declarations, scope, trace, name, owner_line, work, depth, matches, candidates|:
@@ -98,7 +114,13 @@ extend ElisaProof:
                                 found <- proof_replay_integer_constant_lookup(all_declarations, all_declarations, root_scope, root_scope, name, trace.line, work, 0)
                             candidates <- candidates + 1 if found.valid and found.matches == 1
                     Ast::Decl.Module(module_name, body, _):
-                        if not proof_replay_integer_constant_work_charge(scope.count, work) or not proof_replay_integer_constant_work_charge(sview_len(module_name), work):
+                        module_bytes: usize = sview_len(module_name)
+                        if not proof_replay_integer_constant_work_charge(scope.count, work):
+                            return (matches, candidates)
+                        if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or module_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3:
+                            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return (matches, candidates)
+                        if not proof_replay_integer_constant_work_charge(module_bytes * 3, work):
                             return (matches, candidates)
                         next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(scope, module_name)
                         child = proof_replay_integer_constant_owner(body, all_declarations, next_scope, trace, name, owner_line, work, depth + 1)
@@ -108,8 +130,14 @@ extend ElisaProof:
                         child = proof_replay_integer_constant_owner(body, all_declarations, scope, trace, name, owner_line, work, depth + 1)
                         matches <- matches + child.matches
                         candidates <- candidates + child.candidates
-                    _:
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (matches, candidates)
+                    _:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return (matches, candidates)
             (matches, candidates)
 
         def proof_replay_integer_constant_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
@@ -124,6 +152,8 @@ extend ElisaProof:
             return false if not marker.known
             name: sview = proof_ident_name(marker.term)
             return false if name == ""
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             root_scope: darray[sview] = []
             owned = proof_replay_integer_constant_owner(report.source_declarations, report.source_declarations, root_scope, trace, name, report.replay_owner_line, work, 0)
             work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and owned.matches == 1 and owned.candidates == 1
