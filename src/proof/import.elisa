@@ -5,8 +5,11 @@
 extend ElisaProof:
     private:
         const PROOF_IMPORT_PATH_BUFFER_SIZE: usize = 4096
+        # A normalized path shorter than PATH_BUFFER_SIZE cannot need this many retained
+        # one-byte components. Bound scratch index arrays even when `..` later cancels a long
+        # prefix; an empty result from normalization signals excessive path complexity.
+        const PROOF_IMPORT_PATH_COMPONENT_MAX: usize = 2048
         const PROOF_IMPORT_INCLUDE_DEPTH_LIMIT: i64 = 64
-        const PROOF_IMPORT_BYTE_NUL: u8 = 0
         const PROOF_IMPORT_BYTE_TAB: u8 = 9
         const PROOF_IMPORT_BYTE_LINE_FEED: u8 = 10
         const PROOF_IMPORT_BYTE_VERTICAL_TAB: u8 = 11
@@ -34,6 +37,14 @@ extend ElisaProof:
         # complete include-once expansion. Without it, a graph of many individually acceptable
         # files could retain an arbitrarily large parser input before semantic checking begins.
         const PROOF_IMPORT_EXPANDED_SOURCE_MAX_BYTES: usize = 134217728
+        # Bound aggregate I/O and include graph bookkeeping separately from emitted text.
+        # Include directives disappear during expansion, so output size alone cannot limit
+        # a broad graph of empty or nearly empty files.
+        const PROOF_IMPORT_TOTAL_READ_MAX_BYTES: usize = 134217728
+        const PROOF_IMPORT_MAX_FILES: usize = 4096
+        const PROOF_IMPORT_PATH_METADATA_MAX_BYTES: usize = 4194304
+        const PROOF_IMPORT_SOURCE_MAP_MAX_LINES: usize = 1048576
+        const PROOF_IMPORT_PATH_SCAN_WORK_MAX: usize = 67108864
 
         def proof_path_directory(path: darray[u8]&) -> darray[u8]:
             directory: mutable darray[u8] = []
@@ -117,6 +128,7 @@ extend ElisaProof:
                         else:
                             keep <- not rooted
                     if keep:
+                        return [] if depth >= PROOF_IMPORT_PATH_COMPONENT_MAX
                         if depth < starts.count:
                             starts[depth] <- segment_start
                             lengths[depth] <- length
@@ -141,7 +153,7 @@ extend ElisaProof:
         # invoking `elisa-proof file.elisa` instead of an absolute path.
         def proof_absolute_path(path: darray[u8]&) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read, Global.Write]:
             normalized: darray[u8] = proof_normalize_path(path)
-            return normalized if proof_path_is_absolute(normalized)
+            return normalized if normalized.count == 0 or proof_path_is_absolute(normalized)
             cwd_buffer: mutable darray[u8] = []
             cwd_buffer.resize(PROOF_IMPORT_PATH_BUFFER_SIZE)
             target: void& = (&cwd_buffer[0]).cast[void&] can Unsafe.PointerCast
@@ -193,11 +205,6 @@ extend ElisaProof:
 
         def proof_import_space(byte: u8) -> bool:
             return byte == PROOF_IMPORT_BYTE_TAB or byte == PROOF_IMPORT_BYTE_LINE_FEED or byte == PROOF_IMPORT_BYTE_VERTICAL_TAB or byte == PROOF_IMPORT_BYTE_FORM_FEED or byte == PROOF_IMPORT_BYTE_CARRIAGE_RETURN or byte == PROOF_IMPORT_BYTE_SPACE
-
-        def proof_import_path_has_nul(path: darray[u8]&) -> bool:
-            for byte in path |path|:
-                return true if byte == PROOF_IMPORT_BYTE_NUL
-            return false
 
         # Append one source line including its newline only when the aggregate expansion budget
         # still contains the complete record. Returning false is an import failure, never a
@@ -269,14 +276,17 @@ extend ElisaProof:
                         if quoted_path:
                             captured: mutable darray[u8] = []
                             for offset in 1..<(argument_end - argument_start - 1) |captured, line, argument_start|:
+                                return (true, captured) if captured.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                                 captured.push(line[argument_start + offset])
                             return (true, captured)
+                        return (true, proof_include_path_prefix(line, argument_start, argument_end)) if argument_end - argument_start >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                         has_space: mutable bool = false
                         for offset in argument_start..<argument_end |has_space, line|:
                             has_space <- true if proof_import_space(line[offset])
                         if not has_space:
                             captured: mutable darray[u8] = []
                             for offset in argument_start..<argument_end |captured, line|:
+                                return (true, captured) if captured.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                                 captured.push(line[offset])
                             return (true, captured)
                 return (false, empty)
@@ -299,6 +309,7 @@ extend ElisaProof:
             return (false, empty) if end - cursor < 2 or line[cursor] != PROOF_IMPORT_BYTE_DOUBLE_QUOTE or line[end - 1] != PROOF_IMPORT_BYTE_DOUBLE_QUOTE
             captured: mutable darray[u8] = []
             for offset in (cursor + 1)..<(end - 1) |captured, line, cursor|:
+                return (true, captured) if captured.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                 captured.push(line[offset])
             return (true, captured)
 
@@ -356,11 +367,13 @@ extend ElisaProof:
             inner_start: usize = argument_start + 1 if quoted else argument_start
             inner_stop: usize = argument_stop - 1 if quoted else argument_stop
             return empty if inner_stop <= inner_start
+            return proof_include_path_prefix(line, inner_start, inner_stop) if not quoted and inner_stop - inner_start >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
             if not quoted:
                 for offset in inner_start..<inner_stop |empty, line|:
                     return empty if proof_import_blank(line[offset])
             captured: mutable darray[u8] = []
             for offset in inner_start..<inner_stop |captured, line|:
+                return captured if captured.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                 captured.push(line[offset])
             return captured
 
@@ -391,6 +404,7 @@ extend ElisaProof:
             captured: mutable darray[u8] = []
             while cursor < line.count |cursor, line, captured|:
                 break if line[cursor] == PROOF_IMPORT_BYTE_DOUBLE_QUOTE
+                return captured if captured.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES
                 captured.push(line[cursor])
                 cursor <- cursor + 1
             return empty if cursor >= line.count
@@ -414,10 +428,18 @@ extend ElisaProof:
         # lists files in first-visit order) and the 1-based line there of expanded line k + 1.
         # Include directives are dropped from the expansion, so without the map a line number
         # past the first include no longer points into any one file.
-        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, depth: i64, failed: mutable bool&, root_read_failed: mutable bool&, line_files: mutable darray[u32]&, line_numbers: mutable darray[u32]&, capture_source_map: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read, Global.Write]:
+        def proof_expand_file(path: darray[u8]&, output: mutable darray[u8]&, seen: mutable darray[u8]&, active: mutable darray[u8]&, total_read: mutable usize&, path_scan_work: mutable usize&, file_count: mutable usize&, depth: i64, failed: mutable bool&, root_read_failed: mutable bool&, line_files: mutable darray[u32]&, line_numbers: mutable darray[u32]&, capture_source_map: bool) -> void can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read, Global.Write]:
             if depth > PROOF_IMPORT_INCLUDE_DEPTH_LIMIT:
                 failed <- true
                 return
+            if path.count >= PROOF_IMPORT_PATH_BUFFER_SIZE:
+                failed <- true
+                return
+            path_scan_charge: usize = (seen.count + active.count) * 2 + path.count * 8 + 2
+            if path_scan_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX or path_scan_charge > PROOF_IMPORT_PATH_SCAN_WORK_MAX - path_scan_work:
+                failed <- true
+                return
+            path_scan_work <- path_scan_work + path_scan_charge
             if proof_import_path_has_nul(path):
                 failed <- true
                 return
@@ -425,28 +447,36 @@ extend ElisaProof:
                 failed <- true
                 return
             return if proof_path_seen(seen, path)
-            file_index: mutable u32 = 0
-            for byte in seen |file_index|:
-                file_index <- file_index + 1 if byte == PROOF_IMPORT_BYTE_NUL
+            if path.count >= PROOF_IMPORT_PATH_METADATA_MAX_BYTES or seen.count > PROOF_IMPORT_PATH_METADATA_MAX_BYTES - path.count - 1:
+                failed <- true
+                return
+            if file_count >= PROOF_IMPORT_MAX_FILES:
+                failed <- true
+                return
+            file_index: u32 = file_count.u32()
             proof_record_path(seen, path)
             proof_record_path(active, path)
+            file_count <- file_count + 1
             path_storage: mutable darray[u8] = []
             path_storage.extend(path)
             path_storage.push(0)
             path_cstr: cstr = (&path_storage[0]).cast[cstr] can Unsafe.PointerCast
-            read_result: (ok: bool, contents: darray[u8]) = (proof_read_file_checked(path_cstr) can Global{Read,Write})
+            read_remaining: usize = PROOF_IMPORT_TOTAL_READ_MAX_BYTES - total_read
+            per_file_limit: usize = PROOF_INPUT_FILE_MAX_BYTES if PROOF_INPUT_FILE_MAX_BYTES < read_remaining else read_remaining
+            read_result: (ok: bool, contents: darray[u8]) = (proof_read_file_checked_with_limit(path_cstr, per_file_limit) can Global{Read,Write})
             if not read_result.ok:
                 failed <- true
                 root_read_failed <- true if depth == 0
                 active.count <- active.count - path.count - 1
                 return
             contents: darray[u8] = read_result.contents
+            total_read <- total_read + contents.count
             directory: darray[u8] = proof_path_directory(path)
             line: mutable darray[u8] = []
             index: mutable usize = 0
             source_line: mutable u32 = 0
             trailing_partial: bool = contents.count > 0 and contents[contents.count - 1] != PROOF_IMPORT_BYTE_LINE_FEED
-            while index < contents.count + (1 if trailing_partial else 0) and failed == false |index, contents, line, output, seen, active, directory, path, depth, failed, root_read_failed, trailing_partial, source_line, file_index, line_files, line_numbers, capture_source_map|:
+            while index < contents.count + (1 if trailing_partial else 0) and failed == false |index, contents, line, output, seen, active, total_read, path_scan_work, file_count, directory, path, depth, failed, root_read_failed, trailing_partial, source_line, file_index, line_files, line_numbers, capture_source_map|:
                 at_end: bool = index == contents.count
                 byte: u8 = PROOF_IMPORT_BYTE_LINE_FEED if at_end else contents[index]
                 if byte == PROOF_IMPORT_BYTE_LINE_FEED:
@@ -455,12 +485,28 @@ extend ElisaProof:
                     if not proof_include_agreement(line, included):
                         failed <- true
                     elif included.recognized:
-                        if proof_import_path_has_nul(included.path):
+                        if included.path.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES or directory.count >= PROOF_IMPORT_PATH_BUFFER_SIZE:
                             failed <- true
                         else:
+                            resolve_work: usize = (directory.count + included.path.count + 1) * 4
+                            if path_scan_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX or resolve_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX - path_scan_work:
+                                failed <- true
+                                continue
+                            path_scan_work <- path_scan_work + resolve_work
+                            if proof_import_path_has_nul(included.path):
+                                failed <- true
+                                continue
                             resolved: darray[u8] = proof_resolve_include(directory, included.path)
-                            (proof_expand_file(resolved, output, seen, active, depth + 1, failed, root_read_failed, line_files, line_numbers, capture_source_map) can Global{Read,Write})
+                            if resolved.count == 0 or resolved.count >= PROOF_IMPORT_PATH_BUFFER_SIZE:
+                                failed <- true
+                                continue
+                            (proof_expand_file(resolved, output, seen, active, total_read, path_scan_work, file_count, depth + 1, failed, root_read_failed, line_files, line_numbers, capture_source_map) can Global{Read,Write})
                     else:
+                        if capture_source_map and line_files.count >= PROOF_IMPORT_SOURCE_MAP_MAX_LINES:
+                            failed <- true
+                            line <- line.truncate(0)
+                            index <- index + 1
+                            continue
                         if proof_import_append_line(output, line):
                             if capture_source_map:
                                 line_files.push(file_index)
@@ -487,11 +533,40 @@ extend ElisaProof:
             def proof_import_source_mapped[@files, @line_files, @line_numbers](path: darray[u8]&, failed: mutable bool&, root_read_failed: mutable bool&, files: mutable darray[u8]& @files, line_files: mutable darray[u32]& @line_files, line_numbers: mutable darray[u32]& @line_numbers, capture_source_map: bool) -> darray[u8] can[Memory.Allocate, Abort.Panic, Unsafe.PointerCast, Global.Read, Global.Write]:
                 output: mutable darray[u8] = []
                 active: mutable darray[u8] = []
+                total_read: mutable usize = 0
+                path_scan_work: mutable usize = 0
+                file_count: mutable usize = 0
+                if path.count >= PROOF_IMPORT_RAW_PATH_MAX_BYTES:
+                    failed <- true
+                    root_read_failed <- true
+                    return output
+                if capture_source_map:
+                    # A source map is an output of this import operation. Accepting caller
+                    # supplied rows would let unrelated or forged provenance flow into the
+                    # parser's source bindings.
+                    if files.count != 0 or line_files.count != 0 or line_numbers.count != 0:
+                        failed <- true
+                        return output
+                # Absolute-path normalization may also inspect cwd/PWD and realpath buffers.
+                root_path_work: usize = path.count * 4 + PROOF_IMPORT_PATH_BUFFER_SIZE * 4
+                if path_scan_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX or root_path_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX - path_scan_work:
+                    failed <- true
+                    root_read_failed <- true
+                    return output
+                path_scan_work <- path_scan_work + root_path_work
+                if proof_import_path_has_nul(path):
+                    failed <- true
+                    root_read_failed <- true
+                    return output
                 normalized: darray[u8] = (proof_absolute_path(path) can Global{Read,Write})
+                if normalized.count == 0 or normalized.count >= PROOF_IMPORT_PATH_BUFFER_SIZE:
+                    failed <- true
+                    root_read_failed <- true
+                    return output
                 root_read_failed <- false
                 if capture_source_map:
-                    (proof_expand_file(normalized, &output, files, &active, 0, failed, root_read_failed, line_files, line_numbers, true) can Global{Read,Write})
+                    (proof_expand_file(normalized, &output, files, &active, &total_read, &path_scan_work, &file_count, 0, failed, root_read_failed, line_files, line_numbers, true) can Global{Read,Write})
                 else:
                     seen: mutable darray[u8] = []
-                    (proof_expand_file(normalized, &output, &seen, &active, 0, failed, root_read_failed, line_files, line_numbers, false) can Global{Read,Write})
+                    (proof_expand_file(normalized, &output, &seen, &active, &total_read, &path_scan_work, &file_count, 0, failed, root_read_failed, line_files, line_numbers, false) can Global{Read,Write})
                 return output

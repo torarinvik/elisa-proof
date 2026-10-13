@@ -1,0 +1,72 @@
+extend ElisaProofTheoremOutput:
+    private:
+        # Upper-bound the JSON object/array structures emitted for an expression. Text
+        # bytes are measured by proof_replay_summary_expr_cost and charged separately.
+        def proof_suggestion_json_units_add(left: usize, right: usize) -> usize:
+            return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if left > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1 if right > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - left
+            left + right
+
+        def proof_suggestion_json_expr_units(expression: Ast::Expr, depth: usize) -> usize:
+            requires depth <= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT
+            decreases PROOF_THEOREM_OUTPUT_DEPTH_LIMIT - depth
+            if depth >= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT:
+                return PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            unit: mutable usize = 1
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(inner, depth + 1))
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(left, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(right, depth + 1))
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(object, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(low, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(high, depth + 1))
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(callee, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, argument_names.count)
+                    for argument in arguments |unit, depth|:
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(argument, depth + 1))
+                Ast::Expr.ShorthandMember(parts, _):
+                    unit <- proof_suggestion_json_units_add(unit, parts.count)
+                Ast::Expr.IndexN(object, arguments, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(object, depth + 1))
+                    for argument in arguments |unit, depth|:
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(argument, depth + 1))
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |unit, depth|:
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(element, depth + 1))
+                Ast::Expr.DictLit(entries, _):
+                    unit <- proof_suggestion_json_units_add(unit, entries.count)
+                    for entry in entries |unit, depth|:
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(entry.key, depth + 1))
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(entry.value, depth + 1))
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(base, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, fields.count)
+                    for field in fields |unit, depth|:
+                        unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(field.value, depth + 1))
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(iterable, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(condition, depth + 1))
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(body, depth + 1))
+                Ast::Expr.Block(statements, value, _, _):
+                    unit <- proof_suggestion_json_units_add(unit, statements.count)
+                    for statement in statements |unit, depth|:
+                        match statement:
+                            Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                                unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(type_expression, depth + 1))
+                                unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(initializer, depth + 1))
+                            _:
+                                pass
+                    unit <- proof_suggestion_json_units_add(unit, proof_suggestion_json_expr_units(value, depth + 1))
+                _:
+                    pass
+            return unit
+
+        def proof_suggestion_output_expr_cost_reserve(expression: Ast::Expr, cost: usize, work: mutable usize&) -> bool:
+            return false if not proof_suggestion_work_charge(&work, cost)
+            units: usize = proof_suggestion_json_expr_units(expression, 0)
+            return false if units > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return proof_suggestion_product_charge(&work, units, 1, 128) and proof_suggestion_product_charge(&work, cost, 1, 6)

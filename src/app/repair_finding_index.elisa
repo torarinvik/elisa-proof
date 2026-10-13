@@ -1,0 +1,120 @@
+# Linear-time index for binding repair-queue rows to report findings. Goal IDs remain the
+# authoritative key; legacy diagnostics use a unique-only (line, name) fallback.
+const PROOF_REPAIR_FINDING_INDEX_MAX_CLUSTER: usize = 128
+
+struct ProofRepairFindingLookupIndex:
+    exact_indices: mutable darray[usize] = []
+    exact_present: mutable darray[bool] = []
+    slot_values: mutable darray[usize] = []
+    names: mutable darray[sview] = []
+    lines: mutable darray[u32] = []
+    hashes: mutable darray[u32] = []
+    counts: mutable darray[usize] = []
+    first_indices: mutable darray[usize] = []
+    valid: bool = false
+
+def proof_repair_finding_key_hash(line: u32, name: sview, work_used: mutable usize&) -> (complete: bool, hash: u32):
+    return (false, 0) if not proof_output_reserve_status_snapshot_work(work_used, sview_len(name))
+    hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+    for offset in 0..<sview_len(name) |offset, name, hash|:
+        hash <- ((hash ^ sview_at(name, offset).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+    return (false, 0) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+    hash <- ((hash ^ line.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+    (true, hash.u32())
+
+def proof_repair_finding_index_add(index: mutable ProofRepairFindingLookupIndex&, line: u32, name: sview, finding_index: usize, work_used: mutable usize&) -> bool:
+    capacity: usize = index.slot_values.count
+    return false if not index.valid or capacity == 0 or index.names.count != index.lines.count or index.names.count != index.hashes.count or index.names.count != index.counts.count or index.names.count != index.first_indices.count
+    key_hash: (complete: bool, hash: u32) = proof_repair_finding_key_hash(line, name, work_used)
+    return false if not key_hash.complete
+    slot: mutable usize = (key_hash.hash.i64() % capacity.i64()).usize()
+    probes: mutable usize = 0
+    while probes < capacity and probes < PROOF_REPAIR_FINDING_INDEX_MAX_CLUSTER |slot, probes, capacity, key_hash, line, name, finding_index, index, work_used|:
+        return false if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        current: usize = index.slot_values[slot]
+        if current == capacity:
+            return false if not proof_output_reserve_status_snapshot_work(work_used, 6)
+            new_index: usize = index.names.count
+            index.names.push(name)
+            index.lines.push(line)
+            index.hashes.push(key_hash.hash)
+            index.counts.push(1)
+            index.first_indices.push(finding_index)
+            index.slot_values[slot] <- new_index
+            return true
+        return false if current >= index.names.count or current >= index.lines.count or current >= index.hashes.count or current >= index.counts.count or current >= index.first_indices.count
+        if index.hashes[current] == key_hash.hash and index.lines[current] == line:
+            equal: (complete: bool, equal: bool) = proof_output_text_equal_with_work(index.names[current], name, work_used)
+            return false if not equal.complete
+            if equal.equal:
+                index.counts[current] <- index.counts[current] + 1
+                return true
+        slot <- (slot + 1) % capacity
+        probes <- probes + 1
+    return false
+
+def proof_repair_finding_index_build(report: ProofReport&, goal_count: usize, work_used: mutable usize&) -> ProofRepairFindingLookupIndex can[Memory.Allocate]:
+    index: mutable ProofRepairFindingLookupIndex = ProofRepairFindingLookupIndex{}
+    limit: usize = ElisaProof::proof_replay_summary_source_work_limit()
+    return index if goal_count > limit / 4
+    return index if not proof_output_reserve_status_snapshot_work(work_used, goal_count * 4)
+    index.exact_indices.resize(goal_count)
+    index.exact_present.resize(goal_count)
+    for goal_id in 0..<goal_count |goal_id, index|:
+        index.exact_indices[goal_id] <- 0
+        index.exact_present[goal_id] <- false
+    legacy_count: mutable usize = 0
+    for finding_index in 0..<report.results.findings.count |finding_index, report, index, legacy_count, goal_count, work_used|:
+        return ProofRepairFindingLookupIndex{} if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        finding: ProofFinding = report.results.findings[finding_index]
+        if finding.has_goal:
+            if finding.goal_id < goal_count and not index.exact_present[finding.goal_id]:
+                index.exact_indices[finding.goal_id] <- finding_index
+                index.exact_present[finding.goal_id] <- true
+        else:
+            legacy_count <- legacy_count + 1
+    if legacy_count > 0:
+        return ProofRepairFindingLookupIndex{} if legacy_count > limit / 2
+        target_capacity: usize = legacy_count * 2
+        capacity: mutable usize = 1
+        while capacity < target_capacity |capacity, target_capacity|:
+            return ProofRepairFindingLookupIndex{} if capacity > limit / 2
+            capacity <- capacity * 2
+        return ProofRepairFindingLookupIndex{} if capacity > limit / 2 or not proof_output_reserve_status_snapshot_work(work_used, capacity * 2)
+        index.slot_values.resize(capacity)
+        for slot in 0..<capacity |slot, index, capacity|:
+            index.slot_values[slot] <- capacity
+    index.valid <- true
+    for finding_index in 0..<report.results.findings.count |finding_index, report, index, work_used|:
+        return ProofRepairFindingLookupIndex{} if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        finding: ProofFinding = report.results.findings[finding_index]
+        continue if finding.has_goal
+        return ProofRepairFindingLookupIndex{} if not proof_repair_finding_index_add(index, finding.line, finding.name, finding_index, work_used)
+    return index
+
+def proof_repair_finding_index_lookup(index: ProofRepairFindingLookupIndex&, attempt: ProofGoalAttempt, goal_id: usize, work_used: mutable usize&) -> (complete: bool, known: bool, index: usize, ambiguous: bool):
+    return (false, false, 0, false) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+    return (false, false, 0, false) if not index.valid or goal_id >= index.exact_present.count or goal_id >= index.exact_indices.count
+    if index.exact_present[goal_id]:
+        return (true, true, index.exact_indices[goal_id], false)
+    capacity: usize = index.slot_values.count
+    return (true, false, 0, false) if capacity == 0
+    return (false, false, 0, false) if index.names.count != index.lines.count or index.names.count != index.hashes.count or index.names.count != index.counts.count or index.names.count != index.first_indices.count
+    key_hash: (complete: bool, hash: u32) = proof_repair_finding_key_hash(attempt.line, attempt.name, work_used)
+    return (false, false, 0, false) if not key_hash.complete
+    slot: mutable usize = (key_hash.hash.i64() % capacity.i64()).usize()
+    probes: mutable usize = 0
+    while probes < capacity and probes < PROOF_REPAIR_FINDING_INDEX_MAX_CLUSTER |slot, probes, capacity, key_hash, attempt, index, work_used|:
+        return (false, false, 0, false) if not proof_output_reserve_status_snapshot_work(work_used, 1)
+        current: usize = index.slot_values[slot]
+        return (true, false, 0, false) if current == capacity
+        return (false, false, 0, false) if current >= index.names.count or current >= index.lines.count or current >= index.hashes.count or current >= index.counts.count or current >= index.first_indices.count
+        if index.hashes[current] == key_hash.hash and index.lines[current] == attempt.line:
+            equal: (complete: bool, equal: bool) = proof_output_text_equal_with_work(index.names[current], attempt.name, work_used)
+            return (false, false, 0, false) if not equal.complete
+            if equal.equal:
+                return (true, true, index.first_indices[current], false) if index.counts[current] == 1
+                return (true, false, 0, true)
+        slot <- (slot + 1) % capacity
+        probes <- probes + 1
+    return (false, false, 0, false)
