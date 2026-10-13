@@ -1,20 +1,20 @@
 extend ElisaProof:
     private:
-        def proof_prepare_frame_producer_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_prepare_frame_producer_declarations(report: mutable ProofReport&, declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, depth: usize, frame_work: mutable usize&, work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             return false if depth >= 64
-            for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, work|:
+            for declaration in declarations |report, all_declarations, tokens, source, source_length, depth, frame_work, work|:
                 return false if work >= 4096
                 work <- work + 1
                 match declaration:
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not (proof_prepare_frame_producer_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, work) can Global{Read,Write})
+                        return false if not (proof_prepare_frame_producer_declarations(report, &nested, all_declarations, tokens, source, source_length, depth + 1, frame_work, work) can Global{Read,Write})
                     Ast::Decl.Func(name, _, _, _, _, _, position):
-                        inventory = (ElisaProofFrameSource::direct_events(all_declarations, name, position.line, tokens, source, source_length) can Global{Read,Write})
+                        inventory = (ElisaProofFrameSource::direct_events_with_work(all_declarations, report.source_annotations, name, position.line, tokens, source, source_length, frame_work) can Global{Read,Write})
                         if inventory.known and inventory.events.count > 0:
                             return false if report.frame_producer.rows.count > 4096 or inventory.events.count > 4096 - report.frame_producer.rows.count
-                            lowered = (ElisaProofFrameSource::lower_direct_events(all_declarations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET) can Global{Read,Write})
+                            lowered = (ElisaProofFrameSource::lower_direct_events_with_work(all_declarations, report.source_annotations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET, ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET, frame_work) can Global{Read,Write})
                             if lowered.known:
-                                decisions = (ElisaProofFrameSource::direct_event_decisions(all_declarations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, &lowered.roots) can Global{Read,Write})
+                                decisions = (ElisaProofFrameSource::direct_event_decisions_with_work(all_declarations, report.source_annotations, name, position.line, tokens, source, source_length, &report.kernel.nodes, &report.kernel.children, &lowered.roots, frame_work) can Global{Read,Write})
                                 if decisions.known:
                                     report.frame_producer.names.push(name)
                                     report.frame_producer.lines.push(position.line)
@@ -34,7 +34,18 @@ extend ElisaProof:
             ready: bool = (proof_prepare_semantic_source_with_diagnostics(file, report, diagnostics) can Global{Read,Write})
             return if not ready
             work: mutable usize = 0
-            complete: bool = (proof_prepare_frame_producer_declarations(report, &file.top_decls, &file.top_decls, tokens, source, source_length, 0, &work) can Global{Read,Write})
+            frame_import_work: mutable usize = 0
+            unresolved_frame_imports: bool = proof_replay_summary_has_unresolved_import(report.source_annotations, &frame_import_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return if not proof_source_analysis_charge_work(frame_import_work, work)
+            complete: mutable bool = true
+            return if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            frame_work_seed: usize = ElisaProofFrameSource::FRAME_SOURCE_REPLAY_WORK_LIMIT - (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work)
+            frame_work: mutable usize = frame_work_seed
+            if not unresolved_frame_imports:
+                complete <- (proof_prepare_frame_producer_declarations(report, &file.top_decls, &file.top_decls, tokens, source, source_length, 0, &frame_work, &work) can Global{Read,Write})
+                frame_work_debit: usize = frame_work - frame_work_seed
+                frame_work_charged: bool = proof_source_analysis_charge_work(frame_work_debit, work)
+                complete <- complete and frame_work_charged
             if not complete:
                 report.frame_producer.names.clear()
                 report.frame_producer.lines.clear()

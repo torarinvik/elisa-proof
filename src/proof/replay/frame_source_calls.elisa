@@ -1,5 +1,14 @@
 extend ElisaProofFrameSource:
     private:
+        def call_name_is_lemma(annotations: darray[Ast::EnumAnnotation]&, name: sview, work: mutable usize&) -> (complete: bool, lemma: bool):
+            for annotation in annotations |annotation, name, work|:
+                return (false, false) if not replay_work_charge(1, work)
+                return (false, false) if not replay_work_charge(sview_len(annotation.owner), work)
+                if annotation.owner == "__lemma":
+                    return (false, false) if not replay_work_charge(sview_len(annotation.name), work)
+                    return (true, true) if annotation.name == name
+            return (true, false)
+
         def call_expression_at(expression: Ast::Expr, position: Ast::Pos, depth: usize, work: mutable usize&, matches: mutable usize&, found: mutable Ast::Expr&) -> bool:
             return false if depth >= 64 or not replay_work_charge(1, work)
             match expression:
@@ -11,8 +20,15 @@ extend ElisaProofFrameSource:
                     return false if not call_expression_at(callee, position, depth + 1, work, matches, found)
                     for argument in arguments |position, depth, work, matches, found|:
                         return false if not call_expression_at(argument, position, depth + 1, work, matches, found)
+                Ast::Expr.Binary(left, TokenKind.And, right, _) | Ast::Expr.Binary(left, TokenKind.Or, right, _):
+                    return false if not call_expression_at(left, position, depth + 1, work, matches, found)
+                    return false if not call_expression_at(right, position, depth + 1, work, matches, found)
                 Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
                     return false if not call_expression_at(left, position, depth + 1, work, matches, found) or not call_expression_at(right, position, depth + 1, work, matches, found)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not call_expression_at(condition, position, depth + 1, work, matches, found)
+                    return false if not call_expression_at(then_expression, position, depth + 1, work, matches, found)
+                    return false if not call_expression_at(else_expression, position, depth + 1, work, matches, found)
                 Ast::Expr.Unary(_, inner, _) | Ast::Expr.Paren(inner, _) | Ast::Expr.Field(inner, _, _):
                     return false if not call_expression_at(inner, position, depth + 1, work, matches, found)
                 Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
@@ -28,8 +44,7 @@ extend ElisaProofFrameSource:
                 match statement:
                     Ast::Stmt.Contract(_, expression, _):
                         return false if not call_expression_at(expression, position, depth + 1, work, matches, found)
-                    Ast::Stmt.Assign(target, operator, value, _):
-                        return false if operator == TokenKind.Assign
+                    Ast::Stmt.Assign(target, _, value, _):
                         return false if not call_expression_at(target, position, depth + 1, work, matches, found) or not call_expression_at(value, position, depth + 1, work, matches, found)
                     Ast::Stmt.VarDecl(_, declared_type, value, _):
                         return false if not contract_scalar_type_with_work(declared_type, work) or not call_expression_at(value, position, depth + 1, work, matches, found)
@@ -45,34 +60,137 @@ extend ElisaProofFrameSource:
                         return false
             return true
 
-        def call_owner_line(declarations: darray[Ast::Decl]&, name: sview, depth: usize, work: mutable usize&, matches: mutable usize&, line: mutable u32&) -> bool:
+        def call_find_caller_module(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, found_path: mutable darray[sview]&, matches: mutable usize&) -> bool:
+            return false if depth >= 64 or not replay_work_charge(declarations.count, work)
+            for declaration in declarations |owner, owner_line, depth, work, current_path, found_path, matches|:
+                return false if not replay_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, position):
+                        return false if not replay_work_charge(sview_len(candidate), work)
+                        if candidate == owner and position.line == owner_line:
+                            matches <- matches + 1
+                            return false if matches > 1
+                            return false if not replay_work_charge(current_path.count, work)
+                            for module_name in current_path |module_name, work|:
+                                return false if not replay_work_charge(sview_len(module_name), work)
+                            found_path.extend(current_path)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not replay_work_charge(sview_len(module_name), work)
+                        current_path.push(module_name)
+                        return false if not call_find_caller_module(nested, owner, owner_line, depth + 1, work, current_path, found_path, matches)
+                        current_path <- current_path.truncate(current_path.count - 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not call_find_caller_module(nested, owner, owner_line, depth + 1, work, current_path, found_path, matches)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def call_owner_line(declarations: darray[Ast::Decl]&, name: sview, lemma_name: bool, caller_path: darray[sview]&, depth: usize, work: mutable usize&, current_path: mutable darray[sview]&, total_matches: mutable usize&, global_line: mutable u32&, global_path: mutable darray[sview]&, best_depth: mutable usize&, best_matches: mutable usize&, best_line: mutable u32&, best_path: mutable darray[sview]&, relevant_import: mutable bool&) -> bool:
             return false if depth >= 64
             return false if not replay_work_charge(declarations.count, work)
-            for declaration in declarations |name, depth, work, matches, line|:
+            for declaration in declarations |name, lemma_name, caller_path, depth, work, current_path, total_matches, global_line, global_path, best_depth, best_matches, best_line, best_path, relevant_import|:
+                return false if not replay_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Func(candidate, _, _, _, _, _, position):
                         return false if not replay_work_charge(sview_len(candidate), work)
                         if candidate == name:
-                            return false if matches != 0
-                            matches <- matches + 1
-                            line <- position.line
-                    Ast::Decl.Const(candidate, _, _, _, _) | Ast::Decl.Alias(candidate, _, _):
+                            continue if lemma_name
+                            total_matches <- total_matches + 1
+                            if total_matches == 1:
+                                global_line <- position.line
+                                global_path.clear()
+                                return false if not replay_work_charge(current_path.count, work)
+                                for module_name in current_path |module_name, work|:
+                                    return false if not replay_work_charge(sview_len(module_name), work)
+                                global_path.extend(current_path)
+                            return false if not replay_work_charge(current_path.count, work)
+                            prefix_matches: bool = current_path.count <= caller_path.count
+                            if prefix_matches:
+                                for index in 0..<current_path.count |index, current_path, caller_path, work, prefix_matches|:
+                                    return false if not replay_work_charge(sview_len(current_path[index]), work)
+                                    return false if not replay_work_charge(sview_len(caller_path[index]), work)
+                                    prefix_matches <- false if current_path[index] != caller_path[index]
+                            if prefix_matches:
+                                candidate_depth: usize = current_path.count
+                                if candidate_depth > best_depth:
+                                    best_depth <- candidate_depth
+                                    best_matches <- 1
+                                    best_line <- position.line
+                                    best_path.clear()
+                                    return false if not replay_work_charge(current_path.count, work)
+                                    for module_name in current_path |module_name, work|:
+                                        return false if not replay_work_charge(sview_len(module_name), work)
+                                    best_path.extend(current_path)
+                                elif candidate_depth == best_depth:
+                                    best_matches <- best_matches + 1
+                                    best_line <- position.line
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not replay_work_charge(sview_len(module_name), work)
+                        current_path.push(module_name)
+                        return false if not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, current_path, total_matches, global_line, global_path, best_depth, best_matches, best_line, best_path, relevant_import)
+                        current_path <- current_path.truncate(current_path.count - 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not call_owner_line(nested, name, lemma_name, caller_path, depth + 1, work, current_path, total_matches, global_line, global_path, best_depth, best_matches, best_line, best_path, relevant_import)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Import(candidate, _):
                         return false if not replay_work_charge(sview_len(candidate), work)
-                        return false if candidate == name
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not call_owner_line(&nested, name, depth + 1, work, matches, line)
-                    _:
+                        if candidate == name and current_path.count <= caller_path.count:
+                            candidate_import: mutable bool = true
+                            for index in 0..<current_path.count |index, current_path, caller_path, work, candidate_import|:
+                                return false if not replay_work_charge(sview_len(current_path[index]), work)
+                                return false if not replay_work_charge(sview_len(caller_path[index]), work)
+                                candidate_import <- false if current_path[index] != caller_path[index]
+                            relevant_import <- true if candidate_import
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    _:
+                        return false
             return true
 
     public:
-        # Resolve one exact original occurrence; no producer call/summary row is
-        # consulted. Leaf targets must be globally unique and unshadowed.
-        def source_call(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
-            work: mutable usize = 0
-            return source_call_with_work(declarations, name, line, position, &work)
+        def resolve_callee_line_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, callee_name: sview, work: mutable usize&) -> (known: bool, line: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
+            return resolve_callee_line_with_work_and_caller_policy(declarations, annotations, caller_name, caller_line, callee_name, false, work)
 
-        def source_call_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
+        # Type-only source queries may use a lemma's module scope as the caller; lemma names
+        # remain excluded from callee resolution in call_owner_line.
+        def resolve_callee_line_with_work_and_caller_policy(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, caller_name: sview, caller_line: u32, callee_name: sview, allow_lemma_caller: bool, work: mutable usize&) -> (known: bool, line: u32, module_path: darray[sview]) can[Memory.Allocate, Abort.Panic]:
+            caller_path: mutable darray[sview] = []
+            current_path: mutable darray[sview] = []
+            owner_matches: mutable usize = 0
+            return (false, 0, []) if caller_name == "" or caller_line == 0 or callee_name == ""
+            caller_is_lemma: (complete: bool, lemma: bool) = call_name_is_lemma(annotations, caller_name, work)
+            return (false, 0, []) if not caller_is_lemma.complete or caller_is_lemma.lemma and not allow_lemma_caller
+            callee_is_lemma: (complete: bool, lemma: bool) = call_name_is_lemma(annotations, callee_name, work)
+            return (false, 0, []) if not callee_is_lemma.complete
+            return (false, 0, []) if not call_find_caller_module(declarations, caller_name, caller_line, 0, work, &current_path, &caller_path, &owner_matches) or owner_matches != 1
+            current_path.clear()
+            total_matches: mutable usize = 0
+            global_line: mutable u32 = 0
+            best_depth: mutable usize = 0
+            best_matches: mutable usize = 0
+            best_line: mutable u32 = 0
+            global_path: mutable darray[sview] = []
+            best_path: mutable darray[sview] = []
+            relevant_import: mutable bool = false
+            return (false, 0, []) if not call_owner_line(declarations, callee_name, callee_is_lemma.lemma, caller_path, 0, work, &current_path, &total_matches, &global_line, &global_path, &best_depth, &best_matches, &best_line, &best_path, &relevant_import)
+            return (false, 0, []) if relevant_import or total_matches == 0
+            return (true, global_line, global_path) if total_matches == 1
+            return (true, best_line, best_path) if best_matches == 1
+            return (false, 0, [])
+
+        # Resolve one exact original occurrence; no producer call/summary row is
+        # consulted. Leaf targets must resolve uniquely under caller-module precedence
+        # and remain unshadowed at the call site.
+        def source_call(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, position: Ast::Pos) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
+            work: mutable usize = 0
+            return source_call_with_work(declarations, annotations, name, line, position, &work)
+
+        def source_call_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, position: Ast::Pos, work: mutable usize&) -> (known: bool, expression: Ast::Expr, callee: sview, callee_line: u32) can[Memory.Allocate, Abort.Panic]:
             context = owner_with_work(declarations, name, line, work)
             return (false, Ast::Expr.Invalid, "", 0) if not context.known
             matches: mutable usize = 0
@@ -84,17 +202,15 @@ extend ElisaProofFrameSource:
                     for formal in context.formals |callee, work|:
                         return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(sview_len(formal), work)
                         return (false, Ast::Expr.Invalid, "", 0) if formal == callee
-                    return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(context.body.count, work)
-                    for statement in context.body |callee, work|:
-                        match statement:
-                            Ast::Stmt.VarDecl(binding, _, _, _):
-                                return (false, Ast::Expr.Invalid, "", 0) if not replay_work_charge(sview_len(binding), work)
-                                return (false, Ast::Expr.Invalid, "", 0) if binding == callee
-                            _:
-                                pass
-                    matches <- 0
-                    callee_line: mutable u32 = 0
-                    return (false, Ast::Expr.Invalid, "", 0) if not call_owner_line(declarations, callee, 0, work, &matches, &callee_line) or matches != 1
-                    return (true, found, callee, callee_line)
+                    return (false, Ast::Expr.Invalid, "", 0) if not ElisaProof::source_call_locals_unshadowed_at_with_work(context.body, annotations, found, work)
+                    resolved: (known: bool, line: u32, module_path: darray[sview]) = resolve_callee_line_with_work(declarations, annotations, name, line, callee, work)
+                    return (false, Ast::Expr.Invalid, "", 0) if not resolved.known
+                    # Downstream frame helpers still address owners by name and line.
+                    # Refuse repeated source identities here until those APIs carry the
+                    # selected module path, so a successful scoped resolution cannot be
+                    # redirected by another module's same-line declaration.
+                    selected_owner = owner_with_work(declarations, callee, resolved.line, work)
+                    return (false, Ast::Expr.Invalid, "", 0) if not selected_owner.known
+                    return (true, found, callee, resolved.line)
                 _:
                     return (false, Ast::Expr.Invalid, "", 0)

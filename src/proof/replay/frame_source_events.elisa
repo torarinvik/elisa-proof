@@ -22,7 +22,7 @@ extend ElisaProofFrameSource:
 
         # Complete only for the explicit direct-body subset. Unknown statement,
         # expression or write mappings invalidate the entire inventory.
-        def source_events_impl(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, calls: bool, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+        def source_events_impl(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, calls: bool, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
             policy = source_policy_with_work(declarations, name, line, tokens, source, source_length, work)
             context = owner_with_work(declarations, name, line, work)
             return (false, []) if not policy.known or not context.known
@@ -42,7 +42,7 @@ extend ElisaProofFrameSource:
                 has_changes <- true if clause.kind == "changes"
                 events.push(Event{call_effect: false, change_index: 0, kind: clause.kind, position: clause.position, statement_index: 0, clause_index: index, place: clause.place})
             return (false, []) if not replay_work_charge(context.body.count, work)
-            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, name, line, work, local_names, local_types, scalar_environment, calls, tokens, source, source_length|:
+            for index in 0..<context.body.count |index, context, policy, events, has_changes, declarations, annotations, name, line, work, local_names, local_types, scalar_environment, calls, tokens, source, source_length|:
                 match context.body[index]:
                     Ast::Stmt.Contract(kind, expression, _):
                         if kind != "changes" and kind != "preserves":
@@ -69,7 +69,23 @@ extend ElisaProofFrameSource:
                     Ast::Stmt.Return(value, _):
                         if value is expression:
                             if not inert_value(expression, 0, work):
-                                return (false, []) if not scalar_environment or not scalar_read(expression, &local_names, &local_types, 0, work)
+                                return (false, []) if not scalar_environment
+                                if calls:
+                                    mapped = (source_return_effects_with_work(&context.body, index, declarations, annotations, name, line, &local_names, &local_types, context.return_type, tokens, source, source_length, work) can Global{Read,Write})
+                                    return (false, []) if not mapped.known
+                                    return (false, []) if not replay_work_charge(mapped.effects.count, work)
+                                    for effect in mapped.effects |effect, events, index, has_changes, policy, work|:
+                                        if has_changes:
+                                            return (false, []) if events.count >= 4096
+                                            events.push(Event{call_effect: true, change_index: effect.change_index, kind: "allow", position: effect.position, statement_index: index, clause_index: 0, place: effect.place})
+                                        return (false, []) if not replay_work_charge(policy.clauses.count, work)
+                                        for clause_index in 0..<policy.clauses.count |clause_index, policy, events, effect, index, work|:
+                                            return (false, []) if not replay_work_charge(sview_len(policy.clauses[clause_index].kind), work)
+                                            if policy.clauses[clause_index].kind == "preserves":
+                                                return (false, []) if events.count >= 4096
+                                                events.push(Event{call_effect: true, change_index: effect.change_index, kind: "preserve", position: effect.position, statement_index: index, clause_index: clause_index, place: effect.place})
+                                else:
+                                    return (false, []) if not scalar_read(expression, &local_names, &local_types, 0, work)
                     Ast::Stmt.If(_, then_body, else_body, _):
                         return (false, []) if not calls
                         for arm in [then_body, else_body] |context, work, scalar_environment, local_names, local_types|:
@@ -81,7 +97,7 @@ extend ElisaProofFrameSource:
                                             return (false, []) if not scalar_environment or not scalar_read(expression, &local_names, &local_types, 0, work)
                                     _:
                                         return (false, [])
-                        mapped = (source_condition_effects_with_work(declarations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
+                        mapped = (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
                         return (false, []) if not mapped.known
                         return (false, []) if not replay_work_charge(mapped.effects.count, work)
                         for effect in mapped.effects |effect, events, index, has_changes, policy, work|:
@@ -101,7 +117,7 @@ extend ElisaProofFrameSource:
                             return (false, []) if not replay_work_charge(sview_len(existing), work)
                             return (false, []) if not replay_work_charge(sview_len(binding), work)
                             return (false, []) if existing == binding
-                        mapped = (source_condition_effects_with_work(declarations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
+                        mapped = (source_condition_effects_with_work(declarations, annotations, name, line, index, tokens, source, source_length, work) can Global{Read,Write})
                         return (false, []) if not mapped.known
                         return (false, []) if not replay_work_charge(mapped.effects.count, work)
                         for effect in mapped.effects |effect, events, index, has_changes, policy, work|:
@@ -122,17 +138,21 @@ extend ElisaProofFrameSource:
 
         def strict_direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
             work: mutable usize = 0
-            return (strict_direct_events_with_work(declarations, name, line, tokens, source, source_length, &work) can Global{Read,Write})
+            return (strict_direct_events_with_work(declarations, [], name, line, tokens, source, source_length, &work) can Global{Read,Write})
 
-        def strict_direct_events_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
-            return (source_events_impl(declarations, name, line, tokens, source, source_length, false, work) can Global{Read,Write})
+        def strict_direct_events_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return (source_events_impl(declarations, annotations, name, line, tokens, source, source_length, false, work) can Global{Read,Write})
 
         def direct_events(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
             work: mutable usize = 0
-            return (direct_events_with_work(declarations, name, line, tokens, source, source_length, &work) can Global{Read,Write})
+            return (direct_events_with_work(declarations, [], name, line, tokens, source, source_length, &work) can Global{Read,Write})
 
-        def direct_events_with_work(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
-            return (source_events_impl(declarations, name, line, tokens, source, source_length, true, work) can Global{Read,Write})
+        def direct_events_with_annotations(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
+            work: mutable usize = 0
+            return (direct_events_with_work(declarations, annotations, name, line, tokens, source, source_length, &work) can Global{Read,Write})
+
+        def direct_events_with_work(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, work: mutable usize&) -> (known: bool, events: darray[Event]) can[Memory.Allocate, Abort.Panic]:
+            return (source_events_impl(declarations, annotations, name, line, tokens, source, source_length, true, work) can Global{Read,Write})
 
         def direct_events_match(declarations: darray[Ast::Decl]&, name: sview, line: u32, tokens: darray[Lexer::Token]&, source: u8&, source_length: usize, claimed: darray[Event]&) -> bool can[Memory.Allocate, Abort.Panic]:
             expected = (direct_events(declarations, name, line, tokens, source, source_length) can Global{Read,Write})
