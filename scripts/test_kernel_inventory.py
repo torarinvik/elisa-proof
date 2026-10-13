@@ -107,6 +107,11 @@ def called_functions(files: list[Path]) -> set[str]:
 def node_kinds() -> set[str]:
     text = strip_comments(read(PROOF / "kernel_replay" / "arena_shapes.elisa"))
     kinds = set(re.findall(r'kind == "([^"]+)"', text))
+    for membership in re.findall(r'node\.kind\s+in\s*\{([^}]*)\}', text):
+        literals = re.findall(r'"([^"]+)"', membership)
+        if not literals or re.sub(r'"[^"]+"|[\s,]', "", membership):
+            raise AssertionError("arena node-kind membership is not a literal set")
+        kinds.update(literals)
     kinds |= match_arms(function_body(text, "proof_kernel_replay_arena_resource_region_shape"))
     return kinds
 
@@ -131,7 +136,7 @@ def certificate_producer_functions() -> set[str]:
                     break
                 body.append(following)
             text = "\n".join(body)
-            if "report.certificates" in text and "ProofGoalCertificate{" in text:
+            if re.search(r"report(?:\.[A-Za-z_]\w*)*\.certificates\.push\s*\(", text) and "ProofGoalCertificate{" in text:
                 producers.add(definition.group(1))
     return producers
 
@@ -159,7 +164,7 @@ def public_certificate_producers() -> set[str]:
                         break
                     body.append(following)
                 text = "\n".join(body)
-                if "report.certificates" in text and "ProofGoalCertificate{" in text and section_visibility == "public":
+                if re.search(r"report(?:\.[A-Za-z_]\w*)*\.certificates\.push\s*\(", text) and "ProofGoalCertificate{" in text and section_visibility == "public":
                     public.add(name)
             # A sibling section ends the preceding section; sections at the same indentation
             # replace its visibility for following declarations.
@@ -199,8 +204,19 @@ def resource_fact_free_leaves() -> set[str]:
     body = strip_comments(function_body(text, "proof_replay_resource_event_facts_with_owner"))
     lines = body.splitlines()
     for index, line in enumerate(lines):
-        if line.strip().startswith("if node.kind ==") and index + 1 < len(lines) and lines[index + 1].strip() == "return true":
-            return set(re.findall(r'node\.kind == "([^"]+)"', line))
+        if index + 1 >= len(lines) or lines[index + 1].strip() != "return true":
+            continue
+        equality = re.fullmatch(r'\s*if node\.kind == "([^"]+)":\s*', line)
+        if equality:
+            return {equality.group(1)}
+        membership = re.fullmatch(r'\s*if node\.kind in \{([^}]*)\}:\s*', line)
+        if membership:
+            literals = re.findall(r'"([^"]+)"', membership.group(1))
+            if not literals or re.sub(r'"[^"]+"|[\s,]', "", membership.group(1)):
+                raise AssertionError("resource fact-free leaf membership is not a literal set")
+            if len(literals) != len(set(literals)):
+                raise AssertionError("resource fact-free leaf membership has duplicate kinds")
+            return set(literals)
     raise AssertionError("resource fact-free leaf list not found")
 
 
@@ -236,7 +252,8 @@ def kernel_member_calls(files: list[Path] | None = None) -> set[str]:
 
 KERNEL_CALL_SYNTAX = frozenset({
     "and", "assert", "cast", "elif", "else", "for", "if", "is", "match",
-    "mutable", "not", "or", "return", "sizeof", "typeof", "when", "while",
+    "ensure", "implies", "mutable", "not", "or", "return", "sizeof", "sview_at",
+    "sview_len", "typeof", "when", "while",
 })
 
 
