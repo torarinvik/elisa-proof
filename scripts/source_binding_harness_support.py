@@ -2,10 +2,43 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
 import tempfile
+from stage1_provenance_validation import validated_stage1_snapshot_std_root
+
+
+def checked_in_stage0_revision(root: Path) -> str:
+    pinned = (root / "ELISA_STAGE0_REV").read_text(encoding="ascii").strip()
+    configured = os.environ.get("ELISA_STAGE0_REV", "").strip()
+    if configured and configured != pinned:
+        raise ValueError("ELISA_STAGE0_REV environment value differs from the checked-in proof pin")
+    return pinned
+
+
+def _source_file_manifest(root: Path) -> dict[str, str]:
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def assert_canonical_std_matches_snapshot(snapshot_std: Path, canonical_std: Path) -> None:
+    try:
+        snapshot_manifest = _source_file_manifest(snapshot_std)
+        canonical_manifest = _source_file_manifest(canonical_std)
+    except OSError as error:
+        raise ValueError(f"cannot compare pinned and canonical standard libraries: {error}") from error
+    if not snapshot_manifest or canonical_manifest != snapshot_manifest:
+        raise ValueError(
+            f"canonical standard library does not match pinned compiler snapshot: "
+            f"{canonical_std} vs {snapshot_std}"
+        )
 
 
 def _test_replay_includes(root: Path, scratch: Path) -> str:
@@ -66,16 +99,6 @@ def _test_replay_includes(root: Path, scratch: Path) -> str:
     if copied_helpers != set(private_helpers.values()):
         raise AssertionError(f"replay source-binding helpers were not all included: {copied_helpers}")
     return "\n".join(expanded)
-
-
-def _elisa_source_manifest(root: Path) -> dict[str, str]:
-    if not root.is_dir():
-        return {}
-    return {
-        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and path.suffix in {".elisa", ".elisai"}
-    }
 
 
 def _grant_global_effects_to_harness_calls(source: str) -> str:
@@ -160,29 +183,36 @@ def run_source_binding_replay_harness(
     stage1_wrapper = compiler_root / "scripts/elisac_stage1.sh"
     freshness_script = compiler_root / "scripts/assert_stage1_fresh.sh"
     frontend_snapshot = root / "build/snapshot/Elisa-compiler"
+    compiler_env = {
+        key: value for key, value in os.environ.items()
+        if key != "ELISA_ALLOW_STALE_STAGE1" and key != "ELISA_STAGE0_REV"
+    }
     if not stage1_wrapper.is_file() or not stage1.is_file() or not freshness_script.is_file():
         raise SystemExit(f"Stage1 compiler installation is incomplete: {compiler_root}")
-    if not frontend_snapshot.is_dir() or not (frontend_snapshot / ".rev").is_file():
-        raise SystemExit(f"pinned frontend snapshot is missing: {frontend_snapshot}; build the proof project first")
-    snapshot_revision = (frontend_snapshot / ".rev").read_text(encoding="utf-8").strip()
-    if snapshot_revision != pinned_frontend_revision:
-        raise SystemExit(
-            f"pinned frontend snapshot mismatch: snapshot={snapshot_revision} expected={pinned_frontend_revision}"
-        )
+    try:
+        pinned_stage0_revision = checked_in_stage0_revision(root)
+        snapshot_std = Path(validated_stage1_snapshot_std_root(
+            str(frontend_snapshot),
+            str(stage1),
+            str(compiler_root),
+            str(compiler_root),
+            pinned_frontend_revision,
+            pinned_stage0_revision=pinned_stage0_revision,
+            require_stage0_binding=True,
+        ))
+    except (OSError, ValueError) as error:
+        raise SystemExit(f"pinned Stage1/compiler snapshot qualification failed: {error}") from error
     canonical_std = compiler_root / "elisacore_std"
-    pinned_std = frontend_snapshot / "elisacore_std"
-    canonical_std_manifest = _elisa_source_manifest(canonical_std)
-    pinned_std_manifest = _elisa_source_manifest(pinned_std)
-    if not pinned_std_manifest or canonical_std_manifest != pinned_std_manifest:
-        raise SystemExit(
-            f"canonical standard library does not match pinned compiler revision {snapshot_revision}: "
-            f"{canonical_std} vs {pinned_std}"
-        )
+    try:
+        assert_canonical_std_matches_snapshot(snapshot_std, canonical_std)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     freshness = subprocess.run(
         ["bash", str(freshness_script), str(stage1)],
         capture_output=True,
         text=True,
         cwd=compiler_root,
+        env=compiler_env,
     )
     if freshness.returncode:
         raise AssertionError(f"Stage1 freshness check failed:\n{freshness.stdout}\n{freshness.stderr}")
@@ -240,7 +270,7 @@ def run_source_binding_replay_harness(
             directory = Path(temporary)
             source_path = directory / "bounded_counter_source_replay.elisa"
             executable = directory / "bounded_counter_source_replay"
-            canonical_std = (compiler_root / "elisacore_std").resolve()
+            canonical_std = canonical_std.resolve()
             harness = harness.replace(
                 "../../Elisa-compiler/elisacore_std/", str(canonical_std) + "/"
             ).replace("../../Elisa-compiler/", str(frontend_snapshot.resolve()) + "/").replace(
@@ -253,6 +283,7 @@ def run_source_binding_replay_harness(
                 capture_output=True,
                 text=True,
                 cwd=root,
+                env=compiler_env,
                 # This standalone harness embeds the pinned parser and proof replay modules;
                 # Stage1 can take longer than the product build on a busy validation host.
                 timeout=2400,
