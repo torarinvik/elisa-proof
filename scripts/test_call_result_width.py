@@ -2,12 +2,12 @@
 is read at the callee's declared signed width, and a call result nested in another call's
 arguments generalizes with it; nothing else is."""
 import json
-import os
 from pathlib import Path
 import subprocess
+from qualified_test_binary import proof_test_binary
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+BINARY = proof_test_binary(ROOT)
 
 
 def check(name):
@@ -15,8 +15,10 @@ def check(name):
                          capture_output=True, text=True, timeout=60)
     data = json.loads(run.stdout)
     assert data["summary"]["semantic_errors"] == 0, data
+    assert data["source"]["admissible"] is True, data["source"]
     assert data["replay"]["gaps"] == 0, data["replay"]
     assert data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+    assert not data["trust"]["trusted_assumptions"], data["trust"]
     return run.returncode, data
 
 
@@ -30,6 +32,12 @@ for name, minimum in (("call_result_width.elisa", 19), ("returned_call_local.eli
     assert code == 0 and data["status"] == "proved", (name, code, data["findings"])
     assert data["findings"] == [], (name, data["findings"])
     assert data["replay"]["certificates"] >= minimum, (name, data["replay"])
+
+for name in ("call_result_module_alias_u32.elisa", "call_result_local_precedence.elisa",
+             "call_result_bare_imports_u16_u32.elisa"):
+    code, data = check(name)
+    assert code == 0 and data["status"] == "proved", (name, code, data["findings"])
+    assert data["findings"] == [], (name, data["findings"])
 
 code, data = check("rejected_call_result_width.elisa")
 assert code == 1 and data["status"] == "failed", code
@@ -60,4 +68,10 @@ assert unproven(data) == [
     ("ensure-unproven", 32, "swapped_arguments"),
 ], unproven(data)
 
-print("call results: returned locals keep their summary, constants typed at the call's width, nested calls generalized, replayed")
+code, data = check("rejected_call_result_shadowed_u32.elisa")
+assert code == 1 and data["status"] == "failed", code
+assert unproven(data) == [
+    ("ensure-unproven", 13, "uses_local_forward_declaration"),
+], unproven(data)
+
+print("call results: returned locals keep their summary, constants typed at the call's width, nested and module-alias calls replayed, and shadowed forward calls rejected")
