@@ -8,7 +8,9 @@ extend ElisaProof:
         def proof_tactic_json_expression_charge(work_used: mutable usize&, amount: usize) -> bool:
             return false if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
             if amount > PROOF_JSON_EXPRESSION_WORK_LIMIT - work_used:
-                work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT
+                # Keep an explicit exhausted sentinel so optional missing fields cannot turn a
+                # failed member-scan reservation into a successful partial decode.
+                work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
                 return false
             work_used <- work_used + amount
             return true
@@ -19,7 +21,9 @@ extend ElisaProof:
             missing: JsonValueHandle[r] = ElisaProofJson::null_value(value)
             return (false, missing) if not ElisaProofJson::is_object(value)
             member_count: i64 = ElisaProofJson::object_len(value)
-            return (false, missing) if member_count < 0
+            # Keep the signed-to-unsigned narrowing below within both the work cap and the
+            # target usize range before converting the parser's i64 length.
+            return (false, missing) if member_count < 0 or member_count > 16777216
             return (false, missing) if not proof_tactic_json_expression_charge(work_used, member_count.usize())
             return (false, missing) if not proof_tactic_json_expression_charge(work_used, member_count.usize())
             return proof_tactic_json_field(value, key)
@@ -27,7 +31,7 @@ extend ElisaProof:
         def proof_tactic_json_has_with_work[@r](value: JsonValueHandle[r], key: sview, work_used: mutable usize&) -> bool:
             return false if not ElisaProofJson::is_object(value)
             member_count: i64 = ElisaProofJson::object_len(value)
-            return false if member_count < 0 or not proof_tactic_json_expression_charge(work_used, member_count.usize())
+            return false if member_count < 0 or member_count > 16777216 or not proof_tactic_json_expression_charge(work_used, member_count.usize())
             return ElisaProofJson::has(value, key)
 
         def proof_tactic_json_expr_list[@r](value: JsonValueHandle[r], key: sview, line: u32, output: mutable darray[Ast::Expr]& @r) -> bool:
@@ -110,7 +114,14 @@ extend ElisaProof:
             work_used: mutable usize = 0
             return proof_tactic_json_expr_with_work(value, &work_used, 0)
 
+        # Treat exhausted work as an invalid decode even when it happened on an optional field
+        # that the wire format permits to be absent.
         def proof_tactic_json_expr_with_work[@r](value: JsonValueHandle[r], work_used: mutable usize&, depth: usize) -> (known: bool, value: Ast::Expr):
+            parsed: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work_impl(value, work_used, depth)
+            return (false, Ast::Expr.Invalid) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            return parsed
+
+        def proof_tactic_json_expr_with_work_impl[@r](value: JsonValueHandle[r], work_used: mutable usize&, depth: usize) -> (known: bool, value: Ast::Expr):
             return (false, Ast::Expr.Invalid) if not ElisaProofKernelCore::depth_valid(depth) or not proof_tactic_json_expression_charge(work_used, 1)
             return (false, Ast::Expr.Invalid) if not ElisaProofJson::is_object(value)
             kind_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field_with_work(value, "kind", work_used)
@@ -298,7 +309,9 @@ extend ElisaProof:
                 arguments: mutable darray[Ast::Expr] = []
                 names: mutable darray[sview] = []
                 return (false, Ast::Expr.Invalid) if not callee_field.known or not callee.known or not proof_tactic_json_expr_list_with_work(value, "arguments", line, &arguments, work_used, depth + 1)
-                names_ok: bool = proof_tactic_json_text_list_with_work(value, "argument_names", &names, work_used) if proof_tactic_json_has_with_work(value, "argument_names", work_used) else true
+                has_names: bool = proof_tactic_json_has_with_work(value, "argument_names", work_used)
+                return (false, Ast::Expr.Invalid) if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
+                names_ok: bool = proof_tactic_json_text_list_with_work(value, "argument_names", &names, work_used) if has_names else true
                 # The compiler AST uses either an empty name vector for an all-positional call or
                 # one slot aligned with every argument. Requiring a full vector rejected every
                 # positional call, including the compiler type markers that carry declared widths

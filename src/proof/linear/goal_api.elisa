@@ -45,11 +45,15 @@ extend ElisaProof:
             budget: mutable usize = 0
             return (proof_goal_depth(integers, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
 
-        def proof_goal_with_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
-            return proof_float_goal(facts, goal) or proof_float_propositional_goal(facts, goal, operator_mask) if (proof_float_mode can Global.Read)
+        def proof_goal_with_operator_mask_and_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            if (proof_float_mode can Global.Read):
+                return proof_float_goal(facts, goal) or proof_float_propositional_goal(facts, goal, operator_mask)
             return false if not proof_state_literals_fit(facts, goal, annotations)
-            budget: mutable usize = 0
             return (proof_goal_depth(facts, goal, annotations, operator_mask, 0, budget, 0, exhausted) can Global{Read,Write})
+
+        def proof_goal_with_operator_mask(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, exhausted: mutable bool&) -> bool:
+            budget: mutable usize = 0
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
 
         def proof_goal_fact_is_disjunction(fact: Ast::Expr) -> bool:
             match fact:
@@ -71,6 +75,30 @@ extend ElisaProof:
         def proof_goal_with_limits(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
             operator_mask: usize = proof_source_primitive_operator_mask(annotations)
             return (proof_goal_with_operator_mask(facts, goal, annotations, operator_mask, exhausted) can Global{Read,Write})
+
+        # Imported tactic trees pass one counter through every solver-backed action and its
+        # deterministic replay. Keeping this overload separate preserves ordinary checker fuel.
+        def proof_goal_with_shared_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            # The legacy preflight readers (literal validation, disjunction filtering, and
+            # float-safe containment) are pure recursive scans. Reserve their worst-case
+            # repeated traversal cost before invoking them, then let proof_goal_depth continue
+            # from the same counter. This bounds repeated action calls as well as enumeration.
+            return false if budget >= PROOF_LINEAR_SAFETY_WORK_LIMIT
+            exhausted: mutable bool = false
+            goal_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(goal, &goal_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
+            return false if not proof_linear_safety_work_charge_scaled(&budget, &exhausted, goal_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            for fact in facts |fact, budget, exhausted|:
+                fact_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost_with_limit(fact, &fact_cost, 0, PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS)
+                return false if not proof_linear_safety_work_charge_scaled(&budget, &exhausted, fact_cost, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+            operator_mask: usize = proof_source_primitive_operator_mask(annotations)
+            plain: mutable darray[Ast::Expr] = []
+            for fact in facts |plain|:
+                plain.push(fact) if not proof_goal_fact_is_disjunction(fact)
+            if plain.count < facts.count and (proof_goal_with_operator_mask_and_work(plain, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write}):
+                return true
+            return (proof_goal_with_operator_mask_and_work(facts, goal, annotations, operator_mask, &budget, &exhausted) can Global{Read,Write})
 
         def proof_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
             # Dropping hypotheses only weakens them, so facts without a disjunction are tried
