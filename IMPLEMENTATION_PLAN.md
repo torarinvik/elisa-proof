@@ -1,10 +1,9 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-13. **Current checkpoint: qualify the dirty proof changes against an exact, current Elisa toolchain before merging.** Proof `main` is `d47b0e92` with an uncommitted working tree; Elisa-compiler `main` is `cce6b6afc` with 331 dirty paths; Core `main` is `55fb293d` with 16 dirty paths. Proof pins remain `ELISA_COMPILER_REV=b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and `ELISA_STAGE0_REV=fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The installed Stage1 remains from compiler revision `5cda9b4e69ff937f00ea43f0e7e4713d5ad3403b` (provenance schema v1), which does not match the proof pin. The installed Stage0 is a clean build of Core `55fb293de91cc0263972b1d87a1aa0702938ad7a`, but does not match the Stage0 pin. In the latest stable combined check, Stage0 AST parsed all 34 changed `src/**/*.elisa` modules at fingerprint `c9433dc77aaeb813e0e80713463359286f099440d62c0c610f88e3468b02d4c4`; the full entry-point attempt on that exact snapshot exited with 583 non-warning parser diagnostics across 33 imported files because this Stage0 predates syntax used by the proof source. A Stage0 AST pass returned zero parser errors over 35 changed proof modules at stable fingerprint `9589bc633ad8a8a6c7f79954cb85523a6b151204099cd7d0c22f3b62ba60e7ba`; this run was outside the inherited static-only constraint and is excluded from qualification. Do not run further Elisa parser/build/test/replay checks until that constraint is lifted. The latest 2026-10-13 static snapshot covers 219 changed paths (45 Python, 31 shell, 140 Elisa, plus README, schema, and this plan). Python AST parsing of 45 changed scripts, `bash -n` on 31 changed shell files, whitespace, source-length, uniqueness of all 490 three-part numbered plan headings, and `git diff --check` pass; the changed-content fingerprint excluding this plan covers 218 paths and is `a99475b63c872d2923004621ed4074efed26a93cde7c12c2d0750cc30b6cf0c5` (SHA-256 over sorted paths, NUL, file contents, NUL). Pattern literal admission now supports the empty string (whose preserved token text uniquely identifies a string) and safe printable-ASCII punctuation after an identifier-start byte. The `sview` and `cstr` positive controls cover both forms across aggregate and focused report routes; they remain unrun. Python AST, source-length, and whitespace checks pass for this edit. No Elisa parser/build/test/replay was run. A work-aware linear-reader scan confirms there are no remaining calls to the legacy unmetered parenthesis or peer-nameability helpers inside `*_with_work` bodies. Static review found both a missing `fact_scan_cost_valid` argument and a dropped unsigned increment-equality witness path in the work-aware subtraction helper; both are now repaired with bounded readers, but `examples/counting_loop_measure.elisa` remains unrun against a current compiler, so runtime parity is unqualified. Each candidate increment equality still rescans order facts to validate its strict peer; the work budget bounds this product-shaped search, and a batched peer index is a follow-up after correctness qualification. The Stage1 product is pin-mismatched and its direct CLI invocation does not provide a valid proof-project semantic run. Current compiler-source inspection confirms a default-on Global.Read/Write authority checker with direct CLI, authority, transitive-call, alias, shadowing, indexed-target, and mutable-field regression coverage; the current compiler candidate has not rerun those suites. A static alias audit exposed a Global.Read/Write bypass through reference-bearing match, loop, and comprehension binders. The compiler candidate carries structural binder TypeIds into those scopes and unwraps references to iterable containers. A follow-up static audit found two unresolved cases: nested Ref fields projected from reference-bearing aggregate items may lose their alias origin, creating a potential grant bypass, while blanket `UNKNOWN_ALIAS` assignment can reject references known to point only to local storage. The eight paired regressions cover missing-grant/granted cases for loops, comprehensions, and enum payloads, but not these nested and no-grant-local controls. Close both cases and add those controls before treating the pass as qualified; scalar binders remain untracked. The edits pass static Python and whitespace checks only. Structural termination replay now binds the recursive call graph and complete owner-certificate set to parser-origin declarations; an independent static review found no counterexample, but runtime remains pending. The dirty candidate now routes source-bound tactics through an opaque `ProofCheckedView`, checks source validation and per-goal source admissibility, and keeps the report-taking helper private; static call-site inspection finds the CLI and repair paths using the view, but compile compatibility remains unverified. Open-attempt fact provenance now has an immutable per-attempt status snapshot in the opaque receipt, computed within the source-bound transaction using the selected attempt’s parser-origin owner context and shared bounded replay caches. Source-bound tactic execution, final tactic-result admission, and repair search consult these statuses; contexts the validator cannot authenticate fail closed. Structural certificate replay rebuilds source call edges, binds exact call sites and declarations, reruns termination checking, and compares the owner’s complete certificate set. Certificate-root owner selection now uses a bounded reverse index from certificate IDs to proven attempts, avoiding a full attempt scan for each certificate while retaining exact identity checks. These changes pass static checks only and remain compile/runtime-unqualified; open attempts now accept immutable declaration facts only when source-anchored liveness is reconstructed; mutable, loop, and call-result witnesses without attempt-specific rules remain fail-closed, and the replay index has not been benchmarked. A focused open-attempt end-to-end regression now checks source local-binding admission and refusal of a caller-injected initial-state fact; it remains unrun under the toolchain hold. Do not run mutating trace validators through the read-only checked view. Highest-ROI order: (1) establish a schema-v5 Stage1 whose provenance matches the exact selected compiler/Core source pair; (2) close nested aggregate alias propagation and known-local precision, then qualify the Global.Read/Write pass through focused CLI and proof-API negative and positive controls; (3) qualify the source-bound fact-origin receipt, structural certificate-source checks, and pattern-collision controls with focused replay and end-to-end gates; (4) broaden qualification only where focused results expose risk; (5) after correctness gates pass, measure candidate compiler changes with paired local Mac A/B runs using retired-instruction counts, recording exact source/product/runtime/target identities and host load. Label Mac results exploratory and non-qualifying; wall-clock time is not the primary metric and timing cannot replace correctness or provenance evidence. Preserve dirty worktrees and branches because the cleanup audit found no safe removal target. Seven additional proof worktrees are dirty and contain no commits ahead of `main`; both feature branch refs are checked out in dirty worktrees, so preserve the worktrees and branches until their changes are qualified or captured.
 
-Read-only toolchain inventory (2026-10-13): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-qualification`; the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core snapshots are also available: `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` at `4d17e30f443b2433eee2959869df11b9bbf630bc` with its matching Stage0 product, and `/private/tmp/elisa-core-stage0-snapshot-20261013` at `7696bdfa458a42fe2f2b848123bcb53f27488774`; their commits are not in canonical Core `main`’s object database. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
+Read-only toolchain inventory (2026-10-13): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-qualification`; the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
 
-Read-only cleanup audit (refreshed 2026-10-13): proof has eight worktrees including `main`; all eight are dirty, and its three merged branch refs are checked out in dirty trees. Elisa-compiler has 122 worktrees including `main`, 42 dirty; five clean non-root worktrees point to commits already on `main` and retain Stage1 seed/source, proof-compiler, or profiler baseline state. The other clean compiler trees point to candidate commits not merged to `main`. Of 102 compiler branch refs, eight are merged and all eight are checked out in dirty worktrees; the remaining 94 are unmerged. There are no clean merged compiler branches outside the retained baselines and no uncommitted-free proof worktrees. No branch or worktree is safe to remove without discarding live changes, unmerged candidate history, or bootstrap/profiler evidence.
+Read-only cleanup audit (refreshed 2026-10-13): proof has eight worktrees including `main`; all eight are dirty, and its three merged branch refs are checked out in dirty trees. Elisa-compiler has 127 worktrees including `main`, 43 dirty; seven clean non-root worktrees point to commits already on `main` and retain Stage1 seed/source, proof-compiler, or profiler baseline state. The other clean compiler trees point to candidate commits not merged to `main`. Of 103 local compiler branch refs, only `main` is merged; the other 102 are unmerged. There are no non-main merged compiler branches to prune and no uncommitted-free proof worktrees. No branch or worktree is safe to remove without discarding live changes, unmerged candidate history, or bootstrap/profiler evidence.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
@@ -14280,3 +14279,157 @@ checkpoint.
 ### 23.27.445 Recheck the exact pinned compiler seed pair (2026-10-13)
 
 An isolated Stage1 seed attempt used the exact compiler pin `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and Stage0 pin `fa65ef625c4217cf54486821a6aa9348f5f04ec6`, with the product and generated files confined to `/private/tmp/elisa-stage1-b8eb-qualification`. The source worktree remains clean and the global seed lock was released. Stage0 rejected the compiler source before producing a Stage1 binary: `bam_remember_local_callable` calls helpers requiring `Global{Read,Write}` but declares only `Memory.Allocate, Abort.Panic`, yielding four missing-grant diagnostics. The current dirty Elisa-compiler `main` already grants `Global{Read,Write}` on that helper. This confirms the pinned compiler/Core pair cannot produce the provenance-matched qualification binary as pinned. Freeze a compiler commit that includes the grant, update the proof compiler pin to that exact revision, then seed and check schema-v5 provenance before resuming proof qualification. No proof parser, proof build, test, or replay was run.
+
+
+### 23.27.446 Requalify the toolchain after source commits (2026-10-13)
+
+The proof source changes are now committed on clean proof `main` at `d418d9fcc560fe6bbf9a99ca7f3972d9a43435f4`; the checked-in compiler pin is still `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a`. Elisa-compiler `main` now points to `4869dadbe52eb2d41a441c31a38df0c62a8747cc`, whose committed borrow-analysis helper includes the missing `Global{Read,Write}` effect row, although three paths were dirty at the last inspection. I retried the seed in isolated clean worktree `/private/tmp/elisa-stage1-4869-qualification` against the exact pinned Stage0 product (SHA-256 `9bac784d0f2c8e7a02c62b72b4ca06a2deedde76bf61090e8d43580179e7cc67`). That pair fails before producing Stage1: the pinned Stage0 reports widespread parser errors on newer compiler syntax, including `for`-as-value and effect-row forms. The exact pinned compiler source `b8eb…` separately parses far enough to fail on four missing Global effect grants. Both temporary worktrees remained clean; no proof checker/test/replay was run. The qualification hold remains active. Follow-up isolated seeds found that the failures extend beyond the first missing effect row: after backporting that grant as local compiler commit `16e04fd0e` atop `b8eb`, the exact pinned Stage0 exited with 1,318 non-warning compiler diagnostics; compiler commit `300c7b410` with the clean `4d17` Stage0 exited with 1,829, and compiler `4869dadbe` with `4d17` failed on newer syntax. None produced Stage1. The `4d17` Stage0 binary is locally reproducible, but its source commit is not available from canonical Core `main`. Select and freeze a mutually compatible compiler/Core revision pair, build and verify its Stage1 provenance, update both proof pins if needed, then resume focused proof qualification.
+
+### 23.27.447 Invalidate EASM pointer provenance across calls (2026-10-13)
+
+Static review found that both the CFG provenance transfer and the linear memory-provenance pass
+kept caller-saved carrier types across calls. Both now clear the ABI caller-clobber mask, including
+RAX because this instruction-only pass has no typed call-result fact; the linear pass also clears
+parameter-origin facts. The layout check distinguishes a tracked-but-cleared register from an
+unseen input, preventing its input-type fallback from reviving stale provenance and rejecting an
+untraced memory base unless the existing `memory.base.untyped` opt-in applies.
+
+The production CFG transfer proof checks all 16 carrier slots and ambiguity bits for a `callq`,
+with a rejected RAX-preservation control. The linear transfer suite adds caller-saved invalidation
+and callee-saved preservation lemmas plus a rejected preservation claim. Source-only admission
+reports 36 positive theorems and 15 false controls for the CFG suite (six-file closure), and 16
+positive theorems, 3 model functions, and 5 false controls for linear provenance (two-file closure).
+Python syntax, the repository source-length gate, and `git diff --check` pass. The exact pinned
+Stage1/Stage0 qualification hold remains active: no Elisa parser, build, test, or replay was run.
+
+### 23.27.448 Invalidate EASM provenance for implicit result registers (2026-10-13)
+
+A second stale-carrier path remained for instructions with implicit outputs. The canonical
+`implicit_result_write_mask` now specifies CPUID's RAX/RBX/RCX/RDX outputs and RDTSC's RAX/RDX
+outputs; both CFG and linear provenance transfers clear these facts, while call handling continues
+to use the full caller-clobber mask. The linear pass clears parameter origins and the existing
+tracked-empty check prevents input-type fallback from restoring a carrier after the write.
+
+The production flow proof quantifies over all 16 provenance slots for CPUID and RDTSC and checks
+that only mask-selected carrier and ambiguity facts are removed; a false CPUID/RAX preservation
+control was added. The linear provenance proof adds an implicit-result invalidation theorem and
+matched rejected control. Its strict checker now also requires all flow-suite false controls to be
+refused, while retaining the concrete counterexample check for the one-sided merge claim. Source-only
+admission reports 37 positive theorems and 16 false controls for flow (six-file closure), and 17
+positive theorems, 3 model functions, and 6 false controls for linear provenance (two-file closure).
+Python syntax, source-length, and both repositories' `git diff --check` pass. The pinned toolchain
+hold remains active; no Elisa parser, build, test, or proof replay was run.
+
+### 23.27.449 Extend the toolchain compatibility search and audit proof authority routes (2026-10-13)
+
+Two more isolated Stage1 seeds used clean compiler `4869dadbe52eb2d41a441c31a38df0c62a8747cc`
+with clean Stage0 products: Core `55fb293de91cc0263972b1d87a1aa0702938ad7a` (SHA-256
+`33d4de8e96b50afaa93a255f2303537c1c8e9a38735024ef3a9a0c3702c36199`) and Core
+`5df22efab0445ab517d13213dbcdc082e729bd19` (SHA-256
+`2caa62a82df4b7dfee6ae2faebf682440faf75b61c60ee737c7583619319df08`). Both products recorded
+`vcs.modified=false`; each seed stopped on widespread parser diagnostics before producing Stage1.
+The clean compiler worktree remains at `/private/tmp/elisa-stage1-4869-qualification`. No proof
+parser, build, test, or replay was run.
+
+The public source-authorized API audit found no report/receipt mixing path: `ProofCheckedView`
+fields and construction are private, its report accessor is read-only, and the standalone replay
+receipt is explicitly unbound and exposes only low-trust kernel diagnostics. Structural
+certificate replay also reconstructs parser-origin call edges, checks exact source call sites,
+reruns termination analysis, and compares the complete certificate set for the owner. These are
+static findings; compile and runtime qualification remain outstanding.
+
+### 23.27.450 Reject width-truncated EASM pointer provenance (2026-10-13)
+
+Static review found that register provenance was copied or swapped by opcode prefix alone, so
+`movl`/partial-register moves and `xchgl` could incorrectly retain full pointer facts. The CFG
+transfer and linear memory-provenance pass now preserve carriers only for supported operations on
+64-bit registers. Partial moves clear the destination; partial exchanges clear each parsed
+operand. Linear provenance lookup and update now use canonical register-bit identity so aliases
+such as RAX/EAX address the same carrier. The source-bound checks pin these guards to the existing
+exact 32/64/unknown width policy and register alias map.
+
+The production CFG fixture checks full-width `movq` propagation, `movl` invalidation, and both
+`xchgl` clobbers, with rejected controls for copying or retaining stale facts. The linear transfer
+model adds partial-move and partial-exchange cases, including rejected preservation claims. The
+flow source-only admission reports 40 positive theorems and 18 false controls over seven source
+files; linear provenance reports 19 positive theorems, 3 model functions, and 9 false controls;
+the address-width source-only admission reports 4 positive theorems and 4 false controls. Python
+syntax, all three source-only admissions, the repository source-length gate, and both repositories'
+`git diff --check` pass. The pinned compiler/proof toolchain hold remains active, so no Elisa parser,
+build, test, or proof replay was run.
+
+### 23.27.451 Prove clobbered memory provenance cannot fall back to input types (2026-10-13)
+
+The linear memory verifier distinguishes a register with a tracked-but-empty provenance fact from
+an unseen register before consulting signature input types. The transfer proof now models this
+fallback choice: an empty tracked fact stays empty, while an unseen typed input retains its
+legitimate signature provenance. A rejected false claim attempts to recover the input type after a
+tracked clobber. The source-bound checker ties the model to production `easm_provenance_has_register`,
+the layout verifier's lookup order, and the alias-aware state lookup.
+
+Source-only admission reports 21 positive theorems, 4 model functions, and 10 false controls across
+the two-file proof closure. Python syntax, the source-only admission, the proof repository's source-
+length gate, and both repositories' `git diff --check` pass. The pinned toolchain hold remains
+active; no Elisa parser, build, test, or proof replay was run.
+
+### 23.27.452 Prove width-gated EASM LEA and arithmetic transfers (2026-10-13)
+
+A separate production-flow proof fixture now covers width-sensitive LEA and pointer arithmetic.
+It proves that full-width `leaq` copies the base carrier and its ambiguity bit, a `leaq` using a
+32-bit base clears the destination, and full-width `addq` preserves the complete pre-state. It
+also checks both bare and explicit narrow arithmetic with `%eax`, requiring the destination carrier
+and ambiguity bit to clear. The fixture snapshots all 16 carrier slots and the other state fields
+before transfer so the claims compare against the actual pre-state. Rejected controls claim the
+partial-base LEA and narrow arithmetic can preserve stale facts. A dedicated source-bound checker
+locks these theorems to the production transfer and exact width/alias classifiers.
+
+Source-only admission reports 4 positive theorems and 2 false controls over the seven-file include
+closure; Python syntax and whitespace checks pass. This extends source coverage only: the pinned
+compiler/proof toolchain remains incompatible, so no Elisa parser, build, test, or proof replay was
+run.
+
+### 23.27.453 Prove conservative Global-authority access classification (2026-10-13)
+
+The Global-authority origin policy now states exactly which sentinels require conservative
+permission checks: `UNKNOWN_ALIAS` and the reserved `LOCAL_ALIAS` ceiling. The semantic pass uses
+this proved predicate for both dereference access and reference rebind writes. Additional theorems
+show the exact classification, require conservative checks for each sentinel, and establish that
+local roots encoded as `global_count + identity` stay below the ceiling under the same bounds as
+the production allocator. Rejected controls try to skip checks for the sentinels or classify a
+bounded encoded local root as unknown.
+
+The source-bound checker was refreshed to bind both production call sites, the local-root bound
+checks, overflow sentinel storage, and address-origin preservation. Source-only admission reports
+28 positive theorem declarations and 17 false controls over the three-file proof closure. Python
+syntax, proof source length, and compiler whitespace checks pass. The pinned toolchain hold remains
+active; no Elisa parser, build, test, or proof replay was run.
+
+### 23.27.454 Fail closed on missing Global-authority reference origins (2026-10-13)
+
+The conservative Global-authority origin predicate now includes `NO_ORIGIN` alongside
+`UNKNOWN_ALIAS` and the reserved `LOCAL_ALIAS` ceiling. This closes the access-policy gap where a
+reference expression whose origin was lost could bypass the conservative permission check. The
+proof adds an exact classifier theorem and a positive missing-origin case; a rejected control tries
+to allow missing provenance to skip the check. Bounded encoded local roots remain outside the
+conservative sentinel class.
+
+The source-bound checker verifies the exact predicate and its production use on dereference and
+rebind paths. Source-only admission reports 29 positive theorem declarations and 18 false controls
+across the three-file proof closure. Python syntax, proof source length, and both repositories'
+whitespace checks pass. The pinned toolchain hold remains active; no Elisa parser, build, test, or
+proof replay was run.
+
+### 23.27.455 Restore source-only admission for element-stride proofs (2026-10-13)
+
+The production element-stride policy now parenthesizes its result equality around the full scalar
+kind and nonzero-width conjunction, avoiding a precedence ambiguity in the contract. The existing
+proof already states the exact classification; its source checker had drifted to expect the older,
+unparenthesized `ensure`. I updated the binding and added a genuine `--source-only` mode that exits
+after validating production shapes, theorem inventories, and the three-file proof include closure,
+without requiring or invoking a proof product. The positive suite now also proves that the scalar
+byte count is the least whole-byte count covering any requested `u32` bit width; a false control
+claims a nine-bit value can be truncated to fewer than nine storage bits.
+
+Source-only admission reports 14 positive declarations and 6 false controls. Python syntax,
+source-length, and both repositories' whitespace checks pass. The pinned toolchain hold remains
+active, so Elisa-Proof elaboration and certificate replay were not run.
