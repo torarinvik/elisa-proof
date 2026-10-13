@@ -16540,3 +16540,23 @@ cannot prove `result > x`; selected overflow checks and the isolated test pass. 
 suite still has one failure in the separate guarded recursive sview proof, so that recursive proof
 work remains unqualified and timing remains skipped. Follow-up ROI is to fix that single proof path,
 then rerun the full semantic package before integrating the pending recursive analyzer changes.
+
+### 23.27.634 Record recursive proof matching on Core main (2026-10-13)
+
+Core `6116512d` is now on `main`, with `39bd2241` in its ancestry. It matches cloned contract calls by
+their full expression and builds recursive SMT substitutions only for free callee formals, declining
+if a referenced actual is missing or identifier collection encounters an unsupported expression.
+It also keeps type analysis on caller-side paths and actual arguments, avoiding cross-scope type-table
+overwrites. Before the commit, focused overflow, local-return, named-tuple, and recursive-call matching
+checks passed on the equivalent working tree. The full semantic run completed with the guarded
+recursive sview proof as its sole failure. No new test, build, or timing job was started for this
+entry; the recursive sview path remains the next qualification target.
+
+### Repair queue finding lookup (2026-10-13)
+
+The repair queue previously rescanned all report findings for each unresolved goal, giving
+O(goals × findings) work. It now lazily builds a bounded, work-metered per-report index: exact
+goal IDs preserve first-match behavior, while legacy `(line, name)` matching is accepted only when
+unique. Index construction and lookups fail closed when their work or probe limits are exhausted.
+`git diff --check` and `scripts/check_source_length.py` pass on the shared tree; this remains a
+static-only qualification, with no build or runtime checks performed under the provenance hold.
