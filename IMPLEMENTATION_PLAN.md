@@ -16624,33 +16624,32 @@ closed, and matched Stage0/Stage1 gates run on a provenance-matched build.
 
 ### 23.27.641 Align arena work admission with advertised node and child caps (2026-10-13)
 
-Static accounting found a possible mismatch between the 12,000,000-unit ceiling
-(`PROOF_KERNEL_CHILD_BUDGET + 8 * PROOF_KERNEL_NODE_BUDGET`) and the declared 1,000,000-node and
-4,000,000-child caps. The full-arena postorder pass now combines child-root and child-kind
-validation in one pass, removing the earlier duplicate scan. The selected-root DFS has a separate
-counter, however, and charges four node-sized workspace initializations, pushes serialized child
-edges, pushes one exit marker per visited node, and rechecks child ranges on exit, in addition to
-root work and shape text. For a fully reachable DAG with N nodes, C child edges, and F fact roots, the simple terms can
-reach roughly `6N + F + 2C + T`, where T is charged shape-text length: four node-sized workspace
-initializations, node shape visits, root/child/exit work-item pushes, and one semantic edge scan
-plus one push scan. Since F can approach N, this can exceed the 12,000,000 ceiling even for a
-shallow DAG within the array caps. Shared-DAG depth revisits can add more work. Such arenas may be
-refused for work exhaustion before reaching their serialized size caps. This is a fail-closed effective-cap/completeness issue, not a
-soundness failure. Avoid raising the global ceiling without a matching adversarial-cost argument.
-Prefer computing selected-root maximum depth in one postorder-aware propagation pass, or otherwise
-derive and document an upper bound covering every charged operation and confirm which capped shapes
-are admissible. This is static review only; no build or runtime qualification was run.
-
+Static accounting found that the previous 12,000,000-unit arena-local ceiling was below the base
+cost implied by the declared 1,000,000-node and 4,000,000-child caps. The full-arena postorder
+pass combines child-root and child-kind validation in one pass. Selected-root DFS charges four
+node-sized workspace initializations, node shape visits, root/child/exit work-item pushes, and one
+semantic edge scan plus one push scan. For N nodes, C child edges, F fact roots, and T charged
+shape-text units, the simple no-revisit cost is about `6N + F + 2C + T`; at the declared caps
+with F approaching N, this is about 15,000,000 units plus T. Arena admission now has a separate
+16,000,000-unit local ceiling, below the 16,777,216-unit tactic trace ceiling. At maximum N/C,
+less than about 1,000,000 local units remain for T, and a max-cost arena leaves less than 777,216
+units for subsequent tactic-trace work. Shared-DAG depth revisits also consume the same meter and
+can cause fail-closed refusal, so array caps alone do not promise admission for every shape; the
+independent work ceilings define the effective acceptance envelope. A cursor-based DFS with per-node maximum-depth memoization could
+remove duplicate edge inspection and bound revisits; it must preserve arbitrary-graph cycle
+checking for APIs that do not first establish postorder. Static checks only; no build or runtime
+qualification was run.
 ### 23.27.642 Reconfirm the active proof/compiler provenance hold (2026-10-13)
 
-The current proof checkout is at `764154a1b77164d9862057e1235c5949aeb7eff0` with four dirty
-paths, and the compiler candidate is at `dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23
-dirty paths. The available `build/elisa-proof.manifest.json` names proof HEAD
-`5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and clean compiler source `7e1251785276c539c98dbe33a12e610e2338cbf4`;
-the replay manifest names a different proof HEAD and compiler revision again. Neither artifact
-qualifies the current dirty sources. Keep parser, build, test, and replay qualification on hold
-until a frozen proof snapshot and provenance-matched compiler/runtime product exist. This check
-read manifest metadata only; it ran no proof binary or build.
+The proof checkout is now clean at `e73f0dc29f75bb5359fdc73c244ecb0b5d15398d` after committing
+the arena edge-validation changes. The compiler candidate remains at
+`dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23 dirty paths. The available
+`build/elisa-proof.manifest.json` names proof HEAD `5fd8a73bd4f0a002f239748ec963a96b1f28ee87`
+and clean compiler source `7e1251785276c539c98dbe33a12e610e2338cbf4`; the replay manifest names
+a different proof HEAD and compiler revision again. Neither artifact qualifies the current proof
+commit and compiler candidate. Keep parser, build, test, and replay qualification on hold until a
+provenance-matched compiler/runtime product exists. This check read manifest metadata only; it ran
+no proof binary or build.
 
 ### 23.27.643 Record typed overload selection in proposition replay (2026-10-13)
 
@@ -16665,3 +16664,25 @@ Stage0/Core provenance is mismatched, and parser/build/test/replay gates remain 
 current test inventory has overload controls for deterministic call summaries, but no dedicated
 kernel proposition typing control was found in this static search. Add positive typed-overload and
 negative ambiguous-overload cases to matched qualification before marking overload replay complete.
+
+### 23.27.644 Pin the current Elisa compiler mainline and separate replay budgets (2026-10-13)
+
+`ELISA_COMPILER_REV` now points to Elisa-compiler `505351f99585b15b5a392aa08cfdd8fb405f073a`,
+the current `main`/`origin/main` commit in the local compiler repository. Arena validation uses a
+separate 16,000,000-unit ceiling to account for the per-edge push and validation passes; the
+12,000,000-unit general replay budget remains defined for API and subtraction-alias callers. Static
+reference search confirms those existing callers still resolve the general constant. No compiler
+snapshot, proof binary, build, or runtime test was produced, so qualification remains pending.
+
+### 23.27.644 Track the current arena-budget source tuple (2026-10-13)
+
+The committed proof base is `e73f0dc29f75bb5359fdc73c244ecb0b5d15398d`; the current proof worktree
+also has dirty `ELISA_COMPILER_REV`, `IMPLEMENTATION_PLAN.md`, and
+`src/proof/kernel_replay/tactic_arena_validation.elisa` changes. The arena-local ceiling was raised
+from 12M to 16M and still needs review and commit. The compiler candidate remains at
+`dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23 dirty paths. The available proof manifest is
+pinned to proof HEAD `5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and compiler source
+`7e1251785276c539c98dbe33a12e610e2338cbf4`; the replay manifest is pinned to proof HEAD
+`a1a8f2cd75a65755f4bed8574a1e75b7678b8c0c` and compiler source `ac2b23ef4d9590e77b40503c0d90df59837d542a`.
+Neither manifest qualifies the current source pair. `git diff --check` and the source-length gate
+pass; no parser, build, test, or replay command was run.
