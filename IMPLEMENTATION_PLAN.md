@@ -16560,3 +16560,11 @@ goal IDs preserve first-match behavior, while legacy `(line, name)` matching is 
 unique. Index construction and lookups fail closed when their work or probe limits are exhausted.
 `git diff --check` and `scripts/check_source_length.py` pass on the shared tree; this remains a
 static-only qualification, with no build or runtime checks performed under the provenance hold.
+
+### 23.27.635 Fail closed on incomplete recursive-call identity (2026-10-13)
+
+Core commit `6b6f7469` replaces rendered-string equality in `contractCallsMatch` with full AST deep
+equality after checking source position. This preserves safe-call receivers, call flags, argument
+ordering, and any unsupported child expression fields; a lossy optimization rendering can no longer
+make two distinct calls inherit the same proof guard. Static diff review only; tests and builds were
+not run under the user's no-new-jobs instruction.
