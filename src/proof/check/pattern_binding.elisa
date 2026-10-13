@@ -1,0 +1,102 @@
+extend ElisaProof:
+    private:
+        def proof_bind_pattern(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&) -> bool:
+            name_mark: usize = names.count
+            value_mark: usize = values.count
+            work: mutable usize = 0
+            supported: bool = proof_bind_pattern_depth(pattern, position, source, names, values, 0, &work)
+            if not supported:
+                names <- names.truncate(name_mark)
+                values <- values.truncate(value_mark)
+            return supported
+
+        def proof_bind_pattern_depth(pattern: Ast::Pattern, position: Ast::Pos, source: Ast::Expr, names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, depth: usize, work: mutable usize&) -> bool:
+            return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
+            work <- work + 1
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return true
+                Ast::Pattern.Literal(_):
+                    return true
+                Ast::Pattern.Pin(_):
+                    return true
+                Ast::Pattern.Range(_, _, _):
+                    return true
+                Ast::Pattern.Binding(binding):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return true
+                Ast::Pattern.Rest(binding):
+                    return true if binding == ""
+                    names.push(binding)
+                    values.push(Ast::Expr.Invalid)
+                    return true
+                Ast::Pattern.TypeBind(_, binding):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return true
+                Ast::Pattern.As(binding, inner):
+                    return false if binding == ""
+                    names.push(binding)
+                    values.push(source)
+                    return false if inner.count != 1
+                    return proof_bind_pattern_depth(inner[0], position, source, names, values, depth + 1, work)
+                Ast::Pattern.Variant(_, fields):
+                    for field in fields |names, values, position, source, depth, work|:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+                        work <- work + 1
+                        match field:
+                            Ast::Pattern.Field(selector, inner):
+                                return false if selector == "" or inner.count != 1
+                                field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
+                                return false if not proof_bind_pattern_depth(inner[0], position, field_source, names, values, depth + 1, work)
+                            Ast::Pattern.Wildcard:
+                                pass
+                            Ast::Pattern.Binding(binding):
+                                # The payload ordinal-to-field map is not carried by this
+                                # compiler AST layer. Keep the binder in lexical scope for the
+                                # structural-recursion checker, but leave its value opaque so it
+                                # cannot be mistaken for the whole enum or an invented field.
+                                return false if binding == ""
+                                names.push(binding)
+                                values.push(Ast::Expr.Invalid)
+                            _:
+                                # Positional variant payloads need the compiler's lowered
+                                # ordinal-to-field map; guessing a field name would be unsound.
+                                return false
+                    return true
+                Ast::Pattern.Struct(_, fields):
+                    for field in fields |names, values, position, source, depth, work|:
+                        return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
+                        work <- work + 1
+                        match field:
+                            Ast::Pattern.Field(selector, inner):
+                                return false if selector == "" or inner.count != 1
+                                field_source: Ast::Expr = Ast::Expr.Field(source, selector, position)
+                                return false if not proof_bind_pattern_depth(inner[0], position, field_source, names, values, depth + 1, work)
+                            Ast::Pattern.Binding(binding):
+                                return false if binding == ""
+                                names.push(binding)
+                                values.push(Ast::Expr.Field(source, binding, position))
+                            Ast::Pattern.Wildcard:
+                                pass
+                            _:
+                                return false
+                    return true
+                Ast::Pattern.Field(_, inner):
+                    return false if inner.count != 1
+                    return proof_bind_pattern_depth(inner[0], position, source, names, values, depth + 1, work)
+                Ast::Pattern.Tuple(elements):
+                    for index in 0..<elements.count |index, elements, names, values, position, source, depth, work|:
+                        element_source: Ast::Expr = Ast::Expr.Index(source, Ast::Expr.IntLit(index.i64(), position), position)
+                        return false if not proof_bind_pattern_depth(elements[index], position, element_source, names, values, depth + 1, work)
+                    return true
+                Ast::Pattern.Or(options):
+                    return false if options.count == 0
+                    for option in options |position, depth, work|:
+                        return false if not proof_pattern_or_closed_depth(option, depth + 1, work)
+                    return true
+                Ast::Pattern.Other(_):
+                    return false
