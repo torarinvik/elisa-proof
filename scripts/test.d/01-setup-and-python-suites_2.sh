@@ -1,3 +1,4 @@
+python3 "$ROOT_DIR/scripts/test_checked_in_stage0_revision.py"
 "$SELF_HOST_COMPILER" "${PROOF_IMPORT_FLAGS[@]}" -emit obj -O0 -o "$standalone_probe_dir/rejected-overloaded-primitive-rewrite.o" "$ROOT_DIR/examples/rejected_overloaded_primitive_rewrite.elisa" >/dev/null 2>&1
 rejected_overloaded_primitive_rewrite_compiler_status=$?
 if [[ "$rejected_overloaded_primitive_rewrite_compiler_status" -ne 0 ]]; then

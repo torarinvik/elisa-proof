@@ -4,6 +4,7 @@ python3 "$ROOT_DIR/scripts/check_source_length.py"
 python3 "$ROOT_DIR/scripts/test_keep_going.py"
 python3 "$ROOT_DIR/scripts/test_clang_resolution.py"
 python3 "$ROOT_DIR/scripts/test_compiler_selection.py"
+python3 "$ROOT_DIR/scripts/test_qualified_test_binary.py"
 python3 "$ROOT_DIR/test/audit_harness_test.py"
 # ELISA_PROOF_SKIP_BUILD=1 tests prebuilt binaries (for example on a remote runner).
 if [[ "${ELISA_PROOF_SKIP_BUILD:-0}" != "1" ]]; then
@@ -16,7 +17,7 @@ fi
 QUALIFICATION_JSON="$(bash "$ROOT_DIR/scripts/qualify_prebuilt_test.sh" --json)"
 IFS=$'\t' read -r ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN <<<"$(python3 -c 'import json, sys; result=json.load(sys.stdin); paths=(result.get("proof_binary"), result.get("replay_binary")); assert all(isinstance(path, str) and path for path in paths); print("\t".join(paths))' <<<"$QUALIFICATION_JSON")"
 [[ -n "$ELISA_PROOF_BIN" && -n "$ELISA_PROOF_REPLAY_BIN" ]] || { printf 'proof test matrix failed: qualification did not return both product paths\n' >&2; exit 1; }
-export ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN
+export ELISA_PROOF_BIN ELISA_PROOF_REPLAY_BIN ELISA_PROOF_QUALIFIED_BIN="$ELISA_PROOF_BIN"
 
 # ELISA_PROOF_JOBS>1 runs every literal run_json_report fixture in parallel first; the serial
 # assertions below then read those stored reports (scripts/prefetch_reports.py).
@@ -95,6 +96,9 @@ run_py_test test_local_function_frame_shadow.py
 run_py_test test_source_call_result_alias.py
 run_py_test test_stable_conditional_predicates.py
 run_py_test test_pattern_literal_collisions.py
+run_py_test test_mutable_reference_proposition_signatures.py
+run_py_test test_mutable_reference_annotation_preflight.py
+run_py_test test_same_module_call_replay.py
 run_py_test tests/test_fixed_width_replay_matrix.py
 run_py_test test_fresh_loop_invariant.py
 run_py_test test_impure_proof_body.py
@@ -186,6 +190,7 @@ run_py_test test_measurements.py
 run_py_test tests/test_disjunction_work_accounting.py
 run_py_test test_source_admission_matrix.py
 run_py_test test_direct_api_semantic_admission.py
+run_py_test test_open_attempt_fact_admission.py
 run_py_test test_required_permission_api_admission.py
 run_py_test test_required_permission_cli_admission.py
 run_py_test test_required_permission_extra_routes.py
@@ -343,7 +348,6 @@ python3 "$ROOT_DIR/scripts/tests/test_deterministic_call_loop_replay.py"
 python3 "$ROOT_DIR/scripts/tests/test_replay_rebind_and_alias_holes.py"
 python3 "$ROOT_DIR/scripts/tests/test_replay_threaded_summary_holes.py"
 python3 "$ROOT_DIR/scripts/tests/test_replay_scope_and_context_holes.py"
-
 # Keep a true destruction case beside the two unknown-provenance regressions.
 for diagnostic_fixture in unsupported_region_record_copy unsupported_computed_write_place rejected_region_destroyed_write; do
     set +e

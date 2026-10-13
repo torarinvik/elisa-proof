@@ -470,6 +470,7 @@ if [[ "$bitwise_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: fixed-width bitwise kernel coverage\n' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/rejected_typed_bitwise_constant.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed" and report["summary"]["semantic_errors"] == 0 and report["replay"]["gaps"] == 0; assert {(finding["kind"], finding["name"]) for finding in report["findings"]} == {("ensure-unproven", "overlapping_typed_i64_masks_are_disjoint")}'
 run_json_report "$ROOT_DIR/examples/proof_step_derivation.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert any(trace["kind"] == "proof-step" and trace["premises_count"] > 0 for trace in report["kernel"]["fact_traces"]); assert report["replay"]["gaps"] == 0'
 proof_trace_probe_status=${PIPESTATUS[1]}
 if [[ "$proof_trace_probe_status" -ne 0 ]]; then
