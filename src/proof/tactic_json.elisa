@@ -190,49 +190,59 @@ extend ElisaProof:
             return proof_tactic_right(state) if action == "right"
             return false
 
-        # Tactic action equality/substitution/rewrite walkers are AST-recursive too. Reserve AST
-        # pair work for matching and replacement scans, plus AST-by-annotation probes. The factor
-        # of two covers deterministic replay without charging annotation pairs.
+        def proof_tactic_json_action_ast_exhaust(total_work: mutable usize&) -> bool:
+            total_work <- PROOF_JSON_ACTION_AST_WORK_LIMIT
+            return false
+
+        # The census is itself a bounded recursive AST walk. Charge it along with AST-pair work
+        # for action execution and deterministic replay, and latch exhaustion after any failed
+        # post-census admission so repeated rejected actions cannot repeat a large scan for free.
         def proof_tactic_json_charge_action_ast_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, annotations: darray[Ast::EnumAnnotation]&, total_work: mutable usize&) -> bool:
             return false if total_work >= PROOF_JSON_ACTION_AST_WORK_LIMIT
             remaining: usize = PROOF_JSON_ACTION_AST_WORK_LIMIT - total_work
             ast_cost: mutable usize = 0
             for fact in facts |fact, ast_cost, remaining|:
                 cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(fact, &cost, remaining - ast_cost)
-                return false if cost > remaining - ast_cost
+                return proof_tactic_json_action_ast_exhaust(&total_work) if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(fact, &cost, remaining - ast_cost)
+                return proof_tactic_json_action_ast_exhaust(&total_work) if cost > remaining - ast_cost
                 ast_cost <- ast_cost + cost
             goal_cost: mutable usize = 0
-            return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(goal, &goal_cost, remaining - ast_cost)
-            return false if goal_cost > remaining - ast_cost
+            return proof_tactic_json_action_ast_exhaust(&total_work) if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(goal, &goal_cost, remaining - ast_cost)
+            return proof_tactic_json_action_ast_exhaust(&total_work) if goal_cost > remaining - ast_cost
             ast_cost <- ast_cost + goal_cost
             if has_argument:
                 argument_cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(argument, &argument_cost, remaining - ast_cost)
-                return false if argument_cost > remaining - ast_cost
+                return proof_tactic_json_action_ast_exhaust(&total_work) if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(argument, &argument_cost, remaining - ast_cost)
+                return proof_tactic_json_action_ast_exhaust(&total_work) if argument_cost > remaining - ast_cost
                 ast_cost <- ast_cost + argument_cost
             if has_secondary:
                 secondary_cost: mutable usize = 0
-                return false if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(secondary, &secondary_cost, remaining - ast_cost)
-                return false if secondary_cost > remaining - ast_cost
+                return proof_tactic_json_action_ast_exhaust(&total_work) if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(secondary, &secondary_cost, remaining - ast_cost)
+                return proof_tactic_json_action_ast_exhaust(&total_work) if secondary_cost > remaining - ast_cost
                 ast_cost <- ast_cost + secondary_cost
             annotation_cost: mutable usize = 0
-            for annotation in annotations |annotation, annotation_cost, remaining|:
+            census_remaining: usize = remaining - ast_cost
+            for annotation in annotations |annotation, annotation_cost, census_remaining|:
                 owner_cost: usize = sview_len(annotation.owner)
                 name_cost: usize = sview_len(annotation.name)
-                return false if owner_cost >= remaining - annotation_cost
-                return false if name_cost > remaining - annotation_cost - owner_cost - 1
+                return proof_tactic_json_action_ast_exhaust(&total_work) if annotation_cost >= census_remaining or owner_cost >= census_remaining - annotation_cost
+                return proof_tactic_json_action_ast_exhaust(&total_work) if name_cost > census_remaining - annotation_cost - owner_cost - 1
                 annotation_row_cost: usize = owner_cost + name_cost + 1
                 annotation_cost <- annotation_cost + annotation_row_cost
-            return true if ast_cost == 0
-            return false if ast_cost > remaining / ast_cost
+            if ast_cost == 0:
+                total_work <- total_work + annotation_cost
+                return true
+            return proof_tactic_json_action_ast_exhaust(&total_work) if annotation_cost > remaining - ast_cost
+            census_cost: usize = ast_cost + annotation_cost
+            execution_remaining: usize = remaining - census_cost
+            return proof_tactic_json_action_ast_exhaust(&total_work) if ast_cost > execution_remaining / ast_cost
             quadratic_cost: usize = ast_cost * ast_cost
-            return false if quadratic_cost > remaining
-            remaining_cross_cost: usize = remaining - quadratic_cost
-            return false if annotation_cost > remaining_cross_cost / ast_cost
+            return proof_tactic_json_action_ast_exhaust(&total_work) if quadratic_cost > execution_remaining
+            remaining_cross_cost: usize = execution_remaining - quadratic_cost
+            return proof_tactic_json_action_ast_exhaust(&total_work) if annotation_cost > remaining_cross_cost / ast_cost
             action_cost: usize = quadratic_cost + ast_cost * annotation_cost
-            return false if action_cost > remaining / 2
-            total_work <- total_work + action_cost * 2
+            return proof_tactic_json_action_ast_exhaust(&total_work) if action_cost > execution_remaining / 2
+            total_work <- total_work + census_cost + action_cost * 2
             return true
 
         def proof_tactic_json_prepare_operator_mask(tree: mutable ProofTacticJsonTree&, annotations: darray[Ast::EnumAnnotation]&) -> bool:

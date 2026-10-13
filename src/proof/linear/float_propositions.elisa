@@ -40,6 +40,8 @@ extend ElisaProof:
         def proof_float_boolean_formula(expression: Ast::Expr, operator_mask: usize, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
+                Ast::Expr.BoolLit(_, _):
+                    return true
                 Ast::Expr.Paren(inner, _):
                     return proof_float_boolean_formula(inner, operator_mask, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
@@ -55,64 +57,109 @@ extend ElisaProof:
                 _:
                     return proof_float_boolean_atom(expression, operator_mask)
 
-        def proof_float_boolean_collect(expression: Ast::Expr, atoms: mutable darray[Ast::Expr]&, depth: usize) -> bool:
+        def proof_float_boolean_expression_equal_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&, work_limit: usize) -> (complete: bool, equal: bool):
+            return (false, false) if work > work_limit
+            remaining: usize = work_limit - work
+            scan_limit: usize = remaining / 2
+            scan_limit <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT if scan_limit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if scan_limit == 0:
+                work <- work_limit
+                return (false, false)
+            comparison_cost: mutable usize = 0
+            left_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(left, &left_cost, 0, scan_limit):
+                work <- work_limit
+                return (false, false)
+            right_cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(right, &right_cost, 0, scan_limit):
+                work <- work_limit
+                return (false, false)
+            comparison_cost <- left_cost + right_cost
+            # Each cost walk is capped at half the remaining allowance, so their combined
+            # preflight cannot overshoot it. `comparison_cost` covers both operands; charging six
+            # times that total accounts for the two cost walks plus proof_expr_equal's five
+            # structural passes. If that total does not fit, latch exhaustion and skip equality.
+            if comparison_cost > remaining / 6:
+                work <- work_limit
+                return (false, false)
+            work <- work + comparison_cost * 6
+            return (true, proof_expr_equal(left, right))
+
+        def proof_float_boolean_collect(expression: Ast::Expr, atoms: mutable darray[Ast::Expr]&, atom_hashes: mutable darray[u32]&, work: mutable usize&, work_limit: usize, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
+                Ast::Expr.BoolLit(_, _):
+                    return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_float_boolean_collect(inner, atoms, depth + 1)
+                    return proof_float_boolean_collect(inner, atoms, atom_hashes, work, work_limit, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    return proof_float_boolean_collect(inner, atoms, depth + 1)
+                    return proof_float_boolean_collect(inner, atoms, atom_hashes, work, work_limit, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return proof_float_boolean_collect(left, atoms, depth + 1) and proof_float_boolean_collect(right, atoms, depth + 1)
+                        return false if not proof_float_boolean_collect(left, atoms, atom_hashes, work, work_limit, depth + 1)
+                        return proof_float_boolean_collect(right, atoms, atom_hashes, work, work_limit, depth + 1)
                 _:
                     pass
-            return true if any atom in atoms where proof_expr_equal(atom, expression)
+            return false if atoms.count != atom_hashes.count
+            expression_hash: u32 = proof_expr_shape_hash(expression, 0)
+            for index in 0..<atoms.count |index, atoms, atom_hashes, expression_hash, work, work_limit|:
+                return false if not proof_float_boolean_charge_product(&work, work_limit, 1, 1, 1)
+                continue if atom_hashes[index] != expression_hash
+                equal: (complete: bool, equal: bool) = proof_float_boolean_expression_equal_with_work(atoms[index], expression, &work, work_limit)
+                return false if not equal.complete
+                return true if equal.equal
             return false if atoms.count >= PROOF_FLOAT_BOOLEAN_ATOM_LIMIT
             atoms.push(expression)
+            atom_hashes.push(expression_hash)
             return true
 
-        def proof_float_boolean_evaluate(expression: Ast::Expr, atoms: darray[Ast::Expr]&, values: darray[bool]&, depth: usize) -> (known: bool, value: bool):
-            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+        def proof_float_boolean_evaluate(expression: Ast::Expr, atoms: darray[Ast::Expr]&, atom_hashes: darray[u32]&, values: darray[bool]&, work: mutable usize&, work_limit: usize, depth: usize) -> (known: bool, value: bool):
+            return (false, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or atoms.count != atom_hashes.count or atoms.count != values.count
             match expression:
                 Ast::Expr.BoolLit(value, _):
                     return (true, value)
                 Ast::Expr.Paren(inner, _):
-                    return proof_float_boolean_evaluate(inner, atoms, values, depth + 1)
+                    return proof_float_boolean_evaluate(inner, atoms, atom_hashes, values, work, work_limit, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    nested: (known: bool, value: bool) = proof_float_boolean_evaluate(inner, atoms, values, depth + 1)
+                    nested: (known: bool, value: bool) = proof_float_boolean_evaluate(inner, atoms, atom_hashes, values, work, work_limit, depth + 1)
                     return (nested.known, not nested.value)
                 Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, values, depth + 1)
+                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, atom_hashes, values, work, work_limit, depth + 1)
                     return (false, false) if not first.known
                     return (true, false) if not first.value
-                    return proof_float_boolean_evaluate(right, atoms, values, depth + 1)
+                    return proof_float_boolean_evaluate(right, atoms, atom_hashes, values, work, work_limit, depth + 1)
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
-                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, values, depth + 1)
+                    first: (known: bool, value: bool) = proof_float_boolean_evaluate(left, atoms, atom_hashes, values, work, work_limit, depth + 1)
                     return (false, false) if not first.known
                     return (true, true) if first.value
-                    return proof_float_boolean_evaluate(right, atoms, values, depth + 1)
+                    return proof_float_boolean_evaluate(right, atoms, atom_hashes, values, work, work_limit, depth + 1)
                 _:
                     pass
-            for index in 0..<atoms.count |index, atoms, values, expression|:
-                return (true, values[index]) if index < values.count and proof_expr_equal(atoms[index], expression)
+            return (false, false) if atoms.count != atom_hashes.count
+            expression_hash: u32 = proof_expr_shape_hash(expression, 0)
+            for index in 0..<atoms.count |index, atoms, atom_hashes, values, expression_hash, work, work_limit|:
+                return (false, false) if not proof_float_boolean_charge_product(&work, work_limit, 1, 1, 1)
+                continue if atom_hashes[index] != expression_hash
+                equal: (complete: bool, equal: bool) = proof_float_boolean_expression_equal_with_work(atoms[index], expression, &work, work_limit)
+                return (false, false) if not equal.complete
+                return (true, values[index]) if equal.equal
             return (false, false)
 
-        def proof_float_boolean_all_assignments(facts: darray[Ast::Expr]&, goal: Ast::Expr, atoms: darray[Ast::Expr]&, values: mutable darray[bool]&, atom_index: usize) -> bool:
+        def proof_float_boolean_all_assignments(facts: darray[Ast::Expr]&, goal: Ast::Expr, atoms: darray[Ast::Expr]&, atom_hashes: darray[u32]&, values: mutable darray[bool]&, atom_index: usize, work: mutable usize&, work_limit: usize) -> bool:
             if atom_index >= atoms.count:
-                for fact in facts |fact, goal, atoms, values|:
-                    premise: (known: bool, value: bool) = proof_float_boolean_evaluate(fact, atoms, values, 0)
+                for fact in facts |fact, goal, atoms, atom_hashes, values, work, work_limit|:
+                    premise: (known: bool, value: bool) = proof_float_boolean_evaluate(fact, atoms, atom_hashes, values, &work, work_limit, 0)
                     return false if not premise.known
                     continue if premise.value
                     return true
-                conclusion: (known: bool, value: bool) = proof_float_boolean_evaluate(goal, atoms, values, 0)
+                conclusion: (known: bool, value: bool) = proof_float_boolean_evaluate(goal, atoms, atom_hashes, values, &work, work_limit, 0)
                 return conclusion.known and conclusion.value
             values.push(false)
-            if not proof_float_boolean_all_assignments(facts, goal, atoms, values, atom_index + 1):
+            if not proof_float_boolean_all_assignments(facts, goal, atoms, atom_hashes, values, atom_index + 1, work, work_limit):
                 values.truncate(values.count - 1)
                 return false
             values[values.count - 1] <- true
-            valid: bool = proof_float_boolean_all_assignments(facts, goal, atoms, values, atom_index + 1)
+            valid: bool = proof_float_boolean_all_assignments(facts, goal, atoms, atom_hashes, values, atom_index + 1, work, work_limit)
             values.truncate(values.count - 1)
             return valid
 
@@ -135,23 +182,27 @@ extend ElisaProof:
                 not proof_replay_summary_expr_cost(goal, &goal_cost, cost_work, 0)
                 goal_cost > PROOF_FLOAT_BOOLEAN_WORK_LIMIT - total_nodes or goal_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost_work
             total_nodes <- total_nodes + goal_cost
-            # Formula validation and atom collection each traverse the input. Reserve those
-            # passes now; the model evaluation allowance can use the exact atom count below.
+            # Validation, formula collection, atom hashing, and the bounded linear hash-table
+            # probes each traverse the input at most a fixed number of times. Structural equality
+            # is separately metered only when hashes collide.
             return false if:
-                not proof_float_boolean_charge_product(&work, work_limit, total_nodes, 1, 8)
+                not proof_float_boolean_charge_product(&work, work_limit, total_nodes, 1, 32)
                 not proof_float_boolean_formula(goal, operator_mask, 0)
             relevant_facts: mutable darray[Ast::Expr] = []
             atoms: mutable darray[Ast::Expr] = []
-            for fact in facts |fact, goal, operator_mask, relevant_facts, atoms|:
+            atom_hashes: mutable darray[u32] = []
+            for fact in facts |fact, goal, operator_mask, relevant_facts, atoms, atom_hashes, work, work_limit|:
                 continue if not proof_float_boolean_formula(fact, operator_mask, 0)
                 relevant_facts.push(fact)
-                return false if not proof_float_boolean_collect(fact, &atoms, 0)
-            return false if not proof_float_boolean_collect(goal, &atoms, 0)
+                return false if not proof_float_boolean_collect(fact, &atoms, &atom_hashes, &work, work_limit, 0)
+            return false if not proof_float_boolean_collect(goal, &atoms, &atom_hashes, &work, work_limit, 0)
+            return false if atoms.count != atom_hashes.count
             model_count: mutable usize = 1
             for _ in 0..<atoms.count |model_count|:
                 model_count <- model_count * 2
-            # Every model evaluates the relevant formulas and resolves opaque atoms by a
-            # bounded scan of at most eight atom expressions.
+            # Every model evaluates the relevant formulas, hashes each opaque atom once, and
+            # scans at most eight stored atom hashes. Any colliding structural equality is charged
+            # by proof_float_boolean_expression_equal_with_work.
             return false if not proof_float_boolean_charge_product(&work, work_limit, total_nodes, model_count, 32)
             assignments: mutable darray[bool] = []
-            proof_float_boolean_all_assignments(relevant_facts, goal, atoms, &assignments, 0)
+            return proof_float_boolean_all_assignments(relevant_facts, goal, atoms, atom_hashes, &assignments, 0, &work, work_limit)

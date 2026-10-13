@@ -1,12 +1,11 @@
-def proof_goal_identity_work_preflight(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work: mutable usize&, depth: usize) -> bool:
+def proof_goal_identity_work_preflight(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work: mutable usize&, identity_bytes: mutable usize&, depth: usize) -> bool:
     requires depth <= PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT
     decreases PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT - depth
     return false if depth >= PROOF_RUNTIME_IDENTITY_DEPTH_LIMIT or root >= nodes.count
     node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-    # Bound the preflight plus identity serialization and fingerprint hash. JSON strings can
-    # expand sixfold; their bytes are emitted and hashed, while raw kind/operator bytes are also
-    # emitted and hashed. Charge each occurrence before descending so shared DAG expansion stops
-    # at the aggregate limit.
+    # Charge recursive node/shape inspection and reserve a worst-case encoded byte count. The
+    # output reserve is checked before serialization, so a long string cannot overrun the cap
+    # before the next recursive entry gets a chance to stop.
     kind_bytes: usize = sview_len(node.kind)
     operator_bytes: usize = sview_len(node.operator)
     name_bytes: usize = sview_len(node.name)
@@ -27,37 +26,54 @@ def proof_goal_identity_work_preflight(nodes: darray[ElisaProofKernelCore::Proof
     remaining <- PROOF_JSON_EXPRESSION_WORK_LIMIT - work
     return false if secondary_bytes > remaining / 13
     work <- work + secondary_bytes * 13
+
+    return false if identity_bytes > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT
+    output_remaining: usize = PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes
+    return false if output_remaining < 128
+    identity_bytes <- identity_bytes + 128
+    output_remaining <- PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes
+    return false if kind_bytes > output_remaining
+    identity_bytes <- identity_bytes + kind_bytes
+    output_remaining <- PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes
+    return false if operator_bytes > output_remaining
+    identity_bytes <- identity_bytes + operator_bytes
+    output_remaining <- PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes
+    return false if name_bytes > output_remaining / 6
+    identity_bytes <- identity_bytes + name_bytes * 6
+    output_remaining <- PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes
+    return false if secondary_bytes > output_remaining / 6
+    identity_bytes <- identity_bytes + secondary_bytes * 6
     match node.kind:
         "unary" | "move" | "field" | "scope" | "call_arg" | "checked-get":
-            return proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
+            return proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
         "binary" | "index" | "checked-index" | "dict_entry":
-            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
-            return proof_goal_identity_work_preflight(nodes, children, node.right, &work, depth + 1)
+            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
+            return proof_goal_identity_work_preflight(nodes, children, node.right, &work, &identity_bytes, depth + 1)
         "if" | "slice":
-            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
-            return false if not proof_goal_identity_work_preflight(nodes, children, node.right, &work, depth + 1)
-            return proof_goal_identity_work_preflight(nodes, children, node.auxiliary, &work, depth + 1)
+            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
+            return false if not proof_goal_identity_work_preflight(nodes, children, node.right, &work, &identity_bytes, depth + 1)
+            return proof_goal_identity_work_preflight(nodes, children, node.auxiliary, &work, &identity_bytes, depth + 1)
         "call" | "index-n" | "construct" | "record-update":
-            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
+            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
             return false if node.children_start > children.count or node.children_count > children.count - node.children_start
-            for index in 0..<node.children_count |index, node, children, nodes, work, depth|:
-                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, depth + 1)
+            for index in 0..<node.children_count |index, node, children, nodes, work, identity_bytes, depth|:
+                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, &identity_bytes, depth + 1)
             return true
         "array" | "tuple" | "set" | "dict":
             return false if node.children_start > children.count or node.children_count > children.count - node.children_start
-            for index in 0..<node.children_count |index, node, children, nodes, work, depth|:
-                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, depth + 1)
+            for index in 0..<node.children_count |index, node, children, nodes, work, identity_bytes, depth|:
+                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, &identity_bytes, depth + 1)
             return true
         "frame-place" | "frame-policy":
             if node.kind == "frame-policy":
-                return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
+                return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
             return false if node.children_start > children.count or node.children_count > children.count - node.children_start
-            for index in 0..<node.children_count |index, node, children, nodes, work, depth|:
-                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, depth + 1)
+            for index in 0..<node.children_count |index, node, children, nodes, work, identity_bytes, depth|:
+                return false if not proof_goal_identity_work_preflight(nodes, children, children[node.children_start + index], &work, &identity_bytes, depth + 1)
             return true
         "quantifier":
-            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, depth + 1)
-            return proof_goal_identity_work_preflight(nodes, children, node.right, &work, depth + 1)
+            return false if not proof_goal_identity_work_preflight(nodes, children, node.left, &work, &identity_bytes, depth + 1)
+            return proof_goal_identity_work_preflight(nodes, children, node.right, &work, &identity_bytes, depth + 1)
         _:
             return true
 
@@ -67,40 +83,101 @@ def proof_goal_fingerprint(report: ProofReport&, attempt: ProofGoalAttempt) -> (
 
 def proof_goal_fingerprint_with_work(report: ProofReport&, attempt: ProofGoalAttempt, identity_work: mutable usize&) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
     identity: mutable darray[u8] = []
-    return (false, 0) if:
-        attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count
-        attempt.kernel_facts_count > report.analysis_1.kernel.certificate_facts.count - attempt.kernel_facts_start
-    return (false, 0) if identity_work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+    if attempt.kernel_facts_start > report.analysis_1.kernel.certificate_facts.count or attempt.kernel_facts_count > report.analysis_1.kernel.certificate_facts.count - attempt.kernel_facts_start:
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return (false, 0)
+    if identity_work > PROOF_JSON_EXPRESSION_WORK_LIMIT:
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return (false, 0)
+    identity_bytes: mutable usize = 20
+    if attempt.kernel_facts_count > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes - 1:
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return (false, 0)
+    identity_bytes <- identity_bytes + attempt.kernel_facts_count + 1
     remaining: usize = PROOF_JSON_EXPRESSION_WORK_LIMIT - identity_work
-    if remaining < 32:
+    roots: usize = attempt.kernel_facts_count + 1
+    if roots > remaining:
         identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
         return (false, 0)
-    remaining <- remaining - 32
-    if attempt.kernel_facts_count >= remaining:
-        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
-        return (false, 0)
-    roots: usize = attempt.kernel_facts_count + 1 + 32
     identity_work <- identity_work + roots
-    for index in 0..<attempt.kernel_facts_count |index, attempt, report, identity_work|:
-        if not proof_goal_identity_work_preflight(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + index], &identity_work, 0):
+    for index in 0..<attempt.kernel_facts_count |index, attempt, report, identity_work, identity_bytes|:
+        if not proof_goal_identity_work_preflight(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, report.analysis_1.kernel.certificate_facts[attempt.kernel_facts_start + index], &identity_work, &identity_bytes, 0):
             identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
             return (false, 0)
-    if not proof_goal_identity_work_preflight(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, attempt.kernel_goal, &identity_work, 0):
+    if not proof_goal_identity_work_preflight(report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, attempt.kernel_goal, &identity_work, &identity_bytes, 0):
         identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
         return (false, 0)
-    return (false, 0) if not proof_portable_sequent_identity(&identity, report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, report.analysis_1.kernel.certificate_facts, attempt.kernel_facts_start, attempt.kernel_facts_count, attempt.kernel_goal)
-    return (true, proof_source_fingerprint(identity))
+    if not proof_portable_sequent_identity(&identity, report.analysis_1.kernel.nodes, report.analysis_1.kernel.children, report.analysis_1.kernel.certificate_facts, attempt.kernel_facts_start, attempt.kernel_facts_count, attempt.kernel_goal):
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return (false, 0)
+    if identity.count > identity_bytes or identity.count > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT:
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return (false, 0)
+    fingerprint: (valid: bool, value: u32) = proof_source_fingerprint_with_work(identity, &identity_work, PROOF_JSON_EXPRESSION_WORK_LIMIT)
+    return (false, 0) if not fingerprint.valid
+    return (true, fingerprint.value)
 
-def proof_push_theorem_expression_identity(buffer: mutable darray[u8]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, expression: Ast::Expr) -> bool can[Memory.Allocate, Abort.Panic]:
+def proof_theorem_identity_work_charge(work: mutable usize&, amount: usize) -> bool:
+    return false if work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+    if amount > PROOF_JSON_EXPRESSION_WORK_LIMIT - work:
+        work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return false
+    work <- work + amount
+    return true
+
+def proof_theorem_identity_work_charge_scaled(work: mutable usize&, count: usize, scale: usize) -> bool:
+    return false if scale == 0 or work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+    if count > (PROOF_JSON_EXPRESSION_WORK_LIMIT - work) / scale:
+        work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return false
+    work <- work + count * scale
+    return true
+
+def proof_theorem_identity_text_reserve(value: sview, work: mutable usize&) -> bool:
+    length: usize = sview_len(value)
+    return false if work > PROOF_JSON_EXPRESSION_WORK_LIMIT
+    if length > (PROOF_JSON_EXPRESSION_WORK_LIMIT - work) / 13:
+        work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return false
+    work <- work + length * 13
+    return true
+
+def proof_theorem_identity_bytes_charge(identity_bytes: mutable usize&, amount: usize) -> bool:
+    return false if identity_bytes > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT
+    if amount > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - identity_bytes:
+        identity_bytes <- PROOF_RUNTIME_IDENTITY_BYTE_LIMIT + 1
+        return false
+    identity_bytes <- identity_bytes + amount
+    return true
+
+def proof_theorem_identity_text_bytes_reserve(value: sview, identity_bytes: mutable usize&) -> bool:
+    length: usize = sview_len(value)
+    # JSON string output includes two quotes in addition to up to six bytes per input byte.
+    return false if length > (PROOF_RUNTIME_IDENTITY_BYTE_LIMIT - 2) / 6
+    return proof_theorem_identity_bytes_charge(&identity_bytes, length * 6 + 2)
+
+def proof_push_theorem_expression_identity_with_work(buffer: mutable darray[u8]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, expression: Ast::Expr, source_work: mutable usize&, identity_work: mutable usize&, identity_bytes: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+    return false if not proof_replay_summary_expr_kernel_identity_reserve(expression, &source_work)
     return false if not proof_kernel_expression_supported(expression)
     root: usize = proof_kernel_encode_expression(expression, nodes, children)
-    return proof_push_kernel_identity(buffer, nodes, children, root, 0)
+    bytes_before: usize = identity_bytes
+    if not proof_goal_identity_work_preflight(nodes, children, root, &identity_work, &identity_bytes, 0):
+        identity_work <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+        return false
+    return false if identity_bytes < bytes_before or not proof_theorem_identity_work_charge(&identity_work, identity_bytes - bytes_before)
+    return false if not proof_push_kernel_identity(buffer, nodes, children, root, 0)
+    return true
 
 # Canonical identity of a theorem statement and invocation signature. Source positions, report
 # indices, proof scripts, and certificate arena offsets are excluded: changing the proof without
 # changing the checked theorem does not invalidate consumers. Verification and replay remain
 # separate admission gates and are never implied by this observational FNV identity.
 def proof_theorem_fingerprint(report: ProofReport&, theorem: ProofTheoremSummary) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
+    source_work: mutable usize = 0
+    identity_work: mutable usize = 0
+    return proof_theorem_fingerprint_with_work(report, theorem, &source_work, &identity_work)
+
+def proof_theorem_fingerprint_with_work(report: ProofReport&, theorem: ProofTheoremSummary, source_work: mutable usize&, identity_work: mutable usize&) -> (valid: bool, value: u32) can[Memory.Allocate, Abort.Panic]:
     valid_parameters: bool = theorem.parameters_start <= report.analysis_1.theorems.parameters.count and theorem.parameters_count <= report.analysis_1.theorems.parameters.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_types.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_has_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_defaults.count - theorem.parameters_start
     valid_requires: bool = theorem.requires_start <= report.analysis_1.theorems.requires.count and theorem.requires_count <= report.analysis_1.theorems.requires.count - theorem.requires_start
     valid_ensures: bool = theorem.ensures_start <= report.analysis_1.theorems.ensures.count and theorem.ensures_count <= report.analysis_1.theorems.ensures.count - theorem.ensures_start
@@ -109,28 +186,65 @@ def proof_theorem_fingerprint(report: ProofReport&, theorem: ProofTheoremSummary
     identity: mutable darray[u8] = []
     nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
     children: mutable darray[usize] = []
+    identity_bytes: mutable usize = 0
+    return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 128)
+    return (false, 0) if not proof_theorem_identity_text_reserve(theorem.name, &identity_work)
+    return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 64)
+    return (false, 0) if not proof_theorem_identity_text_bytes_reserve(theorem.name, &identity_bytes)
+    return (false, 0) if not proof_theorem_identity_work_charge_scaled(&identity_work, identity_bytes, 1)
+    return (false, 0) if not proof_theorem_identity_work_charge_scaled(&identity_work, theorem.parameters_count, 4)
+    return (false, 0) if:
+        not proof_theorem_identity_work_charge(&identity_work, theorem.requires_count)
+        not proof_theorem_identity_work_charge(&identity_work, theorem.ensures_count)
+        not proof_theorem_identity_work_charge(&identity_work, theorem.decreases_count)
     proof_push(&identity, "elisa-proof-theorem-v1:")
     proof_push_json_string(&identity, theorem.name)
     proof_push(&identity, ":recursive:" if theorem.recursive else ":nonrecursive:")
     valid: mutable bool = true
-    for index in 0..<theorem.parameters_count |index, theorem, report, identity, nodes, children, valid|:
+    for index in 0..<theorem.parameters_count |index, theorem, report, identity, nodes, children, valid, source_work, identity_work|:
+        return (false, 0) if not valid
         parameter_index: usize = theorem.parameters_start + index
+        return (false, 0) if not proof_theorem_identity_text_reserve(report.analysis_1.theorems.parameters[parameter_index], &identity_work)
+        return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+        return (false, 0) if not proof_theorem_identity_text_bytes_reserve(report.analysis_1.theorems.parameters[parameter_index], &identity_bytes)
+        return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1 + sview_len(report.analysis_1.theorems.parameters[parameter_index]) * 6)
         proof_push(&identity, "P")
         proof_push_json_string(&identity, report.analysis_1.theorems.parameters[parameter_index])
-        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.analysis_1.theorems.parameter_types[parameter_index]) and valid
+        valid <- proof_push_theorem_expression_identity_with_work(&identity, &nodes, &children, report.analysis_1.theorems.parameter_types[parameter_index], &source_work, &identity_work, &identity_bytes) and valid
+        return (false, 0) if not valid
         if report.analysis_1.theorems.parameter_has_defaults[parameter_index]:
+            return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+            return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1)
             proof_push(&identity, "D")
-            valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.analysis_1.theorems.parameter_defaults[parameter_index]) and valid
+            valid <- proof_push_theorem_expression_identity_with_work(&identity, &nodes, &children, report.analysis_1.theorems.parameter_defaults[parameter_index], &source_work, &identity_work, &identity_bytes) and valid
+            return (false, 0) if not valid
         else:
+            return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+            return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1)
             proof_push(&identity, "N")
-    for index in 0..<theorem.requires_count |index, theorem, report, identity, nodes, children, valid|:
+    for index in 0..<theorem.requires_count |index, theorem, report, identity, nodes, children, valid, source_work, identity_work|:
+        return (false, 0) if not valid
+        return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+        return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1)
         proof_push(&identity, "R")
-        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.analysis_1.theorems.requires[theorem.requires_start + index]) and valid
-    for index in 0..<theorem.ensures_count |index, theorem, report, identity, nodes, children, valid|:
+        valid <- proof_push_theorem_expression_identity_with_work(&identity, &nodes, &children, report.analysis_1.theorems.requires[theorem.requires_start + index], &source_work, &identity_work, &identity_bytes) and valid
+        return (false, 0) if not valid
+    for index in 0..<theorem.ensures_count |index, theorem, report, identity, nodes, children, valid, source_work, identity_work|:
+        return (false, 0) if not valid
+        return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+        return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1)
         proof_push(&identity, "E")
-        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.analysis_1.theorems.ensures[theorem.ensures_start + index]) and valid
-    for index in 0..<theorem.decreases_count |index, theorem, report, identity, nodes, children, valid|:
+        valid <- proof_push_theorem_expression_identity_with_work(&identity, &nodes, &children, report.analysis_1.theorems.ensures[theorem.ensures_start + index], &source_work, &identity_work, &identity_bytes) and valid
+        return (false, 0) if not valid
+    for index in 0..<theorem.decreases_count |index, theorem, report, identity, nodes, children, valid, source_work, identity_work|:
+        return (false, 0) if not valid
+        return (false, 0) if not proof_theorem_identity_bytes_charge(&identity_bytes, 1)
+        return (false, 0) if not proof_theorem_identity_work_charge(&identity_work, 1)
         proof_push(&identity, "M")
-        valid <- proof_push_theorem_expression_identity(&identity, &nodes, &children, report.analysis_1.theorems.decreases[theorem.decreases_start + index]) and valid
+        valid <- proof_push_theorem_expression_identity_with_work(&identity, &nodes, &children, report.analysis_1.theorems.decreases[theorem.decreases_start + index], &source_work, &identity_work, &identity_bytes) and valid
+        return (false, 0) if not valid
     return (false, 0) if not valid
-    return (true, proof_source_fingerprint(identity))
+    return (false, 0) if identity.count > identity_bytes or identity.count > PROOF_RUNTIME_IDENTITY_BYTE_LIMIT
+    fingerprint: (valid: bool, value: u32) = proof_source_fingerprint_with_work(identity, &identity_work, PROOF_JSON_EXPRESSION_WORK_LIMIT)
+    return (false, 0) if not fingerprint.valid
+    return (true, fingerprint.value)

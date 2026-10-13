@@ -3,6 +3,69 @@
 module ElisaProofCliTactics:
     private:
         const SCRATCH_SLOT_COUNT: usize = PROOF_JSON_BRANCH_DEPTH_LIMIT
+        # Keep this aligned with the core JSON parser's recursive-descent depth ceiling.
+        const PROOF_CLI_JSON_PARSE_MAX_DEPTH: usize = 256
+
+        # The JSON parser scans each container's subtree once to reserve its DOM row, then
+        # parses the document. Nested containers therefore cost more than a fixed multiple of
+        # input bytes. Charge this linear preflight and the measured sum of container spans
+        # before either parser invocation, with a separate input-sized allowance for parsing
+        # and DOM construction.
+        def proof_cli_json_parse_work_reserve(contents: darray[u8]&, work_used: mutable usize&) -> bool:
+            return false if work_used > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            remaining: usize = PROOF_JSON_EXPRESSION_WORK_LIMIT - work_used
+            if contents.count > remaining:
+                work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+                return false
+            work_used <- work_used + contents.count
+            remaining <- PROOF_JSON_EXPRESSION_WORK_LIMIT - work_used
+            if contents.count > remaining / 2:
+                work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+                return false
+            parser_work: usize = contents.count * 2
+            container_work: mutable usize = 0
+            open_positions: mutable darray[usize] = []
+            depth: mutable usize = 0
+            in_string: mutable bool = false
+            escaped: mutable bool = false
+            cursor: mutable usize = 0
+            while cursor < contents.count |contents, open_positions, depth, in_string, escaped, cursor, container_work, remaining, parser_work|:
+                byte: u8 = contents[cursor]
+                if in_string:
+                    if escaped:
+                        escaped <- false
+                    elif byte == '\\'.u8():
+                        escaped <- true
+                    elif byte == '"'.u8():
+                        in_string <- false
+                elif byte == '"'.u8():
+                    in_string <- true
+                elif byte == '['.u8() or byte == '{'.u8():
+                    if depth >= PROOF_CLI_JSON_PARSE_MAX_DEPTH:
+                        work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+                        return false
+                    if depth < open_positions.count:
+                        open_positions[depth] <- cursor
+                    else:
+                        open_positions.push(cursor)
+                    depth <- depth + 1
+                elif (byte == ']'.u8() or byte == '}'.u8()) and depth > 0:
+                    depth <- depth - 1
+                    span: usize = cursor - open_positions[depth]
+                    if container_work > remaining - parser_work or span > remaining - parser_work - container_work:
+                        work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+                        return false
+                    container_work <- container_work + span
+                cursor <- cursor + 1
+            while depth > 0 |open_positions, depth, container_work, contents, remaining, parser_work|:
+                depth <- depth - 1
+                span: usize = contents.count - open_positions[depth] - 1
+                if container_work > remaining - parser_work or span > remaining - parser_work - container_work:
+                    work_used <- PROOF_JSON_EXPRESSION_WORK_LIMIT + 1
+                    return false
+                container_work <- container_work + span
+            work_used <- work_used + parser_work + container_work
+            return true
 
         def proof_cli_tactic_source_state_preflight(report: ProofReport&, attempt: ProofGoalAttempt, metadata_work: mutable usize&) -> (complete: bool, json_bytes: usize):
             if metadata_work > PROOF_JSON_EXPRESSION_WORK_LIMIT or attempt.facts_start > report.analysis_1.certificate_facts.count or attempt.facts_count > report.analysis_1.certificate_facts.count - attempt.facts_start:
@@ -46,9 +109,20 @@ module ElisaProofCliTactics:
             source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
             script_read: (ok: bool, contents: darray[u8]) = (proof_read_file_checked_with_limit(slots[script_slot].cast[cstr], PROOF_JSON_EXPRESSION_WORK_LIMIT) can Global{Read,Write})
             script_source: mutable darray[u8] = script_read.contents if script_read.ok else []
+            metadata_work: mutable usize = 0
+            text_translation_exhausted: mutable bool = false
             # Human scripts lower to the JSON interchange and gain no independent trust path.
-            script_source <- proof_tactic_text_to_json(script_source) if script_is_text
-            script_source_over_budget: bool = script_source.count > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            if script_is_text:
+                translated_text: (valid: bool, exhausted: bool, output: darray[u8]) = proof_tactic_text_to_json_with_work(script_source, PROOF_JSON_EXPRESSION_WORK_LIMIT, &metadata_work, PROOF_JSON_EXPRESSION_WORK_LIMIT)
+                script_source <- translated_text.output
+                text_translation_exhausted <- translated_text.exhausted
+            script_source_over_budget: mutable bool = metadata_work > PROOF_JSON_EXPRESSION_WORK_LIMIT or script_source.count > PROOF_JSON_EXPRESSION_WORK_LIMIT
+            script_source_over_budget <- true if text_translation_exhausted
+            if not script_source_over_budget:
+                if not proof_cli_json_parse_work_reserve(script_source, &metadata_work):
+                    script_source_over_budget <- true
+            # Parsing is a separate bounded phase before tactic decoding. The reservation covers
+            # the measured nested-container scans plus parsing and DOM construction.
             script_source.clear() if script_source_over_budget
 
             # AST handles belong to the imported parser store. Keep the script DOM in its arena
@@ -56,7 +130,6 @@ module ElisaProofCliTactics:
             source_target_state: mutable darray[u8] = []
             source_script_arena: mutable Arena = zeroed
             source_script: JsonParseResult[source_script_arena] = (json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&script_source, 0, script_source.count)) can Global{Read,Write})
-            metadata_work: mutable usize = PROOF_JSON_EXPRESSION_WORK_LIMIT + 1 if script_source_over_budget else 0
             source_target: mutable (present: bool, valid: bool, goal_id: usize) = (false, false, 0)
             declared_target_fingerprint: mutable (present: bool, valid: bool, value: u32) = (false, false, 0)
             declared_source_fingerprint: mutable (present: bool, valid: bool, value: u32) = (false, false, 0)
@@ -114,33 +187,43 @@ module ElisaProofCliTactics:
                                     target_fingerprint_valid <- computed_target_fingerprint.valid
                                     target_goal_fingerprint <- computed_target_fingerprint.value
                                     tactic_tree.total_expression_work <- metadata_work
-                                if source_target.present:
+                                if metadata_work <= PROOF_JSON_EXPRESSION_WORK_LIMIT and source_target.present:
                                     if source_target.valid:
                                         if source_target_state.count > 0:
-                                            parsed_source_state: JsonParseResult[source_script_arena] = (json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&source_target_state, 0, source_target_state.count)) can Global{Read,Write})
-                                            tactic_result <- (proof_tactic_json_run_source(ElisaProofJson::from_result(source_script), ElisaProofJson::from_result(parsed_source_state), &annotations, tactic_state, tactic_tree, &scratch_states, checked_view, source_target.goal_id) can Global{Read,Write}) if parsed_source_state.code == JsonErrorCode.OK
+                                            if not proof_cli_json_parse_work_reserve(source_target_state, &metadata_work):
+                                                tactic_tree.total_expression_work <- metadata_work
+                                            else:
+                                                tactic_tree.total_expression_work <- metadata_work
+                                                parsed_source_state: JsonParseResult[source_script_arena] = (json_parse_checked(&source_script_arena, ElisaProofJson::bytes_range_ref(&source_target_state, 0, source_target_state.count)) can Global{Read,Write})
+                                                tactic_result <- (proof_tactic_json_run_source(ElisaProofJson::from_result(source_script), ElisaProofJson::from_result(parsed_source_state), &annotations, tactic_state, tactic_tree, &scratch_states, checked_view, source_target.goal_id) can Global{Read,Write}) if parsed_source_state.code == JsonErrorCode.OK
                                     else:
                                         tactic_result.valid <- false
                                         tactic_result.reason <- "target.goal_id must be an exact nonnegative integer"
-                                else:
+                                elif metadata_work <= PROOF_JSON_EXPRESSION_WORK_LIMIT:
                                     tactic_result <- (proof_tactic_json_run(ElisaProofJson::from_result(source_script), &annotations, tactic_state, tactic_tree, &scratch_states) can Global{Read,Write})
-                                if declared_target_fingerprint.present:
-                                    target_fingerprint_match <- declared_target_fingerprint.valid and source_target.present and source_target.valid and target_fingerprint_valid and declared_target_fingerprint.value == target_goal_fingerprint
-                                    if not declared_target_fingerprint.valid:
-                                        tactic_result.valid <- false
-                                        tactic_result.reason <- "target.goal_fingerprint must be an exact unsigned 32-bit integer"
-                                    elif not target_fingerprint_match:
-                                        tactic_result.valid <- false
-                                        tactic_result.reason <- "target.goal_fingerprint does not match the imported kernel goal and hypotheses"
-                                source_match <- not declared_source_fingerprint.present or declared_source_fingerprint.valid and declared_source_fingerprint.value == source_fingerprint
-                                if declared_source_fingerprint.present and not declared_source_fingerprint.valid:
+                                metadata_work <- tactic_tree.total_expression_work
+                                if metadata_work >= PROOF_JSON_EXPRESSION_WORK_LIMIT:
                                     source_match <- false
                                     tactic_result.valid <- false
-                                    tactic_result.reason <- "source_fingerprint must be an exact unsigned 32-bit integer"
-                                elif declared_source_fingerprint.present and declared_source_fingerprint.value != source_fingerprint:
-                                    source_match <- false
-                                    tactic_result.valid <- false
-                                    tactic_result.reason <- "proof script source_fingerprint does not match imported Elisa"
+                                    tactic_result.reason <- "proof script exhausted the aggregate JSON metadata and tactic decode-work budget"
+                                else:
+                                    if declared_target_fingerprint.present:
+                                        target_fingerprint_match <- declared_target_fingerprint.valid and source_target.present and source_target.valid and target_fingerprint_valid and declared_target_fingerprint.value == target_goal_fingerprint
+                                        if not declared_target_fingerprint.valid:
+                                            tactic_result.valid <- false
+                                            tactic_result.reason <- "target.goal_fingerprint must be an exact unsigned 32-bit integer"
+                                        elif not target_fingerprint_match:
+                                            tactic_result.valid <- false
+                                            tactic_result.reason <- "target.goal_fingerprint does not match the imported kernel goal and hypotheses"
+                                    source_match <- not declared_source_fingerprint.present or declared_source_fingerprint.valid and declared_source_fingerprint.value == source_fingerprint
+                                    if declared_source_fingerprint.present and not declared_source_fingerprint.valid:
+                                        source_match <- false
+                                        tactic_result.valid <- false
+                                        tactic_result.reason <- "source_fingerprint must be an exact unsigned 32-bit integer"
+                                    elif declared_source_fingerprint.present and declared_source_fingerprint.value != source_fingerprint:
+                                        source_match <- false
+                                        tactic_result.valid <- false
+                                        tactic_result.reason <- "proof script source_fingerprint does not match imported Elisa"
                         elif metadata_work > PROOF_JSON_EXPRESSION_WORK_LIMIT:
                             source_match <- false
                             tactic_result.valid <- false
