@@ -1,0 +1,156 @@
+# Work-aware helpers for recursive fixed-width unsigned safety checks.
+extend ElisaProof:
+    public:
+        def proof_unsigned_minus_safe_with_work(term: Ast::Expr, bound: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            readable: mutable darray[Ast::Expr] = []
+            for fact in facts |fact, readable, budget, exhausted|:
+                return false if not proof_unsigned_conjuncts_with_work(fact, &readable, 0, budget, exhausted)
+            orders: mutable darray[Ast::Expr] = []
+            for fact in readable |fact, orders, budget, exhausted|:
+                return false if not proof_unsigned_order_fact_with_work(fact, &orders, budget, exhausted)
+            for fact in facts |fact, orders, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return false if not cost.complete
+                # Reserve for the extra traversal performed by the legacy marker decoder.
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, cost.cost, 2)
+                marker_root: sview = proof_type_marker_root_name(fact)
+                is_marker: bool = marker_root != ""
+                if not is_marker:
+                    unsigned_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                    return false if not unsigned_cost.complete
+                    return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, unsigned_cost.cost, 2)
+                    unsigned_name: sview = proof_unsigned_marker_name(fact)
+                    is_marker <- unsigned_name != ""
+                if is_marker:
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    orders.push(fact)
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(orders, false, budget, exhausted)
+            return false if not marker_result.complete
+            markers: mutable ProofScalarWitnesses = marker_result.witnesses
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+            return false if not marker_scale.complete
+            increments: mutable darray[Ast::Expr] = []
+            for fact in readable |fact, increments, orders, markers, budget, exhausted|:
+                increment_equality: (complete: bool, matches: bool) = proof_unsigned_peer_increment_equality_with_work(fact, orders, markers, budget, exhausted)
+                return false if not increment_equality.complete
+                if increment_equality.matches:
+                    return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                    increments.push(fact)
+            for fact in increments |fact, orders, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                orders.push(fact)
+            fact_scan_cost: mutable usize = 0
+            for fact in orders |fact, fact_scan_cost, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, budget, exhausted)
+                return false if not cost.complete
+                return false if cost.cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT or fact_scan_cost > PROOF_LINEAR_SAFETY_WORK_LIMIT - cost.cost - 1
+                return false if not proof_linear_safety_work_charge(budget, exhausted, cost.cost + 1)
+                fact_scan_cost <- fact_scan_cost + cost.cost + 1
+            fact_scan_cost_valid: mutable bool = true
+            direct: (complete: bool, matches: bool) = proof_sum_has_order_fact_with_work(term, bound, false, orders, markers, marker_scale.scale, fact_scan_cost, fact_scan_cost_valid, budget, exhausted)
+            return false if not direct.complete
+            return true if direct.matches
+            return proof_linear_goal_with_work(term, TokenKind.LtEq, bound, orders, budget, exhausted)
+
+        def proof_unsigned_peer_increment_equality_with_work(expression: Ast::Expr, orders: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, matches: bool):
+            expression_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, budget, exhausted)
+            return (false, false) if not expression_cost.complete
+            stripped: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(expression, budget, exhausted)
+            return (false, false) if not stripped.complete
+            match stripped.expression:
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    first: (complete: bool, matches: bool) = proof_unsigned_peer_increment_side_with_work(left, right, orders, markers, budget, exhausted)
+                    return first if not first.complete or first.matches
+                    return proof_unsigned_peer_increment_side_with_work(right, left, orders, markers, budget, exhausted)
+                _:
+                    return (not exhausted, false)
+
+        def proof_unsigned_peer_increment_side_with_work(name_side: Ast::Expr, increment_side: Ast::Expr, orders: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, matches: bool):
+            name: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(name_side, budget, exhausted)
+            return (false, false) if not name.complete
+            return (true, false) if proof_ident_name(name.expression) == ""
+            increment: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(increment_side, budget, exhausted)
+            return (false, false) if not increment.complete
+            match increment.expression:
+                Ast::Expr.Binary(left, TokenKind.Plus, right, _):
+                    unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base_with_work(left, right, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, false) if not unit.known
+                    base: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(unit.base, budget, exhausted)
+                    return (false, false) if not base.complete
+                    return (true, false) if proof_ident_name(base.expression) == ""
+                    width: i64 = proof_unsigned_width_in_expression_with_work(unit.base, markers, budget, exhausted)
+                    return (false, false) if exhausted
+                    return (true, false) if width == 0
+                    return proof_unsigned_increment_has_strict_peer_with_work(unit.base, width, orders, markers, budget, exhausted)
+                _:
+                    return (not exhausted, false)
+
+        def proof_unsigned_conjuncts_with_work(expression: Ast::Expr, conjuncts: mutable darray[Ast::Expr]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            stripped_result: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(expression, budget, exhausted)
+            return false if not stripped_result.complete
+            stripped: Ast::Expr = stripped_result.expression
+            if depth < ElisaProofKernelCore::PROOF_KERNEL_STRUCTURAL_SCAN_DEPTH_LIMIT:
+                match stripped:
+                    Ast::Expr.Binary(left, TokenKind.And, right, _):
+                        return false if not proof_unsigned_conjuncts_with_work(left, &conjuncts, depth + 1, budget, exhausted)
+                        return proof_unsigned_conjuncts_with_work(right, &conjuncts, depth + 1, budget, exhausted)
+                    _:
+                        pass
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            conjuncts.push(stripped)
+            return true
+
+        def proof_unsigned_strip_parens_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, expression: Ast::Expr):
+            current: mutable Ast::Expr = expression
+            depth: mutable usize = 0
+            while depth < ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT |current, depth, budget, exhausted|:
+                return (false, Ast::Expr.Invalid) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                match current:
+                    Ast::Expr.Paren(inner, _):
+                        current <- inner
+                        depth <- depth + 1
+                    _:
+                        return (true, current)
+            exhausted <- true
+            return (false, Ast::Expr.Invalid)
+
+        def proof_unsigned_order_fact_with_work(expression: Ast::Expr, orders: mutable darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, budget, exhausted)
+            return false if not cost.complete
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_order_fact_with_work(inner, &orders, budget, exhausted)
+                Ast::Expr.Unary(TokenKind.Not, operand, _):
+                    match operand:
+                        Ast::Expr.Binary(left, operator, right, _):
+                            if proof_is_comparison(operator):
+                                left_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(left, budget, exhausted)
+                                return false if not left_cost.complete
+                                left_atom: bool = proof_unsigned_order_atom(left)
+                                if left_atom:
+                                    right_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(right, budget, exhausted)
+                                    return false if not right_cost.complete
+                                    right_atom: bool = proof_unsigned_order_atom(right)
+                                    if right_atom:
+                                        return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                                        orders.push(expression)
+                    return true
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.And:
+                        return false if not proof_unsigned_order_fact_with_work(left, &orders, budget, exhausted)
+                        return proof_unsigned_order_fact_with_work(right, &orders, budget, exhausted)
+                    if proof_is_comparison(operator):
+                        left_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(left, budget, exhausted)
+                        return false if not left_cost.complete
+                        left_atom: bool = proof_unsigned_order_atom(left)
+                        if left_atom:
+                            right_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(right, budget, exhausted)
+                            return false if not right_cost.complete
+                            right_atom: bool = proof_unsigned_order_atom(right)
+                            if right_atom:
+                                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                                orders.push(expression)
+                    return true
+                _:
+                    return true

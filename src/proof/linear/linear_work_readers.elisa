@@ -1,0 +1,297 @@
+extend ElisaProof:
+    public:
+        def proof_expression_has_negative_integer_bit_pattern_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return true if exhausted or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return true if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return value < 0
+                Ast::Expr.Unary(_, operand, _) | Ast::Expr.Paren(operand, _):
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(operand, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(left, depth + 1, budget, exhausted)
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(right, depth + 1, budget, exhausted)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(condition, depth + 1, budget, exhausted)
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(then_expression, depth + 1, budget, exhausted)
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(else_expression, depth + 1, budget, exhausted)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(callee, depth + 1, budget, exhausted)
+                    for argument in arguments |depth, budget, exhausted|:
+                        return true if proof_expression_has_negative_integer_bit_pattern_with_work(argument, depth + 1, budget, exhausted)
+                    return false
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _):
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(object, depth + 1, budget, exhausted)
+                Ast::Expr.Index(object, index, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(object, depth + 1, budget, exhausted)
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(index, depth + 1, budget, exhausted)
+                Ast::Expr.IndexN(object, indices, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(object, depth + 1, budget, exhausted)
+                    for index in indices |depth, budget, exhausted|:
+                        return true if proof_expression_has_negative_integer_bit_pattern_with_work(index, depth + 1, budget, exhausted)
+                    return false
+                Ast::Expr.Slice(object, low, high, _):
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(object, depth + 1, budget, exhausted)
+                    return true if proof_expression_has_negative_integer_bit_pattern_with_work(low, depth + 1, budget, exhausted)
+                    return proof_expression_has_negative_integer_bit_pattern_with_work(high, depth + 1, budget, exhausted)
+                _:
+                    return false
+
+        def proof_constant_bool_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, value: bool):
+            return (false, false) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or exhausted
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_constant_bool_with_work(inner, depth + 1, budget, exhausted)
+                Ast::Expr.BoolLit(value, _):
+                    return (true, value)
+                Ast::Expr.Unary(operator, operand, _):
+                    return (false, false) if operator != TokenKind.Not
+                    inner: (known: bool, value: bool) = proof_constant_bool_with_work(operand, depth + 1, budget, exhausted)
+                    return (inner.known, not inner.value)
+                _:
+                    return (false, false)
+
+        # Metered mirror of the proof constant folder for source-driven safety checks.
+        def proof_constant_int_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, value: i64):
+            return (false, 0) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or exhausted
+            return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return (true, value)
+                Ast::Expr.Paren(inner, _):
+                    return proof_constant_int_with_work(inner, depth + 1, budget, exhausted)
+                Ast::Expr.Field(object, field_name, _):
+                    return (false, 0) if not proof_linear_safety_work_charge(budget, exhausted, sview_len(field_name))
+                    return (false, 0) if field_name != "count"
+                    match object:
+                        Ast::Expr.Array(elements, _):
+                            return proof_small_literal_count(elements.count)
+                        _:
+                            return (false, 0)
+                Ast::Expr.Unary(operator, operand, _):
+                    found: (known: bool, value: i64) = proof_constant_int_with_work(operand, depth + 1, budget, exhausted)
+                    return (false, 0) if exhausted
+                    if found.known and operator == TokenKind.Minus:
+                        return (true, 0 - found.value) if found.value != proof_i64_min()
+                    return found if found.known and operator == TokenKind.Plus
+                    return (false, 0)
+                Ast::Expr.Binary(left, operator, right, _):
+                    left_constant: (known: bool, value: i64) = proof_constant_int_with_work(left, depth + 1, budget, exhausted)
+                    return (false, 0) if exhausted
+                    right_constant: (known: bool, value: i64) = proof_constant_int_with_work(right, depth + 1, budget, exhausted)
+                    return (false, 0) if exhausted or not left_constant.known or not right_constant.known
+                    if operator == TokenKind.Plus:
+                        return proof_add_safe(left_constant.value, right_constant.value)
+                    if operator == TokenKind.Minus:
+                        return proof_sub_safe(left_constant.value, right_constant.value)
+                    if operator == TokenKind.Star:
+                        return proof_mul_safe(left_constant.value, right_constant.value)
+                    if operator == TokenKind.Slash:
+                        return proof_div_safe(left_constant.value, right_constant.value)
+                    if operator == TokenKind.Percent:
+                        return proof_mod_safe(left_constant.value, right_constant.value)
+                    if operator == TokenKind.Ampersand:
+                        return (true, left_constant.value & right_constant.value)
+                    if operator == TokenKind.Pipe:
+                        return (true, left_constant.value | right_constant.value)
+                    if operator == TokenKind.Caret:
+                        return (true, left_constant.value ^ right_constant.value)
+                    if operator == TokenKind.LShift:
+                        return proof_shift_safe(left_constant.value, right_constant.value, true)
+                    if operator == TokenKind.RShift:
+                        return proof_shift_safe(left_constant.value, right_constant.value, false)
+                    return (false, 0)
+                _:
+                    return (false, 0)
+
+        def proof_unsigned_unit_increment_base_with_work(left: Ast::Expr, right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, base: Ast::Expr):
+            right_constant: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+            return (false, Ast::Expr.Invalid) if exhausted
+            return (true, left) if right_constant.known and right_constant.value == 1
+            left_constant: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+            return (false, Ast::Expr.Invalid) if exhausted
+            return (true, right) if left_constant.known and left_constant.value == 1
+            return (false, Ast::Expr.Invalid)
+
+        def proof_unsigned_negative_integer_literal_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or exhausted
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.IntLit(value, _):
+                    return value < 0
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_negative_integer_literal_with_work(inner, depth + 1, budget, exhausted)
+                _:
+                    return false
+
+        def proof_unsigned_constants_fit_with_work(expression: Ast::Expr, width: i64, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if width <= 0 or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or exhausted
+            constant: (known: bool, value: i64) = proof_constant_int_with_work(expression, 0, budget, exhausted)
+            return false if exhausted
+            return proof_unsigned_constants_fit_after_constant_with_work(expression, width, depth, constant, budget, exhausted)
+
+        def proof_unsigned_constants_fit_after_constant_with_work(expression: Ast::Expr, width: i64, depth: usize, constant: (known: bool, value: i64), budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            return false if width <= 0 or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or exhausted
+            return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            if constant.known:
+                return constant.value <= proof_unsigned_width_max(width) if constant.value >= 0
+                if width == 64:
+                    return proof_unsigned_negative_integer_literal_with_work(expression, 0, budget, exhausted)
+                return false
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_unsigned_constants_fit_with_work(inner, width, depth + 1, budget, exhausted)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_unsigned_constants_fit_with_work(operand, width, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    return false if not proof_unsigned_constants_fit_with_work(left, width, depth + 1, budget, exhausted)
+                    return false if exhausted
+                    return proof_unsigned_constants_fit_with_work(right, width, depth + 1, budget, exhausted)
+                Ast::Expr.If(condition, then_expression, else_expression, _):
+                    return false if not proof_unsigned_constants_fit_with_work(condition, width, depth + 1, budget, exhausted)
+                    return false if exhausted or not proof_unsigned_constants_fit_with_work(then_expression, width, depth + 1, budget, exhausted)
+                    return false if exhausted
+                    return proof_unsigned_constants_fit_with_work(else_expression, width, depth + 1, budget, exhausted)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return false if not proof_unsigned_constants_fit_with_work(callee, width, depth + 1, budget, exhausted)
+                    for argument in arguments |argument, width, depth, budget, exhausted|:
+                        return false if not proof_unsigned_constants_fit_with_work(argument, width, depth + 1, budget, exhausted)
+                        return false if exhausted
+                    return true
+                _:
+                    return true
+
+        def proof_bound_for_name_with_work(bounds: darray[ProofBound]&, name: sview, budget: mutable usize&, exhausted: mutable bool&) -> ProofBound:
+            for bound in bounds |bound, name, budget, exhausted|:
+                return ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                if not bound.term_key:
+                    name_length: usize = sview_len(name)
+                    bound_name_length: usize = sview_len(bound.name)
+                    if name_length > PROOF_LINEAR_SAFETY_WORK_LIMIT or bound_name_length > PROOF_LINEAR_SAFETY_WORK_LIMIT - name_length:
+                        exhausted <- true
+                        return ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+                    amount: usize = name_length + bound_name_length
+                    return ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_linear_safety_work_charge(budget, exhausted, amount)
+                    return bound if bound.name == name
+            return ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_bound_for_term_with_work(bounds: darray[ProofBound]&, term: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> ProofBound:
+            for bound in bounds |bound, term, budget, exhausted|:
+                return ProofBound{name: "", term: term, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                if bound.term_key and proof_unsigned_witness_terms_equal_with_work(bound.term, term, budget, exhausted):
+                    return bound
+                return ProofBound{name: "", term: term, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if exhausted
+            return ProofBound{name: "", term: term, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+
+        def proof_interval_with_work(expression: Ast::Expr, bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool):
+            empty: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = (false, 0, 0, false, false)
+            if exhausted or depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                exhausted <- true
+                return empty
+            return empty if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            constant: (known: bool, value: i64) = proof_constant_int_with_work(expression, 0, budget, exhausted)
+            return empty if exhausted
+            return (true, constant.value, constant.value, true, true) if constant.known
+            term_bound: ProofBound = proof_bound_for_term_with_work(bounds, expression, budget, exhausted)
+            return empty if exhausted
+            return (term_bound.has_lower and term_bound.has_upper, term_bound.lower, term_bound.upper, term_bound.has_lower, term_bound.has_upper) if term_bound.term_key
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_interval_with_work(inner, bounds, depth + 1, budget, exhausted)
+                Ast::Expr.Ident(name, _):
+                    found: ProofBound = proof_bound_for_name_with_work(bounds, name, budget, exhausted)
+                    return empty if exhausted
+                    return (found.has_lower and found.has_upper, found.lower, found.upper, found.has_lower, found.has_upper)
+                Ast::Expr.Unary(operator, operand, _):
+                    inner: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(operand, bounds, depth + 1, budget, exhausted)
+                    return empty if exhausted
+                    if operator == TokenKind.Minus:
+                        negated_lower: mutable i64 = 0
+                        negated_upper: mutable i64 = 0
+                        has_negated_lower: mutable bool = inner.has_upper and inner.upper != proof_i64_min()
+                        has_negated_upper: mutable bool = inner.has_lower and inner.lower != proof_i64_min()
+                        negated_lower <- 0 - inner.upper if has_negated_lower
+                        negated_upper <- 0 - inner.lower if has_negated_upper
+                        return (has_negated_lower and has_negated_upper, negated_lower, negated_upper, has_negated_lower, has_negated_upper)
+                    if operator == TokenKind.Plus:
+                        return inner
+                Ast::Expr.Binary(left, operator, right, _):
+                    a: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(left, bounds, depth + 1, budget, exhausted)
+                    return empty if exhausted
+                    b: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(right, bounds, depth + 1, budget, exhausted)
+                    return empty if exhausted
+                    if operator == TokenKind.Plus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_lower:
+                            low: (known: bool, value: i64) = proof_add_safe(a.lower, b.lower)
+                            lower <- low.value if low.known
+                            has_lower <- low.known
+                        if a.has_upper and b.has_upper:
+                            high: (known: bool, value: i64) = proof_add_safe(a.upper, b.upper)
+                            upper <- high.value if high.known
+                            has_upper <- high.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Minus:
+                        lower: mutable i64 = 0
+                        upper: mutable i64 = 0
+                        has_lower: mutable bool = false
+                        has_upper: mutable bool = false
+                        if a.has_lower and b.has_upper:
+                            low_sub: (known: bool, value: i64) = proof_sub_safe(a.lower, b.upper)
+                            lower <- low_sub.value if low_sub.known
+                            has_lower <- low_sub.known
+                        if a.has_upper and b.has_lower:
+                            high_sub: (known: bool, value: i64) = proof_sub_safe(a.upper, b.lower)
+                            upper <- high_sub.value if high_sub.known
+                            has_upper <- high_sub.known
+                        return (has_lower and has_upper, lower, upper, has_lower, has_upper)
+                    if operator == TokenKind.Star and a.known and b.known:
+                        p1_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.lower)
+                        p2_result: (known: bool, value: i64) = proof_mul_safe(a.lower, b.upper)
+                        p3_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.lower)
+                        p4_result: (known: bool, value: i64) = proof_mul_safe(a.upper, b.upper)
+                        return empty if not p1_result.known or not p2_result.known or not p3_result.known or not p4_result.known
+                        p1: i64 = p1_result.value
+                        p2: i64 = p2_result.value
+                        p3: i64 = p3_result.value
+                        p4: i64 = p4_result.value
+                        low: mutable i64 = p1
+                        high: mutable i64 = p1
+                        low <- p2 if p2 < low
+                        low <- p3 if p3 < low
+                        low <- p4 if p4 < low
+                        high <- p2 if p2 > high
+                        high <- p3 if p3 > high
+                        high <- p4 if p4 > high
+                        return (true, low, high, true, true)
+                    if operator == TokenKind.Slash and b.known and b.lower == b.upper and a.has_lower and a.has_upper:
+                        lower_quotient: (known: bool, value: i64) = proof_div_safe(a.lower, b.lower)
+                        upper_quotient: (known: bool, value: i64) = proof_div_safe(a.upper, b.lower)
+                        return empty if not lower_quotient.known or not upper_quotient.known
+                        return (true, lower_quotient.value, upper_quotient.value, true, true) if b.lower > 0
+                        return (true, upper_quotient.value, lower_quotient.value, true, true)
+                    if operator == TokenKind.Slash and b.has_lower and b.has_upper and b.lower >= 1 and a.has_lower and a.has_upper:
+                        return (true, a.lower / b.upper, a.upper / b.lower, true, true) if a.lower >= 0
+                        return (true, a.lower / b.lower, a.upper / b.upper, true, true) if a.upper <= 0
+                        return (true, a.lower / b.lower, a.upper / b.lower, true, true)
+                    return proof_variable_divisor_interval(a, b) if operator == TokenKind.Slash
+                    if operator == TokenKind.Percent:
+                        divisor: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+                        return empty if exhausted or not divisor.known or divisor.value == 0 or divisor.value == -1
+                        magnitude: mutable i64 = divisor.value
+                        if magnitude < 0:
+                            absolute: (known: bool, value: i64) = proof_sub_safe(0, magnitude)
+                            return empty if not absolute.known
+                            magnitude <- absolute.value
+                        remainder_limit: (known: bool, value: i64) = proof_sub_safe(magnitude, 1)
+                        return empty if not remainder_limit.known
+                        negative_limit: (known: bool, value: i64) = proof_sub_safe(0, remainder_limit.value)
+                        return empty if not negative_limit.known
+                        return (true, negative_limit.value, remainder_limit.value, true, true)
+                _:
+                    pass
+            return empty

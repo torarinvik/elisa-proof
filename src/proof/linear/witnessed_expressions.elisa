@@ -39,127 +39,112 @@ extend ElisaProof:
             exhausted: mutable bool = false
             return proof_unsigned_expression_safe_with_work(expression, facts, bounds, 0, &budget, &exhausted)
 
-        # The goal search shares this counter across safety-context construction and every
-        # premise check. Count recursive AST visits directly and stop with exhaustion at the
-        # same depth boundary used by the other proof-analysis walkers.
         def proof_unsigned_expression_safe_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or not proof_unsigned_expression_safety_reserve(expression, facts, bounds, depth, budget, exhausted):
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
                 exhausted <- true
                 return false
-            width: i64 = proof_unsigned_width_in_expression(expression, facts)
-            return false if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS and proof_expression_has_negative_integer_bit_pattern(expression, 0)
-            return true if proof_unsigned_conditional_difference_safe(expression, facts)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+            if not markers_result.complete:
+                exhausted <- true
+                return false
+            markers: mutable ProofScalarWitnesses = markers_result.witnesses
+            return proof_unsigned_expression_safe_inner_work(expression, facts, bounds, depth, markers, budget, exhausted)
+
+        def proof_unsigned_expression_safe_inner_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or not proof_unsigned_expression_safety_reserve_expression(expression, depth, budget, exhausted):
+                exhausted <- true
+                return false
+            width: i64 = proof_unsigned_width_in_expression_with_work(expression, markers, budget, exhausted)
+            return false if exhausted
+            if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS:
+                has_negative_bits: bool = proof_expression_has_negative_integer_bit_pattern_with_work(expression, 0, budget, exhausted)
+                return false if exhausted or has_negative_bits
+            return true if proof_unsigned_conditional_difference_safe_with_work(expression, markers, budget, exhausted)
+            return false if exhausted
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_unsigned_expression_safe_with_work(inner, facts, bounds, depth + 1, budget, exhausted)
+                    return proof_unsigned_expression_safe_inner_work(inner, facts, bounds, depth + 1, markers, budget, exhausted)
                 Ast::Expr.Unary(operator, operand, _):
-                    return false if not proof_unsigned_expression_safe_with_work(operand, facts, bounds, depth + 1, budget, exhausted)
+                    return false if not proof_unsigned_expression_safe_inner_work(operand, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
                     if operator == TokenKind.Minus:
-                        width: i64 = proof_unsigned_width_in_expression(operand, facts)
+                        width: i64 = proof_unsigned_width_in_expression_with_work(operand, markers, budget, exhausted)
+                        return false if exhausted
                         if width != 0:
-                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(expression, bounds, 0, budget, exhausted)
+                            return false if exhausted
                             return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
                     return true
                 Ast::Expr.Binary(left, operator, right, _):
-                    # `or` and `and` short-circuit, so an operand the left one settles is never
-                    # evaluated and its arithmetic never happens. Requiring it to be in range
-                    # refuses goals whose own structure makes it unreachable -- `ensure not result
-                    # or count <= total - start` on the path that returns false, where the guard
-                    # the subtraction needs is exactly what failed.
+                    # Short-circuit operators skip the right operand when the left value settles.
                     if operator == TokenKind.Or or operator == TokenKind.And:
-                        return false if not proof_unsigned_expression_safe_with_work(left, facts, bounds, depth + 1, budget, exhausted)
+                        return false if not proof_unsigned_expression_safe_inner_work(left, facts, bounds, depth + 1, markers, budget, exhausted)
                         return false if exhausted
-                        settled: (known: bool, value: bool) = proof_constant_bool(left)
+                        settled: (known: bool, value: bool) = proof_constant_bool_with_work(left, 0, budget, exhausted)
+                        return false if exhausted
                         return true if settled.known and settled.value and operator == TokenKind.Or
                         return true if settled.known and not settled.value and operator == TokenKind.And
-                        return proof_unsigned_expression_safe_with_work(right, facts, bounds, depth + 1, budget, exhausted)
-                    return false if not proof_unsigned_expression_safe_with_work(left, facts, bounds, depth + 1, budget, exhausted)
-                    return false if exhausted or not proof_unsigned_expression_safe_with_work(right, facts, bounds, depth + 1, budget, exhausted)
+                        return proof_unsigned_expression_safe_inner_work(right, facts, bounds, depth + 1, markers, budget, exhausted)
+                    return false if not proof_unsigned_expression_safe_inner_work(left, facts, bounds, depth + 1, markers, budget, exhausted)
+                    return false if exhausted or not proof_unsigned_expression_safe_inner_work(right, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
                     arithmetic: bool = operator == TokenKind.Plus or operator == TokenKind.Minus or operator == TokenKind.Star or operator == TokenKind.Slash or operator == TokenKind.Percent or operator == TokenKind.LShift or operator == TokenKind.RShift
-                    width: i64 = proof_unsigned_width_in_expression(expression, facts)
                     return true if not arithmetic or width == 0
-                    # Unsigned subtraction is defined for every nonnegative pair when the
-                    # minuend is at least the subtrahend, even when the values are wider than
-                    # this prover's i64 interval domain. Preserve useful range proofs such as
-                    # `count <= total - start` under the explicit `start <= total` precondition.
+                    # Unsigned subtraction needs an order proof even when i64 intervals cannot represent its range.
                     if operator == TokenKind.Plus:
-                        unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
+                        unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base_with_work(left, right, budget, exhausted)
+                        return false if exhausted
                         if unit.known:
-                            return true if proof_unsigned_increment_has_strict_peer(unit.base, width, facts)
-                        # A sum of two non-constant terms has no interval here, and for a 64-bit
-                        # unsigned value it never can. What it can have is a bound: the same search
-                        # that discharges `a + b <= C` also names the `C`, and a sum bounded by a
-                        # term of its own width is in range without any magnitude being known.
-                        sum_witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
-                        if sum_witness.known and proof_peer_is_nameable(sum_witness.bound):
-                            return true if proof_peer_unsigned_width(sum_witness.bound, facts) == width
+                            peer: (complete: bool, matches: bool) = proof_unsigned_increment_has_strict_peer_with_work(unit.base, width, facts, markers, budget, exhausted)
+                            return false if not peer.complete
+                            return true if peer.matches
+                        # A same-width upper-bound witness admits sums even when no finite i64 interval exists.
+                        sum_witness: (complete: bool, known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness_with_work(left, right, facts, markers, budget, exhausted)
+                        return false if not sum_witness.complete
+                        if sum_witness.known:
+                            bound_peer: (complete: bool, nameable: bool) = proof_unsigned_peer_nameable_with_work(sum_witness.bound, budget, exhausted)
+                            return false if not bound_peer.complete
+                            if bound_peer.nameable:
+                                bound_width: (complete: bool, matches: bool) = proof_unsigned_peer_width_matches_with_work(sum_witness.bound, width, markers, budget, exhausted)
+                                return false if not bound_width.complete
+                                return true if bound_width.matches
                     if operator == TokenKind.Star:
-                        scaled_witness: (known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness(expression, facts, false)
+                        scaled_witness: (complete: bool, known: bool, base: Ast::Expr, bound: Ast::Expr, factor: i64) = proof_unsigned_scaled_product_witness_with_work(expression, facts, markers, false, budget, exhausted)
+                        return false if not scaled_witness.complete
                         return true if scaled_witness.known
                     if operator == TokenKind.Minus:
-                        orders: mutable darray[Ast::Expr] = []
-                        # Read the facts the same way the structural rules do: conjuncts
-                        # flattened, and a disjunction one side of which an existing fact denies
-                        # contributing the other. A callee's postcondition arrives as
-                        # `not result or ...` and the caller has already guarded on the result, so
-                        # without this the order the subtraction needs is stated and unreadable.
-                        readable: darray[Ast::Expr] = proof_conjunct_facts(facts)
-                        for fact in readable |orders|:
-                            proof_collect_unsigned_order_facts(fact, &orders)
-                        # The order tier is gated on its operands' primitive type witness, which
-                        # is a type statement rather than an order fact. Carry the markers across
-                        # with the orders; they are inert for every bound and alias collector.
-                        for fact in facts |orders|:
-                            orders.push(fact) if proof_type_marker_root_name(fact) != "" or proof_unsigned_marker_name(fact) != ""
-                        increments: mutable darray[Ast::Expr] = []
-                        for fact in readable |orders, increments|:
-                            increments.push(fact) if proof_unsigned_peer_increment_equality(fact, orders)
-                        orders.extend(increments)
-                        # The order the subtraction needs may be stated between two places, and
-                        # the affine tiers below name one bare identifier, so they cannot read it.
-                        # A collected order is a comparison between two atoms and contains no
-                        # arithmetic, so matching one directly imports nothing this guard would
-                        # then be deciding about itself.
-                        return true if proof_has_order_fact(right, left, false, orders)
-                        ordered_by_alias: bool = proof_linear_goal_with_work(right, TokenKind.LtEq, left, orders, budget, exhausted)
-                        return false if exhausted
-                        return ordered_by_alias
-                    # For an unsigned remainder, a positive, representable constant divisor
-                    # gives the machine result range [0, divisor - 1] regardless of the
-                    # dividend. The generic interval below is signed and intentionally spans
-                    # negative values, which used to reject safe `%` terms in conditional paths.
-                    # Keep this rule narrow: variable/zero/negative divisors and divisors that
-                    # do not fit the witnessed result width still fall through to rejection.
+                        return proof_unsigned_minus_safe_with_work(right, left, facts, budget, exhausted)
+                    # A positive representable divisor bounds an unsigned remainder by divisor - 1.
                     if operator == TokenKind.Percent and width > 0:
-                        divisor: (known: bool, value: i64) = proof_constant_int(right)
-                        return false if not divisor.known or divisor.value <= 0
-                        return false if not proof_unsigned_constants_fit(right, width, 0)
+                        divisor: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+                        return false if exhausted or not divisor.known or divisor.value <= 0
+                        return false if not proof_unsigned_constants_fit_after_constant_with_work(right, width, 0, divisor, budget, exhausted)
+                        return false if exhausted
                         remainder_upper: (known: bool, value: i64) = proof_sub_safe(divisor.value, 1)
                         return false if not remainder_upper.known
                         return remainder_upper.value <= proof_unsigned_width_max(width)
-                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
+                    interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(expression, bounds, 0, budget, exhausted)
+                    return false if exhausted
                     return interval.has_lower and interval.has_upper and interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(width)
                 Ast::Expr.If(condition, then_expression, else_expression, position):
-                    return false if not proof_unsigned_expression_safe_with_work(condition, facts, bounds, depth + 1, budget, exhausted)
+                    return false if not proof_unsigned_expression_safe_inner_work(condition, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
-                    then_safe: mutable bool = proof_unsigned_expression_safe_with_work(then_expression, facts, bounds, depth + 1, budget, exhausted)
+                    then_safe: mutable bool = proof_unsigned_expression_safe_inner_work(then_expression, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
                     if not then_safe:
                         then_safe <- proof_unsigned_arm_safe_under_with_work(then_expression, condition, facts, bounds, depth + 1, budget, exhausted)
                     return false if exhausted
                     return false if not then_safe
-                    else_safe: bool = proof_unsigned_expression_safe_with_work(else_expression, facts, bounds, depth + 1, budget, exhausted)
+                    else_safe: bool = proof_unsigned_expression_safe_inner_work(else_expression, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
                     return true if else_safe
                     return false if exhausted
                     return proof_unsigned_arm_safe_unless_with_work(else_expression, condition, facts, bounds, position, depth + 1, budget, exhausted)
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return false if not proof_unsigned_expression_safe_with_work(callee, facts, bounds, depth + 1, budget, exhausted)
+                    return false if not proof_unsigned_expression_safe_inner_work(callee, facts, bounds, depth + 1, markers, budget, exhausted)
                     return false if exhausted
-                    for argument in arguments |argument, facts, bounds, depth, budget, exhausted|:
-                        return false if not proof_unsigned_expression_safe_with_work(argument, facts, bounds, depth + 1, budget, exhausted)
+                    for argument in arguments |argument, facts, bounds, depth, markers, budget, exhausted|:
+                        return false if not proof_unsigned_expression_safe_inner_work(argument, facts, bounds, depth + 1, markers, budget, exhausted)
                         return false if exhausted
                     return true
                 _:

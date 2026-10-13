@@ -13,6 +13,187 @@ extend ElisaProof:
             return bounds[index] if index < bounds.count
             return ProofBound{name: name, term: Ast::Expr.Invalid, term_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
 
+        # Metered safety reader. Bare-name widths come from the already-built witness index;
+        # exact field and element markers retain the legacy term comparison semantics.
+        def proof_unsigned_width_in_expression_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return proof_scalar_witness_unsigned_width_with_work(markers, name, budget, exhausted)
+                Ast::Expr.Field(_, _, _):
+                    return proof_unsigned_place_marker_width_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    return proof_unsigned_element_width_for_expression_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_unsigned_width_in_expression_with_work(inner, markers, budget, exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    left_width: i64 = proof_unsigned_width_in_expression_with_work(left, markers, budget, exhausted)
+                    return 0 if exhausted
+                    right_width: i64 = proof_unsigned_width_in_expression_with_work(right, markers, budget, exhausted)
+                    return 0 if exhausted
+                    return right_width if left_width == 0
+                    return left_width if right_width == 0 or left_width < right_width
+                    return right_width
+                Ast::Expr.If(_, then_expression, else_expression, _):
+                    then_width: i64 = proof_unsigned_width_in_expression_with_work(then_expression, markers, budget, exhausted)
+                    return 0 if exhausted
+                    else_width: i64 = proof_unsigned_width_in_expression_with_work(else_expression, markers, budget, exhausted)
+                    return 0 if exhausted or then_width == 0 or else_width == 0
+                    return then_width if then_width < else_width
+                    return else_width
+                Ast::Expr.Call(_, _, _, _):
+                    return 0
+                _:
+                    return 0
+
+        # Signed widths use exact term markers. Keeping those marker rows in the already-built
+        # witness index avoids rescanning unrelated arithmetic facts at every expression leaf.
+        def proof_signed_marker_width_for_term_with_work(term: Ast::Expr, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            if markers.signed_terms.count != markers.signed_widths.count:
+                exhausted <- true
+                return 0
+            for index in 0..<markers.signed_terms.count |index, term, markers, budget, exhausted|:
+                return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                equal: bool = proof_unsigned_witness_terms_equal_with_work(markers.signed_terms[index], term, budget, exhausted)
+                return 0 if exhausted
+                return markers.signed_widths[index] if equal
+            return 0
+
+        def proof_signed_width_in_expression_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                exhausted <- true
+                return 0
+            return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Tuple(_, _):
+                    marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+                    return 0 if not marker_scale.complete
+                    structural: (complete: bool, matches: bool) = proof_structural_bound_atom_with_work(expression, markers, marker_scale.scale, budget, exhausted)
+                    return 0 if not structural.complete or not structural.matches
+                    return proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    return proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_signed_width_in_expression_with_work(inner, markers, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    left_width: i64 = proof_signed_width_in_expression_with_work(left, markers, depth + 1, budget, exhausted)
+                    return 0 if exhausted
+                    right_width: i64 = proof_signed_width_in_expression_with_work(right, markers, depth + 1, budget, exhausted)
+                    return 0 if exhausted
+                    return 0 if left_width != 0 and right_width != 0 and left_width != right_width
+                    return left_width if left_width != 0
+                    return right_width
+                Ast::Expr.If(_, then_expression, else_expression, _):
+                    then_width: i64 = proof_signed_width_in_expression_with_work(then_expression, markers, depth + 1, budget, exhausted)
+                    return 0 if exhausted
+                    else_width: i64 = proof_signed_width_in_expression_with_work(else_expression, markers, depth + 1, budget, exhausted)
+                    return 0 if exhausted or then_width != else_width
+                    return then_width
+                _:
+                    return 0
+
+        def proof_signed_width_in_expression_with_scale_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, depth: usize, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                exhausted <- true
+                return 0
+            return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Tuple(_, _):
+                    structural: (complete: bool, matches: bool) = proof_structural_bound_atom_with_work(expression, markers, marker_scale, budget, exhausted)
+                    return 0 if not structural.complete or not structural.matches
+                    return proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    return proof_signed_marker_width_for_term_with_work(expression, markers, budget, exhausted)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _):
+                    return proof_signed_width_in_expression_with_scale_work(inner, markers, depth + 1, marker_scale, budget, exhausted)
+                Ast::Expr.Binary(left, _, right, _):
+                    left_width: i64 = proof_signed_width_in_expression_with_scale_work(left, markers, depth + 1, marker_scale, budget, exhausted)
+                    return 0 if exhausted
+                    right_width: i64 = proof_signed_width_in_expression_with_scale_work(right, markers, depth + 1, marker_scale, budget, exhausted)
+                    return 0 if exhausted
+                    return 0 if left_width != 0 and right_width != 0 and left_width != right_width
+                    return left_width if left_width != 0
+                    return right_width
+                Ast::Expr.If(_, then_expression, else_expression, _):
+                    then_width: i64 = proof_signed_width_in_expression_with_scale_work(then_expression, markers, depth + 1, marker_scale, budget, exhausted)
+                    return 0 if exhausted
+                    else_width: i64 = proof_signed_width_in_expression_with_scale_work(else_expression, markers, depth + 1, marker_scale, budget, exhausted)
+                    return 0 if exhausted or then_width != else_width
+                    return then_width
+                _:
+                    return 0
+
+        def proof_unsigned_witness_terms_equal_with_work(left: Ast::Expr, right: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            left_nodes: mutable usize = 0
+            right_nodes: mutable usize = 0
+            return false if not proof_linear_safety_expression_shape_with_work(left, 0, &left_nodes, &budget, &exhausted)
+            return false if not proof_linear_safety_expression_shape_with_work(right, 0, &right_nodes, &budget, &exhausted)
+            if left_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT or right_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT - left_nodes:
+                exhausted <- true
+                return false
+            combined: usize = left_nodes + right_nodes
+            return false if combined < left_nodes
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, combined, 5)
+            return proof_expr_equal(left, right)
+
+        def proof_unsigned_place_marker_width_with_work(term: Ast::Expr, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            return 0 if exhausted
+            if markers.place_terms.count != markers.place_widths.count:
+                exhausted <- true
+                return 0
+            width: mutable i64 = 0
+            for index in 0..<markers.place_terms.count |index, markers, term, width, budget, exhausted|:
+                return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                candidate: Ast::Expr = markers.place_terms[index]
+                if proof_unsigned_witness_terms_equal_with_work(candidate, term, budget, exhausted):
+                    current_width: i64 = markers.place_widths[index]
+                    width <- current_width if width == 0 or current_width < width
+                return 0 if exhausted
+            return width
+
+        def proof_unsigned_element_width_for_expression_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> i64:
+            path: (complete: bool, known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path_with_work(expression, 0, budget, exhausted)
+            return 0 if not path.complete or exhausted
+            return 0 if not path.known or path.subscripts == 0
+            if markers.element_terms.count != markers.element_depths.count or markers.element_terms.count != markers.element_widths.count:
+                exhausted <- true
+                return 0
+            width: mutable i64 = 0
+            for index in 0..<markers.element_terms.count |index, markers, path, width, budget, exhausted|:
+                return 0 if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                marker_width: i64 = markers.element_widths[index]
+                continue if marker_width == 0 or markers.element_depths[index] != path.subscripts
+                if proof_unsigned_witness_terms_equal_with_work(markers.element_terms[index], path.container, budget, exhausted):
+                    width <- marker_width if width == 0 or marker_width < width
+                return 0 if exhausted
+            return width
+
+        def proof_indexed_element_path_with_work(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, container: Ast::Expr, subscripts: i64):
+            if depth > PROOF_CONGRUENCE_SCAN_DEPTH:
+                return (true, false, Ast::Expr.Invalid, 0)
+            return (false, false, Ast::Expr.Invalid, 0) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_indexed_element_path_with_work(inner, depth + 1, budget, exhausted)
+                Ast::Expr.Index(object, _, _):
+                    path: (complete: bool, known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path_with_work(object, depth + 1, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, 0) if not path.complete
+                    return (true, false, Ast::Expr.Invalid, 0) if not path.known or path.subscripts >= PROOF_TYPE_AUDIT_DEPTH_LIMIT.i64()
+                    return (true, true, path.container, path.subscripts + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return (true, false, Ast::Expr.Invalid, 0) if arguments.count == 0 or arguments.count > PROOF_TYPE_AUDIT_DEPTH_LIMIT
+                    return (false, false, Ast::Expr.Invalid, 0) if not proof_linear_safety_work_charge(budget, exhausted, arguments.count)
+                    path: (complete: bool, known: bool, container: Ast::Expr, subscripts: i64) = proof_indexed_element_path_with_work(object, depth + 1, budget, exhausted)
+                    return (false, false, Ast::Expr.Invalid, 0) if not path.complete
+                    return (true, false, Ast::Expr.Invalid, 0) if not path.known or path.subscripts > PROOF_TYPE_AUDIT_DEPTH_LIMIT.i64() - arguments.count.i64()
+                    return (true, true, path.container, path.subscripts + arguments.count.i64())
+                _:
+                    return (true, true, expression, 0)
+
         def proof_add_lower(bounds: mutable darray[ProofBound]&, name: sview, value: i64) -> void:
             return if name == ""
             index: usize = proof_bound_index(bounds, name)
@@ -186,8 +367,10 @@ extend ElisaProof:
                         witnessed: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, markers, marker_scale, budget, exhausted)
                         return (false, false) if not witnessed.complete
                         if witnessed.matches:
-                            left_literal: (known: bool, value: i64) = proof_constant_int(left)
-                            right_literal: (known: bool, value: i64) = proof_constant_int(right)
+                            left_literal: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+                            return (false, false) if exhausted
+                            right_literal: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+                            return (false, false) if exhausted
                             return proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted) if left_literal.known and left_literal.value >= 0
                             return proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted) if right_literal.known and right_literal.value >= 0
                         return (true, false)
@@ -227,7 +410,7 @@ extend ElisaProof:
         def proof_linear_safety_fact_term_scan_with_work(term: Ast::Expr, facts: darray[Ast::Expr]&, fact_scan_cost: usize, passes: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             term_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(term, budget, exhausted)
             return false if not term_cost.complete
-            for pass in 0..<passes |pass, facts, fact_scan_cost, term_cost, budget, exhausted|:
+            for pass_index in 0..<passes |pass_index, facts, fact_scan_cost, term_cost, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, fact_scan_cost)
                 return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, term_cost.cost, facts.count)
             return true
@@ -244,8 +427,10 @@ extend ElisaProof:
             return false if not proof_linear_safety_work_charge(budget, exhausted, left_cost.cost + right_cost.cost)
             left_name: sview = proof_ident_name(left)
             right_name: sview = proof_ident_name(right)
-            right_constant: (known: bool, value: i64) = proof_constant_int(right)
-            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            right_constant: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+            return false if exhausted
+            left_constant: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+            return false if exhausted
             if left_name != "" and right_constant.known:
                 incremented: (known: bool, value: i64) = proof_add_safe(right_constant.value, 1)
                 return false if operator == TokenKind.Gt and incremented.known and not proof_equalities_add_lower_with_work(bounds, left_name, incremented.value, budget, exhausted)

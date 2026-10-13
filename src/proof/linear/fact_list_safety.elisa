@@ -85,15 +85,25 @@ extend ElisaProof:
             return true
 
         def proof_unsigned_expression_safety_reserve(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            nodes: mutable usize = 0
-            if not proof_unsigned_expression_safety_shape_work(expression, depth, &nodes, budget, exhausted):
-                exhausted <- true
-                return false
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
             environment_nodes: mutable usize = 0
             if not proof_unsigned_safety_environment_shape_work(facts, bounds, &environment_nodes, budget, exhausted):
                 exhausted <- true
                 return false
+            return false if not proof_unsigned_expression_safety_reserve_expression(expression, depth, budget, exhausted)
+            return proof_unsigned_safety_reserve_environment_read(environment_nodes, budget, exhausted)
+
+        # Work-aware recursive visits charge expression work directly. Only the legacy bound
+        # collection paths reserve the environment size before scanning facts and bounds.
+        def proof_unsigned_expression_safety_reserve_expression(expression: Ast::Expr, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            nodes: mutable usize = 0
+            if not proof_unsigned_expression_safety_shape_work(expression, depth, &nodes, budget, exhausted):
+                exhausted <- true
+                return false
+            return proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
+
+        # Reserve only when this safety branch is about to call a legacy reader over facts or
+        # bounds. Indexed marker lookups and work-aware equality checks charge their own scans.
+        def proof_unsigned_safety_reserve_environment_read(environment_nodes: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             return proof_linear_safety_work_charge_scaled(budget, exhausted, environment_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
 
         def proof_unsigned_arm_safe_under_with_work(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, base_bounds: darray[ProofBound]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
@@ -104,36 +114,44 @@ extend ElisaProof:
             arm_bounds: mutable darray[ProofBound] = []
             arm_bounds.extend(base_bounds)
             return false if not proof_unsigned_expression_safety_reserve(condition, guarded, arm_bounds, depth, budget, exhausted)
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(guarded)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(guarded, false, budget, exhausted)
+            if not markers_result.complete:
+                exhausted <- true
+                return false
+            markers: ProofScalarWitnesses = markers_result.witnesses
             proof_collect_bounds_marked(condition, guarded, markers, &arm_bounds)
             if not proof_close_equalities_with_work(guarded, markers, &arm_bounds, budget, exhausted):
                 exhausted <- true
                 return false
-            safe: bool = proof_unsigned_expression_safe_with_work(arm, guarded, arm_bounds, depth + 1, budget, exhausted)
+            safe: bool = proof_unsigned_expression_safe_inner_work(arm, guarded, arm_bounds, depth + 1, markers, budget, exhausted)
             return false if exhausted or safe
             if not proof_close_plain_bounds_with_work(guarded, &arm_bounds, budget, exhausted):
                 exhausted <- true
                 return false
-            return proof_unsigned_expression_safe_with_work(arm, guarded, arm_bounds, depth + 1, budget, exhausted)
+            return proof_unsigned_expression_safe_inner_work(arm, guarded, arm_bounds, depth + 1, markers, budget, exhausted)
 
         def proof_unsigned_arm_safe_unless_with_work(arm: Ast::Expr, condition: Ast::Expr, facts: darray[Ast::Expr]&, base_bounds: darray[ProofBound]&, position: Ast::Pos, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             arm_bounds: mutable darray[ProofBound] = []
             arm_bounds.extend(base_bounds)
             negated_condition: Ast::Expr = Ast::Expr.Unary(TokenKind.Not, condition, position)
             return false if not proof_unsigned_expression_safety_reserve(negated_condition, facts, arm_bounds, depth, budget, exhausted)
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+            if not markers_result.complete:
+                exhausted <- true
+                return false
+            markers: ProofScalarWitnesses = markers_result.witnesses
             proof_collect_bounds_marked(negated_condition, facts, markers, &arm_bounds)
             if not proof_close_equalities_with_work(facts, markers, &arm_bounds, budget, exhausted):
                 exhausted <- true
                 return false
-            safe: bool = proof_unsigned_expression_safe_with_work(arm, facts, arm_bounds, depth + 1, budget, exhausted)
+            safe: bool = proof_unsigned_expression_safe_inner_work(arm, facts, arm_bounds, depth + 1, markers, budget, exhausted)
             return false if exhausted or safe
             if not proof_close_plain_bounds_with_work(facts, &arm_bounds, budget, exhausted):
                 exhausted <- true
                 return false
-            return proof_unsigned_expression_safe_with_work(arm, facts, arm_bounds, depth + 1, budget, exhausted)
+            return proof_unsigned_expression_safe_inner_work(arm, facts, arm_bounds, depth + 1, markers, budget, exhausted)
 
-        def proof_unsigned_safety_context_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+        def proof_unsigned_safety_context_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: mutable darray[ProofBound]&, markers: mutable ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
             for fact in facts |fact, budget, exhausted|:
                 nodes: mutable usize = 0
@@ -141,33 +159,46 @@ extend ElisaProof:
                     exhausted <- true
                     return false
                 return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            if not markers_result.complete:
+                exhausted <- true
+                return false
+            markers <- markers_result.witnesses
             if not proof_collect_fact_bounds_with_work(facts, markers, &bounds, budget, exhausted):
                 exhausted <- true
                 return false
             if not proof_close_equalities_with_work(facts, markers, &bounds, budget, exhausted):
                 exhausted <- true
                 return false
-            return proof_signed_safety_bounds_from_base_with_work(facts, bounds, &signed_bounds, budget, exhausted)
+            return proof_signed_safety_bounds_from_base_with_work(facts, bounds, &signed_bounds, markers, budget, exhausted)
 
         def proof_unsigned_expression_safe_with_facts_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             bounds: mutable darray[ProofBound] = []
             signed_bounds: mutable darray[ProofBound] = []
-            if not proof_unsigned_safety_context_with_work(facts, &bounds, &signed_bounds, budget, exhausted):
+            markers: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], place_terms: [], place_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: []}
+            if not proof_unsigned_safety_context_with_work(facts, &bounds, &signed_bounds, &markers, budget, exhausted):
                 exhausted <- true
                 return false
-            return proof_unsigned_expression_safe_with_context_work(expression, facts, &bounds, &signed_bounds, budget, exhausted)
+            return proof_unsigned_expression_safe_with_context_and_markers_work(expression, facts, &bounds, &signed_bounds, markers, budget, exhausted)
 
         def proof_unsigned_expression_safe_with_context_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            unsigned_safe: bool = proof_unsigned_expression_safe_with_work(expression, facts, bounds, 0, budget, exhausted)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            if not markers_result.complete:
+                exhausted <- true
+                return false
+            markers: mutable ProofScalarWitnesses = markers_result.witnesses
+            return proof_unsigned_expression_safe_with_context_and_markers_work(expression, facts, bounds, signed_bounds, markers, budget, exhausted)
+
+        def proof_unsigned_expression_safe_with_context_and_markers_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, signed_bounds: darray[ProofBound]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            unsigned_safe: bool = proof_unsigned_expression_safe_inner_work(expression, facts, bounds, 0, markers, budget, exhausted)
             return false if exhausted
             if not unsigned_safe:
                 if not proof_close_plain_bounds_with_work(facts, &bounds, budget, exhausted):
                     exhausted <- true
                     return false
-                unsigned_safe <- proof_unsigned_expression_safe_with_work(expression, facts, bounds, 0, budget, exhausted)
+                unsigned_safe <- proof_unsigned_expression_safe_inner_work(expression, facts, bounds, 0, markers, budget, exhausted)
                 return false if exhausted
-            signed_safe: bool = proof_signed_expression_safe_with_bounds_work(expression, facts, signed_bounds, 0, budget, exhausted)
+            signed_safe: bool = proof_signed_expression_safe_with_bounds_work(expression, facts, signed_bounds, 0, markers, budget, exhausted)
             return false if exhausted
             return unsigned_safe and signed_safe
 
@@ -203,14 +234,20 @@ extend ElisaProof:
             kept <- []
             bounds <- []
             signed_bounds <- []
-            if not proof_unsigned_safety_context_with_work(facts, bounds, signed_bounds, budget, exhausted):
+            markers: mutable ProofScalarWitnesses = ProofScalarWitnesses{untrusted_terms: [], scalar_terms: [], names: [], name_unsigned_widths: [], signed_terms: [], signed_widths: [], element_terms: [], element_depths: [], element_widths: [], place_terms: [], place_widths: [], name_hashes: [], name_slots: [], sorted_name_indices: []}
+            if not proof_unsigned_safety_context_with_work(facts, bounds, signed_bounds, &markers, budget, exhausted):
+                exhausted <- true
+                return false
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+            if not marker_scale.complete:
+                kept <- []
                 exhausted <- true
                 return false
             closed: mutable darray[ProofBound] = []
             has_closed: mutable bool = false
             all_safe: mutable bool = true
-            for fact in facts |facts, bounds, closed, has_closed, signed_bounds, kept, all_safe, budget, exhausted|:
-                unsigned_safe: mutable bool = proof_unsigned_expression_safe_with_work(fact, facts, bounds, 0, budget, exhausted)
+            for fact in facts |facts, bounds, closed, has_closed, signed_bounds, marker_scale, kept, all_safe, budget, exhausted|:
+                unsigned_safe: mutable bool = proof_unsigned_expression_safe_inner_work(fact, facts, bounds, 0, markers, budget, exhausted)
                 if exhausted:
                     kept <- []
                     return false
@@ -222,11 +259,11 @@ extend ElisaProof:
                             exhausted <- true
                             return false
                         has_closed <- true
-                    unsigned_safe <- proof_unsigned_expression_safe_with_work(fact, facts, closed, 0, budget, exhausted)
+                    unsigned_safe <- proof_unsigned_expression_safe_inner_work(fact, facts, closed, 0, markers, budget, exhausted)
                     if exhausted:
                         kept <- []
                         return false
-                signed_safe: bool = proof_signed_expression_safe_with_bounds_work(fact, facts, signed_bounds, 0, budget, exhausted)
+                signed_safe: bool = proof_signed_expression_safe_with_bounds_work_inner_scaled(fact, facts, signed_bounds, 0, markers, marker_scale.scale, budget, exhausted)
                 if exhausted:
                     kept <- []
                     return false

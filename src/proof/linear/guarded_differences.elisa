@@ -17,9 +17,9 @@ extend ElisaProof:
             bound_nodes: mutable usize = 0
             return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
             return false if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_nodes, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+            return false if not marker_result.complete
+            markers: ProofScalarWitnesses = marker_result.witnesses
             staged: mutable darray[ProofDifference] = []
             for fact in facts |fact, bounds, facts, markers, fact_nodes, bound_nodes, staged, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
@@ -53,18 +53,20 @@ extend ElisaProof:
             proof_guarded_difference_push(low, operator, high, constraints)
             true
 
-        def proof_guarded_difference_import_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, constraints: mutable darray[ProofDifference]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            right_constant: (known: bool, value: i64) = proof_constant_int(right)
+        def proof_guarded_difference_import_with_work(left: Ast::Expr, operator: TokenKind, right: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, constraints: mutable darray[ProofDifference]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            right_constant: (known: bool, value: i64) = proof_constant_int_with_work(right, 0, budget, exhausted)
+            return false if exhausted
             if right_constant.known:
-                split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(left, facts, budget, exhausted)
+                split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(left, facts, markers, budget, exhausted)
                 return false if exhausted or not split.known
                 high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
                 low: ProofAffine = ProofAffine{known: true, base: split.low, offset: right_constant.value, negative: false}
                 return false if not proof_guarded_difference_push_with_work(high, operator, low, constraints, budget, exhausted)
                 return true
-            left_constant: (known: bool, value: i64) = proof_constant_int(left)
+            left_constant: (known: bool, value: i64) = proof_constant_int_with_work(left, 0, budget, exhausted)
+            return false if exhausted
             return false if not left_constant.known
-            split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(right, facts, budget, exhausted)
+            split: (known: bool, high: sview, low: sview) = proof_guarded_difference_names_with_work(right, facts, markers, budget, exhausted)
             return false if exhausted or not split.known
             low: ProofAffine = ProofAffine{known: true, base: split.low, offset: left_constant.value, negative: false}
             high: ProofAffine = ProofAffine{known: true, base: split.high, offset: 0, negative: false}
@@ -104,17 +106,24 @@ extend ElisaProof:
                 _:
                     return (false, "", "")
 
-        def proof_guarded_difference_names_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, high: sview, low: sview):
+        def proof_guarded_difference_names_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> (known: bool, high: sview, low: sview):
             nodes: mutable usize = 0
             return (false, "", "") if not proof_linear_safety_expression_shape_with_work(expression, 0, &nodes, &budget, &exhausted)
-            match proof_strip_parens(expression):
+            expression_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(expression, budget, exhausted)
+            return (false, "", "") if not expression_view.complete
+            match expression_view.expression:
                 Ast::Expr.Binary(minuend, TokenKind.Minus, subtrahend, _):
-                    high: sview = proof_ident_name(proof_strip_parens(minuend))
-                    low: sview = proof_ident_name(proof_strip_parens(subtrahend))
+                    high_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(minuend, budget, exhausted)
+                    return (false, "", "") if not high_view.complete
+                    low_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(subtrahend, budget, exhausted)
+                    return (false, "", "") if not low_view.complete
+                    high: sview = proof_ident_name(high_view.expression)
+                    low: sview = proof_ident_name(low_view.expression)
                     return (false, "", "") if high == "" or low == "" or high == low
-                    return (false, "", "") if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, 2)
-                    width: i64 = proof_unsigned_marker_width_for_name(facts, high)
-                    return (false, "", "") if width == 0 or proof_unsigned_marker_width_for_name(facts, low) != width
+                    high_width: i64 = proof_scalar_witness_unsigned_width_with_work(markers, high, budget, exhausted)
+                    return (false, "", "") if exhausted or high_width == 0
+                    low_width: i64 = proof_scalar_witness_unsigned_width_with_work(markers, low, budget, exhausted)
+                    return (false, "", "") if exhausted or low_width != high_width
                     for fact in facts |fact, high, low, budget, exhausted|:
                         return (false, "", "") if not proof_linear_safety_work_charge(budget, exhausted, 1)
                         if proof_fact_orders_names_with_work(fact, low, high, 0, budget, exhausted):
@@ -141,14 +150,20 @@ extend ElisaProof:
         def proof_fact_orders_names_with_work(fact: Ast::Expr, low: sview, high: sview, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-            match proof_strip_parens(fact):
+            fact_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(fact, budget, exhausted)
+            return false if not fact_view.complete
+            match fact_view.expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
                         return true if proof_fact_orders_names_with_work(left, low, high, depth + 1, budget, exhausted)
                         return false if exhausted
                         return proof_fact_orders_names_with_work(right, low, high, depth + 1, budget, exhausted)
-                    left_name: sview = proof_ident_name(proof_strip_parens(left))
-                    right_name: sview = proof_ident_name(proof_strip_parens(right))
+                    left_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(left, budget, exhausted)
+                    return false if not left_view.complete
+                    right_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(right, budget, exhausted)
+                    return false if not right_view.complete
+                    left_name: sview = proof_ident_name(left_view.expression)
+                    right_name: sview = proof_ident_name(right_view.expression)
                     return true if (operator == TokenKind.LtEq or operator == TokenKind.Lt) and left_name == low and right_name == high
                     return (operator == TokenKind.GtEq or operator == TokenKind.Gt) and left_name == high and right_name == low
                 _:
@@ -225,17 +240,22 @@ extend ElisaProof:
             bound_nodes: mutable usize = 0
             return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
             return false if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_nodes, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
-            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count, PROOF_SCALAR_WITNESS_NAME_PROBE_LIMIT)
-            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, budget, exhausted)
+            return false if not marker_result.complete
+            markers: ProofScalarWitnesses = marker_result.witnesses
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+            return false if not marker_scale.complete
+            fact_scan_cost: mutable usize = 0
+            fact_scan_cost_valid: mutable bool = false
+            return false if not proof_signed_fact_scan_cost_ensure_with_work(facts, &fact_scan_cost, &fact_scan_cost_valid, budget, exhausted)
             staged_bounds: mutable darray[ProofBound] = []
             for bound in bounds |bound, staged_bounds, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(bound.name))
                 staged_bounds.push(bound)
             constraints: mutable darray[ProofDifference] = []
-            for fact in facts |fact, staged_bounds, facts, markers, fact_nodes, bound_nodes, constraints, budget, exhausted|:
+            for fact in facts |fact, staged_bounds, facts, markers, marker_scale, fact_scan_cost, fact_nodes, bound_nodes, constraints, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                return false if not proof_collect_plain_differences_with_work(fact, staged_bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
+                return false if not proof_collect_plain_differences_with_work(fact, staged_bounds, facts, markers, marker_scale.scale, fact_scan_cost, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
             if constraints.count > PROOF_LINEAR_MAX_DIFFERENCE_CONSTRAINTS:
                 exhausted <- true
                 return false
@@ -243,14 +263,16 @@ extend ElisaProof:
             bounds <- staged_bounds
             return true
 
-        def proof_collect_plain_differences_with_work(fact: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, fact_nodes: usize, bound_nodes: usize, constraints: mutable darray[ProofDifference]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+        def proof_collect_plain_differences_with_work(fact: Ast::Expr, bounds: darray[ProofBound]&, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, fact_nodes: usize, bound_nodes: usize, constraints: mutable darray[ProofDifference]&, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             return true if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-            match proof_strip_parens(fact):
+            fact_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(fact, budget, exhausted)
+            return false if not fact_view.complete
+            match fact_view.expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And:
-                        return false if not proof_collect_plain_differences_with_work(left, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
-                        return proof_collect_plain_differences_with_work(right, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
+                        return false if not proof_collect_plain_differences_with_work(left, bounds, facts, markers, marker_scale, fact_scan_cost, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
+                        return proof_collect_plain_differences_with_work(right, bounds, facts, markers, marker_scale, fact_scan_cost, fact_nodes, bound_nodes, &constraints, depth + 1, budget, exhausted)
                     return true if not proof_is_comparison(operator) or operator == TokenKind.BangEq
                     left_nodes: mutable usize = 0
                     right_nodes: mutable usize = 0
@@ -261,11 +283,13 @@ extend ElisaProof:
                     return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, bound_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
                     return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, constraints.count + 1, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
                     return true if not proof_primitive_comparison_marked(left, right, markers)
-                    imported: bool = proof_guarded_difference_import_with_work(left, operator, right, facts, &constraints, budget, exhausted)
+                    imported: bool = proof_guarded_difference_import_with_work(left, operator, right, facts, markers, &constraints, budget, exhausted)
                     return false if exhausted
                     return true if imported
                     return true if not proof_plain_order_side(left) or not proof_plain_order_side(right)
-                    normalized: Ast::Expr = proof_strip_parens(fact)
+                    normalized_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(fact, budget, exhausted)
+                    return false if not normalized_view.complete
+                    normalized: Ast::Expr = normalized_view.expression
                     return proof_collect_difference_constraints_marked_work_inner(normalized, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
                     match operand:
@@ -280,9 +304,16 @@ extend ElisaProof:
                             return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, bound_nodes, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
                             return false if not proof_linear_safety_charge_cross_with_work(budget, exhausted, term_nodes, constraints.count + 1, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
                             return true if not proof_primitive_comparison_marked(left, right, markers)
-                            return true if not proof_disjunction_denial_integer_term(left, facts, 0) or not proof_disjunction_denial_integer_term(right, facts, 0)
+                            left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                            return false if not left_integer.complete
+                            return true if not left_integer.integer
+                            right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, 0, budget, exhausted)
+                            return false if not right_integer.complete
+                            return true if not right_integer.integer
                             return true if not proof_plain_order_side(left) or not proof_plain_order_side(right)
-                            normalized: Ast::Expr = proof_strip_parens(fact)
+                            normalized_view: (complete: bool, expression: Ast::Expr) = proof_unsigned_strip_parens_with_work(fact, budget, exhausted)
+                            return false if not normalized_view.complete
+                            normalized: Ast::Expr = normalized_view.expression
                             return proof_collect_difference_constraints_marked_work_inner(normalized, bounds, facts, markers, fact_nodes, bound_nodes, &constraints, 0, budget, exhausted)
                         _:
                             return true

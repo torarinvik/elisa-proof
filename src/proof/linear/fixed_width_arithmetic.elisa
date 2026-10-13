@@ -211,52 +211,63 @@ extend ElisaProof:
 
         def proof_signed_add_type_bounds_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             for fact in facts |fact, bounds, budget, exhausted|:
-                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
-                continue if not proof_marker_has_callee(fact, "__elisa_signed_type_bound")
+                callee: sview = proof_marker_callee_name(fact)
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1 + sview_len(callee))
+                continue if callee != "__elisa_signed_type_bound"
+                marker_nodes: mutable usize = 0
+                return false if not proof_linear_safety_expression_shape_with_work(fact, 0, &marker_nodes, &budget, &exhausted)
+                # Decoding inspects the call arguments and recursively parses the width
+                # expression. Reserve a bounded pass over the measured AST before
+                # invoking the legacy decoder.
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, marker_nodes, 2)
                 marker: (known: bool, term: Ast::Expr, width: i64) = proof_signed_marker_info(fact)
                 continue if not marker.known
                 name: sview = proof_ident_name(marker.term)
                 continue if name == ""
+                return false if not proof_linear_safety_work_charge(budget, exhausted, sview_len(name))
                 return false if not proof_linear_safety_add_lower_with_work(&bounds, name, ElisaProofKernelCore::proof_kernel_signed_width_min(marker.width), budget, exhausted)
                 return false if not proof_linear_safety_add_upper_with_work(&bounds, name, ElisaProofKernelCore::proof_kernel_signed_width_max(marker.width), budget, exhausted)
             return true
 
-        def proof_signed_guarded_subtraction_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool:
+        def proof_signed_guarded_subtraction_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, width: i64) -> bool:
             match expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Minus
-                    width: i64 = proof_signed_width_in_expression(expression, facts)
                     return false if width == 0 or proof_signed_width_in_expression(left, facts) != width or proof_signed_width_in_expression(right, facts) != width
                     right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
                     return right_interval.has_lower and right_interval.lower >= 0 and proof_has_order_fact(right, left, false, facts)
                 _:
                     return false
 
-        def proof_signed_nonnegative_sum_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_signed_nonnegative_sum_safe(expression: Ast::Expr, facts: darray[Ast::Expr]&, bounds: darray[ProofBound]&, width: i64) -> bool can[Memory.Allocate, Abort.Panic]:
             match expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus
-                    width: i64 = proof_signed_width_in_expression(expression, facts)
                     return false if width == 0 or proof_signed_width_in_expression(left, facts) != width or proof_signed_width_in_expression(right, facts) != width
                     left_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(left, bounds)
                     right_interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(right, bounds)
                     return false if not left_interval.has_lower or left_interval.lower < 0 or not right_interval.has_lower or right_interval.lower < 0
                     witness: (known: bool, bound: Ast::Expr, strict: bool) = proof_sum_upper_witness(left, right, facts)
+                    return false if not witness.known
                     bound_width: i64 = proof_signed_width_in_expression(witness.bound, facts)
-                    return witness.known and bound_width > 0 and bound_width <= width
+                    return bound_width > 0 and bound_width <= width
                 _:
                     return false
 
-        def proof_signed_increment_has_strict_peer(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> bool:
+        def proof_signed_increment_has_strict_peer(expression: Ast::Expr, facts: darray[Ast::Expr]&, width: i64) -> bool:
+            # Reuse one marker index across candidate facts instead of rebuilding it per order.
+            markers: ProofScalarWitnesses = proof_scalar_witness_markers(facts)
+            return proof_signed_increment_has_strict_peer_with_markers(expression, facts, markers, width)
+
+        def proof_signed_increment_has_strict_peer_with_markers(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, width: i64) -> bool:
             match expression:
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus
                     unit: (known: bool, base: Ast::Expr) = proof_unsigned_unit_increment_base(left, right)
                     return false if not unit.known
-                    width: i64 = proof_signed_width_in_expression(unit.base, facts)
                     return false if width == 0
-                    for fact in facts |unit, width, facts|:
-                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order(fact, facts)
+                    for fact in facts |unit, width, facts, markers|:
+                        order: (known: bool, left: Ast::Expr, operator: TokenKind, right: Ast::Expr) = proof_readable_order_with_markers(fact, facts, markers)
                         continue if not order.known
                         if order.operator == TokenKind.Lt and proof_expr_equal(order.left, unit.base):
                             peer_width: i64 = proof_signed_width_in_expression(order.right, facts)
@@ -303,9 +314,9 @@ extend ElisaProof:
                         return not proof_scalar_term_witnessed(expression, facts, depth + 1)
                     interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(expression, bounds)
                     return true if interval.has_lower and interval.has_upper and interval.lower >= ElisaProofKernelCore::proof_kernel_signed_width_min(width) and interval.upper <= ElisaProofKernelCore::proof_kernel_signed_width_max(width)
-                    return true if proof_signed_guarded_subtraction_safe(expression, facts, bounds)
-                    return true if proof_signed_nonnegative_sum_safe(expression, facts, bounds)
-                    return proof_signed_increment_has_strict_peer(expression, facts) if width > 0
+                    return true if proof_signed_guarded_subtraction_safe(expression, facts, bounds, width)
+                    return true if proof_signed_nonnegative_sum_safe(expression, facts, bounds, width)
+                    return proof_signed_increment_has_strict_peer(expression, facts, width) if width > 0
                     return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
                     return proof_signed_expression_safe_with_bounds(condition, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(then_expression, facts, bounds, depth + 1) and proof_signed_expression_safe_with_bounds(else_expression, facts, bounds, depth + 1)
@@ -342,33 +353,35 @@ extend ElisaProof:
                         pass
 
         def proof_close_term_equalities_with_work(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            fact_nodes: mutable usize = 0
-            bound_nodes: mutable usize = 0
-            return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
-            return false if not proof_linear_safety_bound_shape_total_with_work(bounds, &bound_nodes, budget, exhausted)
-            return proof_close_term_equalities_work_inner(facts, &bounds, fact_nodes, bound_nodes, budget, exhausted)
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, true, budget, exhausted)
+            return false if not markers_result.complete
+            markers: ProofScalarWitnesses = markers_result.witnesses
+            return proof_close_term_equalities_work_inner(facts, &bounds, markers, budget, exhausted)
 
-        def proof_close_term_equalities_work_inner(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, fact_nodes: usize, bound_nodes: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
-            for fact in facts |fact, facts, bounds, fact_nodes, bound_nodes, budget, exhausted|:
+        def proof_close_term_equalities_work_inner(facts: darray[Ast::Expr]&, bounds: mutable darray[ProofBound]&, markers: ProofScalarWitnesses&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers, budget, exhausted)
+            return false if not marker_scale.complete
+            for fact in facts |fact, facts, bounds, markers, marker_scale, budget, exhausted|:
                 return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                 match proof_strip_parens(fact):
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                        for side in 0..<2 |side, left, right, facts, bounds, fact_nodes, bound_nodes, budget, exhausted|:
+                        for side in 0..<2 |side, left, right, facts, bounds, markers, marker_scale, budget, exhausted|:
                             return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
                             name_side: Ast::Expr = left if side == 0 else right
                             term_side: Ast::Expr = right if side == 0 else left
                             name: sview = proof_ident_name(name_side)
                             continue if name == "" or proof_ident_name(term_side) != ""
-                            return false if not proof_signed_safety_reserve_expression_read_with_work(name_side, fact_nodes, bound_nodes, bounds.count, budget, exhausted)
-                            width: i64 = proof_signed_width_in_expression(name_side, facts)
+                            width: i64 = proof_signed_width_in_expression_with_scale_work(name_side, markers, 0, marker_scale.scale, budget, exhausted)
+                            return false if exhausted
                             continue if width <= 0
-                            return false if not proof_signed_safety_reserve_expression_read_with_work(term_side, fact_nodes, bound_nodes, bounds.count, budget, exhausted)
-                            continue if proof_signed_width_in_expression(term_side, facts) != width
-                            safe: bool = proof_signed_expression_safe_with_bounds_work_inner(term_side, facts, bounds, 0, fact_nodes, bound_nodes, budget, exhausted)
+                            term_width: i64 = proof_signed_width_in_expression_with_scale_work(term_side, markers, 0, marker_scale.scale, budget, exhausted)
+                            return false if exhausted
+                            continue if term_width != width
+                            safe: bool = proof_signed_expression_safe_with_bounds_work_inner_scaled(term_side, facts, bounds, 0, markers, marker_scale.scale, budget, exhausted)
                             return false if exhausted
                             continue if not safe
-                            return false if not proof_signed_safety_reserve_expression_read_with_work(term_side, fact_nodes, bound_nodes, bounds.count, budget, exhausted)
-                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval(term_side, bounds)
+                            interval: (known: bool, lower: i64, upper: i64, has_lower: bool, has_upper: bool) = proof_interval_with_work(term_side, bounds, 0, budget, exhausted)
+                            return false if exhausted
                             continue if not interval.has_lower or not interval.has_upper
                             continue if interval.lower < ElisaProofKernelCore::proof_kernel_signed_width_min(width) or interval.upper > ElisaProofKernelCore::proof_kernel_signed_width_max(width)
                             return false if not proof_linear_safety_add_lower_with_work(&bounds, name, interval.lower, budget, exhausted)
