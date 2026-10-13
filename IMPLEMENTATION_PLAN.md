@@ -16568,3 +16568,13 @@ equality after checking source position. This preserves safe-call receivers, cal
 ordering, and any unsupported child expression fields; a lossy optimization rendering can no longer
 make two distinct calls inherit the same proof guard. Static diff review only; tests and builds were
 not run under the user's no-new-jobs instruction.
+
+### 23.27.636 Bound import, repair lookup, and theorem-output work (2026-10-13)
+
+Proof source commits `527e83ee` and `19d2db14` add aggregate include-read/file/path/scan limits,
+bounded path capture, a work-metered hash index for repair findings, and structural JSON work
+reservation for theorem suggestions. Tactic JSON and replay arena validation now charge additional
+text and repeated child-scan work. Static review found these limits fail closed and the import helper
+split keeps shared path caps and scanners in one included module. No tests, builds, or timing runs were
+started per the current instruction; this source set remains runtime-unqualified with the newest
+compiler.
