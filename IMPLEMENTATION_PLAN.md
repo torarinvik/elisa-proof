@@ -4,17 +4,17 @@
 
 This section controls immediate work. The roadmaps and inventories below retain design history; use this order until a new audit supersedes it.
 
-1. **Clear the current Stage1 retention blocker.** Elisa-core `main` is at `55d83fd6`; its focused semantic and frontend-IR registry packages pass with the cold indexed-value StoreFlow regression, while 12 integration fixtures still have permission/diagnostic expectation failures to triage. The exact current compiler seed at `39f1a4bbeeca` with Stage0 `55d83fd6` (`ecf916fa…`) fails with 17 local-storage retention diagnostics in `codegen_stmt_assign_place.elisa`: `emit_propagating_try_value` at lines 260/586, `error_callee_value_type` at 261/587, and `emit_error_union_call_value` at 581. Trace the shared StoreFlow/no-escape summaries and add both a real-escape rejection control and a proven non-escaping helper control. Then rebuild Stage0 from a clean Core commit, verify its embedded revision, freeze the latest compiler source, and seed O3 through completed object emission, including parallel emission. No Stage1 product exists yet.
+1. **Clear the current Stage1 retention blocker.** Elisa-core `main` is at `55d83fd6`; its focused semantic and frontend-IR registry packages pass with the cold indexed-value StoreFlow regression, while 12 integration fixtures still have permission/diagnostic expectation failures to triage. The exact current compiler seed at `39f1a4bbeeca` with Stage0 `55d83fd6` fails at both O0 and O3 with 17 local-storage retention diagnostics in `codegen_stmt_assign_place.elisa`: `emit_propagating_try_value` at lines 260/586, `error_callee_value_type` at 261/587, and `emit_error_union_call_value` at 581. The latest trace locates these reports in Stage1's StoreThrough proof pass, which summarizes calls as may-store pairs; they are not caused by Core's Go StoreFlow summary. Fix the proof summary with a sound non-escaping helper rule and retain a real-reference-retention rejection control; do not add call-site-specific exemptions. Separately, Core has an immutable `sview.len` termination-proof improvement with focused regressions passing and the full semantic suite pending. After the StoreThrough and Core changes qualify independently, rebuild Stage0 from a clean Core commit, verify its embedded revision, freeze the latest compiler source, and seed O3 through completed object emission, including parallel emission. No Stage1 product exists yet.
 
 2. **Qualify Global.Read/Write enforcement at runtime.** The source-only authority audit passes (29 positive declarations and 18 false-control declarations), and the compiler has a broad real-CLI/reporter matrix. Once a provenance-matched Stage1 exists, run `test/parity/mutable_global_authority_smoke.sh`, `test/parity/mutable_global_cli_smoke.sh`, and `test/parity/global_permissions_smoke.sh`. Preserve direct read, write, read-modify-write requiring both grants, exact-grant success, wrong-member rejection, alias/reference access, and transitive propagation as explicit controls. Do not mark the feature complete from source-only checks.
 
-3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `a9e318e9`; the latest source-length and whitespace gates pass, but parser, build, and replay qualification remain pending. Finish the exact-scope call-result resolver and signed-length safety review, then run their focused runtime controls on the same qualified Stage1. Keep resource accounting fail-closed and add a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace.
+3. **Close proof-replay trust gaps before adding new automation.** The latest proof source baseline is `a9e318e9`; `main` now also has documentation-only plan commits, while lexical type-resolution, captured-block write, and loop-binder source changes remain uncommitted. `git diff --check` and the source-length gate pass, but parser, build, and replay qualification remain pending. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls on a matching Stage1. Keep resource accounting fail-closed and add a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace.
 
 4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Skip performance timing and benchmark comparisons under the latest user instruction; static source, LLVM IR, and assembly-shape review can continue. Archived timing data is historical and does not justify an optimization.
 
 5. **Commit qualified work, then clean only proven-unused Git state.** Most branch-backed worktrees still contain edits or ignored artifacts. I removed `/private/tmp/codex-elisa-stage1-guard-bridge` after confirming it was detached, clean, merged, had no ignored files, and was not referenced by active tasks. The remaining clean detached worktree `/private/tmp/elisa-compiler-fastpush-1681cebd` is merged and has no ignored files, but recent history in active compiler and proof tasks still cites it, so retain it until those uses are ruled out. No merged compiler branch ref is unchecked-out; keep branch refs attached to dirty or evidence-bearing worktrees. Proof has no clean merged checkout to remove, and Core's `/Users/torarinvikbjarko/.elisac/stage0-ef042-source` remains useful Stage0 source. Preserve Stage0/Stage1 seed and provenance artifacts.
 
-Current evidence: the exact `39f1a4bbeeca` O3 seed failed on the 17 retention diagnostics above, and no matching Stage1 product exists. Global.Read/Write runtime tests remain unrun. Proof parser/replay qualification remains unrun. The goal is active and these gates are still open.
+Current evidence: exact `39f1a4bbeeca` O0 and O3 seeds failed on the 17 StoreThrough retention diagnostics above, and no matching Stage1 product exists. Global.Read/Write runtime tests remain unrun. Proof parser/replay qualification remains unrun. The goal is active and these gates are still open.
 
 
 Historical toolchain inventory (earlier 2026-10-13 snapshot): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-exact-qualification`; `/private/tmp/elisa-stage1-b8eb-qualification` is the `16e04fd0ecc9214d9669cef9492948ae2e95339a` derivative, and the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
@@ -16104,21 +16104,30 @@ from the owning function's lexical module path, while the proof's qualified scal
 looked them up from root. A nested module and root module with the same prefix could therefore
 supply different scalar widths. The replay gap is addressed for call-result, parameter, and local
 type-bound witnesses by recovering the selected function's module scope and matching the complete
-written module path against each lexical prefix, deepest first. A partial nearer prefix does not
-prevent a complete parent or root path from resolving. The read-only scope and generic-binder
-walks charge declaration visits and compared bytes to the shared type-bound work budget. Visible
-module-alias heads still fail closed when no literal module matched; if both exist, the literal
-module wins. These source changes have static review only pending a matched Stage1.
+written module path at each lexical prefix, deepest first. The pinned Stage0 resolver constructs
+the complete candidate path under the current namespace, then each parent and root, so a nearer
+partial prefix does not block a complete parent path. The read-only scope and generic-binder walks
+charge declaration visits and compared bytes to the shared type-bound work budget. Pinned Stage0
+checks lexical literal paths first, visible alias rewrites second, and the raw root spelling last.
+Replay declines alias-qualified witnesses until it can expand that alias at the right precedence,
+including when a same-named root module exists. These source changes have static review only
+pending a matched Stage1.
 
 ### 23.27.607 Reopen lexical resolution for call-result widths (2026-10-13)
 
-The replay resolver now matches the complete written module path against the owning function's
-deepest lexical module and each parent through root. This follows the compiler's type-path matcher:
-a nearer partial prefix does not block a complete parent or root match. A visible module-alias head is still
-unsupported and fails closed when no literal module matched; a literal module takes precedence
-when both spellings exist. Qualified parameter, local, and call-result scalar facts share this
-owner-scope behavior. Generic names are checked at the exact owner declaration line before a
-builtin width or scalar kind is admitted. The focused fixture covers root-qualified and nested
-width collisions, deeper scopes, parent-module fallback, module-alias refusal, and call results.
+The replay resolver matches the complete written module path and leaf declaration against the
+owning function's deepest lexical module and each parent through root. Pinned Stage0's
+`resolveType` builds this same sequence of complete candidates; the fixture checks fallback when
+`Outer::N::M::Sub` exists but has no `Word`, while `Outer::M::Sub::Word` does. The current Stage1
+`ga_module` helper instead commits
+to the nearest first segment, so Stage0 parity and that Stage1 semantic path diverge on partial
+prefixes; this fixture remains unrun under the exact-toolchain hold. Stage0 inserts alias rewrites
+after lexical candidates but before the raw root path. Replay therefore checks nonroot lexical
+literal paths, then fails closed on a visible alias before considering root; a fixture also places
+a literal root `Alias::Word` beside `using M as Alias` to catch wrong root precedence. Qualified
+parameter, local, and call-result scalar facts share the owner-scope behavior. Generic names are
+checked at the exact owner declaration line before a builtin width or scalar kind is admitted.
+Other fixture cases cover root-qualified and nested width collisions, parent fallback, module-alias
+refusal, and call results.
 `git diff --check` and the source-length gate pass; parser, build, and replay have not run against a
 source-matched Stage1.
