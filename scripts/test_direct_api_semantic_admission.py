@@ -94,6 +94,7 @@ assert len(invalid) == 21 and len(global_grant_expectations) == len(invalid) - 7
 constants = "const VALID_API_SOURCE: sview = " + json.dumps(valid) + "\n"
 constants += "const REFINEMENT_API_SOURCE: sview = " + json.dumps('type Positive = i64 where self >= 0\ndef checked(value: Positive) -> i64:\n    ensure result >= 0\n    return value\n') + "\n"
 constants += "const MUTUAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/mutual_structural_decreases.elisa").read_text().replace("structural_even", "checked")) + "\n"
+constants += "const UNIQUE_SIBLING_STRUCTURAL_API_SOURCE: sview = " + json.dumps((ROOT / "examples/unique_sibling_structural_decreases.elisa").read_text()) + "\n"
 constants += "const UNKNOWN_API_SOURCE: sview = " + json.dumps("def checked(value: bool) -> bool:\n    ensure result == true\n    value\n") + "\n"
 constants += "const GLOBAL_READ_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> i64 can[Global.Read]:\n    can Global{Read}:\n        return api_counter\n") + "\n"
 constants += "const GLOBAL_WRITE_API_SOURCE: sview = " + json.dumps("global mutable api_counter: i64 = 0\ndef checked() -> void can[Global.Write]:\n    can Global{Write}:\n        api_counter <- 1\n") + "\n"
@@ -110,6 +111,7 @@ constants += "const PARAMETER_OPEN_API_SOURCE: sview = " + json.dumps("def check
 constants += "const SOURCE_ASSERT_BY_POSITIVE_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_positive.elisa").read_text()) + "\n"
 constants += "const SOURCE_ASSERT_BY_NESTED_API_SOURCE: sview = " + json.dumps((ROOT / "examples/source_obligation_assert_by_module.elisa").read_text()) + "\n"
 constants += "const PARAMETER_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(value: i64) -> i64:\n    requires value == 7\n    ensure result == 7\n    return value\n") + "\n"
+constants += "const GENERIC_BUILTIN_NUMERIC_API_SOURCE: sview = " + json.dumps("def generic_i64_parameter[i64](value: i64) -> i64:\n    requires value >= 0\n    ensure result >= value\n    return value\n") + "\n"
 constants += "const COUNTING_LOOP_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        return index\n    return 0\n") + "\n"
 constants += "const COUNTING_LOOP_TYPE_BOUND_SCOPE_API_SOURCE: sview = " + json.dumps("def checked() -> i64:\n    for index in 0..<3:\n        assert true by:\n            assert true\n    assert true by:\n        assert true\n    return 0\n") + "\n"
 constants += "const LOOP_REBIND_TYPE_BOUND_API_SOURCE: sview = " + json.dumps("def checked(limit: usize) -> usize:\n    ensure result <= limit\n    rounds: mutable usize = 0\n    while rounds < limit |rounds, limit|:\n        invariant rounds <= limit\n        rounds <- rounds + 1\n    return rounds\n") + "\n"
@@ -312,6 +314,9 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
                 expected_global_effect: sview = INVALID_GLOBAL_GRANT_EXPECTED_EFFECTS[grant_index]
                 expected_global_actual: sview = INVALID_GLOBAL_GRANT_EXPECTED_GLOBALS[grant_index]
                 return 199 if not any diagnostic in diagnostics where diagnostic.expected == expected_global_effect and diagnostic.actual == expected_global_actual and Semantic::diagnostic_severity(diagnostic) == 1
+        (api_probe(GENERIC_BUILTIN_NUMERIC_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 272 if not any finding in report.findings where finding.kind == "contract-proposition-type" and finding.name == "generic_i64_parameter"
+        return 273 if report.failed == 0 or report.proven == report.obligations
         (api_probe(GLOBAL_READ_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 194 if report.failed != 0 or report.proven != report.obligations or report.replay_gaps != 0 or report.findings.count != 0
         (api_probe(GLOBAL_WRITE_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
@@ -359,8 +364,18 @@ def main() -> i64 can Memory.Allocate, Abort.Panic:
         return 177 if report.failed != 0 or report.structural.verified_names.count == 0 or report.replay_gaps != 0
         return 261 if not (api_structural_certificate_offset_tamper(&source, &report, &diagnostics) can Global{Read,Write})
         return 262 if not (api_structural_certificate_callee_tamper(&source, &report, &diagnostics) can Global{Read,Write})
+        return 274 if not (api_structural_certificate_subject_tamper(&source, &report, &diagnostics) can Global{Read,Write})
+        return 275 if not (api_structural_certificate_binder_tamper(&source, &report, &diagnostics) can Global{Read,Write})
         return 263 if not (api_structural_certificate_omission(&source, &report, &diagnostics) can Global{Read,Write})
         return 264 if not (api_structural_ambiguous_owner_source(&source, &report, &diagnostics) can Global{Read,Write})
+        (api_probe_before_replay(UNIQUE_SIBLING_STRUCTURAL_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
+        return 266 if report.failed != 0 or report.structural.verified_names.count == 0
+        (proof_replay_certificates(&report) can Global{Read,Write})
+        return 267 if report.replay_gaps != 0 or not proof_replay_certificates_complete(report)
+        return 268 if not (api_structural_ambiguous_callee_source(&source, &report, &diagnostics) can Global{Read,Write})
+        return 269 if not (api_structural_unrelated_ambiguous_declarations(&source, &report, &diagnostics, route) can Global{Read,Write})
+        return 270 if not (api_structural_import_declaration_tamper(&source, &report, &diagnostics) can Global{Read,Write})
+        return 271 if not (api_structural_import_annotation_tamper(&source, &report, &diagnostics) can Global{Read,Write})
         (api_probe(UNKNOWN_API_SOURCE, &source, &report, &diagnostics, route) can Global{Read,Write})
         return 178 if report.failed == 0 and report.proven == report.obligations
         (api_parameter_goal_probe(PARAMETER_RETURN_API_SOURCE, &source, &report, &diagnostics, route, 0) can Global{Read,Write})
