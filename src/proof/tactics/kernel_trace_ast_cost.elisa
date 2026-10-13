@@ -1,0 +1,213 @@
+extend ElisaProof:
+    private:
+        const PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT: usize = 16777216
+
+        # Bound the source AST scan by node, vector, and text width so repeated kernel support
+        # and encoding walks can reserve a conservative amount before they begin.
+        def proof_tactic_kernel_trace_ast_body_cost(body: darray[Ast::Stmt]&, cost: mutable usize&, work: usize, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT
+            return false if cost > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+            return false if body.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+            cost <- cost + body.count
+            for statement in body |cost, work, depth|:
+                match statement:
+                    Ast::Stmt.VarDecl(name, type_expression, value, _):
+                        return false if sview_len(name) > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                        cost <- cost + sview_len(name)
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(type_expression, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                    Ast::Stmt.Expr(value, _) | Ast::Stmt.Return(value, _) | Ast::Stmt.Contract(_, value, _):
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(target, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                    Ast::Stmt.If(condition, yes, no, _):
+                        return false if:
+                            not proof_tactic_kernel_trace_ast_expr_cost(condition, cost, work, depth + 1)
+                            not proof_tactic_kernel_trace_ast_body_cost(yes, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_body_cost(no, cost, work, depth + 1)
+                    Ast::Stmt.While(condition, nested, _):
+                        return false if:
+                            not proof_tactic_kernel_trace_ast_expr_cost(condition, cost, work, depth + 1)
+                            not proof_tactic_kernel_trace_ast_body_cost(nested, cost, work, depth + 1)
+                    Ast::Stmt.For(_, variables, iterable, nested, _):
+                        return false if variables.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                        cost <- cost + variables.count
+                        for variable in variables |variable, cost, work|:
+                            return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(variable))
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(iterable, cost, work, depth + 1)
+                        return false if not proof_tactic_kernel_trace_ast_body_cost(nested, cost, work, depth + 1)
+                    Ast::Stmt.Match(value, arms, _):
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                        return false if arms.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                        cost <- cost + arms.count
+                        for arm in arms |cost, work, depth|:
+                            return false if not proof_tactic_kernel_trace_ast_pattern_cost(arm.pattern, cost, work, depth + 1)
+                            return false if not proof_tactic_kernel_trace_ast_expr_cost(arm.guard, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_body_cost(arm.body, cost, work, depth + 1)
+                    Ast::Stmt.Block(_, clause, binding, nested, _):
+                        return false if clause.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                        cost <- cost + clause.count
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(binding))
+                        for word in clause |cost, work|:
+                            return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(word))
+                        return false if not proof_tactic_kernel_trace_ast_body_cost(nested, cost, work, depth + 1)
+                    Ast::Stmt.Break(label, _) | Ast::Stmt.Continue(label, _):
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(label))
+                    _:
+                        return false
+            return true
+
+        def proof_tactic_kernel_trace_ast_cost_add(cost: mutable usize&, work: usize, amount: usize) -> bool:
+            return false if work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT
+            return false if cost > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+            return false if amount > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+            cost <- cost + amount
+            return true
+
+        # Include pattern nodes and their selector, literal, and path text in the reservation.
+        def proof_tactic_kernel_trace_ast_pattern_cost(pattern: Ast::Pattern, cost: mutable usize&, work: usize, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT
+            return false if cost >= PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+            cost <- cost + 1
+            match pattern:
+                Ast::Pattern.Wildcard:
+                    return true
+                Ast::Pattern.Literal(text) | Ast::Pattern.Binding(text) | Ast::Pattern.Pin(text) | Ast::Pattern.Rest(text) | Ast::Pattern.Other(text):
+                    return proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(text))
+                Ast::Pattern.Variant(path, children) | Ast::Pattern.Struct(path, children):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(path))
+                    for child in children |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_pattern_cost(child, cost, work, depth + 1)
+                    return true
+                Ast::Pattern.Field(selector, children):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(selector))
+                    for child in children |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_pattern_cost(child, cost, work, depth + 1)
+                    return true
+                Ast::Pattern.Tuple(children) | Ast::Pattern.Or(children):
+                    for child in children |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_pattern_cost(child, cost, work, depth + 1)
+                    return true
+                Ast::Pattern.As(name, children):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(name))
+                    for child in children |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_pattern_cost(child, cost, work, depth + 1)
+                    return true
+                Ast::Pattern.TypeBind(type_name, binder):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(type_name))
+                    return proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(binder))
+                Ast::Pattern.Range(low, high, _):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(low))
+                    return proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(high))
+            return false
+
+        def proof_tactic_kernel_trace_ast_expr_cost(expression: Ast::Expr, cost: mutable usize&, work: usize, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT
+            return false if cost >= PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+            cost <- cost + 1
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(name))
+                    return true
+                Ast::Expr.StringLit(value, _) | Ast::Expr.CharLit(value, _) | Ast::Expr.FloatLit(value, _):
+                    return proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(value))
+                Ast::Expr.ShorthandMember(parts, _):
+                    return false if parts.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + parts.count
+                    for part in parts |cost, work|:
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(part))
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Invalid:
+                    return false
+                Ast::Expr.Field(inner, field, _) | Ast::Expr.Scope(inner, field, _):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(field))
+                    return proof_tactic_kernel_trace_ast_expr_cost(inner, cost, work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _):
+                    return proof_tactic_kernel_trace_ast_expr_cost(inner, cost, work, depth + 1)
+                Ast::Expr.RegionNew(inner, region, _):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(region))
+                    return proof_tactic_kernel_trace_ast_expr_cost(inner, cost, work, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    return proof_tactic_kernel_trace_ast_expr_cost(left, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(right, cost, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    return proof_tactic_kernel_trace_ast_expr_cost(object, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(low, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(high, cost, work, depth + 1)
+                Ast::Expr.Call(callee, arguments, argument_names, _):
+                    return false if not proof_tactic_kernel_trace_ast_expr_cost(callee, cost, work, depth + 1)
+                    return false if argument_names.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + argument_names.count
+                    for argument_name in argument_names |cost, work|:
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(argument_name))
+                    for argument in arguments |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(argument, cost, work, depth + 1)
+                    return true
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    # Candidate rows are static dispatch metadata. Charge the row iteration,
+                    # then meter only the runtime capture and explicit argument expressions.
+                    return false if candidates.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + candidates.count
+                    for candidate in candidates |cost, work, depth|:
+                        for capture in candidate.captures |cost, work, depth|:
+                            return false if not proof_tactic_kernel_trace_ast_expr_cost(capture, cost, work, depth + 1)
+                    for argument in arguments |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(argument, cost, work, depth + 1)
+                    return true
+                Ast::Expr.IndexN(object, elements, _):
+                    return false if not proof_tactic_kernel_trace_ast_expr_cost(object, cost, work, depth + 1)
+                    for element in elements |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(element, cost, work, depth + 1)
+                    return true
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(element, cost, work, depth + 1)
+                    return true
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |cost, work, depth|:
+                        return false if cost > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+                        return false if PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost < 2
+                        cost <- cost + 2
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(entry.key, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_expr_cost(entry.value, cost, work, depth + 1)
+                    return true
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    return false if not proof_tactic_kernel_trace_ast_expr_cost(base, cost, work, depth + 1)
+                    for field in fields |cost, work, depth|:
+                        return false if cost >= PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work
+                        cost <- cost + 1
+                        return false if:
+                            not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(field.name))
+                            not proof_tactic_kernel_trace_ast_expr_cost(field.value, cost, work, depth + 1)
+                    return true
+                Ast::Expr.Comprehension(variable, iterable, condition, value, _):
+                    return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(variable))
+                    return proof_tactic_kernel_trace_ast_expr_cost(iterable, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(condition, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    return false if not proof_tactic_kernel_trace_ast_expr_cost(subject, cost, work, depth + 1)
+                    return false if arms.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + arms.count
+                    for arm in arms |cost, work, depth|:
+                        return false if not proof_tactic_kernel_trace_ast_pattern_cost(arm.pattern, cost, work, depth + 1)
+                        return false if not proof_tactic_kernel_trace_ast_expr_cost(arm.guard, cost, work, depth + 1) or not proof_tactic_kernel_trace_ast_body_cost(arm.body, cost, work, depth + 1)
+                    return true
+                Ast::Expr.GetElse(value, recovery, _):
+                    return false if not proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                    return proof_tactic_kernel_trace_ast_body_cost(recovery, cost, work, depth + 1)
+                Ast::Expr.Lambda(parameters, nested, _):
+                    return false if parameters.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + parameters.count
+                    for parameter in parameters |parameter, cost, work|:
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(parameter))
+                    return proof_tactic_kernel_trace_ast_body_cost(nested, cost, work, depth + 1)
+                Ast::Expr.Block(statements, value, captures, _):
+                    return false if captures.count > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work - cost
+                    cost <- cost + captures.count
+                    for capture in captures |cost, work|:
+                        return false if not proof_tactic_kernel_trace_ast_cost_add(cost, work, sview_len(capture))
+                    return proof_tactic_kernel_trace_ast_body_cost(statements, cost, work, depth + 1) and proof_tactic_kernel_trace_ast_expr_cost(value, cost, work, depth + 1)
+                _:
+                    return false
+
+        # Run the source-shape cost walk under the caller's remaining allowance. Seeding the
+        # walk near its fixed ceiling makes each check fail closed once it reaches this limit.
+        def proof_tactic_kernel_trace_ast_expr_cost_with_limit(expression: Ast::Expr, cost: mutable usize&, work_limit: usize) -> bool:
+            return false if work_limit > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT or work_limit == 0
+            bounded_work: usize = PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - work_limit
+            return false if not proof_tactic_kernel_trace_ast_expr_cost(expression, cost, bounded_work, 0)
+            cost <= work_limit

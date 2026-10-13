@@ -54,24 +54,40 @@ extend ElisaProofKernelReplay:
             proof_kernel_replay_state_literals_fit_with_goal_work(nodes, children, facts, goal_root, work_used)
 
         def proof_kernel_replay_tactic_step_impl[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview, arena_prevalidated: bool) -> bool can[Global.Read, Global.Write]:
+            trace_work: mutable usize = 0
+            proof_kernel_replay_tactic_step_impl_with_trace_work(nodes, children, action, accepted, before_solved, after_solved, before_facts, before_goal, after_facts, after_goal, argument, has_argument, secondary, has_secondary, argument_index, has_argument_index, detail, arena_prevalidated, &trace_work)
+
+        # The trace caller shares this counter across every transition. Each transition still
+        # starts with its own tighter goal-search allowance, then debits the observed work to the
+        # trace ceiling so a long trace cannot multiply that allowance without bound.
+        def proof_kernel_replay_tactic_step_impl_with_trace_work[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview, arena_prevalidated: bool, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             saved_nodes: usize = nodes.count
             saved_children: usize = children.count
-            valid: bool = (proof_kernel_replay_tactic_step_body(nodes, children, action, accepted, before_solved, after_solved, before_facts, before_goal, after_facts, after_goal, argument, has_argument, secondary, has_secondary, argument_index, has_argument_index, detail, arena_prevalidated) can Global{Read,Write})
-            if not valid:
+            return false if trace_work > PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
+            step_work: mutable usize = 0
+            step_work_seed: mutable usize = 0
+            valid: bool = (proof_kernel_replay_tactic_step_body(nodes, children, action, accepted, before_solved, after_solved, before_facts, before_goal, after_facts, after_goal, argument, has_argument, secondary, has_secondary, argument_index, has_argument_index, detail, arena_prevalidated, &step_work, &step_work_seed, trace_work) can Global{Read,Write})
+            step_work_used: usize = step_work - step_work_seed if step_work >= step_work_seed else PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+            within_trace_budget: bool = proof_kernel_replay_tactic_trace_charge(trace_work, step_work_used)
+            if not valid or not within_trace_budget:
                 nodes.truncate(saved_nodes)
                 children.truncate(saved_children)
-            valid
+            valid and within_trace_budget
 
-        def proof_kernel_replay_tactic_step_body[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview, arena_prevalidated: bool) -> bool can[Global.Read, Global.Write]:
-            step_work: mutable usize = 0
+        def proof_kernel_replay_tactic_step_body[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, action: sview, accepted: bool, before_solved: bool, after_solved: bool, before_facts: darray[usize], before_goal: usize, after_facts: darray[usize], after_goal: usize, argument: usize, has_argument: bool, secondary: usize, has_secondary: bool, argument_index: usize, has_argument_index: bool, detail: sview, arena_prevalidated: bool, step_work: mutable usize&, step_work_seed: mutable usize&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             # Only the typed API sets this flag, after admitting both states and each present
             # auxiliary root. Reuse that admission instead of rescanning the serialized DAG.
             if not arena_prevalidated:
                 return false if:
-                    not proof_kernel_replay_arena_valid(nodes, children, before_facts, before_goal)
-                    not proof_kernel_replay_arena_valid(nodes, children, after_facts, after_goal)
-                    has_argument and not proof_kernel_replay_arena_valid(nodes, children, [], argument)
-                    has_secondary and not proof_kernel_replay_arena_valid(nodes, children, [], secondary)
+                    not proof_kernel_replay_arena_valid_with_trace_work(nodes, children, before_facts, before_goal, trace_work)
+                    not proof_kernel_replay_arena_valid_with_trace_work(nodes, children, after_facts, after_goal, trace_work)
+                    has_argument and not proof_kernel_replay_arena_valid_with_trace_work(nodes, children, [], argument, trace_work)
+                    has_secondary and not proof_kernel_replay_arena_valid_with_trace_work(nodes, children, [], secondary, trace_work)
+            return false if trace_work > PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT
+            trace_remaining: usize = PROOF_KERNEL_REPLAY_TACTIC_TRACE_WORK_LIMIT - trace_work
+            step_budget: usize = trace_remaining if trace_remaining < PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT else PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            step_work_seed <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - step_budget
+            step_work <- step_work_seed
             return false if:
                 not proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, before_facts, before_goal, step_work)
                 not proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, after_facts, after_goal, step_work)

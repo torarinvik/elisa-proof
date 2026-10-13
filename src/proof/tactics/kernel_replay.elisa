@@ -139,6 +139,47 @@ extend ElisaProof:
         def proof_tactic_kernel_encode_annotated(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&) -> usize:
             return proof_kernel_encode_annotated(expression, nodes, children, annotations)
 
+        # Reserve source cost, support checking, encoding, emitted arena storage, and possible
+        # quantifier annotation scans before either recursive kernel walk starts.
+        def proof_tactic_kernel_trace_encode(expression: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, trace_work: mutable usize&) -> (known: bool, root: usize):
+            node_start: usize = nodes.count
+            return (false, node_start) if ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_remaining_work(trace_work) == 0
+            annotation_scan_work: mutable usize = 0
+            for annotation in annotations |annotation, trace_work, annotation_scan_work|:
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, 1)
+                annotation_scan_work <- annotation_scan_work + 1
+                owner_bytes: usize = sview_len(annotation.owner)
+                return (false, node_start) if annotation_scan_work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - 4
+                return (false, node_start) if owner_bytes > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - 4 - annotation_scan_work
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, owner_bytes)
+                annotation_scan_work <- annotation_scan_work + owner_bytes
+                name_bytes: usize = sview_len(annotation.name)
+                return (false, node_start) if name_bytes > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - 4 - annotation_scan_work
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, name_bytes)
+                annotation_scan_work <- annotation_scan_work + name_bytes
+            remaining: usize = ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_remaining_work(trace_work)
+            if annotation_scan_work > PROOF_TACTIC_KERNEL_TRACE_AST_WORK_LIMIT - 4:
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, remaining)
+                return (false, node_start)
+            passes: usize = annotation_scan_work + 4
+            cost_limit: usize = remaining / passes
+            if cost_limit == 0:
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, remaining)
+                return (false, node_start)
+            ast_cost: mutable usize = 0
+            if not proof_tactic_kernel_trace_ast_expr_cost_with_limit(expression, &ast_cost, cost_limit):
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, remaining)
+                return (false, node_start)
+            if ast_cost > remaining / passes:
+                return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, remaining)
+                return (false, node_start)
+            reserved_work: usize = ast_cost * passes
+            return (false, node_start) if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, reserved_work)
+            return (false, node_start) if not proof_kernel_expression_supported(expression)
+            root: usize = proof_tactic_kernel_encode_annotated(expression, annotations, nodes, children)
+            return (false, nodes.count) if root >= nodes.count
+            return (true, root)
+
         # Imported AST handles may belong to a different store. Compare their canonical
         # arena terms with the reparsed state, preserving the ordered hypotheses as well as
         # the goal. A matching fact count alone does not bind a proof to a source obligation.
@@ -183,16 +224,18 @@ extend ElisaProof:
             return true
 
         def proof_tactic_kernel_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            trace_work: mutable usize = 0
+            return (proof_tactic_kernel_replay_with_trace_work(state, annotations, &trace_work) can Global{Read,Write})
+
+        def proof_tactic_kernel_replay_with_trace_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if not state.solved
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             facts: mutable darray[usize] = []
-            for fact in state.facts |fact, nodes, children, facts, annotations|:
-                return false if not proof_kernel_expression_supported(fact)
-                facts.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
-            return false if not proof_kernel_expression_supported(state.goal)
-            goal_root: usize = proof_tactic_kernel_encode_annotated(state.goal, annotations, nodes, children)
-            return (ElisaProofKernelReplay::proof_kernel_replay_goal_report(&nodes, &children, facts, goal_root) can Global{Read,Write})
+            return false if not proof_tactic_kernel_encode_facts_with_trace_work(state.facts, annotations, &nodes, &children, &facts, trace_work)
+            encoded_goal: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(state.goal, annotations, nodes, children, trace_work)
+            return false if not encoded_goal.known
+            return (ElisaProofKernelReplay::proof_kernel_replay_goal_report_with_trace_work(&nodes, &children, facts, encoded_goal.root, &trace_work) can Global{Read,Write})
 
         # Lower and replay the complete tactic trace through the source-neutral transition
         # checker. Unlike `proof_tactic_replay`, this path never invokes a tactic implementation
@@ -205,18 +248,39 @@ extend ElisaProof:
                 roots.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
             return true
 
+        def proof_tactic_kernel_kernel_trace_work_admitted(trace_work: usize) -> bool:
+            return ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_remaining_work(trace_work) > 0
+
+        def proof_tactic_kernel_encode_facts_with_trace_work(source: darray[Ast::Expr]&, annotations: darray[Ast::EnumAnnotation]&, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, roots: mutable darray[usize]&, trace_work: mutable usize&) -> bool:
+            for fact in source |fact, nodes, children, roots, annotations, trace_work|:
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, 1)
+                encoded: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(fact, annotations, nodes, children, trace_work)
+                return false if not encoded.known
+                roots.push(encoded.root)
+            return true
+
         def proof_tactic_kernel_trace_replay(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            trace_work: mutable usize = 0
+            return (proof_tactic_kernel_trace_replay_with_work(state, annotations, &trace_work) can Global{Read,Write})
+
+        def proof_tactic_kernel_trace_replay_with_work(state: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if state.action_count != state.trace.count
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             before_facts: mutable darray[usize] = []
-            return false if:
-                not proof_tactic_kernel_encode_facts(state.initial_facts, annotations, &nodes, &children, &before_facts)
-                not proof_kernel_expression_supported(state.initial_goal)
-            before_goal: mutable usize = proof_tactic_kernel_encode_annotated(state.initial_goal, annotations, &nodes, &children)
+            return false if not proof_tactic_kernel_kernel_trace_work_admitted(trace_work)
+            return false if not proof_tactic_kernel_encode_facts_with_trace_work(state.initial_facts, annotations, &nodes, &children, &before_facts, trace_work)
+            initial_goal: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(state.initial_goal, annotations, nodes, children, trace_work)
+            return false if not initial_goal.known
+            before_goal: mutable usize = initial_goal.root
             before_solved: mutable bool = false
             snapshot_cursor: mutable usize = 0
-            for expected in state.trace |expected, state, nodes, children, before_facts, before_goal, before_solved, snapshot_cursor|:
+            for expected in state.trace |expected, state, nodes, children, before_facts, before_goal, before_solved, snapshot_cursor, trace_work|:
+                return false if:
+                    not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, 1)
+                    not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, sview_len(expected.action))
+                    not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, sview_len(expected.detail))
+                    not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, sview_len(expected.reason))
                 return false if:
                     expected.facts_start != snapshot_cursor
                     expected.facts_start > state.trace_facts.count
@@ -224,19 +288,25 @@ extend ElisaProof:
                 after_facts: mutable darray[usize] = []
                 for index in 0..<expected.facts_count |index, expected, state, nodes, children, after_facts, annotations|:
                     fact: Ast::Expr = state.trace_facts[expected.facts_start + index]
-                    return false if not proof_kernel_expression_supported(fact)
-                    after_facts.push(proof_tactic_kernel_encode_annotated(fact, annotations, nodes, children))
-                return false if not proof_kernel_expression_supported(expected.goal)
-                after_goal: usize = proof_tactic_kernel_encode_annotated(expected.goal, annotations, nodes, children)
+                    encoded_fact: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(fact, annotations, nodes, children, trace_work)
+                    return false if not encoded_fact.known
+                    return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, 1)
+                    after_facts.push(encoded_fact.root)
+                encoded_goal: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(expected.goal, annotations, nodes, children, trace_work)
+                return false if not encoded_goal.known
+                after_goal: usize = encoded_goal.root
                 argument: mutable usize = 0
                 secondary: mutable usize = 0
                 if expected.has_argument:
-                    return false if not proof_kernel_expression_supported(expected.argument)
-                    argument <- proof_tactic_kernel_encode_annotated(expected.argument, annotations, nodes, children)
+                    encoded_argument: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(expected.argument, annotations, nodes, children, trace_work)
+                    return false if not encoded_argument.known
+                    argument <- encoded_argument.root
                 if expected.has_secondary:
-                    return false if not proof_kernel_expression_supported(expected.secondary)
-                    secondary <- proof_tactic_kernel_encode_annotated(expected.secondary, annotations, nodes, children)
-                return false if not (ElisaProofKernelReplay::proof_kernel_replay_tactic_step(&nodes, &children, expected.action, expected.accepted, before_solved, expected.solved, before_facts, before_goal, after_facts, after_goal, argument, expected.has_argument, secondary, expected.has_secondary, expected.argument_index, expected.has_argument_index, expected.detail) can Global{Read,Write})
+                    encoded_secondary: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(expected.secondary, annotations, nodes, children, trace_work)
+                    return false if not encoded_secondary.known
+                    secondary <- encoded_secondary.root
+                return false if not (ElisaProofKernelReplay::proof_kernel_replay_tactic_step_with_trace_work(&nodes, &children, expected.action, expected.accepted, before_solved, expected.solved, before_facts, before_goal, after_facts, after_goal, argument, expected.has_argument, secondary, expected.has_secondary, expected.argument_index, expected.has_argument_index, expected.detail, &trace_work) can Global{Read,Write})
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_charge_work(trace_work, after_facts.count)
                 before_facts <- []
                 before_facts.extend(after_facts)
                 before_goal <- after_goal
@@ -245,13 +315,14 @@ extend ElisaProof:
             return false if snapshot_cursor != state.trace_facts.count
             final_facts: mutable darray[usize] = []
             return false if:
-                not proof_tactic_kernel_encode_facts(state.facts, annotations, &nodes, &children, &final_facts)
+                not proof_tactic_kernel_encode_facts_with_trace_work(state.facts, annotations, nodes, children, final_facts, trace_work)
                 final_facts.count != before_facts.count
             for index in 0..<final_facts.count |index, final_facts, before_facts, nodes, children|:
-                return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(&nodes, &children, final_facts[index], before_facts[index], 0)
-            return false if not proof_kernel_expression_supported(state.goal)
-            final_goal: usize = proof_tactic_kernel_encode_annotated(state.goal, annotations, &nodes, &children)
-            return false if not ElisaProofKernelReplay::proof_kernel_replay_expr_equal_public(&nodes, &children, final_goal, before_goal, 0)
+                return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_expr_equal(&nodes, &children, final_facts[index], before_facts[index], 0, &trace_work)
+            encoded_final_goal: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(state.goal, annotations, nodes, children, trace_work)
+            return false if not encoded_final_goal.known
+            final_goal: usize = encoded_final_goal.root
+            return false if not ElisaProofKernelReplay::proof_kernel_replay_tactic_trace_expr_equal(&nodes, &children, final_goal, before_goal, 0, &trace_work)
             return state.solved == before_solved
 
         # Complete certificate admission for clients that require both dimensions at once:
@@ -265,25 +336,29 @@ extend ElisaProof:
         # from child closure lets serialized proof trees compose branches recursively without
         # making the parent verifier trust the tactic interpreter's in-memory child references.
         def proof_tactic_kernel_branch_transition_replay(parent: ProofTacticState&, left: ProofTacticState&, right: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            trace_work: mutable usize = 0
+            return (proof_tactic_kernel_branch_transition_replay_with_work(parent, left, right, annotations, &trace_work) can Global{Read,Write})
+
+        def proof_tactic_kernel_branch_transition_replay_with_work(parent: ProofTacticState&, left: ProofTacticState&, right: ProofTacticState&, annotations: darray[Ast::EnumAnnotation]&, trace_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if parent.trace.count == 0
             branch: ProofTacticStep = parent.trace[parent.trace.count - 1]
             return false if:
                 not branch.accepted or (branch.action != "split" and branch.action != "cases")
-                not (proof_tactic_kernel_trace_replay(parent, annotations) can Global{Read,Write})
+                not (proof_tactic_kernel_trace_replay_with_work(parent, annotations, trace_work) can Global{Read,Write})
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
             children: mutable darray[usize] = []
             parent_facts: mutable darray[usize] = []
             left_facts: mutable darray[usize] = []
             right_facts: mutable darray[usize] = []
             return false if:
-                not proof_tactic_kernel_encode_facts(parent.facts, annotations, &nodes, &children, &parent_facts)
-                not proof_kernel_expression_supported(parent.goal) or not proof_kernel_expression_supported(left.initial_goal) or not proof_kernel_expression_supported(right.initial_goal)
-            parent_goal: usize = proof_tactic_kernel_encode_annotated(parent.goal, annotations, &nodes, &children)
-            return false if not proof_tactic_kernel_encode_facts(left.initial_facts, annotations, &nodes, &children, &left_facts)
-            left_goal: usize = proof_tactic_kernel_encode_annotated(left.initial_goal, annotations, &nodes, &children)
-            return false if not proof_tactic_kernel_encode_facts(right.initial_facts, annotations, &nodes, &children, &right_facts)
-            right_goal: usize = proof_tactic_kernel_encode_annotated(right.initial_goal, annotations, &nodes, &children)
-            return ElisaProofKernelReplay::proof_kernel_replay_tactic_branch(&nodes, &children, branch.action, parent_facts, parent_goal, left_facts, left_goal, right_facts, right_goal)
+                not proof_tactic_kernel_encode_facts_with_trace_work(parent.facts, annotations, &nodes, &children, &parent_facts, trace_work)
+                not proof_tactic_kernel_encode_facts_with_trace_work(left.initial_facts, annotations, &nodes, &children, &left_facts, trace_work)
+                not proof_tactic_kernel_encode_facts_with_trace_work(right.initial_facts, annotations, &nodes, &children, &right_facts, trace_work)
+            parent_goal_encoded: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(parent.goal, annotations, nodes, children, trace_work)
+            left_goal_encoded: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(left.initial_goal, annotations, nodes, children, trace_work)
+            right_goal_encoded: (known: bool, root: usize) = proof_tactic_kernel_trace_encode(right.initial_goal, annotations, nodes, children, trace_work)
+            return false if not parent_goal_encoded.known or not left_goal_encoded.known or not right_goal_encoded.known
+            return (ElisaProofKernelReplay::proof_kernel_replay_tactic_branch_with_trace_work(&nodes, &children, branch.action, parent_facts, parent_goal_encoded.root, left_facts, left_goal_encoded.root, right_facts, right_goal_encoded.root, &trace_work) can Global{Read,Write})
 
         # Compose a completed branching proof. The parent trace proves that the branch action was
         # a valid state transition; the independent branch kernel below additionally binds both

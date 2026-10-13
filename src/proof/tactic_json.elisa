@@ -12,6 +12,8 @@ extend ElisaProof:
         const PROOF_JSON_MAX_SAFE_INTEGER: f64 = 9007199254740991.0
         const PROOF_JSON_MAX_TREE_NODES: usize = 65536
         const PROOF_JSON_BRANCH_DEPTH_LIMIT: usize = 32
+        const PROOF_JSON_MAX_TOTAL_ACTIONS: usize = 65536
+        const PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS: usize = 1048576
         const PROOF_TACTIC_WORKSPACE_ARENA_BYTES: usize = 1048576
         struct ProofTacticJsonResult:
             valid: mutable bool = false
@@ -34,6 +36,11 @@ extend ElisaProof:
             left: mutable darray[usize]
             right: mutable darray[usize]
             has_branch: mutable darray[bool]
+            total_actions: mutable usize
+            total_trace_fact_snapshots: mutable usize
+            total_expression_work: mutable usize
+            total_kernel_replay_work: mutable usize
+            total_solver_work: mutable usize
 
         # One slot owns both branch states as distinct fields, making their non-aliasing
         # structural instead of relying on arithmetic analysis of adjacent array indices.
@@ -48,7 +55,7 @@ extend ElisaProof:
 
         def proof_tactic_tree_in_arena[@r](arena: mutable Arena& @r) -> mutable ProofTacticJsonTree& @r:
             in arena:
-                return new[r] ProofTacticJsonTree{states: [], left: [], right: [], has_branch: []}
+                return new[r] ProofTacticJsonTree{states: [], left: [], right: [], has_branch: [], total_actions: 0, total_trace_fact_snapshots: 0, total_expression_work: 0, total_kernel_replay_work: 0, total_solver_work: 0}
 
         def proof_tactic_json_field[@r](value: JsonValueHandle[r], key: sview) -> (known: bool, value: JsonValueHandle[r]):
             return ElisaProofJson::field(value, key)
@@ -148,21 +155,21 @@ extend ElisaProof:
             return false if has_argument or has_secondary or has_argument_index
             return action in {"assumption", "exact", "decide", "intro", "simp", "split", "cases", "left", "right"}
 
-        def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&, source_bound: bool) -> bool can[Global.Read, Global.Write]:
+        def proof_tactic_json_action(state: mutable ProofTacticState&, action: sview, argument: Ast::Expr, has_argument: bool, secondary: Ast::Expr, has_secondary: bool, argument_index: usize, has_argument_index: bool, annotations: mutable darray[Ast::EnumAnnotation]&, source_bound: bool, solver_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             return false if:
                 action in {"split", "cases"}
                 (proof_float_mode can Global.Read) and action != "assumption" and action != "exact"
                 (action in {"rewrite", "rewriteback"}) and has_argument_index and (has_argument or has_secondary)
             return proof_tactic_assumption(state, annotations) if action == "assumption"
-            return (proof_tactic_exact(state, annotations) can Global{Read,Write}) if action == "exact"
-            return (proof_tactic_decide(state, annotations) can Global{Read,Write}) if action == "decide"
+            return (proof_tactic_decision_with_shared_work(state, annotations, "exact", &solver_work) can Global{Read,Write}) if action == "exact"
+            return (proof_tactic_decision_with_shared_work(state, annotations, "decide", &solver_work) can Global{Read,Write}) if action == "decide"
             return proof_tactic_intro(state) if action == "intro"
             return false if action == "apply" and (has_argument or has_secondary)
             return proof_tactic_apply_from_fact(state, argument_index, annotations) if action == "apply" and has_argument_index
             return proof_tactic_apply(state, annotations) if action == "apply"
-            return (proof_tactic_simplify_source_bound(state, annotations) can Global{Read,Write}) if source_bound and action == "simp"
-            return (proof_tactic_simplify(state, annotations) can Global{Read,Write}) if action == "simp"
-            return (proof_tactic_have(state, argument, annotations) can Global{Read,Write}) if action == "have" and has_argument
+            return (proof_tactic_simplify_source_bound_with_shared_work(state, annotations, &solver_work) can Global{Read,Write}) if source_bound and action == "simp"
+            return (proof_tactic_simplify_with_shared_work(state, annotations, &solver_work) can Global{Read,Write}) if action == "simp"
+            return (proof_tactic_have_with_shared_work(state, argument, annotations, &solver_work) can Global{Read,Write}) if action == "have" and has_argument
             return proof_tactic_instantiate(state, argument_index, argument, annotations) if action == "instantiate" and has_argument and has_argument_index
             return (proof_tactic_rewrite_from_fact(state, argument_index, false, annotations) can Global.Read) if source_bound and action == "rewrite" and has_argument_index and not has_argument and not has_secondary
             return (proof_tactic_rewrite_from_fact(state, argument_index, true, annotations) can Global.Read) if source_bound and action == "rewriteback" and has_argument_index and not has_argument and not has_secondary
@@ -195,7 +202,9 @@ extend ElisaProof:
             while cursor < tree.states.count |cursor, tree, validity|:
                 if not tree.has_branch[cursor]:
                     leaf: mutable ProofTacticState = tree.states[cursor]
-                    validity[cursor] <- (proof_tactic_kernel_certificate_replay(&leaf, annotations) can Global{Read,Write})
+                    trace_valid: bool = (proof_tactic_kernel_trace_replay_with_work(leaf, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
+                    kernel_valid: bool = (proof_tactic_kernel_replay_with_trace_work(leaf, annotations, &tree.total_kernel_replay_work) can Global{Read,Write}) if trace_valid else false
+                    validity[cursor] <- trace_valid and kernel_valid
                 else:
                     left_index: usize = tree.left[cursor]
                     right_index: usize = tree.right[cursor]
@@ -205,7 +214,7 @@ extend ElisaProof:
                     parent: mutable ProofTacticState = tree.states[cursor]
                     left: mutable ProofTacticState = tree.states[left_index]
                     right: mutable ProofTacticState = tree.states[right_index]
-                    validity[cursor] <- (proof_tactic_kernel_branch_transition_replay(&parent, &left, &right, annotations) can Global{Read,Write})
+                    validity[cursor] <- (proof_tactic_kernel_branch_transition_replay_with_work(&parent, &left, &right, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
                 cursor <- cursor + 1
             return validity[root]
 
@@ -275,8 +284,8 @@ extend ElisaProof:
                 return invalid if not action_field.known or not action.known
                 argument_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(item, "argument")
                 secondary_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(item, "secondary")
-                argument: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(argument_field.value) if argument_field.known else (false, Ast::Expr.Absent)
-                secondary: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(secondary_field.value) if secondary_field.known else (false, Ast::Expr.Absent)
+                argument: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(argument_field.value, &tree.total_expression_work, 0) if argument_field.known else (false, Ast::Expr.Absent)
+                secondary: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(secondary_field.value, &tree.total_expression_work, 0) if secondary_field.known else (false, Ast::Expr.Absent)
                 index_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(item, "argument_index")
                 parsed_index: (known: bool, value: i64) = proof_tactic_json_integer(index_field.value) if index_field.known else (false, 0)
                 expected_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(item, "accepted")
@@ -284,6 +293,15 @@ extend ElisaProof:
                 return invalid if:
                     (argument_field.known and not argument.known) or (secondary_field.known and not secondary.known) or (index_field.known and (not parsed_index.known or parsed_index.value < 0 or parsed_index.value > ElisaProofKernelCore::PROOF_KERNEL_U32_MAX)) or (expected_field.known and not expected.known)
                     not proof_tactic_json_action_fields_valid(action.value, argument_field.known, secondary_field.known, index_field.known)
+                # These counters span recursive branches. Per-node limits alone allowed a
+                # document with many small scripts to multiply both replay work and copied fact
+                # snapshots by the full tree size.
+                return exhausted if tree.total_actions >= PROOF_JSON_MAX_TOTAL_ACTIONS
+                return exhausted if tree.total_trace_fact_snapshots > PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS
+                snapshot_charge: usize = state.facts.count + 1
+                return exhausted if snapshot_charge > PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS - tree.total_trace_fact_snapshots
+                tree.total_actions <- tree.total_actions + 1
+                tree.total_trace_fact_snapshots <- tree.total_trace_fact_snapshots + snapshot_charge
                 before_action_count: usize = state.action_count
                 actual: mutable bool = false
                 if action.value in {"split", "cases"}:
@@ -314,9 +332,9 @@ extend ElisaProof:
                         branch_kernel_ok <- left_result.kernel_replayed and right_result.kernel_replayed
                         branch_left_node <- left_result.tree_node
                         branch_right_node <- right_result.tree_node
-                        branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and (proof_tactic_kernel_branch_transition_replay(state, left_branch_state, right_branch_state, annotations) can Global{Read,Write})
+                        branch_certificate_ok <- left_result.valid and right_result.valid and left_result.certificate_replayed and right_result.certificate_replayed and (proof_tactic_kernel_branch_transition_replay_with_work(state, left_branch_state, right_branch_state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
                 else:
-                    actual <- (proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound) can Global{Read,Write})
+                    actual <- (proof_tactic_json_action(state, action.value, argument.value, argument_field.known, secondary.value, secondary_field.known, parsed_index.value.usize(), index_field.known, annotations, source_bound, &tree.total_solver_work) can Global{Read,Write})
                 # Every well-formed action, including a rejected one, must leave a replayable
                 # trace entry. Otherwise an unknown action paired with `accepted: false` could
                 # be silently treated as a no-op and disappear from both replay passes.
@@ -327,15 +345,22 @@ extend ElisaProof:
                 return contradicted if actual != expected.value
                 accepted_count <- accepted_count + 1 if actual
             trace_ok: mutable bool = (proof_tactic_replay(state, annotations) can Global{Read,Write})
-            kernel_trace_ok: mutable bool = (proof_tactic_kernel_trace_replay(state, annotations) can Global{Read,Write})
-            kernel_ok: mutable bool = (proof_tactic_kernel_replay(state, annotations) can Global{Read,Write})
-            certificate_ok: mutable bool = (proof_tactic_kernel_certificate_replay(state, annotations) can Global{Read,Write})
+            kernel_trace_ok: mutable bool = (proof_tactic_kernel_trace_replay_with_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
+            kernel_ok: mutable bool = (proof_tactic_kernel_replay_with_trace_work(state, annotations, &tree.total_kernel_replay_work) can Global{Read,Write})
+            # The combined certificate predicate is exactly these two independent kernel
+            # results. Replaying both through the convenience wrapper would duplicate the work.
+            certificate_ok: mutable bool = kernel_trace_ok and kernel_ok
             if branch_present:
                 trace_ok <- trace_ok and branch_trace_ok
                 kernel_trace_ok <- kernel_trace_ok and branch_kernel_trace_ok
                 kernel_ok <- branch_kernel_ok
                 certificate_ok <- branch_certificate_ok
             tree_node: usize = tree.states.count
+            state_snapshot_charge: usize = state.facts.count + state.initial_facts.count + state.trace_facts.count + state.trace.count
+            return exhausted if:
+                tree.total_trace_fact_snapshots > PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS
+                state_snapshot_charge > PROOF_JSON_MAX_TRACE_FACT_SNAPSHOTS - tree.total_trace_fact_snapshots
+            tree.total_trace_fact_snapshots <- tree.total_trace_fact_snapshots + state_snapshot_charge
             snapshot_facts: mutable darray[Ast::Expr] @r = []
             snapshot_facts.extend(state.facts)
             snapshot_initial_facts: mutable darray[Ast::Expr] @r = []
@@ -348,9 +373,13 @@ extend ElisaProof:
             tree.left.push(branch_left_node)
             tree.right.push(branch_right_node)
             tree.has_branch.push(branch_present)
-            tree_certificate_ok: bool = (proof_tactic_json_tree_certificate_replay(tree, tree_node, annotations) can Global{Read,Write})
-            certificate_ok <- tree_certificate_ok
-            branch_certificate_ok <- tree_certificate_ok if branch_present
+            # Recursive returns carry the already replayed certificate for this node. Run the
+            # independent whole-tree pass once, after the root has been appended; repeating it
+            # for every child return rescans the growing postorder prefix quadratically.
+            if depth == 0:
+                tree_certificate_ok: bool = (proof_tactic_json_tree_certificate_replay(tree, tree_node, annotations) can Global{Read,Write})
+                certificate_ok <- tree_certificate_ok
+                branch_certificate_ok <- tree_certificate_ok if branch_present
             return ProofTacticJsonResult{valid: true, solved: state.solved or branch_certificate_ok, trace_replayed: trace_ok, kernel_trace_replayed: kernel_trace_ok, kernel_replayed: kernel_ok, certificate_replayed: certificate_ok, branch_present: branch_present, branch_certificate_replayed: branch_certificate_ok, action_count: state.action_count, accepted_count: accepted_count, reason: "portable tactic script admitted" if certificate_ok else "portable tactic script did not close an independently replayable goal", tree_node: tree_node}
 
     private:
@@ -359,6 +388,7 @@ extend ElisaProof:
         # authority, even when its kernel roots happen to match the imported JSON state.
         def proof_tactic_json_run_source_candidate[@r](root: JsonValueHandle[r], source_state: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r, report: ProofReport&, goal_id: usize) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid source-bound proof script"}
+            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_expression_work != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0
             format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
             return invalid if:
@@ -383,8 +413,8 @@ extend ElisaProof:
             goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(source_state, "goal")
             return invalid if:
                 not facts_field.known or not goal_field.known
-                not proof_tactic_json_expr_list(source_state, "facts", 0, &facts)
-            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(goal_field.value)
+                not proof_tactic_json_expr_list_with_work(source_state, "facts", 0, &facts, &tree.total_expression_work, 0)
+            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(goal_field.value, &tree.total_expression_work, 0)
             return invalid if not goal.known or facts.count != attempt.facts_count
             # Source-bound tactics share the contract checker’s operator boundary: an imported
             # source overload must never be reinterpreted by the source-neutral tactic kernel.
@@ -411,6 +441,7 @@ extend ElisaProof:
     public:
         def proof_tactic_json_run[@r](root: JsonValueHandle[r], annotations: mutable darray[Ast::EnumAnnotation]& @r, state: mutable ProofTacticState& @r, tree: mutable ProofTacticJsonTree& @r, scratch: mutable darray[ProofTacticJsonBranchScratch]& @r) -> ProofTacticJsonResult can[Global.Read, Global.Write]:
             invalid: ProofTacticJsonResult = ProofTacticJsonResult{reason: "invalid proof script"}
+            return invalid if tree.states.count != 0 or tree.left.count != 0 or tree.right.count != 0 or tree.has_branch.count != 0 or tree.total_actions != 0 or tree.total_trace_fact_snapshots != 0 or tree.total_expression_work != 0 or tree.total_kernel_replay_work != 0 or tree.total_solver_work != 0
             format_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(root, "format")
             format: (known: bool, value: sview) @r = proof_tactic_json_text(format_field.value)
             return invalid if not format_field.known or not format.known or format.value != "elisa-proof-tactics-v1"
@@ -419,8 +450,8 @@ extend ElisaProof:
             goal_field: (known: bool, value: JsonValueHandle[r]) = proof_tactic_json_field(initial_field.value, "goal")
             return invalid if not initial_field.known or not facts_field.known or not goal_field.known
             facts: mutable darray[Ast::Expr] = []
-            return invalid if not proof_tactic_json_expr_list(initial_field.value, "facts", 0, &facts)
-            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr(goal_field.value)
+            return invalid if not proof_tactic_json_expr_list_with_work(initial_field.value, "facts", 0, &facts, &tree.total_expression_work, 0)
+            goal: (known: bool, value: Ast::Expr) = proof_tactic_json_expr_with_work(goal_field.value, &tree.total_expression_work, 0)
             return invalid if:
                 not goal.known
                 not proof_tactic_json_parse_annotations(root, annotations)
