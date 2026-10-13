@@ -16674,15 +16674,14 @@ separate 16,000,000-unit ceiling to account for the per-edge push and validation
 reference search confirms those existing callers still resolve the general constant. No compiler
 snapshot, proof binary, build, or runtime test was produced, so qualification remains pending.
 
-### 23.27.644 Track the current arena-budget source tuple (2026-10-13)
+### 23.27.645 Track the current arena-budget source tuple (2026-10-13)
 
-The committed proof base is `e73f0dc29f75bb5359fdc73c244ecb0b5d15398d`; the current proof worktree
-also has dirty `ELISA_COMPILER_REV`, `IMPLEMENTATION_PLAN.md`, and
-`src/proof/kernel_replay/tactic_arena_validation.elisa` changes. The arena-local ceiling was raised
-from 12M to 16M and still needs review and commit. The compiler candidate remains at
-`dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23 dirty paths. The available proof manifest is
-pinned to proof HEAD `5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and compiler source
-`7e1251785276c539c98dbe33a12e610e2338cbf4`; the replay manifest is pinned to proof HEAD
-`a1a8f2cd75a65755f4bed8574a1e75b7678b8c0c` and compiler source `ac2b23ef4d9590e77b40503c0d90df59837d542a`.
-Neither manifest qualifies the current source pair. `git diff --check` and the source-length gate
-pass; no parser, build, test, or replay command was run.
+The arena-local ceiling change is committed in proof `dad3aa714adecac63c7688120836ca208cde0065`;
+the only current dirty path is this plan document. `ELISA_COMPILER_REV` points to Elisa-compiler
+`505351f99585b15b5a392aa08cfdd8fb405f073a`, matching local compiler `main`. The separate compiler
+candidate remains at `dfaeb45c6ff6532b59d2a3183557413172f23d6f` with 23 dirty paths. The available
+proof manifest is pinned to proof HEAD `5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and compiler
+source `7e1251785276c539c98dbe33a12e610e2338cbf4`; the replay manifest is pinned to proof HEAD
+`a1a8f2cd75a65755f4bed8574a1e75b7678b8c0` and compiler source `ac2b23ef4d9590e77b40503c0d90df59837d542a`.
+Neither manifest qualifies the current source pair. Static diff and source-length checks pass; no
+parser, build, test, or replay command was run.
