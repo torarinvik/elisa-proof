@@ -13,6 +13,14 @@ extend ElisaProof:
         # for each kind the encoder emits and this module may share. Children ranges are node
         # references as well, and are handled separately. The sentinel marks every other kind.
         const PROOF_KERNEL_INTERN_UNSHAREABLE: usize = 4
+        # Interning only saves producer-side space. A long collision chain may miss a sharing
+        # opportunity, but must never make report encoding scan an attacker-sized table.
+        const PROOF_KERNEL_INTERN_MAX_CLUSTER: usize = 64
+        # Hashing is also optional work: bound the total text bytes and child references read
+        # for one candidate before walking any attacker-controlled field.
+        const PROOF_KERNEL_INTERN_HASH_WORK_LIMIT: usize = 4096
+        # Share one report-wide ceiling across candidate hashing, collision checks and rehashing.
+        const PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT: usize = 16000000
 
         def proof_kernel_intern_reference_fields(kind: sview) -> usize:
             return 0 if kind == "int" or kind == "absent" or kind == "bool" or kind == "string" or kind == "char" or kind == "ident" or kind == "shorthand"
@@ -33,18 +41,24 @@ extend ElisaProof:
         def proof_kernel_intern_encoded(report: mutable ProofReport&, node_start: usize, child_start: usize, root: usize) -> usize:
             node_end: usize = report.kernel.nodes.count
             return root if root < node_start or root >= node_end
+            return root if report.kernel.intern_work_exhausted or child_start > report.kernel.children.count
+            return root if not proof_kernel_intern_charge(report, node_end - node_start)
+            return root if not proof_kernel_intern_charge(report, report.kernel.children.count - child_start)
             return root if not proof_kernel_intern_suffix_shareable(report, node_start, child_start)
             proof_kernel_intern_reserve(report, node_end - node_start)
+            return root if report.kernel.intern_work_exhausted
             final_index: mutable darray[usize] = []
             write: mutable usize = node_start
             for index in node_start..<node_end |index, report, node_start, write, final_index|:
                 node: ElisaProofKernelCore::ProofKernelNode = proof_kernel_intern_remapped(report, index, node_start, final_index)
-                existing: (known: bool, index: usize) = proof_kernel_intern_find(report, node, write)
+                existing: (known: bool, index: usize) = (false, 0)
+                if not report.kernel.intern_work_exhausted:
+                    existing <- proof_kernel_intern_find(report, node, write)
                 if existing.known:
                     final_index.push(existing.index)
                 else:
                     report.kernel.nodes[write] <- node
-                    proof_kernel_intern_insert(report, write)
+                    proof_kernel_intern_insert(report, write) if not report.kernel.intern_work_exhausted
                     final_index.push(write)
                     write <- write + 1
             report.kernel.interned_nodes <- report.kernel.interned_nodes + (node_end - write)
@@ -54,6 +68,17 @@ extend ElisaProof:
             return final_index[root - node_start]
 
     private:
+        def proof_kernel_intern_charge(report: mutable ProofReport&, amount: usize) -> bool:
+            return false if report.kernel.intern_work_exhausted
+            if report.kernel.intern_work_used > PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT:
+                report.kernel.intern_work_exhausted <- true
+                return false
+            if amount > PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT - report.kernel.intern_work_used:
+                report.kernel.intern_work_exhausted <- true
+                return false
+            report.kernel.intern_work_used <- report.kernel.intern_work_used + amount
+            return true
+
         def proof_kernel_intern_suffix_shareable(report: ProofReport&, node_start: usize, child_start: usize) -> bool:
             for index in node_start..<report.kernel.nodes.count |index, report, node_start, child_start|:
                 node: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[index]
@@ -106,7 +131,22 @@ extend ElisaProof:
             low: i64 = value & 4294967295
             return (((hash.i64() ^ low) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS).u32()
 
-        def proof_kernel_intern_hash(report: ProofReport&, node: ElisaProofKernelCore::ProofKernelNode) -> u32:
+        def proof_kernel_intern_hash_text_work(text: sview, work: mutable usize&) -> bool:
+            return false if work > PROOF_KERNEL_INTERN_HASH_WORK_LIMIT
+            length: usize = sview_len(text)
+            return false if length > PROOF_KERNEL_INTERN_HASH_WORK_LIMIT - work
+            work <- work + length
+            return true
+
+        def proof_kernel_intern_hash(report: mutable ProofReport&, node: ElisaProofKernelCore::ProofKernelNode) -> (known: bool, hash: u32):
+            work: mutable usize = 0
+            return (false, 0) if not proof_kernel_intern_hash_text_work(node.kind, &work)
+            return (false, 0) if not proof_kernel_intern_hash_text_work(node.operator, &work)
+            return (false, 0) if not proof_kernel_intern_hash_text_work(node.name, &work)
+            return (false, 0) if not proof_kernel_intern_hash_text_work(node.secondary_name, &work)
+            return (false, 0) if node.children_count > PROOF_KERNEL_INTERN_HASH_WORK_LIMIT - work
+            return (false, 0) if node.children_start > report.kernel.children.count or node.children_count > report.kernel.children.count - node.children_start
+            return (false, 0) if not proof_kernel_intern_charge(report, work + node.children_count + 10)
             hash: mutable u32 = proof_name_hash(node.kind)
             hash <- proof_kernel_intern_mix(hash, proof_name_hash(node.operator).i64())
             hash <- proof_kernel_intern_mix(hash, proof_name_hash(node.name).i64())
@@ -119,22 +159,36 @@ extend ElisaProof:
             hash <- proof_kernel_intern_mix(hash, node.children_count.i64())
             for offset in 0..<node.children_count |offset, node, report, hash|:
                 hash <- proof_kernel_intern_mix(hash, report.kernel.children[node.children_start + offset].i64())
-            return hash
+            return (true, hash)
 
         # Open addressing over node indices. A slot is only a candidate: a hit must also lie below
         # `limit` (the settled prefix of the arena) and match field by field, so a slot left stale
         # by an arena truncation elsewhere can never alias a different term.
-        def proof_kernel_intern_find(report: ProofReport&, node: ElisaProofKernelCore::ProofKernelNode, limit: usize) -> (known: bool, index: usize):
+        def proof_kernel_intern_find(report: mutable ProofReport&, node: ElisaProofKernelCore::ProofKernelNode, limit: usize) -> (known: bool, index: usize):
             capacity: usize = report.kernel.intern_slots.count
             return (false, 0) if capacity == 0
             empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
-            slot: mutable usize = (proof_kernel_intern_hash(report, node).i64() % capacity.i64()).usize()
+            hash_result: (known: bool, hash: u32) = proof_kernel_intern_hash(report, node)
+            return (false, 0) if not hash_result.known
+            slot: mutable usize = (hash_result.hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, capacity, empty, report, node, limit|:
+            while probes < capacity and probes < PROOF_KERNEL_INTERN_MAX_CLUSTER |probes, slot, capacity, empty, report, node, limit|:
+                return (false, 0) if not proof_kernel_intern_charge(report, 1)
                 candidate: usize = report.kernel.intern_slots[slot]
                 return (false, 0) if candidate == empty
                 if candidate < limit and candidate < report.kernel.nodes.count:
-                    return (true, candidate) if proof_kernel_intern_same(report, report.kernel.nodes[candidate], node)
+                    stored: ElisaProofKernelCore::ProofKernelNode = report.kernel.nodes[candidate]
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(stored.kind))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(stored.operator))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(stored.name))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(stored.secondary_name))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(node.kind))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(node.operator))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(node.name))
+                    return (false, 0) if not proof_kernel_intern_charge(report, sview_len(node.secondary_name))
+                    return (false, 0) if not proof_kernel_intern_charge(report, stored.children_count)
+                    return (false, 0) if not proof_kernel_intern_charge(report, node.children_count)
+                    return (true, candidate) if proof_kernel_intern_same(report, stored, node)
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
             return (false, 0)
@@ -143,9 +197,12 @@ extend ElisaProof:
             capacity: usize = report.kernel.intern_slots.count
             return if capacity == 0
             empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
-            slot: mutable usize = (proof_kernel_intern_hash(report, report.kernel.nodes[index]).i64() % capacity.i64()).usize()
+            hash_result: (known: bool, hash: u32) = proof_kernel_intern_hash(report, report.kernel.nodes[index])
+            return if not hash_result.known
+            slot: mutable usize = (hash_result.hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, capacity, empty, report, index|:
+            while probes < capacity and probes < PROOF_KERNEL_INTERN_MAX_CLUSTER |probes, slot, capacity, empty, report, index|:
+                return if not proof_kernel_intern_charge(report, 1)
                 if report.kernel.intern_slots[slot] == empty:
                     report.kernel.intern_slots[slot] <- index
                     report.kernel.intern_used <- report.kernel.intern_used + 1
@@ -156,9 +213,17 @@ extend ElisaProof:
         # Keep the table at most half full for `additional` more insertions. Growing rehashes the
         # recorded indices that still lie inside the arena; the rest were truncated away.
         def proof_kernel_intern_reserve(report: mutable ProofReport&, additional: usize) -> void:
+            return if report.kernel.intern_work_exhausted
+            # Successful insertions charge at least one unit, and one encoding can append no
+            # more than the kernel node budget. Reject inconsistent state before sizing the
+            # table, so corrupted counters cannot wrap the addition or capacity calculation.
+            if report.kernel.intern_used > PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT or additional > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
+                report.kernel.intern_work_exhausted <- true
+                return
             needed: usize = (report.kernel.intern_used + additional) * 2
             return if needed <= report.kernel.intern_slots.count
             capacity: usize = proof_index_capacity(needed)
+            return if capacity == 0 or not proof_kernel_intern_charge(report, capacity)
             previous: darray[usize] = report.kernel.intern_slots
             empty: usize = ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
             report.kernel.intern_slots <- []
@@ -167,4 +232,5 @@ extend ElisaProof:
                 report.kernel.intern_slots[slot] <- empty
             report.kernel.intern_used <- 0
             for index in previous |report, empty|:
+                return if report.kernel.intern_work_exhausted or not proof_kernel_intern_charge(report, 1)
                 proof_kernel_intern_insert(report, index) if index != empty and index < report.kernel.nodes.count

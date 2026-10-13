@@ -1,0 +1,136 @@
+# Per-name chains for complete and incomplete function declarations. This keeps call typing
+# proportional to the selected overload group instead of rescanning the whole environment.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_build_typing_index(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> (known: bool, index: ProofKernelReplayTypingIndex):
+            empty_group_index: ProofKernelReplayFunctionGroupIndex = proof_kernel_replay_empty_function_group_index()
+            return proof_kernel_replay_build_typing_index_internal(environment, work, false, empty_group_index)
+
+        def proof_kernel_replay_build_scoped_typing_index(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, inherited_index: ProofKernelReplayTypingIndex) -> (known: bool, index: ProofKernelReplayTypingIndex):
+            empty: ProofKernelReplayTypingIndex = proof_kernel_replay_empty_typing_index()
+            global_count: usize = environment.global_bindings.count
+            local_count: usize = environment.bindings.count
+            parent_local_count: usize = inherited_index.scoped_local_binding_count
+            total_count: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return (false, empty) if total_count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            return (false, empty) if parent_local_count > local_count or inherited_index.source_binding_count < parent_local_count or inherited_index.source_binding_count - parent_local_count != global_count
+            return (false, empty) if local_count - parent_local_count == 0 or local_count - parent_local_count > 2
+            return (false, empty) if total_count - inherited_index.source_binding_count != local_count - parent_local_count
+            return (false, empty) if inherited_index.global_function_group_index.source_binding_count != global_count
+            return (false, empty) if inherited_index.local_function_group_index.source_binding_count != parent_local_count or inherited_index.local_function_group_index.next_rows.count != parent_local_count
+            return (false, empty) if inherited_index.local_function_group_index.function_count > 0 and inherited_index.local_function_group_index.tails.count != inherited_index.local_function_group_index.capacity
+            return (false, empty) if inherited_index.owner_path_index.source_binding_count != inherited_index.source_binding_count or inherited_index.owner_path_index.owner_ids.count != inherited_index.owner_path_index.owner_count or inherited_index.owner_path_index.starts.count != inherited_index.owner_path_index.owner_count or inherited_index.owner_path_index.counts.count != inherited_index.owner_path_index.owner_count
+            return (false, empty) if (inherited_index.owner_path_index.capacity == 0 and inherited_index.owner_path_index.owner_count > 0) or inherited_index.owner_path_index.slots.count != inherited_index.owner_path_index.capacity
+            return (false, empty) if inherited_index.call_binding_count > parent_local_count
+            return (false, empty) if inherited_index.value_overlay_start > parent_local_count or inherited_index.value_overlay_count != parent_local_count - inherited_index.value_overlay_start
+            for row in parent_local_count..<local_count |row, environment, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = environment.bindings[row]
+                return (false, empty) if binding.kind != "value" or not proof_kernel_replay_typing_binding_valid(binding, work)
+            next: mutable ProofKernelReplayTypingIndex = inherited_index
+            next.source_binding_count <- total_count
+            # The appended rows above are validated values only; owner spans still describe this full environment.
+            owner_paths: mutable ProofKernelReplayOwnerPathIndex = next.owner_path_index
+            owner_paths.source_binding_count <- total_count
+            next.owner_path_index <- owner_paths
+            next.value_overlay_count <- local_count - next.value_overlay_start
+            next.scoped_local_binding_count <- local_count
+            return (true, next)
+
+        def proof_kernel_replay_function_group_charge_text(name: sview, work: mutable usize&) -> bool:
+            amount: usize = sview_len(name)
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or amount > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work
+            work <- work + amount
+            return true
+
+        def proof_kernel_replay_function_group_index_build(bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], work: mutable usize&) -> (known: bool, index: ProofKernelReplayFunctionGroupIndex):
+            empty: ProofKernelReplayFunctionGroupIndex = proof_kernel_replay_empty_function_group_index()
+            count: usize = bindings.count
+            return (false, empty) if count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            function_count: mutable usize = 0
+            for binding in bindings |function_count, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                function_count <- function_count + 1 if binding.kind == "function" or binding.kind == "function-incomplete"
+            capacity: usize = proof_kernel_replay_name_index_capacity(function_count)
+            return (false, empty) if function_count > 0 and capacity == 0
+            allocation_work: usize = count + capacity * 5
+            return (false, empty) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or allocation_work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work
+            work <- work + allocation_work
+            index: mutable ProofKernelReplayFunctionGroupIndex = ProofKernelReplayFunctionGroupIndex{source_binding_count: count, function_count: 0, capacity: capacity, hashes: [], slots: [], heads: [], tails: [], counts: [], next_rows: []}
+            index.next_rows.resize(count)
+            for row in 0..<count |row, count, index|:
+                index.next_rows[row] <- count
+            return (true, index) if function_count == 0
+            index.hashes.resize(capacity)
+            index.slots.resize(capacity)
+            index.heads.resize(capacity)
+            index.tails.resize(capacity)
+            index.counts.resize(capacity)
+            for slot in 0..<capacity |slot, count, index|:
+                index.slots[slot] <- count
+                index.heads[slot] <- count
+                index.tails[slot] <- count
+                index.counts[slot] <- 0
+            for row in 0..<count |row, bindings, index, capacity, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[row]
+                index.next_rows[row] <- count
+                continue if binding.kind != "function" and binding.kind != "function-incomplete"
+                return (false, empty) if binding.name == ""
+                return (false, empty) if not proof_kernel_replay_function_group_charge_text(binding.name, work)
+                hash: u32 = proof_kernel_replay_name_owner_hash(binding.name, binding.owner_type_identity)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, hash, binding, row, bindings, index, capacity, count, work, placed|:
+                    return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                    current: usize = index.slots[slot]
+                    if current == count:
+                        index.hashes[slot] <- hash
+                        index.slots[slot] <- row
+                        index.heads[slot] <- row
+                        index.tails[slot] <- row
+                        index.counts[slot] <- 1
+                        placed <- true
+                        break
+                    if index.hashes[slot] == hash:
+                        representative: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[current]
+                        if representative.owner_type_identity == binding.owner_type_identity:
+                            same_name: bool = proof_kernel_replay_type_text_equal(representative.name, binding.name, work)
+                            return (false, empty) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                            if same_name:
+                                tail: usize = index.tails[slot]
+                                return (false, empty) if tail >= row or tail >= index.next_rows.count
+                                index.next_rows[tail] <- row
+                                index.tails[slot] <- row
+                                index.counts[slot] <- index.counts[slot] + 1
+                                placed <- true
+                                break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return (false, empty) if not placed
+                index.function_count <- index.function_count + 1
+            return (true, index)
+
+        def proof_kernel_replay_function_group_slot(index: ProofKernelReplayFunctionGroupIndex, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], name: sview, owner_identity: usize, work: mutable usize&) -> (known: bool, slot: usize):
+            empty_slot: usize = index.source_binding_count
+            return (false, empty_slot) if index.source_binding_count > bindings.count or index.next_rows.count != index.source_binding_count
+            return (true, empty_slot) if index.function_count == 0 and index.capacity == 0
+            return (false, empty_slot) if index.capacity == 0 or index.hashes.count != index.capacity or index.slots.count != index.capacity or index.heads.count != index.capacity or index.tails.count != index.capacity or index.counts.count != index.capacity
+            return (false, empty_slot) if not proof_kernel_replay_function_group_charge_text(name, work)
+            hash: u32 = proof_kernel_replay_name_owner_hash(name, owner_identity)
+            slot: mutable usize = (hash.i64() % index.capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < index.capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, hash, name, index, bindings, empty_slot, work|:
+                return (false, empty_slot) if not proof_kernel_replay_type_work_consume(work)
+                current: usize = index.slots[slot]
+                return (true, empty_slot) if current == empty_slot
+                return (false, empty_slot) if current >= index.source_binding_count
+                if index.hashes[slot] == hash:
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[current]
+                    if binding.owner_type_identity == owner_identity and proof_kernel_replay_type_text_equal(binding.name, name, work):
+                        return (false, empty_slot) if index.counts[slot] == 0 or index.heads[slot] >= index.source_binding_count or index.tails[slot] >= index.source_binding_count
+                        return (true, slot)
+                slot <- (slot + 1) % index.capacity
+                probes <- probes + 1
+            return (false, empty_slot)

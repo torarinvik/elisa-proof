@@ -1,0 +1,343 @@
+# Cross-row validation for source-selected bare-call owner markers.
+extend ElisaProofKernelReplay:
+    private:
+        const PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER: usize = 64
+
+        def proof_kernel_replay_name_hash(name: sview) -> u32:
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            for index in 0..<sview_len(name) |index, hash, name|:
+                hash <- ((hash ^ sview_at(name, index).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return hash.u32()
+
+        def proof_kernel_replay_name_index_capacity(count: usize) -> usize:
+            return 0 if count == 0 or count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET / 2
+            capacity: mutable usize = 1
+            target: usize = count * 2
+            while capacity < target |capacity, target|:
+                capacity <- capacity * 2
+            return capacity
+
+        def proof_kernel_replay_name_owner_hash(name: sview, owner_identity: usize) -> u32:
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            name_hash: u32 = proof_kernel_replay_name_hash(name)
+            hash <- ((hash ^ name_hash.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ owner_identity.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return hash.u32()
+
+        def proof_kernel_replay_type_work_consume_amount(amount: usize, work: mutable usize&) -> bool:
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or amount > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work
+            work <- work + amount
+            return true
+
+        def proof_kernel_replay_bare_owner_index_slot(owner_identity: usize, capacity: usize, owner_ids: darray[usize]&, work: mutable usize&) -> usize:
+            return capacity if owner_identity == 0 or capacity == 0 or owner_ids.count != capacity
+            owner_hash: u32 = proof_kernel_replay_name_owner_hash("", owner_identity)
+            slot: mutable usize = (owner_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, owner_identity, capacity, owner_ids, slot, work|:
+                return capacity if not proof_kernel_replay_type_work_consume(work)
+                current: usize = owner_ids[slot]
+                return capacity if current == 0
+                return slot if current == owner_identity
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return capacity
+
+        # Recompute the source selector for each function name and validate the marker set
+        # exactly. Unique names retain the global-name fast path; duplicate names select one
+        # uniquely nearest visible owner. Missing and tied selections emit no marker. Owner 0
+        # is the valid root declaration identity.
+        def proof_kernel_replay_bare_call_owners_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> bool:
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return false if total > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            function_count: mutable usize = 0
+            owner_identity_count: mutable usize = 0
+            marker_count: mutable usize = 0
+            context_identity: mutable usize = 0
+            context_seen: mutable bool = false
+            for index in 0..<total |index, environment, function_count, owner_identity_count, marker_count, context_identity, context_seen, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                function_count <- function_count + 1 if binding.kind == "function" or binding.kind == "function-incomplete"
+                owner_identity_count <- owner_identity_count + 1 if binding.kind == "module-owner-segment" and binding.parameter_index == 0
+                marker_count <- marker_count + 1 if binding.kind == "bare-call-owner"
+                if binding.kind == "module-context":
+                    return false if context_seen or binding.owner_type_identity == 0
+                    context_identity <- binding.owner_type_identity
+                    context_seen <- true
+            return false if marker_count > function_count
+            return false if context_seen and owner_identity_count == 0
+            return true if function_count == 0 and owner_identity_count == 0
+            # Function names and identities come from untrusted serialized bindings, so avoid
+            # a quadratic pairwise scan. The bounded hash set holds one representative row per
+            # exact name and records multiplicity for the unique-name source rule. A linked row
+            # chain lets duplicate-name validation visit only that exact group.
+            capacity: usize = proof_kernel_replay_name_index_capacity(function_count)
+            return false if capacity == 0 and function_count > 0
+            owner_capacity: usize = proof_kernel_replay_name_index_capacity(owner_identity_count)
+            return false if owner_capacity == 0 and owner_identity_count > 0
+            return false if not proof_kernel_replay_type_work_consume_amount(capacity * 7 + total + owner_capacity * 3, work)
+            hashes: mutable darray[u32] = []
+            slots: mutable darray[usize] = []
+            counts: mutable darray[usize] = []
+            heads: mutable darray[usize] = []
+            next_rows: mutable darray[usize] = []
+            owner_ids: mutable darray[usize] = []
+            selected_owner_ids: mutable darray[usize] = []
+            selected_owner_epochs: mutable darray[usize] = []
+            owner_starts: mutable darray[usize] = []
+            owner_counts: mutable darray[usize] = []
+            hashes.resize(capacity)
+            slots.resize(capacity)
+            counts.resize(capacity)
+            heads.resize(capacity)
+            next_rows.resize(total)
+            owner_ids.resize(owner_capacity)
+            owner_starts.resize(owner_capacity)
+            owner_counts.resize(owner_capacity)
+            selected_owner_ids.resize(capacity)
+            selected_owner_epochs.resize(capacity)
+            for slot in 0..<capacity |slot, selected_owner_epochs, work|:
+                selected_owner_epochs[slot] <- 0
+                return false if not proof_kernel_replay_type_work_consume(work)
+            for slot in 0..<capacity |slot, slots, counts, heads, total, work|:
+                slots[slot] <- total
+                counts[slot] <- 0
+                heads[slot] <- total
+                return false if not proof_kernel_replay_type_work_consume(work)
+            for row in 0..<total |row, next_rows, total, work|:
+                next_rows[row] <- total
+                return false if not proof_kernel_replay_type_work_consume(work)
+            for slot in 0..<owner_capacity |slot, owner_ids, owner_starts, owner_counts, total, work|:
+                owner_ids[slot] <- 0
+                owner_starts[slot] <- total
+                owner_counts[slot] <- 0
+                return false if not proof_kernel_replay_type_work_consume(work)
+            for index in 0..<total |index, environment, owner_ids, owner_starts, owner_counts, owner_capacity, total, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if row.kind != "module-owner-segment"
+                return false if row.owner_type_identity == 0 or row.parameter_count == 0 or row.parameter_count > total - index or row.parameter_index >= row.parameter_count or row.name == ""
+                owner_identity: usize = row.owner_type_identity
+                if row.parameter_index == 0:
+                    owner_hash: u32 = proof_kernel_replay_name_owner_hash("", owner_identity)
+                    owner_slot: mutable usize = (owner_hash.i64() % owner_capacity.i64()).usize()
+                    owner_probes: mutable usize = 0
+                    owner_placed: mutable bool = false
+                    while owner_probes < owner_capacity and owner_probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |owner_probes, owner_identity, index, row, owner_slot, owner_capacity, owner_ids, owner_starts, owner_counts, total, work, owner_placed|:
+                        return false if not proof_kernel_replay_type_work_consume(work)
+                        existing_identity: usize = owner_ids[owner_slot]
+                        if existing_identity == 0:
+                            owner_ids[owner_slot] <- owner_identity
+                            owner_starts[owner_slot] <- index
+                            owner_counts[owner_slot] <- row.parameter_count
+                            owner_placed <- true
+                            break
+                        return false if existing_identity == owner_identity
+                        owner_slot <- (owner_slot + 1) % owner_capacity
+                        owner_probes <- owner_probes + 1
+                    return false if not owner_placed
+                    for segment in 0..<row.parameter_count |segment, environment, index, owner_identity, row, total, work|:
+                        return false if not proof_kernel_replay_type_work_consume(work)
+                        owner_segment: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index + segment)
+                        return false if owner_segment.kind != "module-owner-segment" or owner_segment.owner_type_identity != owner_identity or owner_segment.parameter_index != segment or owner_segment.parameter_count != row.parameter_count or owner_segment.name == ""
+                else:
+                    return false if index < row.parameter_index
+                    expected_start: usize = index - row.parameter_index
+                    owner_slot: usize = proof_kernel_replay_bare_owner_index_slot(owner_identity, owner_capacity, owner_ids, work)
+                    return false if owner_slot == owner_capacity or owner_starts[owner_slot] != expected_start or owner_counts[owner_slot] != row.parameter_count
+            context_owner_count: mutable usize = 0
+            context_owner_start: mutable usize = total
+            if context_seen:
+                context_owner_slot: usize = proof_kernel_replay_bare_owner_index_slot(context_identity, owner_capacity, owner_ids, work)
+                return false if context_owner_slot == owner_capacity
+                context_owner_count <- owner_counts[context_owner_slot]
+                context_owner_start <- owner_starts[context_owner_slot]
+                return false if context_owner_count == 0
+            for index in 0..<total |index, environment, hashes, slots, counts, heads, next_rows, owner_ids, owner_capacity, capacity, total, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if binding.kind != "function" and binding.kind != "function-incomplete"
+                if binding.owner_type_identity != 0:
+                    owner_slot: usize = proof_kernel_replay_bare_owner_index_slot(binding.owner_type_identity, owner_capacity, owner_ids, work)
+                    return false if owner_slot == owner_capacity
+                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(binding.name), work)
+                hash: u32 = proof_kernel_replay_name_hash(binding.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                inserted: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, binding, hash, slot, capacity, environment, hashes, slots, counts, heads, next_rows, total, work, inserted|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    current: usize = slots[slot]
+                    if current == total:
+                        hashes[slot] <- hash
+                        slots[slot] <- index
+                        counts[slot] <- 1
+                        heads[slot] <- index
+                        inserted <- true
+                        break
+                    return false if current >= total
+                    existing: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, current)
+                    if hashes[slot] == hash:
+                        return false if not proof_kernel_replay_type_text_equal(existing.name, binding.name, work)
+                        if existing.name == binding.name:
+                            next_rows[index] <- heads[slot]
+                            heads[slot] <- index
+                            counts[slot] <- counts[slot] + 1
+                            inserted <- true
+                            break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not inserted
+            marker_slots: mutable darray[usize] = []
+            return false if not proof_kernel_replay_type_work_consume_amount(capacity, work)
+            marker_slots.resize(capacity)
+            for slot in 0..<capacity |slot, marker_slots, total, work|:
+                marker_slots[slot] <- total
+                return false if not proof_kernel_replay_type_work_consume(work)
+            # This is a parallel array indexed by the function-name hash table's slots, not
+            # an independent hash table: every marker resolves through that table and stores
+            # its row at the matching function group slot. Thus its collision chain and hash
+            # are exactly the function table's.
+            for index in 0..<total |index, environment, marker_slots, hashes, slots, capacity, total, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                marker: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
+                continue if marker.kind != "bare-call-owner"
+                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(marker.name), work)
+                hash: u32 = proof_kernel_replay_name_hash(marker.name)
+                function_slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                function_found: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, marker, hash, function_slot, capacity, environment, marker_slots, hashes, slots, total, work, function_found|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    function_row: usize = slots[function_slot]
+                    break if function_row == total
+                    return false if function_row >= total
+                    function: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, function_row)
+                    if hashes[function_slot] == hash:
+                        return false if not proof_kernel_replay_type_text_equal(function.name, marker.name, work)
+                        if function.name == marker.name:
+                            return false if marker_slots[function_slot] != total
+                            marker_slots[function_slot] <- index
+                            function_found <- true
+                            break
+                    function_slot <- (function_slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not function_found
+            owner_epoch: mutable usize = 0
+            for slot in 0..<capacity |slot, environment, hashes, slots, counts, heads, next_rows, owner_ids, owner_starts, owner_counts, owner_capacity, marker_slots, capacity, total, context_identity, context_seen, context_owner_count, context_owner_start, selected_owner_ids, selected_owner_epochs, owner_epoch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                representative: usize = slots[slot]
+                continue if representative == total
+                return false if owner_epoch >= total * 2 + 1
+                owner_epoch <- owner_epoch + 1
+                return false if representative >= total
+                first: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, representative)
+                multiplicity: usize = counts[slot]
+                selected_owner: mutable usize = 0
+                selected_depth: mutable usize = 0
+                selected_count: mutable usize = 0
+                enclosing_depth: mutable usize = 0
+                enclosing_owner: mutable usize = 0
+                enclosing_count: mutable usize = 0
+                if multiplicity == 1:
+                    selected_owner <- first.owner_type_identity
+                    selected_count <- 1
+                else:
+                    row: mutable usize = heads[slot]
+                    rows_seen: mutable usize = 0
+                    while row != total and rows_seen < multiplicity |row, rows_seen, environment, first, multiplicity, selected_owner, selected_depth, selected_count, enclosing_depth, enclosing_owner, enclosing_count, context_identity, context_seen, context_owner_count, next_rows, total, selected_owner_ids, selected_owner_epochs, owner_epoch, capacity, work|:
+                        return false if row >= total
+                        return false if not proof_kernel_replay_type_work_consume(work)
+                        candidate: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, row)
+                        return false if (candidate.kind != "function" and candidate.kind != "function-incomplete") or not proof_kernel_replay_type_text_equal(candidate.name, first.name, work)
+                        candidate_visible: mutable bool = false
+                        candidate_prefix: mutable usize = 0
+                        if candidate.owner_type_identity == 0:
+                            candidate_visible <- true
+                        else:
+                            candidate_owner_slot: usize = proof_kernel_replay_bare_owner_index_slot(candidate.owner_type_identity, owner_capacity, owner_ids, work)
+                            return false if candidate_owner_slot == owner_capacity
+                            candidate_count: usize = owner_counts[candidate_owner_slot]
+                            candidate_owner_start: usize = owner_starts[candidate_owner_slot]
+                            if context_seen:
+                                if candidate_count > 0 and candidate_count <= context_owner_count:
+                                    candidate_visible <- true
+                                    for segment in 0..<candidate_count |segment, environment, candidate_owner_start, context_owner_start, candidate_count, candidate_visible, work|:
+                                        return false if not proof_kernel_replay_type_work_consume(work)
+                                        owner_segment_binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, candidate_owner_start + segment)
+                                        context_segment_binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, context_owner_start + segment)
+                                        return false if owner_segment_binding.kind != "module-owner-segment" or context_segment_binding.kind != "module-owner-segment"
+                                        owner_segment: sview = owner_segment_binding.name
+                                        context_segment: sview = context_segment_binding.name
+                                        return false if owner_segment == "" or context_segment == "" or not proof_kernel_replay_type_text_equal(owner_segment, context_segment, work)
+                                        if owner_segment != context_segment:
+                                            candidate_visible <- false
+                                            break
+                            elif candidate_count == 0:
+                                candidate_visible <- true
+                            if candidate_visible:
+                                candidate_prefix <- candidate_count
+                        if candidate_visible:
+                            if candidate_prefix > enclosing_depth:
+                                enclosing_depth <- candidate_prefix
+                                return false if owner_epoch >= total * 2 + 1
+                                owner_epoch <- owner_epoch + 1
+                                enclosing_count <- 0
+                            if candidate_prefix == enclosing_depth:
+                                selected_owner_hash: u32 = proof_kernel_replay_name_owner_hash("", candidate.owner_type_identity)
+                                selected_owner_slot: mutable usize = (selected_owner_hash.i64() % capacity.i64()).usize()
+                                selected_owner_probes: mutable usize = 0
+                                selected_owner_recorded: mutable bool = false
+                                while selected_owner_probes < capacity and selected_owner_probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |selected_owner_probes, candidate, selected_owner_slot, capacity, selected_owner_ids, selected_owner_epochs, owner_epoch, enclosing_owner, enclosing_count, work, selected_owner_recorded|:
+                                    return false if not proof_kernel_replay_type_work_consume(work)
+                                    if selected_owner_epochs[selected_owner_slot] != owner_epoch:
+                                        selected_owner_ids[selected_owner_slot] <- candidate.owner_type_identity
+                                        selected_owner_epochs[selected_owner_slot] <- owner_epoch
+                                        enclosing_count <- enclosing_count + 1
+                                        enclosing_owner <- candidate.owner_type_identity if enclosing_count == 1
+                                        selected_owner_recorded <- true
+                                        break
+                                    if selected_owner_ids[selected_owner_slot] == candidate.owner_type_identity:
+                                        selected_owner_recorded <- true
+                                        break
+                                    selected_owner_slot <- (selected_owner_slot + 1) % capacity
+                                    selected_owner_probes <- selected_owner_probes + 1
+                                return false if not selected_owner_recorded
+                        row <- next_rows[row]
+                        rows_seen <- rows_seen + 1
+                    return false if rows_seen != multiplicity or row != total
+                    if enclosing_count > 0:
+                        selected_owner <- enclosing_owner
+                        selected_depth <- enclosing_depth
+                        selected_count <- enclosing_count
+                expected_selected: bool = selected_count == 1
+                expected_owner: usize = selected_owner
+                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(first.name), work)
+                name_hash: u32 = proof_kernel_replay_name_hash(first.name)
+                marker_slot: mutable usize = (name_hash.i64() % capacity.i64()).usize()
+                marker_probes: mutable usize = 0
+                group_marker: mutable usize = total
+                while marker_probes < capacity and marker_probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |marker_probes, first, name_hash, marker_slot, capacity, hashes, slots, marker_slots, total, group_marker, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    function_row: usize = slots[marker_slot]
+                    break if function_row == total
+                    return false if function_row >= total
+                    function: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, function_row)
+                    if hashes[marker_slot] == name_hash:
+                        return false if not proof_kernel_replay_type_text_equal(function.name, first.name, work)
+                        if function.name == first.name:
+                            group_marker <- marker_slots[marker_slot]
+                            break
+                    marker_slot <- (marker_slot + 1) % capacity
+                    marker_probes <- marker_probes + 1
+                marker_present: bool = group_marker != total
+                if marker_present:
+                    return false if group_marker >= total
+                    marker: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, group_marker)
+                    return false if not proof_kernel_replay_type_text_equal(marker.name, first.name, work)
+                    # Nested lexical values can shadow this valid outer marker. Call-owner
+                    # lookup suppresses it while the shadow remains in scope.
+                    return false if not expected_selected or marker.owner_type_identity != expected_owner
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return true

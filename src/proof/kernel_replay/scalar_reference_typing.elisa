@@ -1,5 +1,41 @@
 extend ElisaProofKernelReplay:
     private:
+        def proof_kernel_replay_raw_pointer_reference_shape_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, raw_pointer: bool):
+            decreases remaining
+            return (false, false) if remaining == 0 or depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or root >= nodes.count
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "call" or node.kind == "field" or node.kind == "index" or node.kind == "scope" or node.kind == "checked-index" or node.kind == "checked-get":
+                return (false, false) if remaining <= 1
+                # These shapes are classified as non-reference only when the source adapter
+                # preserved a complete result sort. Reference-returning calls and fields are
+                # omitted from that adapter, so their result remains unknown here.
+                result_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+                return (result_sort.known, false)
+            reference_shape: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+            return (false, false) if not reference_shape.known
+            return (true, false) if not reference_shape.is_reference
+            if node.kind == "ident":
+                value: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_value_binding(environment, typing_index, node.name, work)
+                return (false, false) if not value.known
+                return (true, value.binding.kind == "raw-reference-value")
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_raw_pointer_reference_shape_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "if":
+                then_shape: (known: bool, raw_pointer: bool) = proof_kernel_replay_raw_pointer_reference_shape_remaining(nodes, children, environment, typing_index, node.right, depth + 1, remaining - 1, work)
+                else_shape: (known: bool, raw_pointer: bool) = proof_kernel_replay_raw_pointer_reference_shape_remaining(nodes, children, environment, typing_index, node.auxiliary, depth + 1, remaining - 1, work)
+                return (false, false) if not then_shape.known or not else_shape.known or then_shape.raw_pointer != else_shape.raw_pointer
+                return then_shape
+            return (true, false) if node.kind == "unary" and node.operator == "&"
+            return (false, false)
+
+        def proof_kernel_replay_byte_pointer_reference_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> bool:
+            decreases remaining
+            return false if remaining <= 1 or root >= nodes.count
+            reference_shape: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+            return false if not reference_shape.known or not reference_shape.is_reference
+            pointee_sort: ProofKernelInferredSort = proof_kernel_replay_argument_value_sort_remaining(nodes, children, environment, typing_index, root, depth, remaining - 1, work)
+            return pointee_sort.known and pointee_sort.family == "integer" and (pointee_sort.name == "u8" or pointee_sort.name == "byte")
+
         # A scalar reference is a one-element place. Admit only the literal zero subscript;
         # dynamic/raw-pointer offsets need a separate extent proof and stay unknown here.
         def proof_kernel_replay_scalar_reference_index_sort(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, object_root: usize, index_root: usize, depth: usize, work: mutable usize&) -> ProofKernelInferredSort:
@@ -19,3 +55,203 @@ extend ElisaProofKernelReplay:
             container_element: ProofKernelInferredSort = proof_kernel_replay_index_element_sort(receiver, environment, work)
             return container_element if container_element.known
             return proof_kernel_replay_scalar_reference_index_sort(nodes, environment, typing_index, object_root, index_root, depth, work)
+
+        # Bare indexed expressions can be implicitly lent to a by-reference formal. Most
+        # such places are represented by a checked container access or a bounded array
+        # place, but `cstr[index]` becomes a raw pointer GEP in that context. C strings are
+        # nullable and the replay environment carries no non-null fact, so even offset zero
+        # is not a justified borrow. Parentheses and `move` preserve the expression here.
+        def proof_kernel_replay_implicit_cstr_index_borrow_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, cstr_index: bool):
+            decreases remaining
+            return (false, false) if remaining == 0 or depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or root >= nodes.count
+            return (false, false) if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_implicit_cstr_index_borrow_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "index":
+                receiver: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+                return (false, false) if not receiver.known
+                return (true, receiver.family == "string" and receiver.name == "cstr")
+            return (true, false)
+
+        # Parentheses and `move` preserve an explicit reference value. Find an `&place`
+        # through those wrappers so it receives the same place validation as bare `&place`.
+        def proof_kernel_replay_explicit_borrow_value_root_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work: mutable usize&) -> (known: bool, explicit_borrow: bool, value_root: usize):
+            decreases remaining
+            return (false, false, 0) if remaining == 0 or root >= nodes.count
+            return (false, false, 0) if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_explicit_borrow_value_root_remaining(nodes, node.left, remaining - 1, work)
+            if node.kind == "unary" and node.operator == "&":
+                return (true, true, node.left)
+            return (true, false, root)
+
+        def proof_kernel_replay_untyped_numeric_literal_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work: mutable usize&) -> (known: bool, integer_literal: bool, floating_literal: bool, unary_numeric: bool, integral_only: bool):
+            decreases remaining
+            return (false, false, false, false, false) if remaining == 0 or root >= nodes.count
+            return (false, false, false, false, false) if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_untyped_numeric_literal_remaining(nodes, node.left, remaining - 1, work)
+            if node.kind == "int":
+                return (true, not proof_kernel_replay_int_tagged(node), false, false, false)
+            return (true, false, true, false, false) if node.kind == "opaque-float-literal"
+            if node.kind == "unary" and (node.operator == "+" or node.operator == "-" or node.operator == "~"):
+                operand: (known: bool, integer_literal: bool, floating_literal: bool, unary_numeric: bool, integral_only: bool) = proof_kernel_replay_untyped_numeric_literal_remaining(nodes, node.left, remaining - 1, work)
+                return (false, false, false, false, false) if not operand.known
+                return (true, operand.integer_literal, false, true, true) if node.operator == "~" and operand.integer_literal
+                return (true, false, false, true, true) if node.operator == "~"
+                return (true, operand.integer_literal, operand.floating_literal, true, operand.integral_only)
+            return (true, false, false, false, false)
+
+        def proof_kernel_replay_explicit_borrow_target_place_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray<usize>&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, place: bool):
+            requires depth <= PROOF_KERNEL_TYPING_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return (false, false) if remaining <= 1 or depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or root >= nodes.count
+            return (false, false) if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "paren":
+                return proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "ident":
+                value: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_value_binding(environment, typing_index, node.name, work)
+                return (false, false) if not value.known
+                return (true, value.binding.kind == "value" or value.binding.kind == "reference-value" or value.binding.kind == "raw-reference-value")
+            if node.kind == "field":
+                enum_member: (is_enum_path: bool, sort: ProofKernelInferredSort) = proof_kernel_replay_qualified_enum_member_sort(nodes, environment, typing_index, root, work)
+                return (true, false) if enum_member.is_enum_path
+                receiver: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+                field_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+                return (false, false) if not receiver.known or not field_sort.known
+                return (true, false) if (receiver.family == "container" or receiver.family == "string") and node.name == "count"
+                return proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "index":
+                return (false, false) if node.left >= nodes.count
+                receiver: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+                index: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, node.right, depth + 1, remaining - 1, work)
+                element: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+                return (false, false) if not receiver.known or not index.known or not proof_kernel_replay_integral_sort(index) or not element.known
+                if receiver.family == "string" and receiver.name == "cstr":
+                    # Borrowing a C-string element forms a raw pointer GEP, unlike the
+                    # checked value read. Literal zero alone is insufficient: cstr is
+                    # nullable, and this environment has no non-null or extent evidence.
+                    return (false, false)
+                return proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "call":
+                result: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+                return (false, false) if not result.known
+                return (true, false) if result.family != "named" or result.type_identity == 0
+                type_binding: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, "type", result.name, "", 0, work)
+                return (false, false) if not type_binding.known or type_binding.binding.sort != "named" or type_binding.binding.type_identity != result.type_identity
+                total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
+                for binding_index in 0..<total_bindings |binding_index, environment, result, work|:
+                    return (false, false) if not proof_kernel_replay_type_work_consume(work)
+                    declaration: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                    continue if declaration.kind != "enum-tag"
+                    owner_matches: bool = proof_kernel_replay_type_text_equal(declaration.owner, result.name, work) if declaration.kind == "enum-tag" and declaration.type_identity == result.type_identity and declaration.owner_type_identity == result.type_identity else false
+                    return (false, false) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                    return (true, false) if owner_matches
+                return (true, true)
+            return (true, false)
+
+        def proof_kernel_replay_argument_matches_parameter_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, argument_root: usize, parameter: ElisaProofKernelCore::ProofKernelTypingBinding, allow_contextual_string: bool, depth: usize, remaining: usize, work: mutable usize&) -> bool:
+            requires depth <= PROOF_KERNEL_ARGUMENT_DEPTH_PRECONDITION
+            requires remaining > 0
+            decreases remaining
+            return false if remaining <= 1 or argument_root >= nodes.count or depth >= PROOF_KERNEL_ARGUMENT_DEPTH_GUARD
+            return false if not proof_kernel_replay_type_work_consume(work)
+            expected: ProofKernelInferredSort = proof_kernel_replay_binding_sort(parameter)
+            argument: ElisaProofKernelCore::ProofKernelNode = nodes[argument_root]
+            borrow_value: (known: bool, explicit_borrow: bool, value_root: usize) = proof_kernel_replay_explicit_borrow_value_root_remaining(nodes, argument_root, remaining - 1, work)
+            return false if not borrow_value.known
+            reference_argument: bool = borrow_value.explicit_borrow
+            reference_shape: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, argument_root, depth + 1, remaining - 1, work)
+            return false if not reference_shape.known
+            # An explicit `&place` remains a Ref expression, so only a Ref formal accepts it.
+            # This guard also keeps typed candidate ranking and unique-shape fallback aligned.
+            return false if reference_argument and not parameter.parameter_by_reference
+            value_root: usize = borrow_value.value_root if reference_argument else argument_root
+            return false if value_root >= nodes.count
+            value_argument: ElisaProofKernelCore::ProofKernelNode = nodes[value_root]
+            if reference_argument:
+                borrowed_place: (known: bool, place: bool) = proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                return false if not borrowed_place.known or not borrowed_place.place
+            elif parameter.parameter_by_reference:
+                cstr_index_borrow: (known: bool, cstr_index: bool) = proof_kernel_replay_implicit_cstr_index_borrow_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                return false if not cstr_index_borrow.known
+                if cstr_index_borrow.cstr_index:
+                    borrowed_place: (known: bool, place: bool) = proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                    return false if not borrowed_place.known or not borrowed_place.place
+            untyped_literal: mutable (known: bool, integer_literal: bool, floating_literal: bool, unary_numeric: bool, integral_only: bool) = (true, false, false, false, false)
+            if value_argument.kind == "int" and not proof_kernel_replay_int_tagged(value_argument):
+                untyped_literal <- (true, true, false, false, false)
+            elif value_argument.kind == "opaque-float-literal":
+                untyped_literal <- (true, false, true, false, false)
+            elif value_argument.kind == "paren" or value_argument.kind == "move" or value_argument.kind == "unary":
+                untyped_literal <- proof_kernel_replay_untyped_numeric_literal_remaining(nodes, value_root, remaining - 1, work)
+            return false if not untyped_literal.known
+            if parameter.parameter_by_reference and not reference_shape.is_reference and (untyped_literal.integer_literal or untyped_literal.floating_literal):
+                return false
+            if not parameter.parameter_by_reference and untyped_literal.integer_literal:
+                return expected.known and (expected.family == "integer" or expected.family == "character" or (expected.family == "floating" and not untyped_literal.integral_only) or (expected.family == "boolean" and not untyped_literal.unary_numeric))
+            if not parameter.parameter_by_reference and untyped_literal.floating_literal:
+                return expected.known and expected.family == "floating"
+            if allow_contextual_string and not parameter.parameter_by_reference and value_argument.kind == "string":
+                adapts: bool = expected.family == "string" and expected.type_identity == 0 and (expected.name == "sview" or expected.name == "dstr")
+                adapts <- adapts or (expected.family == "container" and expected.type_identity == 0 and expected.element_type_identity == 0 and expected.name == "darray" and expected.element_family == "integer" and expected.element_name == "u8")
+                return expected.known and adapts
+            actual: ProofKernelInferredSort = proof_kernel_replay_argument_value_sort_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+            source_representation_match: (known: bool, matches: bool) = proof_kernel_replay_backend_overload_sort_match(actual, expected, work)
+            return source_representation_match.matches if source_representation_match.known
+            return false
+
+        def proof_kernel_replay_argument_is_reference_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, is_reference: bool):
+            decreases remaining
+            return (false, false) if remaining == 0 or depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or root >= nodes.count
+            return (false, false) if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "unary" and node.operator == "&":
+                inner_reference: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+                return (false, false) if not inner_reference.known or inner_reference.is_reference
+                return (true, true)
+            if node.kind == "ident":
+                value: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_value_binding(environment, typing_index, node.name, work)
+                return (false, false) if not value.known
+                return (true, value.binding.kind == "reference-value" or value.binding.kind == "raw-reference-value")
+            if node.kind == "call" or node.kind == "field" or node.kind == "index" or node.kind == "scope" or node.kind == "checked-index" or node.kind == "checked-get":
+                return (false, false) if remaining <= 1
+                # Source projection omits reference-returning calls and reference-valued
+                # fields. A complete result sort is therefore evidence for a value here.
+                result_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth + 1, remaining - 1, work)
+                return (result_sort.known, false)
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "if":
+                then_reference: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, node.right, depth + 1, remaining - 1, work)
+                else_reference: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, node.auxiliary, depth + 1, remaining - 1, work)
+                return (false, false) if not then_reference.known or not else_reference.known or then_reference.is_reference != else_reference.is_reference
+                return (true, then_reference.is_reference)
+            if node.kind == "unary":
+                return (false, false) if node.operator == "*"
+                return (true, false)
+            return (true, false) if node.kind == "int" or node.kind == "opaque-float-literal" or node.kind == "char" or node.kind == "bool" or node.kind == "string" or node.kind == "null" or node.kind == "binary"
+            # Calls, fields, and qualified paths can themselves have reference types;
+            # this source-neutral environment does not preserve enough evidence to erase them.
+            return (false, false)
+
+        # Call checking can strip an explicit borrow when the backend accepts that expression
+        # as a reference formal or implicitly dereferences it for a unique-shape fallback.
+        # Ordinary proposition term sorting does not strip borrow operators.
+        def proof_kernel_replay_argument_value_sort_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, depth: usize, remaining: usize, work: mutable usize&) -> ProofKernelInferredSort:
+            requires depth <= PROOF_KERNEL_TYPING_DEPTH_LIMIT
+            requires remaining > 0
+            decreases remaining
+            return proof_kernel_replay_unknown_sort() if depth >= PROOF_KERNEL_TYPING_DEPTH_LIMIT or remaining <= 1 or root >= nodes.count
+            return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            if node.kind == "paren" or node.kind == "move":
+                return proof_kernel_replay_argument_value_sort_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            if node.kind == "unary" and node.operator == "&":
+                return proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, node.left, depth + 1, remaining - 1, work)
+            return proof_kernel_replay_term_sort_remaining(nodes, children, environment, typing_index, root, depth, remaining, work)

@@ -48,9 +48,10 @@ extend ElisaProofKernelReplay:
 
         def proof_kernel_replay_type_scope_identity_insert(identity: usize, capacity: usize, slots: mutable darray[usize]&, work: mutable usize&) -> bool:
             return false if identity == 0 or capacity == 0 or slots.count != capacity
-            slot: mutable usize = (identity % capacity).usize()
+            identity_hash: u32 = proof_kernel_replay_name_owner_hash("", identity)
+            slot: mutable usize = (identity_hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, capacity, identity, slots, work|:
+            while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, slot, capacity, identity, slots, work|:
                 return false if not proof_kernel_replay_type_work_consume(work)
                 current: usize = slots[slot]
                 if current == 0:
@@ -157,17 +158,19 @@ extend ElisaProofKernelReplay:
                         return false if row.parameter_count != 1
                     canonical: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, canonical_index)
                     return false if canonical.kind != "type" or canonical.type_identity != row.type_identity or not proof_kernel_replay_type_text_equal(canonical.name, row.owner, work) or not proof_kernel_replay_type_text_equal(canonical.type_name, row.owner, work) or canonical.sort != "named"
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
             return true
 
         # Match a written qualified path against a canonical declaration path. The compiler
         # permits the full path or an ancestor prefix of the current module followed by that
         # path; among matches, nominal lookup selects the deepest owner and rejects tied identities.
-        def proof_kernel_replay_type_scope_query_matches(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, query_count: usize, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, type_identity: usize, candidate_count: usize, context_start: usize, context_count: usize, context_seen: bool, work: mutable usize&) -> bool:
+        def proof_kernel_replay_type_scope_query_matches(query_segments: darray[sview]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, start_index: usize, type_identity: usize, candidate_count: usize, context_start: usize, context_count: usize, context_seen: bool, work: mutable usize&) -> bool:
+            query_count: usize = query_segments.count
             return false if query_count == 0 or candidate_count == 0
             if candidate_count == query_count:
-                for segment in 0..<query_count |segment, nodes, root, environment, start_index, type_identity, query_count, work|:
+                for segment in 0..<query_count |segment, query_segments, environment, start_index, type_identity, query_count, work|:
                     actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, segment, candidate_count, work)
-                    expected: sview = proof_kernel_replay_scope_path_segment(nodes, root, segment, 0)
+                    expected: sview = query_segments[query_count - 1 - segment]
                     return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
                 return true
             return false if candidate_count < query_count or not context_seen
@@ -177,17 +180,19 @@ extend ElisaProofKernelReplay:
                 actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, segment, candidate_count, work)
                 expected: sview = proof_kernel_replay_type_scope_owner_path_segment(environment, context_start, segment, context_count, work)
                 return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
-            for segment in 0..<query_count |segment, nodes, root, environment, start_index, type_identity, ancestor_depth, candidate_count, work|:
+            for segment in 0..<query_count |segment, query_segments, environment, start_index, type_identity, ancestor_depth, candidate_count, work|:
                 actual: sview = proof_kernel_replay_type_scope_path_segment(environment, start_index, type_identity, ancestor_depth + segment, candidate_count, work)
-                expected: sview = proof_kernel_replay_scope_path_segment(nodes, root, segment, 0)
+                expected: sview = query_segments[query_count - 1 - segment]
                 return false if sview_len(actual) == 0 or sview_len(expected) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
             return true
 
         def proof_kernel_replay_find_type_binding_for_symbol(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, symbol_root: usize, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
             empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
             return (false, empty) if symbol_root >= nodes.count
-            path_count: usize = proof_kernel_replay_scope_path_count(nodes, symbol_root, 0)
-            return (false, empty) if path_count == 0 or path_count > 128
+            path: (known: bool, segments: darray[sview]) = proof_kernel_replay_scope_path_segments(nodes, symbol_root, work)
+            return (false, empty) if not path.known or path.segments.count == 0
+            path_segments: darray[sview] = path.segments
+            path_count: usize = path_segments.count
             context_identity: mutable usize = 0
             context_seen: mutable bool = false
             for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, context_identity, context_seen, work|:
@@ -204,7 +209,7 @@ extend ElisaProofKernelReplay:
                 return (false, empty) if not context_path.known
                 context_start <- context_path.start_index
                 context_count <- context_path.path_count
-            wanted_leaf: sview = proof_kernel_replay_scope_path_segment(nodes, symbol_root, path_count - 1, 0)
+            wanted_leaf: sview = path_segments[0]
             return (false, empty) if wanted_leaf == ""
             selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
             selected_depth: mutable usize = 0
@@ -212,13 +217,13 @@ extend ElisaProofKernelReplay:
             ambiguous: mutable bool = false
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             if path_count > 1:
-                for index in 0..<total_bindings |index, nodes, environment, symbol_root, path_count, context_identity, context_seen, context_count, selected, selected_depth, found, ambiguous, work|:
+                for index in 0..<total_bindings |index, path_segments, environment, path_count, context_identity, context_seen, context_count, selected, selected_depth, found, ambiguous, work|:
                     return (false, empty) if not proof_kernel_replay_type_work_consume(work)
                     start: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
                     continue if start.kind != "type-scope-segment" or start.parameter_index != 0
                     group: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_type_scope_group_binding(environment, index, start.type_identity, start.owner, start.parameter_count, work)
                     continue if not group.known
-                    continue if not proof_kernel_replay_type_scope_query_matches(nodes, symbol_root, path_count, environment, index, start.type_identity, start.parameter_count, context_start, context_count, context_seen, work)
+                    continue if not proof_kernel_replay_type_scope_query_matches(path_segments, environment, index, start.type_identity, start.parameter_count, context_start, context_count, context_seen, work)
                     if not found or start.parameter_count > selected_depth:
                         selected <- group.binding
                         selected_depth <- start.parameter_count

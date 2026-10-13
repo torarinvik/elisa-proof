@@ -1,0 +1,189 @@
+# Validated module-owner paths are indexed once per typing environment.
+extend ElisaProofKernelReplay:
+    private:
+        struct ProofKernelReplayOwnerPathIndex:
+            source_binding_count: usize
+            owner_count: usize
+            capacity: usize
+            owner_ids: darray[usize]
+            slots: darray[usize]
+            starts: darray[usize]
+            counts: darray[usize]
+            context_identity: usize
+            context_seen: bool
+
+        def proof_kernel_replay_empty_owner_path_index() -> ProofKernelReplayOwnerPathIndex:
+            return ProofKernelReplayOwnerPathIndex{source_binding_count: 0, owner_count: 0, capacity: 0, owner_ids: [], slots: [], starts: [], counts: [], context_identity: 0, context_seen: false}
+
+        def proof_kernel_replay_owner_identity_recorded(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, work: mutable usize&) -> bool:
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            start: mutable usize = 0
+            count: mutable usize = 0
+            found: mutable bool = false
+            return false if owner_identity == 0
+            for binding_index in 0..<total |binding_index, environment, owner_identity, start, count, found, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != 0
+                return false if found or binding.parameter_count == 0
+                start <- binding_index
+                count <- binding.parameter_count
+                found <- true
+            return false if not found or count > total - start
+            for segment in 0..<count |segment, environment, owner_identity, start, count, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start + segment)
+                return false if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != segment or binding.parameter_count != count or binding.name == ""
+            rows: mutable usize = 0
+            for binding_index in 0..<total |binding_index, environment, owner_identity, start, count, rows, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity
+                return false if binding_index < start or binding_index >= start + count
+                rows <- rows + 1
+            return rows == count
+
+        def proof_kernel_replay_owner_path_index_find(index: ProofKernelReplayOwnerPathIndex, owner_identity: usize, work: mutable usize&) -> usize:
+            return index.owner_count if owner_identity == 0 or index.capacity == 0 or index.slots.count != index.capacity or index.owner_ids.count != index.owner_count
+            hash: u32 = proof_kernel_replay_name_owner_hash("", owner_identity)
+            slot: mutable usize = (hash.i64() % index.capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < index.capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, index, owner_identity, slot, work|:
+                return index.owner_count if not proof_kernel_replay_type_work_consume(work)
+                ordinal: usize = index.slots[slot]
+                return index.owner_count if ordinal == index.owner_count or ordinal >= index.owner_count
+                return ordinal if index.owner_ids[ordinal] == owner_identity
+                slot <- (slot + 1) % index.capacity
+                probes <- probes + 1
+            return index.owner_count
+
+        def proof_kernel_replay_owner_path_index_build(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> (known: bool, index: ProofKernelReplayOwnerPathIndex):
+            empty: ProofKernelReplayOwnerPathIndex = proof_kernel_replay_empty_owner_path_index()
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return (false, empty) if total > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            owner_count: mutable usize = 0
+            context_identity: mutable usize = 0
+            context_seen: mutable bool = false
+            for binding_index in 0..<total |binding_index, environment, owner_count, context_identity, context_seen, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                owner_count <- owner_count + 1 if binding.kind == "module-owner-segment" and binding.parameter_index == 0
+                if binding.kind == "module-context":
+                    return (false, empty) if context_seen or binding.owner_type_identity == 0
+                    context_identity <- binding.owner_type_identity
+                    context_seen <- true
+            return (false, empty) if context_seen and owner_count == 0
+            capacity: usize = proof_kernel_replay_name_index_capacity(owner_count)
+            return (false, empty) if owner_count > 0 and capacity == 0
+            allocation_work: usize = capacity + owner_count * 3
+            return (false, empty) if not proof_kernel_replay_type_work_consume_amount(allocation_work, work)
+            index: mutable ProofKernelReplayOwnerPathIndex = ProofKernelReplayOwnerPathIndex{source_binding_count: total, owner_count: owner_count, capacity: capacity, owner_ids: [], slots: [], starts: [], counts: [], context_identity: context_identity, context_seen: context_seen}
+            index.owner_ids.resize(owner_count)
+            index.starts.resize(owner_count)
+            index.counts.resize(owner_count)
+            index.slots.resize(capacity)
+            for slot in 0..<capacity |slot, index, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                index.slots[slot] <- owner_count
+            owners_added: mutable usize = 0
+            for binding_index in 0..<total |binding_index, environment, index, owners_added, work|:
+                return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
+                continue if binding.kind != "module-owner-segment"
+                return (false, empty) if binding.owner_type_identity == 0 or binding.parameter_count == 0 or binding.parameter_index >= binding.parameter_count or binding.name == ""
+                if binding.parameter_index == 0:
+                    return (false, empty) if capacity == 0 or binding.parameter_count > total - binding_index
+                    for segment in 0..<binding.parameter_count |segment, environment, binding_index, binding, total, work|:
+                        return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                        row: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index + segment)
+                        return (false, empty) if row.kind != "module-owner-segment" or row.owner_type_identity != binding.owner_type_identity or row.parameter_index != segment or row.parameter_count != binding.parameter_count or row.name == ""
+                    hash: u32 = proof_kernel_replay_name_owner_hash("", binding.owner_type_identity)
+                    slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    placed: mutable bool = false
+                    while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, index, binding, binding_index, slot, owners_added, work, placed|:
+                        return (false, empty) if not proof_kernel_replay_type_work_consume(work)
+                        ordinal: usize = index.slots[slot]
+                        if ordinal == owner_count:
+                            return (false, empty) if owners_added >= owner_count
+                            index.owner_ids[owners_added] <- binding.owner_type_identity
+                            index.starts[owners_added] <- binding_index
+                            index.counts[owners_added] <- binding.parameter_count
+                            index.slots[slot] <- owners_added
+                            owners_added <- owners_added + 1
+                            placed <- true
+                            break
+                        return (false, empty) if ordinal >= owners_added
+                        return (false, empty) if index.owner_ids[ordinal] == binding.owner_type_identity
+                        slot <- (slot + 1) % capacity
+                        probes <- probes + 1
+                    return (false, empty) if not placed
+                else:
+                    return (false, empty) if binding.parameter_index > binding_index
+                    expected_start: usize = binding_index - binding.parameter_index
+                    ordinal: usize = proof_kernel_replay_owner_path_index_find(index, binding.owner_type_identity, work)
+                    return (false, empty) if ordinal == owner_count or index.starts[ordinal] != expected_start or index.counts[ordinal] != binding.parameter_count
+            return (false, empty) if owners_added != owner_count
+            if context_seen:
+                return (false, empty) if proof_kernel_replay_owner_path_index_find(index, context_identity, work) == owner_count
+            return (true, index)
+
+        def proof_kernel_replay_owner_path_index_segment(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayOwnerPathIndex, ordinal: usize, segment: usize, work: mutable usize&) -> sview:
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return "" if ordinal >= index.owner_count or index.starts.count != index.owner_count or index.counts.count != index.owner_count or index.source_binding_count != total
+            start: usize = index.starts[ordinal]
+            count: usize = index.counts[ordinal]
+            return "" if segment >= count or start > index.source_binding_count or count > index.source_binding_count - start
+            return "" if not proof_kernel_replay_type_work_consume(work)
+            binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start + segment)
+            return "" if binding.kind != "module-owner-segment" or binding.owner_type_identity != index.owner_ids[ordinal] or binding.parameter_index != segment or binding.parameter_count != count or binding.name == ""
+            return binding.name
+
+        def proof_kernel_replay_owner_path_index_path_valid(segments: darray[sview]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayOwnerPathIndex, ordinal: usize, work: mutable usize&) -> bool:
+            return false if ordinal >= index.owner_count or segments.count == 0 or index.counts[ordinal] != segments.count
+            for segment in 0..<segments.count |segment, segments, environment, index, ordinal, work|:
+                expected: sview = segments[segments.count - 1 - segment]
+                actual: sview = proof_kernel_replay_owner_path_index_segment(environment, index, ordinal, segment, work)
+                return false if sview_len(expected) == 0 or sview_len(actual) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+            return true
+
+        def proof_kernel_replay_owner_path_index_prefix_suffix_valid(segments: darray[sview]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayOwnerPathIndex, candidate: usize, context: usize, work: mutable usize&) -> bool:
+            return false if candidate >= index.owner_count or context >= index.owner_count
+            context_count: usize = index.counts[context]
+            candidate_count: usize = index.counts[candidate]
+            return false if context_count == 0 or context_count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return false if segments.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - context_count or candidate_count != context_count + segments.count
+            for segment in 0..<context_count |segment, environment, index, candidate, context, context_count, work|:
+                context_name: sview = proof_kernel_replay_owner_path_index_segment(environment, index, context, segment, work)
+                candidate_name: sview = proof_kernel_replay_owner_path_index_segment(environment, index, candidate, segment, work)
+                return false if sview_len(context_name) == 0 or sview_len(candidate_name) == 0 or not proof_kernel_replay_type_text_equal(context_name, candidate_name, work)
+            for segment in 0..<segments.count |segment, segments, environment, index, candidate, context_count, work|:
+                expected: sview = segments[segments.count - 1 - segment]
+                actual: sview = proof_kernel_replay_owner_path_index_segment(environment, index, candidate, context_count + segment, work)
+                return false if sview_len(expected) == 0 or sview_len(actual) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
+            return true
+
+        def proof_kernel_replay_scope_owner_identity(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayOwnerPathIndex, path_root: usize, work: mutable usize&) -> usize:
+            path: (known: bool, segments: darray[sview]) = proof_kernel_replay_scope_path_segments(nodes, path_root, work)
+            return 0 if not path.known or path.segments.count == 0
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return 0 if index.source_binding_count != total or index.owner_ids.count != index.owner_count or index.starts.count != index.owner_count or index.counts.count != index.owner_count
+            return 0 if (index.capacity == 0 and index.owner_count > 0) or index.slots.count != index.capacity
+            context_ordinal: usize = index.owner_count
+            if index.context_seen:
+                context_ordinal <- proof_kernel_replay_owner_path_index_find(index, index.context_identity, work)
+                return 0 if context_ordinal == index.owner_count
+            found_identity: mutable usize = 0
+            found: mutable bool = false
+            for candidate in 0..<index.owner_count |candidate, path, environment, index, context_ordinal, found_identity, found, work|:
+                return 0 if not proof_kernel_replay_type_work_consume(work)
+                direct_match: bool = proof_kernel_replay_owner_path_index_path_valid(path.segments, environment, index, candidate, work)
+                relative_match: mutable bool = false
+                if not direct_match and index.context_seen:
+                    relative_match <- proof_kernel_replay_owner_path_index_prefix_suffix_valid(path.segments, environment, index, candidate, context_ordinal, work)
+                continue if not direct_match and not relative_match
+                return 0 if found and found_identity != index.owner_ids[candidate]
+                found_identity <- index.owner_ids[candidate]
+                found <- true
+            return found_identity if found
+            return 0

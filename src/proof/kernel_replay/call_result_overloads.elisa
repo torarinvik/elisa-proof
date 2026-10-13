@@ -1,0 +1,223 @@
+# Mirror the backend's ordered overload selection before using a call's return sort.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_backend_overload_sort_match(actual: ProofKernelInferredSort, expected: ProofKernelInferredSort, work: mutable usize&) -> (known: bool, matches: bool):
+            return (false, false) if not actual.known or not expected.known
+            # Container sort equality compares the element descriptor but deliberately
+            # omits the container's nominal identity. Backend overload matching compares
+            # the full ValueType, so do not let that structural helper erase distinct
+            # container identities here.
+            return (false, false) if actual.family == "container" and expected.family == "container" and actual.type_identity != expected.type_identity
+            return (true, true) if proof_kernel_replay_sort_equal(actual, expected, work)
+            return (false, false) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return (false, false) if actual.type_identity != 0 or expected.type_identity != 0
+            # A container can also carry nominal identity on its element type.
+            # Equal identities were handled by exact sort equality above; any
+            # remaining nominal element comparison is deliberately unknown.
+            return (false, false) if actual.element_type_identity != 0 or expected.element_type_identity != 0
+            actual_numeric: bool = actual.family == "integer" or actual.family == "character"
+            expected_numeric: bool = expected.family == "integer" or expected.family == "character"
+            if actual_numeric and expected_numeric:
+                actual_name: sview = actual.name
+                expected_name: sview = expected.name
+                actual_target_width: bool = actual_name == "int" or actual_name == "isize" or actual_name == "usize" or actual_name == "uintptr"
+                expected_target_width: bool = expected_name == "int" or expected_name == "isize" or expected_name == "usize" or expected_name == "uintptr"
+                return (false, false) if actual_target_width or expected_target_width
+                return (true, true) if (actual.family == "character" and expected.family == "integer" and expected_name == "i64") or (expected.family == "character" and actual.family == "integer" and actual_name == "i64")
+                fixed_integer_name: bool = actual_name == "i8" or actual_name == "i16" or actual_name == "i32" or actual_name == "i64" or actual_name == "u8" or actual_name == "u16" or actual_name == "u32" or actual_name == "u64" or actual.family == "character"
+                expected_fixed_integer_name: bool = expected_name == "i8" or expected_name == "i16" or expected_name == "i32" or expected_name == "i64" or expected_name == "u8" or expected_name == "u16" or expected_name == "u32" or expected_name == "u64" or expected.family == "character"
+                return (false, false) if not fixed_integer_name or not expected_fixed_integer_name
+            return (true, false)
+
+        def proof_kernel_replay_overload_argument_match(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, argument_root: usize, parameter: ElisaProofKernelCore::ProofKernelTypingBinding, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, matches: bool):
+            return (false, false) if remaining <= 1 or argument_root >= nodes.count
+            argument: ElisaProofKernelCore::ProofKernelNode = nodes[argument_root]
+            borrow_value: (known: bool, explicit_borrow: bool, value_root: usize) = proof_kernel_replay_explicit_borrow_value_root_remaining(nodes, argument_root, remaining - 1, work)
+            return (false, false) if not borrow_value.known
+            reference_argument: bool = borrow_value.explicit_borrow
+            return (true, false) if reference_argument and not parameter.parameter_by_reference
+            reference_shape: (known: bool, is_reference: bool) = proof_kernel_replay_argument_is_reference_remaining(nodes, children, environment, typing_index, argument_root, depth + 1, remaining - 1, work)
+            return (false, false) if not reference_shape.known
+            return (true, false) if reference_shape.is_reference and not parameter.parameter_by_reference
+            value_root: usize = borrow_value.value_root if reference_argument else argument_root
+            return (false, false) if value_root >= nodes.count
+            value_argument: ElisaProofKernelCore::ProofKernelNode = nodes[value_root]
+            if reference_argument:
+                borrowed_place: (known: bool, place: bool) = proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                return (false, false) if not borrowed_place.known or not borrowed_place.place
+            elif parameter.parameter_by_reference:
+                cstr_index_borrow: (known: bool, cstr_index: bool) = proof_kernel_replay_implicit_cstr_index_borrow_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                return (false, false) if not cstr_index_borrow.known
+                if cstr_index_borrow.cstr_index:
+                    borrowed_place: (known: bool, place: bool) = proof_kernel_replay_explicit_borrow_target_place_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+                    return (false, false) if not borrowed_place.known or not borrowed_place.place
+            untyped_literal: mutable (known: bool, integer_literal: bool, floating_literal: bool, unary_numeric: bool, integral_only: bool) = (true, false, false, false, false)
+            if value_argument.kind == "int" and not proof_kernel_replay_int_tagged(value_argument):
+                untyped_literal <- (true, true, false, false, false)
+            elif value_argument.kind == "opaque-float-literal":
+                untyped_literal <- (true, false, true, false, false)
+            elif value_argument.kind == "paren" or value_argument.kind == "move" or value_argument.kind == "unary":
+                untyped_literal <- proof_kernel_replay_untyped_numeric_literal_remaining(nodes, value_root, remaining - 1, work)
+            return (false, false) if not untyped_literal.known
+            if parameter.parameter_by_reference and not reference_shape.is_reference and (untyped_literal.integer_literal or untyped_literal.floating_literal):
+                return (true, false)
+            # The backend's typed matcher recognizes only direct literal AST nodes. A
+            # parenthesized, moved, or unary untyped literal is left for its unique-shape
+            # fallback; never rank it using the kernel's default numeric sort.
+            wrapped_unary_literal: bool = value_argument.kind == "unary" and (value_argument.operator == "+" or value_argument.operator == "-" or value_argument.operator == "~")
+            wrapped_literal: bool = (value_argument.kind == "paren" or value_argument.kind == "move" or wrapped_unary_literal) and (untyped_literal.integer_literal or untyped_literal.floating_literal)
+            return (true, false) if wrapped_literal
+            expected: ProofKernelInferredSort = proof_kernel_replay_binding_sort(parameter)
+            return (false, false) if not expected.known
+            # The pinned backend treats bare numeric literals as Unmodeled before matching,
+            # so their encoded default sort must not short-circuit contextual literal typing.
+            if not parameter.parameter_by_reference and untyped_literal.integer_literal:
+                return (expected.family == "integer" or expected.family == "character", expected.family == "integer" or expected.family == "character")
+            if not parameter.parameter_by_reference and untyped_literal.floating_literal:
+                return (expected.family == "floating", expected.family == "floating")
+            actual: ProofKernelInferredSort = proof_kernel_replay_argument_value_sort_remaining(nodes, children, environment, typing_index, value_root, depth + 1, remaining - 1, work)
+            sort_match: (known: bool, matches: bool) = proof_kernel_replay_backend_overload_sort_match(actual, expected, work)
+            return sort_match if not sort_match.known or sort_match.matches
+            return (false, false) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return (actual.known and expected.known, false)
+
+        def proof_kernel_replay_function_positional_arguments_match(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, function: ElisaProofKernelCore::ProofKernelTypingBinding, call: ElisaProofKernelCore::ProofKernelNode, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, matches: bool):
+            requires depth <= PROOF_KERNEL_ARGUMENT_DEPTH_PRECONDITION
+            requires remaining > 0
+            return (true, false) if function.parameter_count != call.children_count
+            return (false, false) if function.parameter_count > PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS
+            return (false, false) if not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count)
+            for offset in 0..<call.children_count |offset, nodes, children, environment, typing_index, function, call, depth, remaining, work|:
+                return (false, false) if not proof_kernel_replay_type_work_consume(work)
+                wrapper: usize = proof_kernel_replay_child_root(children, call, offset)
+                return (false, false) if wrapper >= nodes.count or nodes[wrapper].kind != "call_arg"
+                parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, function, offset, work)
+                return (false, false) if not parameter.known or remaining <= 1
+                match: (known: bool, matches: bool) = proof_kernel_replay_overload_argument_match(nodes, children, environment, typing_index, nodes[wrapper].left, parameter.parameter, depth + 1, remaining - 1, work)
+                return (false, false) if not match.known
+                return (true, false) if not match.matches
+            return (true, true)
+
+        # Map one source argument to a formal slot. This follows the pinned backend's
+        # positional/named assignment rules and rejects duplicate or unknown labels.
+        def proof_kernel_replay_overload_argument_slot(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, function: ElisaProofKernelCore::ProofKernelTypingBinding, call: ElisaProofKernelCore::ProofKernelNode, offset: usize, assigned: darray[bool]&, next_position: mutable usize&, work: mutable usize&) -> (known: bool, matches: bool, slot: usize):
+            return (false, false, 0) if offset >= call.children_count or function.parameter_count > PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS
+            return (false, false, 0) if not proof_kernel_replay_type_work_consume(work)
+            wrapper: usize = proof_kernel_replay_child_root(children, call, offset)
+            return (false, false, 0) if wrapper >= nodes.count
+            argument: ElisaProofKernelCore::ProofKernelNode = nodes[wrapper]
+            return (false, false, 0) if argument.kind != "call_arg"
+            selected: mutable usize = function.parameter_count
+            if argument.name != "":
+                named_parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_name(environment, typing_index, function, argument.name, work)
+                if not named_parameter.known:
+                    label_found: mutable bool = false
+                    for parameter_index in 0..<function.parameter_count |parameter_index, environment, typing_index, function, argument, label_found, work|:
+                        parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, function, parameter_index, work)
+                        return (false, false, 0) if not parameter.known
+                        if proof_kernel_replay_type_text_equal(parameter.parameter.name, argument.name, work):
+                            return (false, false, 0) if label_found
+                            label_found <- true
+                    return (false, false, 0) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                    return (true, false, 0) if not label_found
+                    return (false, false, 0)
+                selected <- named_parameter.parameter.parameter_index
+            else:
+                while next_position < function.parameter_count and assigned[next_position] |next_position, assigned|:
+                    next_position <- next_position + 1
+                selected <- next_position
+                next_position <- next_position + 1 if next_position < function.parameter_count
+            return (true, false, 0) if selected >= function.parameter_count or assigned[selected]
+            return (false, false, 0) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return (true, true, selected)
+
+        def proof_kernel_replay_function_call_shape_matches(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, function: ElisaProofKernelCore::ProofKernelTypingBinding, call: ElisaProofKernelCore::ProofKernelNode, work: mutable usize&) -> (known: bool, matches: bool):
+            return (false, false) if function.parameter_count > PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS
+            return (false, false) if call.children_count > function.parameter_count or not proof_kernel_replay_child_range_valid(call.children_start, call.children_count, children.count)
+            return (false, false) if not proof_kernel_replay_type_work_consume_amount(function.parameter_count, work)
+            assigned: mutable darray[bool] = [false for _slot in 0..<function.parameter_count]
+            next_position: mutable usize = 0
+            for offset in 0..<call.children_count |offset, nodes, children, call, work|:
+                return (false, false) if not proof_kernel_replay_type_work_consume(work)
+                wrapper: usize = proof_kernel_replay_child_root(children, call, offset)
+                return (false, false) if wrapper >= nodes.count or nodes[wrapper].kind != "call_arg"
+            for offset in 0..<call.children_count |offset, assigned, next_position, nodes, children, environment, typing_index, function, call, work|:
+                slot: (known: bool, matches: bool, slot: usize) = proof_kernel_replay_overload_argument_slot(nodes, children, environment, typing_index, function, call, offset, assigned, next_position, work)
+                return (false, false) if not slot.known
+                return (true, false) if not slot.matches
+                assigned[slot.slot] <- true
+            for parameter_index in 0..<function.parameter_count |parameter_index, assigned, environment, typing_index, function, work|:
+                return (false, false) if not proof_kernel_replay_type_work_consume(work)
+                parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, function, parameter_index, work)
+                return (false, false) if not parameter.known
+                return (true, false) if not assigned[parameter_index] and not parameter.parameter.parameter_has_default
+            return (true, true)
+
+        def proof_kernel_replay_function_call_arguments_match(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, function: ElisaProofKernelCore::ProofKernelTypingBinding, call: ElisaProofKernelCore::ProofKernelNode, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, matches: bool):
+            return (false, false) if function.parameter_count > PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS or call.children_count > function.parameter_count
+            shape: (known: bool, matches: bool) = proof_kernel_replay_function_call_shape_matches(nodes, children, environment, typing_index, function, call, work)
+            return shape if not shape.known or not shape.matches
+            return (false, false) if not proof_kernel_replay_type_work_consume_amount(function.parameter_count, work)
+            assigned: mutable darray[bool] = [false for _slot in 0..<function.parameter_count]
+            next_position: mutable usize = 0
+            for offset in 0..<call.children_count |offset, assigned, next_position, nodes, children, environment, typing_index, function, call, depth, remaining, work|:
+                slot: (known: bool, matches: bool, slot: usize) = proof_kernel_replay_overload_argument_slot(nodes, children, environment, typing_index, function, call, offset, assigned, next_position, work)
+                return (false, false) if not slot.known or remaining <= 1
+                return (true, false) if not slot.matches
+                assigned[slot.slot] <- true
+                parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, function, slot.slot, work)
+                return (false, false) if not parameter.known
+                wrapper: usize = proof_kernel_replay_child_root(children, call, offset)
+                match: (known: bool, matches: bool) = proof_kernel_replay_overload_argument_match(nodes, children, environment, typing_index, nodes[wrapper].left, parameter.parameter, depth + 1, remaining - 1, work)
+                return (false, false) if not match.known
+                return (true, false) if not match.matches
+            return (true, true)
+
+        def proof_kernel_replay_call_result_sort_in_group(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], group_index: ProofKernelReplayFunctionGroupIndex, call: ElisaProofKernelCore::ProofKernelNode, callee_name: sview, callee_owner_identity: usize, depth: usize, remaining: usize, work: mutable usize&) -> (known: bool, found: bool, applicable: bool, ambiguous: bool, selected: ProofKernelInferredSort):
+            selected: mutable ProofKernelInferredSort = proof_kernel_replay_unknown_sort()
+            return (false, false, false, false, selected) if remaining <= 1
+            lookup: (known: bool, slot: usize) = proof_kernel_replay_function_group_slot(group_index, bindings, callee_name, callee_owner_identity, work)
+            return (false, false, false, false, selected) if not lookup.known
+            return (true, false, false, false, selected) if lookup.slot == group_index.source_binding_count
+            return (false, false, false, false, selected) if lookup.slot >= group_index.capacity
+            row: mutable usize = group_index.heads[lookup.slot]
+            typed_row: mutable usize = group_index.source_binding_count
+            typed_count: mutable usize = 0
+            shape_row: mutable usize = group_index.source_binding_count
+            shape_count: mutable usize = 0
+            visited: mutable usize = 0
+            while row < group_index.source_binding_count and visited < group_index.counts[lookup.slot] |row, visited, bindings, group_index, lookup, nodes, children, environment, typing_index, call, callee_name, callee_owner_identity, depth, remaining, typed_row, typed_count, shape_row, shape_count, work|:
+                return (false, false, false, false, selected) if not proof_kernel_replay_type_work_consume(work)
+                function: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[row]
+                return (false, false, false, false, selected) if function.kind != "function"
+                return (false, false, false, false, selected) if function.owner_type_identity != callee_owner_identity
+                return (false, false, false, false, selected) if not proof_kernel_replay_type_text_equal(function.name, callee_name, work)
+                return (false, false, false, false, selected) if function.parameter_count > PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS
+                if depth < PROOF_KERNEL_CALL_DEPTH_GUARD and remaining > 1:
+                    typed_match: (known: bool, matches: bool) = proof_kernel_replay_function_call_arguments_match(nodes, children, environment, typing_index, function, call, depth + 1, remaining - 1, work)
+                    return (false, false, false, false, selected) if not typed_match.known
+                    if typed_match.matches:
+                        typed_count <- typed_count + 1
+                        typed_row <- row
+                        # A typed match first passes this same exact call-shape predicate, so
+                        # reuse that result instead of rescanning labels/defaults for this row.
+                        shape_count <- shape_count + 1
+                        shape_row <- row
+                    else:
+                        # Type-mismatching candidates still participate in the unique-shape
+                        # fallback used for contextual literals.
+                        shape_match: (known: bool, matches: bool) = proof_kernel_replay_function_call_shape_matches(nodes, children, environment, typing_index, function, call, work)
+                        return (false, false, false, false, selected) if not shape_match.known
+                        if shape_match.matches:
+                            shape_count <- shape_count + 1
+                            shape_row <- row
+                row <- group_index.next_rows[row]
+                visited <- visited + 1
+            return (false, false, false, false, selected) if visited != group_index.counts[lookup.slot] or row != group_index.source_binding_count
+            chosen_row: usize = typed_row if typed_count == 1 else shape_row if shape_count == 1 else group_index.source_binding_count
+            return (true, false, false, false, selected) if chosen_row == group_index.source_binding_count
+            chosen: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[chosen_row]
+            selected <- proof_kernel_replay_binding_sort(chosen)
+            applicable: bool = depth < PROOF_KERNEL_CALL_DEPTH_GUARD and remaining > 1 and proof_kernel_replay_function_arguments_well_typed_remaining(nodes, children, environment, typing_index, chosen, call, depth + 1, remaining - 1, work)
+            return (false, false, false, false, selected) if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return (true, true, applicable, false, selected)

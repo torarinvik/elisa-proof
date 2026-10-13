@@ -1,0 +1,104 @@
+# Per-proposition hash index for bare-call owner markers and lexical shadows.
+extend ElisaProofKernelReplay:
+    private:
+        def proof_kernel_replay_build_call_owner_lookup_index(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, capacity: mutable usize&, hashes: mutable darray[u32]&, slots: mutable darray[usize]&, owner_ids: mutable darray[usize]&, marker_counts: mutable darray[usize]&, shadowed: mutable darray[bool]&) -> bool:
+            local_count: usize = environment.bindings.count
+            relevant_count: mutable usize = 0
+            for row in environment.bindings |row, relevant_count, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                relevant_count <- relevant_count + 1 if row.kind == "bare-call-owner" or row.kind == "local-call-shadow" or row.kind == "value" or row.kind == "reference-value" or row.kind == "raw-reference-value" or row.kind == "proposition" or row.kind == "function-parameter"
+            capacity <- proof_kernel_replay_name_index_capacity(relevant_count)
+            return false if capacity == 0 and relevant_count > 0
+            hashes.clear()
+            slots.clear()
+            owner_ids.clear()
+            marker_counts.clear()
+            shadowed.clear()
+            return true if capacity == 0
+            return false if not proof_kernel_replay_type_work_consume_amount(capacity * 5 + relevant_count, work)
+            hashes.resize(capacity)
+            slots.resize(capacity)
+            owner_ids.resize(capacity)
+            marker_counts.resize(capacity)
+            shadowed.resize(capacity)
+            for slot in 0..<capacity |slot, slots, marker_counts, shadowed, local_count, work|:
+                slots[slot] <- local_count
+                marker_counts[slot] <- 0
+                shadowed[slot] <- false
+                return false if not proof_kernel_replay_type_work_consume(work)
+            for row in 0..<local_count |row, environment, hashes, slots, owner_ids, marker_counts, shadowed, capacity, local_count, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = environment.bindings[row]
+                is_marker: bool = binding.kind == "bare-call-owner"
+                is_shadow: bool = binding.kind == "local-call-shadow" or binding.kind == "value" or binding.kind == "reference-value" or binding.kind == "raw-reference-value" or binding.kind == "proposition" or binding.kind == "function-parameter"
+                continue if not is_marker and not is_shadow
+                return false if binding.name == "" or not proof_kernel_replay_type_work_consume_amount(sview_len(binding.name), work)
+                hash: u32 = proof_kernel_replay_name_hash(binding.name)
+                slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, binding, row, hash, slot, capacity, hashes, slots, owner_ids, marker_counts, shadowed, environment, local_count, work, placed|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    representative: usize = slots[slot]
+                    if representative == local_count:
+                        slots[slot] <- row
+                        hashes[slot] <- hash
+                        marker_counts[slot] <- 0
+                        shadowed[slot] <- false
+                        representative <- row
+                    else:
+                        return false if representative >= local_count
+                        if hashes[slot] == hash:
+                            prior: ElisaProofKernelCore::ProofKernelTypingBinding = environment.bindings[representative]
+                            comparison_cost: usize = sview_len(prior.name) if sview_len(prior.name) > sview_len(binding.name) else sview_len(binding.name)
+                            return false if not proof_kernel_replay_type_work_consume_amount(comparison_cost, work)
+                            if prior.name == binding.name:
+                                if is_marker:
+                                    marker_counts[slot] <- marker_counts[slot] + 1
+                                    owner_ids[slot] <- binding.owner_type_identity
+                                shadowed[slot] <- true if is_shadow
+                                placed <- true
+                                break
+                    if representative == row:
+                        if is_marker:
+                            marker_counts[slot] <- 1
+                            owner_ids[slot] <- binding.owner_type_identity
+                        shadowed[slot] <- true if is_shadow
+                        placed <- true
+                        break
+                    slot <- (slot + 1) % capacity
+                    probes <- probes + 1
+                return false if not placed
+            return true
+
+        def proof_kernel_replay_call_owner_lookup(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, call_binding_count: usize, scoped_local_binding_count: usize, overlay_start: usize, overlay_count: usize, name: sview, hashes: darray[u32]&, slots: darray[usize]&, owner_ids: darray[usize]&, marker_counts: darray[usize]&, shadowed: darray[bool]&, capacity: usize, work: mutable usize&) -> (known: bool, present: bool, identity: usize):
+            return (false, false, 0) if call_binding_count > environment.bindings.count
+            return (false, false, 0) if scoped_local_binding_count != environment.bindings.count or overlay_start > scoped_local_binding_count or overlay_count > scoped_local_binding_count - overlay_start
+            return (false, false, 0) if capacity != hashes.count or capacity != slots.count or capacity != owner_ids.count or capacity != marker_counts.count or capacity != shadowed.count
+            for offset in 0..<overlay_count |offset, environment, overlay_start, overlay_count, name, work|:
+                return (false, false, 0) if not proof_kernel_replay_type_work_consume(work)
+                local_index: usize = overlay_start + overlay_count - offset - 1
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = environment.bindings[local_index]
+                return (false, false, 0) if binding.kind != "value" and binding.kind != "reference-value" and binding.kind != "raw-reference-value" and binding.kind != "proposition"
+                if proof_kernel_replay_type_text_equal(binding.name, name, work):
+                    return (true, false, 0)
+            return (true, false, 0) if capacity == 0
+            return (false, false, 0) if not proof_kernel_replay_type_work_consume_amount(sview_len(name), work)
+            hash: u32 = proof_kernel_replay_name_hash(name)
+            slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER |probes, name, hash, slot, capacity, hashes, slots, owner_ids, marker_counts, shadowed, call_binding_count, environment, work|:
+                return (false, false, 0) if not proof_kernel_replay_type_work_consume(work)
+                representative: usize = slots[slot]
+                return (true, false, 0) if representative == call_binding_count
+                return (false, false, 0) if representative >= call_binding_count
+                if hashes[slot] == hash:
+                    prior: ElisaProofKernelCore::ProofKernelTypingBinding = environment.bindings[representative]
+                    return (false, false, 0) if not proof_kernel_replay_type_text_equal(prior.name, name, work)
+                    if prior.name == name:
+                        return (true, false, 0) if shadowed[slot]
+                        return (false, false, 0) if marker_counts[slot] > 1
+                        return (true, marker_counts[slot] == 1, owner_ids[slot])
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0)

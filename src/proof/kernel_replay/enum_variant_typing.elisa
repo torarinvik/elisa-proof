@@ -18,24 +18,24 @@ extend ElisaProofKernelReplay:
             return proof_kernel_replay_known_sort(selected.sort, selected.type_name) if found
             return proof_kernel_replay_unknown_sort()
 
-        # The compiler gives an exact visible __cast__(Source) -> Target hook precedence over a
-        # builtin scalar conversion. A matching source-owned hook therefore prevents this proof
-        # rule from interpreting the syntax as an underlying-value cast. Unknown hook parameter
-        # metadata also refuses admission rather than assuming no hook exists.
-        def proof_kernel_replay_const_enum_cast_hook_absent(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, source: ProofKernelInferredSort, target: ProofKernelInferredSort, work: mutable usize&) -> bool:
+        # The compiler cast-hook table includes nested-module functions and checks exact
+        # source/return types without owner filtering. Any exact hook may therefore win.
+        # Incomplete __cast__ metadata also refuses admission rather than assuming a builtin.
+        def proof_kernel_replay_builtin_cast_dispatch_absent(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, source: ProofKernelInferredSort, target: ProofKernelInferredSort, work: mutable usize&) -> bool:
+            return false if not source.known or not target.known
             for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, source, target, work|:
                 return false if not proof_kernel_replay_type_work_consume(work)
                 hook: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if hook.kind != "function" or hook.name != "__cast__" or hook.parameter_count != 1 or not proof_kernel_replay_type_text_equal(hook.sort, target.family, work) or not proof_kernel_replay_type_text_equal(hook.type_name, target.name, work) or hook.type_identity != target.type_identity
-                parameters: mutable usize = 0
-                matched_source: mutable bool = false
-                for parameter_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |parameter_index, environment, hook, source, parameters, matched_source, work|:
-                    return false if not proof_kernel_replay_type_work_consume(work)
-                    parameter: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, parameter_index)
-                    continue if parameter.kind != "function-parameter" or parameter.signature_identity != hook.signature_identity or parameter.parameter_index != 0
-                    parameters <- parameters + 1
-                    matched_source <- true if proof_kernel_replay_type_text_equal(parameter.sort, source.family, work) and proof_kernel_replay_type_text_equal(parameter.type_name, source.name, work) and parameter.type_identity == source.type_identity
-                return false if parameters != 1
+                if hook.kind == "function-incomplete":
+                    return false if not proof_kernel_replay_type_work_consume_amount(sview_len(hook.name), work)
+                    return false if hook.name == "__cast__"
+                    continue
+                continue if hook.kind != "function"
+                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(hook.name), work)
+                continue if hook.name != "__cast__" or hook.parameter_count != 1 or not proof_kernel_replay_type_text_equal(hook.sort, target.family, work) or not proof_kernel_replay_type_text_equal(hook.type_name, target.name, work) or hook.type_identity != target.type_identity
+                parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, hook, 0, work)
+                return false if not parameter.known
+                matched_source: bool = proof_kernel_replay_type_text_equal(parameter.parameter.sort, source.family, work) and proof_kernel_replay_type_text_equal(parameter.parameter.type_name, source.name, work) and parameter.parameter.type_identity == source.type_identity
                 return false if matched_source
             return true
 
@@ -166,7 +166,7 @@ extend ElisaProofKernelReplay:
         # Preserve an enum type's full qualified path in the term, resolve it in the current
         # module context, and require the terminal member and owner identities to agree. A
         # recognized but missing member remains an unknown term.
-        def proof_kernel_replay_qualified_enum_member_sort(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, root: usize, work: mutable usize&) -> (is_enum_path: bool, sort: ProofKernelInferredSort):
+        def proof_kernel_replay_qualified_enum_member_sort(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, root: usize, work: mutable usize&) -> (is_enum_path: bool, sort: ProofKernelInferredSort):
             unknown: ProofKernelInferredSort = proof_kernel_replay_unknown_sort()
             return (false, unknown) if root >= nodes.count
             member: ElisaProofKernelCore::ProofKernelNode = nodes[root]
@@ -174,6 +174,12 @@ extend ElisaProofKernelReplay:
             return (false, unknown) if member.name == "" or member.left >= nodes.count
             owner_path: mutable darray[sview] = []
             if proof_kernel_replay_enum_type_path(nodes, member.left, &owner_path, 0, work):
+                if member.kind == "field" and owner_path.count == 1:
+                    shadowing_value: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_value_binding(environment, typing_index, owner_path[0], work)
+                    # `E.V` is a field expression when a visible local E shadows enum E.
+                    # Check before both enum-resolution paths so fallback cannot bypass it.
+                    # An ambiguous lookup can also carry a candidate with known=false.
+                    return (false, unknown) if shadowing_value.known or shadowing_value.binding.name != ""
                 resolved_owner: ProofKernelInferredSort = proof_kernel_replay_enum_type_sort_for_path(environment, owner_path, work)
                 if resolved_owner.known:
                     return (true, proof_kernel_replay_enum_member_sort_for_type(environment, member.name, resolved_owner, work))

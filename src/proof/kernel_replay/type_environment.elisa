@@ -1,19 +1,33 @@
-# Validation and indexed access for the segmented typing environment. Global declaration
-# signatures are shared across obligations; local context bindings are scoped per expression.
+# Validated segmented environments share declarations; local bindings are scoped per expression.
 extend ElisaProofKernelReplay:
     private:
+        struct ProofKernelReplayFunctionGroupIndex:
+            source_binding_count: usize
+            function_count: usize
+            capacity: usize
+            hashes: darray[u32]
+            slots: darray[usize]
+            heads: darray[usize]
+            tails: darray[usize]
+            counts: darray[usize]
+            next_rows: darray[usize]
+
+        def proof_kernel_replay_empty_function_group_index() -> ProofKernelReplayFunctionGroupIndex:
+            return ProofKernelReplayFunctionGroupIndex{source_binding_count: 0, function_count: 0, capacity: 0, hashes: [], slots: [], heads: [], tails: [], counts: [], next_rows: []}
+
         # String equality can inspect every byte. Charge the longer side before comparing so
         # untrusted environment names cannot bypass the replay work limit.
         def proof_kernel_replay_type_text_equal(left: sview, right: sview, work: mutable usize&) -> bool:
             left_length: usize = sview_len(left)
             right_length: usize = sview_len(right)
             comparison_length: usize = left_length if left_length > right_length else right_length
-            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or comparison_length > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work
+            if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or comparison_length > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET - work:
+                work <- ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET + 1
+                return false
             work <- work + comparison_length
             return left == right
 
-        # Opaque validated cache: callers may hold a workspace but cannot forge or mutate this
-        # source-wide typing authority through its public API.
+        # Private cache of the immutable, validated declaration environment.
         struct ProofKernelReplayTypingCache:
             ready: mutable bool
             bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]
@@ -25,6 +39,7 @@ extend ElisaProofKernelReplay:
             combined_function_parameter_indices: mutable darray[usize]
             combined_function_parameter_bucket_heads: mutable darray[usize]
             combined_function_parameter_next_indices: mutable darray[usize]
+            function_group_index: mutable ProofKernelReplayFunctionGroupIndex
             reuse_global_function_parameter_index: mutable bool
 
     public:
@@ -34,30 +49,55 @@ extend ElisaProofKernelReplay:
             function_parameter_indices: mutable darray[usize]
             function_parameter_bucket_heads: mutable darray[usize]
             function_parameter_next_indices: mutable darray[usize]
+            call_owner_name_capacity: mutable usize
+            call_owner_name_hashes: mutable darray[u32]
+            call_owner_name_slots: mutable darray[usize]
+            call_owner_name_ids: mutable darray[usize]
+            call_owner_marker_counts: mutable darray[usize]
+            call_owner_shadowed: mutable darray[bool]
+            global_function_group_index: mutable ProofKernelReplayFunctionGroupIndex
+            local_function_group_index: mutable ProofKernelReplayFunctionGroupIndex
+            owner_path_index: mutable ProofKernelReplayOwnerPathIndex
             public:
                 cache: ProofKernelReplayTypingCache
 
         def proof_kernel_replay_typing_workspace_new() -> ProofKernelReplayTypingWorkspace:
-            return ProofKernelReplayTypingWorkspace{value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], cache: ProofKernelReplayTypingCache{ready: false, bindings: [], value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], combined_value_binding_indices: [], combined_function_parameter_indices: [], combined_function_parameter_bucket_heads: [], combined_function_parameter_next_indices: [], reuse_global_function_parameter_index: false}}
+            empty_group_index: ProofKernelReplayFunctionGroupIndex = proof_kernel_replay_empty_function_group_index()
+            empty_owner_path_index: ProofKernelReplayOwnerPathIndex = proof_kernel_replay_empty_owner_path_index()
+            return ProofKernelReplayTypingWorkspace{value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], call_owner_name_capacity: 0, call_owner_name_hashes: [], call_owner_name_slots: [], call_owner_name_ids: [], call_owner_marker_counts: [], call_owner_shadowed: [], global_function_group_index: empty_group_index, local_function_group_index: empty_group_index, owner_path_index: empty_owner_path_index, cache: ProofKernelReplayTypingCache{ready: false, bindings: [], value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], combined_value_binding_indices: [], combined_function_parameter_indices: [], combined_function_parameter_bucket_heads: [], combined_function_parameter_next_indices: [], function_group_index: empty_group_index, reuse_global_function_parameter_index: false}}
 
     private:
         const PROOF_KERNEL_MAX_TYPED_FUNCTION_PARAMETERS: usize = 1024
 
-        # Compact positions of bindings used by hot typing lookups. Unrelated type, field, and
-        # declaration rows need not be revisited; lookup routines still compare exact evidence.
+        # Compact positions of bindings used by hot typing lookups.
         struct ProofKernelReplayTypingIndex:
             value_binding_count: usize
+            value_overlay_start: usize
+            value_overlay_count: usize
             function_parameter_count: usize
             source_binding_count: usize
             value_binding_indices: darray[usize]
             function_parameter_indices: darray[usize]
             function_parameter_bucket_heads: darray[usize]
             function_parameter_next_indices: darray[usize]
+            call_binding_count: usize
+            scoped_local_binding_count: usize
+            call_owner_name_capacity: usize
+            call_owner_name_hashes: darray[u32]
+            call_owner_name_slots: darray[usize]
+            call_owner_name_ids: darray[usize]
+            call_owner_marker_counts: darray[usize]
+            call_owner_shadowed: darray[bool]
+            global_function_group_index: ProofKernelReplayFunctionGroupIndex
+            local_function_group_index: ProofKernelReplayFunctionGroupIndex
+            owner_path_index: ProofKernelReplayOwnerPathIndex
 
         def proof_kernel_replay_empty_typing_index() -> ProofKernelReplayTypingIndex:
-            return ProofKernelReplayTypingIndex{value_binding_count: 0, function_parameter_count: 0, source_binding_count: 0, value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: []}
+            empty_group_index: ProofKernelReplayFunctionGroupIndex = proof_kernel_replay_empty_function_group_index()
+            empty_owner_path_index: ProofKernelReplayOwnerPathIndex = proof_kernel_replay_empty_owner_path_index()
+            return ProofKernelReplayTypingIndex{value_binding_count: 0, value_overlay_start: 0, value_overlay_count: 0, function_parameter_count: 0, source_binding_count: 0, value_binding_indices: [], function_parameter_indices: [], function_parameter_bucket_heads: [], function_parameter_next_indices: [], call_binding_count: 0, scoped_local_binding_count: 0, call_owner_name_capacity: 0, call_owner_name_hashes: [], call_owner_name_slots: [], call_owner_name_ids: [], call_owner_marker_counts: [], call_owner_shadowed: [], global_function_group_index: empty_group_index, local_function_group_index: empty_group_index, owner_path_index: empty_owner_path_index}
 
-        def proof_kernel_replay_build_typing_index(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&) -> (known: bool, index: ProofKernelReplayTypingIndex):
+        def proof_kernel_replay_build_typing_index_internal(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, reuse_global_function_group_index: bool, inherited_global_function_group_index: ProofKernelReplayFunctionGroupIndex) -> (known: bool, index: ProofKernelReplayTypingIndex):
             empty: ProofKernelReplayTypingIndex = proof_kernel_replay_empty_typing_index()
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             return (false, empty) if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
@@ -72,6 +112,7 @@ extend ElisaProofKernelReplay:
                 is_value_binding: bool = match binding.kind:
                     "value": true
                     "reference-value": true
+                    "raw-reference-value": true
                     "proposition": true
                     _: false
                 if is_value_binding:
@@ -82,6 +123,18 @@ extend ElisaProofKernelReplay:
                     parameter_binding_count <- parameter_binding_count + 1
             return (false, empty) if not proof_kernel_replay_enum_underlying_bindings_valid(environment, work)
             return (false, empty) if not proof_kernel_replay_type_scope_bindings_valid(environment, work)
+            return (false, empty) if not proof_kernel_replay_bare_call_owners_valid(environment, work)
+            owner_paths: (known: bool, index: ProofKernelReplayOwnerPathIndex) = proof_kernel_replay_owner_path_index_build(environment, work)
+            return (false, empty) if not owner_paths.known
+            global_group_index: mutable ProofKernelReplayFunctionGroupIndex = inherited_global_function_group_index
+            if reuse_global_function_group_index:
+                return (false, empty) if inherited_global_function_group_index.source_binding_count != environment.global_bindings.count
+            else:
+                global_groups: (known: bool, index: ProofKernelReplayFunctionGroupIndex) = proof_kernel_replay_function_group_index_build(environment.global_bindings, work)
+                return (false, empty) if not global_groups.known
+                global_group_index <- global_groups.index
+            local_groups: (known: bool, index: ProofKernelReplayFunctionGroupIndex) = proof_kernel_replay_function_group_index_build(environment.bindings, work)
+            return (false, empty) if not local_groups.known
             parameter_bucket_heads: mutable darray[usize] = []
             parameter_next_indices: mutable darray[usize] = []
             if parameter_binding_count > 0:
@@ -96,16 +149,32 @@ extend ElisaProofKernelReplay:
                     return (false, empty) if binding_index >= total_bindings
                     binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
                     return (false, empty) if binding.kind != "function-parameter" or binding.signature_identity == 0
-                    slot: usize = (binding.signature_identity % parameter_binding_count).usize()
+                    return (false, empty) if not proof_kernel_replay_type_work_consume_amount(sview_len(binding.owner), work)
+                    owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
+                    parameter_hash: u32 = proof_expr_shape_mix(owner_name_hash.i64(), binding.signature_identity.i64())
+                    slot: usize = (parameter_hash.i64() % parameter_binding_count.i64()).usize()
                     parameter_next_indices[parameter_offset] <- parameter_bucket_heads[slot]
                     parameter_bucket_heads[slot] <- parameter_offset
-            return (true, ProofKernelReplayTypingIndex{value_binding_count: value_binding_count, function_parameter_count: parameter_binding_count, source_binding_count: total_bindings, value_binding_indices: value_indices, function_parameter_indices: parameter_indices, function_parameter_bucket_heads: parameter_bucket_heads, function_parameter_next_indices: parameter_next_indices})
+            call_capacity: mutable usize = 0
+            call_hashes: mutable darray[u32] = []
+            call_slots: mutable darray[usize] = []
+            call_owner_ids: mutable darray[usize] = []
+            call_marker_counts: mutable darray[usize] = []
+            call_shadowed: mutable darray[bool] = []
+            return (false, empty) if not proof_kernel_replay_build_call_owner_lookup_index(environment, work, &call_capacity, &call_hashes, &call_slots, &call_owner_ids, &call_marker_counts, &call_shadowed)
+            return (true, ProofKernelReplayTypingIndex{value_binding_count: value_binding_count, value_overlay_start: environment.bindings.count, value_overlay_count: 0, function_parameter_count: parameter_binding_count, source_binding_count: total_bindings, value_binding_indices: value_indices, function_parameter_indices: parameter_indices, function_parameter_bucket_heads: parameter_bucket_heads, function_parameter_next_indices: parameter_next_indices, call_binding_count: environment.bindings.count, scoped_local_binding_count: environment.bindings.count, call_owner_name_capacity: call_capacity, call_owner_name_hashes: call_hashes, call_owner_name_slots: call_slots, call_owner_name_ids: call_owner_ids, call_owner_marker_counts: call_marker_counts, call_owner_shadowed: call_shadowed, global_function_group_index: global_group_index, local_function_group_index: local_groups.index, owner_path_index: owner_paths.index})
 
-        # Fills caller-owned scratch, but returns no view of it. Callers form the temporary index
-        # locally only after this complete validation-and-build pass succeeds.
+        # Fill caller-owned scratch; return the index only after complete validation.
         def proof_kernel_replay_collect_typing_indices(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> (known: bool, value_binding_count: usize, function_parameter_count: usize):
             scratch.value_binding_indices.clear()
             scratch.function_parameter_indices.clear()
+            scratch.call_owner_name_capacity <- 0
+            scratch.call_owner_name_hashes.clear()
+            scratch.call_owner_name_slots.clear()
+            scratch.call_owner_name_ids.clear()
+            scratch.call_owner_marker_counts.clear()
+            scratch.call_owner_shadowed.clear()
+            scratch.local_function_group_index <- proof_kernel_replay_empty_function_group_index()
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             return (false, 0, 0) if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
             value_binding_count: mutable usize = 0
@@ -117,6 +186,7 @@ extend ElisaProofKernelReplay:
                 is_value_binding: bool = match binding.kind:
                     "value": true
                     "reference-value": true
+                    "raw-reference-value": true
                     "proposition": true
                     _: false
                 if is_value_binding:
@@ -127,13 +197,26 @@ extend ElisaProofKernelReplay:
                     parameter_binding_count <- parameter_binding_count + 1
             return (false, 0, 0) if not proof_kernel_replay_enum_underlying_bindings_valid(environment, work)
             return (false, 0, 0) if not proof_kernel_replay_type_scope_bindings_valid(environment, work)
+            return (false, 0, 0) if not proof_kernel_replay_build_call_owner_lookup_index(environment, work, &scratch.call_owner_name_capacity, &scratch.call_owner_name_hashes, &scratch.call_owner_name_slots, &scratch.call_owner_name_ids, &scratch.call_owner_marker_counts, &scratch.call_owner_shadowed)
+            local_groups: (known: bool, index: ProofKernelReplayFunctionGroupIndex) = proof_kernel_replay_function_group_index_build(environment.bindings, work)
+            return (false, 0, 0) if not local_groups.known
+            scratch.local_function_group_index <- local_groups.index
             return (true, value_binding_count, parameter_binding_count)
 
-        def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+        def proof_kernel_replay_build_typing_workspace_internal(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&, validate_bare_call_owners: bool) -> bool:
+            scratch.global_function_group_index <- proof_kernel_replay_empty_function_group_index()
+            scratch.owner_path_index <- proof_kernel_replay_empty_owner_path_index()
             scratch.function_parameter_bucket_heads.clear()
             scratch.function_parameter_next_indices.clear()
             collected: (known: bool, value_binding_count: usize, function_parameter_count: usize) = proof_kernel_replay_collect_typing_indices(environment, work, scratch)
             return false if not collected.known
+            global_groups: (known: bool, index: ProofKernelReplayFunctionGroupIndex) = proof_kernel_replay_function_group_index_build(environment.global_bindings, work)
+            return false if not global_groups.known
+            scratch.global_function_group_index <- global_groups.index
+            return false if validate_bare_call_owners and not proof_kernel_replay_bare_call_owners_valid(environment, work)
+            owner_paths: (known: bool, index: ProofKernelReplayOwnerPathIndex) = proof_kernel_replay_owner_path_index_build(environment, work)
+            return false if not owner_paths.known
+            scratch.owner_path_index <- owner_paths.index
             parameter_binding_count: usize = collected.function_parameter_count
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
             if parameter_binding_count > 0:
@@ -148,14 +231,18 @@ extend ElisaProofKernelReplay:
                     return false if binding_index >= total_bindings
                     binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
                     return false if binding.kind != "function-parameter" or binding.signature_identity == 0
-                    slot: usize = (binding.signature_identity % parameter_binding_count).usize()
+                    return false if not proof_kernel_replay_type_work_consume_amount(sview_len(binding.owner), work)
+                    owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
+                    parameter_hash: u32 = proof_expr_shape_mix(owner_name_hash.i64(), binding.signature_identity.i64())
+                    slot: usize = (parameter_hash.i64() % parameter_binding_count.i64()).usize()
                     scratch.function_parameter_next_indices[parameter_offset] <- scratch.function_parameter_bucket_heads[slot]
                     scratch.function_parameter_bucket_heads[slot] <- parameter_offset
             return true
 
-        # Cache only the immutable, source-wide declaration environment. The API takes a private
-        # copy before validation so later mutation through the caller's darray cannot invalidate
-        # the index. Generic replay APIs continue to validate their complete environment per call.
+        def proof_kernel_replay_build_typing_workspace(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, work: mutable usize&, scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
+            return proof_kernel_replay_build_typing_workspace_internal(environment, work, scratch, true)
+
+        # Cache a private copy of the immutable declaration environment before validation.
         def proof_kernel_replay_typing_workspace_prepare_globals_internal(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], scratch: mutable ProofKernelReplayTypingWorkspace&) -> bool:
             scratch.cache.ready <- false
             scratch.cache.bindings.clear()
@@ -165,11 +252,18 @@ extend ElisaProofKernelReplay:
             scratch.cache.function_parameter_next_indices.clear()
             scratch.cache.reuse_global_function_parameter_index <- false
             return false if global_bindings.count > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
-            for binding in global_bindings |scratch|:
+            work: mutable usize = 0
+            for binding in global_bindings |scratch, work|:
+                return false if not proof_kernel_replay_type_work_consume(work)
+                # The declaration-wide snapshot has no proposition-local source selector.
+                # Reject markers here instead of letting the intentionally deferred
+                # cross-row validation admit caller-supplied marker rows.
+                return false if binding.kind == "bare-call-owner" or binding.kind == "local-call-shadow"
                 scratch.cache.bindings.push(binding)
             environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scratch.cache.bindings, bindings: []}
-            work: mutable usize = 0
-            return false if not proof_kernel_replay_build_typing_workspace(environment, &work, scratch)
+            # Global declarations are cached before any proposition-local owner markers exist.
+            # Cross-row marker validation belongs to complete and combined environments.
+            return false if not proof_kernel_replay_build_typing_workspace_internal(environment, &work, scratch, false)
             for binding_index in scratch.value_binding_indices |binding_index, scratch|:
                 scratch.cache.value_binding_indices.push(binding_index)
             for binding_index in scratch.function_parameter_indices |binding_index, scratch|:
@@ -178,6 +272,7 @@ extend ElisaProofKernelReplay:
                 scratch.cache.function_parameter_bucket_heads.push(slot)
             for parameter_offset in scratch.function_parameter_next_indices |parameter_offset, scratch|:
                 scratch.cache.function_parameter_next_indices.push(parameter_offset)
+            scratch.cache.function_group_index <- scratch.global_function_group_index
             scratch.cache.ready <- true
             return true
 
@@ -188,8 +283,14 @@ extend ElisaProofKernelReplay:
             local_environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: [], bindings: local_bindings}
             collected: (known: bool, value_binding_count: usize, function_parameter_count: usize) = proof_kernel_replay_collect_typing_indices(local_environment, work, scratch)
             return false if not collected.known
+            scratch.global_function_group_index <- scratch.cache.function_group_index
             total_bindings: usize = scratch.cache.bindings.count + local_bindings.count
             return false if total_bindings > ElisaProofKernelCore::PROOF_KERNEL_TYPE_BINDING_BUDGET
+            combined_environment: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: scratch.cache.bindings, bindings: local_bindings}
+            return false if not proof_kernel_replay_bare_call_owners_valid(combined_environment, work)
+            combined_owner_paths: (known: bool, index: ProofKernelReplayOwnerPathIndex) = proof_kernel_replay_owner_path_index_build(combined_environment, work)
+            return false if not combined_owner_paths.known
+            scratch.owner_path_index <- combined_owner_paths.index
             scratch.cache.reuse_global_function_parameter_index <- collected.function_parameter_count == 0
             scratch.cache.combined_value_binding_indices.clear()
             for binding_index in scratch.cache.value_binding_indices |binding_index, scratch, work|:
@@ -222,7 +323,10 @@ extend ElisaProofKernelReplay:
                         return false if binding_index >= total_bindings
                         binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(combined_environment, binding_index)
                         return false if binding.kind != "function-parameter" or binding.signature_identity == 0
-                        slot: usize = (binding.signature_identity % parameter_count).usize()
+                        return false if not proof_kernel_replay_type_work_consume_amount(sview_len(binding.owner), work)
+                        owner_name_hash: u32 = proof_kernel_replay_name_owner_hash(binding.owner, binding.owner_type_identity)
+                        parameter_hash: u32 = proof_expr_shape_mix(owner_name_hash.i64(), binding.signature_identity.i64())
+                        slot: usize = (parameter_hash.i64() % parameter_count.i64()).usize()
                         scratch.cache.combined_function_parameter_next_indices[parameter_offset] <- scratch.cache.combined_function_parameter_bucket_heads[slot]
                         scratch.cache.combined_function_parameter_bucket_heads[slot] <- parameter_offset
             return true
@@ -230,6 +334,12 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_typing_binding_valid(binding: ElisaProofKernelCore::ProofKernelTypingBinding, work: mutable usize&) -> bool:
             if binding.kind == "module-context":
                 return binding.name == "" and binding.owner == "" and binding.sort == "" and binding.type_name == "" and binding.element_sort == "" and binding.element_type_name == "" and binding.type_identity == 0 and binding.owner_type_identity != 0 and binding.element_type_identity == 0 and binding.signature_identity == 0 and binding.parameter_index == 0 and binding.parameter_count == 0 and not binding.parameter_has_default and not binding.parameter_by_reference
+            if binding.kind == "bare-call-owner":
+                return binding.name != "" and binding.owner == "" and binding.sort == "" and binding.type_name == "" and binding.element_sort == "" and binding.element_type_name == "" and binding.type_identity == 0 and binding.element_type_identity == 0 and binding.signature_identity == 0 and binding.parameter_index == 0 and binding.parameter_count == 0 and not binding.parameter_has_default and not binding.parameter_by_reference
+            if binding.kind == "local-call-shadow":
+                return binding.name != "" and binding.owner == "" and binding.sort == "" and binding.type_name == "" and binding.element_sort == "" and binding.element_type_name == "" and binding.type_identity == 0 and binding.owner_type_identity == 0 and binding.element_type_identity == 0 and binding.signature_identity == 0 and binding.parameter_index == 0 and binding.parameter_count == 0 and not binding.parameter_has_default and not binding.parameter_by_reference
+            if binding.kind == "function-incomplete":
+                return binding.name != "" and binding.owner == "" and binding.sort == "" and binding.type_name == "" and binding.element_sort == "" and binding.element_type_name == "" and binding.type_identity == 0 and binding.element_type_identity == 0 and binding.signature_identity != 0 and binding.parameter_index == 0 and binding.parameter_count == 0 and not binding.parameter_has_default and not binding.parameter_by_reference
             if binding.kind == "module-owner-segment":
                 return binding.name != "" and binding.owner == "" and binding.sort == "" and binding.type_name == "" and binding.element_sort == "" and binding.element_type_name == "" and binding.type_identity == 0 and binding.owner_type_identity != 0 and binding.element_type_identity == 0 and binding.signature_identity == 0 and binding.parameter_count > 0 and binding.parameter_index < binding.parameter_count and not binding.parameter_has_default and not binding.parameter_by_reference
             return false if binding.name == "" or binding.type_name == ""
@@ -239,6 +349,9 @@ extend ElisaProofKernelReplay:
                 # only through a matching qualifier.
                 return false if (binding.owner == "") != (binding.owner_type_identity == 0) or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
             elif binding.kind == "reference-value":
+                return false if binding.owner != "" or not binding.parameter_by_reference
+                return false if binding.owner_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default
+            elif binding.kind == "raw-reference-value":
                 return false if binding.owner != "" or not binding.parameter_by_reference
                 return false if binding.owner_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default
             elif binding.kind == "function":
@@ -261,7 +374,10 @@ extend ElisaProofKernelReplay:
                 return false if binding.owner_type_identity == 0
                 return false if binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
             elif binding.kind == "function-parameter":
-                return false if binding.owner == "" or binding.signature_identity == 0 or binding.parameter_count != 0 or binding.owner_type_identity != 0
+                return false if binding.owner == "" or binding.signature_identity == 0 or binding.parameter_count != 0
+                # The parameter's owner identity is part of the signature key. A zero identity
+                # remains valid for source-neutral examples, while imported declarations carry
+                # their module owner identity through parameter lookup.
             elif binding.kind == "enum-member":
                 return false if binding.owner == "" or binding.sort != "named" or not proof_kernel_replay_type_text_equal(binding.type_name, binding.owner, work)
                 return false if binding.element_sort != "" or binding.element_type_name != "" or binding.type_identity == 0 or binding.owner_type_identity != binding.type_identity or binding.element_type_identity != 0 or binding.signature_identity != 0 or binding.parameter_index != 0 or binding.parameter_count != 0 or binding.parameter_has_default or binding.parameter_by_reference
@@ -313,6 +429,7 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_type_work_consume(&work)
                 binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
                 return false if not proof_kernel_replay_typing_binding_valid(binding, &work)
+            return false if not proof_kernel_replay_bare_call_owners_valid(environment, &work)
             return false if not proof_kernel_replay_enum_underlying_bindings_valid(environment, &work)
             return proof_kernel_replay_type_scope_bindings_valid(environment, &work)
 
@@ -324,6 +441,7 @@ extend ElisaProofKernelReplay:
                 return "__kernel_type_budget__" if not proof_kernel_replay_type_work_consume(&work)
                 binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
                 return binding.name if not proof_kernel_replay_typing_binding_valid(binding, &work)
+            return "__kernel_bare_call_owner__" if not proof_kernel_replay_bare_call_owners_valid(environment, &work)
             return "__kernel_enum_underlying__" if not proof_kernel_replay_enum_underlying_bindings_valid(environment, &work)
             return "__kernel_type_scope__" if not proof_kernel_replay_type_scope_bindings_valid(environment, &work)
             return ""
@@ -338,181 +456,22 @@ extend ElisaProofKernelReplay:
         def proof_kernel_replay_find_value_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayTypingIndex, name: sview, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
             return proof_kernel_replay_find_owned_value_binding(environment, index, name, 0, work)
 
-        # Bindings are selected by the exact validated module-path identity (zero: root scope).
-        # Lexical (local) bindings shadow the global environment, as in the source language;
-        # remaining disagreement among same-level candidates is still ambiguous and unknown.
-        def proof_kernel_replay_find_owned_value_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, index: ProofKernelReplayTypingIndex, name: sview, owner_identity: usize, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
-            empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
-            found: mutable bool = false
-            ambiguous: mutable bool = false
-            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
-            local_found: mutable bool = false
-            local_ambiguous: mutable bool = false
-            local_selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
-            global_count: usize = environment.global_bindings.count
-            return (false, selected) if index.source_binding_count != proof_kernel_replay_type_environment_binding_count(environment) or index.value_binding_count > index.value_binding_indices.count
-            for value_offset in 0..<index.value_binding_count |value_offset, environment, index, name, owner_identity, global_count, found, ambiguous, selected, local_found, local_ambiguous, local_selected, work|:
-                return (false, selected) if not proof_kernel_replay_type_work_consume(work)
-                binding_index: usize = index.value_binding_indices[value_offset]
-                return (false, selected) if binding_index >= index.source_binding_count
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                kind_valid: bool = match binding.kind:
-                    "value": true
-                    "reference-value": true
-                    "proposition": true
-                    _: false
-                return (false, selected) if not kind_valid
-                if proof_kernel_replay_type_text_equal(binding.name, name, work) and binding.owner_type_identity == owner_identity:
-                    if binding_index >= global_count:
-                        if not local_found:
-                            local_selected <- binding
-                            local_found <- true
-                        elif not proof_kernel_replay_typing_evidence_equal(local_selected, binding, work):
-                            local_ambiguous <- true
-                    elif not found:
-                        selected <- binding
-                        found <- true
-                    elif not proof_kernel_replay_typing_evidence_equal(selected, binding, work):
-                        ambiguous <- true
-            return (not local_ambiguous, local_selected) if local_found
-            return (found and not ambiguous, selected)
-
-        # Legacy leaf accessor for readers that only need a display name. Owner-sensitive lookup
-        # uses `proof_kernel_replay_scope_owner_identity` and exact segment records below.
-        def proof_kernel_replay_scope_qualifier(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize) -> sview:
-            return "" if root >= nodes.count
-            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return "" if node.kind != "scope" or node.left >= nodes.count
-            base: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
-            return base.name if base.kind == "ident" or base.kind == "scope"
-            return ""
-
-        def proof_kernel_replay_scope_path_count(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> usize:
-            return 0 if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or root >= nodes.count
-            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return 1 if node.kind == "ident"
-            return 1 + proof_kernel_replay_scope_path_count(nodes, node.left, depth + 1) if node.kind == "scope"
-            return 0
-
-        def proof_kernel_replay_scope_path_segment(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, index: usize, depth: usize) -> sview:
-            return "" if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or root >= nodes.count
-            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return node.name if node.kind == "ident" and index == 0
-            return "" if node.kind != "scope"
-            prefix_count: usize = proof_kernel_replay_scope_path_count(nodes, node.left, depth + 1)
-            return node.name if index == prefix_count
-            return proof_kernel_replay_scope_path_segment(nodes, node.left, index, depth + 1) if index < prefix_count
-            return ""
-
-        def proof_kernel_replay_owner_path_count(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, work: mutable usize&) -> usize:
-            count: mutable usize = 0
-            found: mutable bool = false
-            for binding_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |binding_index, environment, owner_identity, count, found, work|:
-                return 0 if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != 0
-                return 0 if found
-                count <- binding.parameter_count
-                found <- true
-            return count if found
-            return 0
-
-        def proof_kernel_replay_owner_path_segment(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, index: usize, count: usize, work: mutable usize&) -> sview:
-            found: mutable bool = false
-            selected: mutable sview = ""
-            for binding_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |binding_index, environment, owner_identity, index, count, found, selected, work|:
-                return "" if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != index or binding.parameter_count != count
-                return "" if found
-                selected <- binding.name
-                found <- true
-            return selected if found
-            return ""
-
-        def proof_kernel_replay_owner_path_shape_valid(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, work: mutable usize&) -> bool:
-            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            start_index: mutable usize = 0
-            count: mutable usize = 0
-            found: mutable bool = false
-            for binding_index in 0..<total_bindings |binding_index, environment, owner_identity, start_index, count, found, work|:
-                return false if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != 0
-                return false if found or binding.parameter_count == 0
-                start_index <- binding_index
-                count <- binding.parameter_count
-                found <- true
-            return false if not found or count > total_bindings - start_index
-            for segment in 0..<count |segment, environment, owner_identity, start_index, count, work|:
-                return false if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, start_index + segment)
-                return false if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_index != segment or binding.parameter_count != count or binding.name == ""
-            rows: mutable usize = 0
-            for binding_index in 0..<total_bindings |binding_index, environment, owner_identity, start_index, count, rows, work|:
-                return false if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity
-                return false if binding_index < start_index or binding_index >= start_index + count
-                rows <- rows + 1
-            return rows == count
-
-        def proof_kernel_replay_owner_identity_recorded(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, work: mutable usize&) -> bool:
-            return proof_kernel_replay_owner_path_shape_valid(environment, owner_identity, work)
-
-        def proof_kernel_replay_owner_path_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, owner_identity: usize, path_root: usize, path_count: usize, work: mutable usize&) -> bool:
-            return false if owner_identity == 0 or path_count == 0
-            return false if not proof_kernel_replay_owner_identity_recorded(environment, owner_identity, work)
-            owner_count: usize = proof_kernel_replay_owner_path_count(environment, owner_identity, work)
-            return false if owner_count != path_count
-            for segment_index in 0..<path_count |segment_index, nodes, environment, owner_identity, path_root, path_count, owner_count, work|:
-                expected: sview = proof_kernel_replay_scope_path_segment(nodes, path_root, segment_index, 0)
-                actual: sview = proof_kernel_replay_owner_path_segment(environment, owner_identity, segment_index, owner_count, work)
-                return false if sview_len(expected) == 0 or sview_len(actual) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
-            return true
-
-        def proof_kernel_replay_owner_path_prefix_suffix_valid(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, candidate_identity: usize, context_identity: usize, qualifier_root: usize, qualifier_count: usize, work: mutable usize&) -> bool:
-            return false if not proof_kernel_replay_owner_identity_recorded(environment, candidate_identity, work) or not proof_kernel_replay_owner_identity_recorded(environment, context_identity, work)
-            context_count: usize = proof_kernel_replay_owner_path_count(environment, context_identity, work)
-            candidate_count: usize = proof_kernel_replay_owner_path_count(environment, candidate_identity, work)
-            return false if context_count == 0 or candidate_count != context_count + qualifier_count
-            for index in 0..<context_count |index, environment, candidate_identity, context_identity, context_count, work|:
-                context_segment: sview = proof_kernel_replay_owner_path_segment(environment, context_identity, index, context_count, work)
-                candidate_segment: sview = proof_kernel_replay_owner_path_segment(environment, candidate_identity, index, candidate_count, work)
-                return false if sview_len(context_segment) == 0 or sview_len(candidate_segment) == 0 or not proof_kernel_replay_type_text_equal(context_segment, candidate_segment, work)
-            for index in 0..<qualifier_count |index, nodes, environment, candidate_identity, qualifier_root, qualifier_count, context_count, candidate_count, work|:
-                expected: sview = proof_kernel_replay_scope_path_segment(nodes, qualifier_root, index, 0)
-                actual: sview = proof_kernel_replay_owner_path_segment(environment, candidate_identity, context_count + index, candidate_count, work)
-                return false if sview_len(expected) == 0 or sview_len(actual) == 0 or not proof_kernel_replay_type_text_equal(actual, expected, work)
-            return true
-
-        def proof_kernel_replay_scope_owner_identity(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, path_root: usize, work: mutable usize&) -> usize:
-            path_count: usize = proof_kernel_replay_scope_path_count(nodes, path_root, 0)
-            return 0 if path_count == 0
-            context_identity: mutable usize = 0
-            context_seen: mutable bool = false
-            for binding_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |binding_index, environment, context_identity, context_seen, work|:
-                return 0 if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-context"
-                return 0 if context_seen
-                return 0 if not proof_kernel_replay_owner_identity_recorded(environment, binding.owner_type_identity, work)
-                context_identity <- binding.owner_type_identity
-                context_seen <- true
-            found_identity: mutable usize = 0
-            found: mutable bool = false
-            for binding_index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |binding_index, nodes, environment, path_root, path_count, context_identity, context_seen, found_identity, found, work|:
-                return 0 if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "module-owner-segment" or binding.parameter_index != 0
-                candidate_count: usize = binding.parameter_count
-                continue if candidate_count == 0
-                candidate_id: usize = binding.owner_type_identity
-                direct_match: bool = proof_kernel_replay_owner_path_valid(nodes, environment, candidate_id, path_root, path_count, work)
-                relative_match: bool = context_seen and proof_kernel_replay_owner_path_prefix_suffix_valid(nodes, environment, candidate_id, context_identity, path_root, path_count, work)
-                continue if not direct_match and not relative_match
-                return 0 if found and found_identity != candidate_id
-                found_identity <- candidate_id
-                found <- true
-            return found_identity if found
-            return 0
+        # Scope ASTs are left-associated, so walking from the outer node collects the
+        # path in reverse order. Keep that compact representation and charge each node
+        # once; callers index from the end when comparing canonical left-to-right paths.
+        def proof_kernel_replay_scope_path_segments(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work: mutable usize&) -> (known: bool, segments: darray[sview]):
+            segments: mutable darray[sview] = []
+            cursor: mutable usize = root
+            depth: mutable usize = 0
+            while true |nodes, cursor, depth, segments, work|:
+                return (false, segments) if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT or cursor >= nodes.count
+                return (false, segments) if not proof_kernel_replay_type_work_consume(work)
+                node: ElisaProofKernelCore::ProofKernelNode = nodes[cursor]
+                return (false, segments) if not proof_kernel_replay_arena_shape_valid(node) or sview_len(node.name) == 0
+                if node.kind == "ident":
+                    segments.push(node.name)
+                    return (segments.count <= 128, segments)
+                return (false, segments) if node.kind != "scope"
+                segments.push(node.name)
+                cursor <- node.left
+                depth <- depth + 1
