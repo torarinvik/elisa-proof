@@ -111,7 +111,8 @@ for route in ("function", "module"):
             assert not array_type_traces, context(route, name, report)
 
     for name in ("missing_read", "missing_write", "write_only_reads",
-                 "read_only_writes", "read_only_update",
+                 "read_only_writes", "read_only_update", "write_only_update",
+                 "indexed_write_only_update",
                  "read_before_local_shadow", "read_after_block_shadow", "forward_missing_read",
                  "signature_only_read", "signature_only_write", "indexed_read_write_only",
                  "indexed_write_read_only", "indexed_target_missing_index_read",
@@ -133,6 +134,8 @@ for route in ("function", "module"):
             "write_only_reads": ("Global.Read", "permission_counter"),
             "read_only_writes": ("Global.Write", "permission_counter"),
             "read_only_update": ("Global.Write", "permission_counter"),
+            "write_only_update": ("Global.Read", "permission_counter"),
+            "indexed_write_only_update": ("Global.Read", "permission_values"),
             "read_before_local_shadow": ("Global.Read", "permission_counter"),
             "read_after_block_shadow": ("Global.Read", "permission_counter"),
             "forward_missing_read": ("Global.Read", "Global"),
@@ -153,6 +156,18 @@ for route in ("function", "module"):
                        and d.get("actual") == actual
                        and (name != "forward_missing_read" or d.get("name") == "read_counter")
                        for d in report["semantic_diagnostics"]), context(route, name, report)
+        update_global = {
+            "read_only_update": "permission_counter",
+            "write_only_update": "permission_counter",
+            "indexed_write_only_update": "permission_values",
+        }.get(name)
+        if update_global is not None:
+            update_effects = {
+                d.get("expected") for d in report["semantic_diagnostics"]
+                if d.get("severity") == 1 and d.get("actual") == update_global
+            }
+            expected_update_effect = "Global.Write" if name == "read_only_update" else "Global.Read"
+            assert update_effects == {expected_update_effect}, context(route, name, report)
         required_qualified_effect = {
             "qualified_global_missing_read": "Global.Read",
             "qualified_global_missing_write": "Global.Write",
