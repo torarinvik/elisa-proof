@@ -25,7 +25,12 @@ extend ElisaProof:
                         for variant in variants |work|:
                             return false if sview_len(variant.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                             work <- work + sview_len(variant.name)
-                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Import(name, _) | Ast::Decl.Law(name, _, _):
+                    Ast::Decl.Import(_, _):
+                        # The imported target is absent from this source snapshot, so it can
+                        # introduce a same-spelled enum that this local declaration scan cannot
+                        # distinguish.
+                        return false
+                    Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Func(name, _, _, _, _, _, _) | Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Law(name, _, _):
                         return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
                         work <- work + sview_len(name)
                     Ast::Decl.Extern(name, _, _, _, _, _, _, _):
@@ -133,8 +138,12 @@ extend ElisaProof:
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_variant_type_alias_with_work(nested, name, target, matches, source_work, depth + 1)
                         return true if matches > 1
-                    _:
+                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
             return true
 
         def proof_replay_variant_type_head_name_with_work(expression: Ast::Expr, declarations: darray[Ast::Decl]&, source_work: mutable usize&, depth: usize) -> sview:
@@ -213,6 +222,10 @@ extend ElisaProof:
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
             source_start: usize = source_work
             return false if not proof_replay_variant_source_tree_charge(report.source_declarations, source_work, 0)
+            for annotation in report.source_annotations |source_work|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                import_metadata: (complete: bool, unresolved: bool) = proof_replay_structural_import_annotation_unresolved(annotation, source_work)
+                return false if not import_metadata.complete or import_metadata.unresolved
             source_cost: usize = source_work - source_start
             return false if extra_scans != 0 and source_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / extra_scans
             source_work <- source_work + source_cost * extra_scans
@@ -225,38 +238,63 @@ extend ElisaProof:
             return true
 
         # Count declarations of `enum_name`, and how many of them declare each of two variants.
-        def proof_replay_variant_scan(declarations: darray[Ast::Decl]&, enum_name: sview, first: sview, second: sview, enums: mutable usize&, firsts: mutable usize&, seconds: mutable usize&, depth: usize):
-            return if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
-            for declaration in declarations |enum_name, first, second, enums, firsts, seconds, depth|:
+        # The complete source-tree preflight validates constructors; this second traversal still
+        # charges every visited row and every compared name to the active trace budget.
+        def proof_replay_variant_scan_with_work(declarations: darray[Ast::Decl]&, enum_name: sview, first: sview, second: sview, enums: mutable usize&, firsts: mutable usize&, seconds: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            for declaration in declarations |enum_name, first, second, enums, firsts, seconds, source_work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(name, variants, _, _, _):
+                        return false if not proof_replay_variant_text_compare_charge_with_work(name, enum_name, source_work)
                         if name == enum_name:
                             enums <- enums + 1
-                            for variant in variants |first, second, firsts, seconds|:
+                            for variant in variants |first, second, firsts, seconds, source_work|:
+                                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                                return false if not proof_replay_variant_text_compare_charge_with_work(variant.name, first, source_work)
+                                return false if not proof_replay_variant_text_compare_charge_with_work(variant.name, second, source_work)
                                 firsts <- firsts + 1 if variant.name == first
                                 seconds <- seconds + 1 if variant.name == second
                     Ast::Decl.Module(_, body, _):
-                        proof_replay_variant_scan(body, enum_name, first, second, enums, firsts, seconds, depth + 1)
+                        return false if not proof_replay_variant_scan_with_work(body, enum_name, first, second, enums, firsts, seconds, source_work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        proof_replay_variant_scan(body, enum_name, first, second, enums, firsts, seconds, depth + 1)
-                    _:
+                        return false if not proof_replay_variant_scan_with_work(body, enum_name, first, second, enums, firsts, seconds, source_work, depth + 1)
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
+            return true
 
-        def proof_replay_collect_enum_variants(declarations: darray[Ast::Decl]&, enum_name: sview, variants_out: mutable darray[sview]&, enums: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_VARIANT_DEPTH_LIMIT
-            for declaration in declarations |enum_name, variants_out, enums, depth|:
+        def proof_replay_collect_enum_variants_with_work(declarations: darray[Ast::Decl]&, enum_name: sview, variants_out: mutable darray[sview]&, enums: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            for declaration in declarations |enum_name, variants_out, enums, source_work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Enum(name, variants, _, _, _):
+                        return false if not proof_replay_variant_text_compare_charge_with_work(name, enum_name, source_work)
                         if name == enum_name:
                             enums <- enums + 1
-                            for variant in variants |variants_out|:
+                            for variant in variants |variants_out, source_work|:
+                                return false if variants_out.count >= PROOF_VARIANT_EXCLUSION_VARIANT_LIMIT
+                                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                                return false if not proof_replay_source_work_charge_or_exhaust(sview_len(variant.name), source_work)
                                 variants_out.push(variant.name)
                     Ast::Decl.Module(_, body, _):
-                        return false if not proof_replay_collect_enum_variants(body, enum_name, variants_out, enums, depth + 1)
+                        return false if not proof_replay_collect_enum_variants_with_work(body, enum_name, variants_out, enums, source_work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_replay_collect_enum_variants(body, enum_name, variants_out, enums, depth + 1)
-                    _:
+                        return false if not proof_replay_collect_enum_variants_with_work(body, enum_name, variants_out, enums, source_work, depth + 1)
+                    Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    Ast::Decl.Invalid:
+                        return false
+                    _:
+                        return false
             return true
 
         def proof_replay_match_case_collect_with_work(expression: Ast::Expr, subjects: mutable darray[Ast::Expr]&, enum_names: mutable darray[sview]&, variants: mutable darray[sview]&, depth: usize, source_work: mutable usize&) -> bool:
@@ -299,7 +337,7 @@ extend ElisaProof:
                     return false if variants[prior] == variants[index]
             declared: mutable darray[sview] = []
             enums: mutable usize = 0
-            return false if not proof_replay_collect_enum_variants(report.source_declarations, enum_name, &declared, &enums, 0)
+            return false if not proof_replay_collect_enum_variants_with_work(report.source_declarations, enum_name, &declared, &enums, source_work, 0)
             return false if enums != 1 or declared.count != variants.count
             declared_seen: mutable darray[sview] = []
             for expected in declared |declared_seen, variants, source_work|:
@@ -355,7 +393,8 @@ extend ElisaProof:
                     enums: mutable usize = 0
                     firsts: mutable usize = 0
                     seconds: mutable usize = 0
-                    proof_replay_variant_scan(report.source_declarations, first.enum_name, first.variant, second.variant, &enums, &firsts, &seconds, 0)
+                    scan_complete: bool = proof_replay_variant_scan_with_work(report.source_declarations, first.enum_name, first.variant, second.variant, &enums, &firsts, &seconds, source_work, 0)
+                    return false if not scan_complete or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                     return enums == 1 and firsts == 1 and seconds == 1
                 _:
                     return false
