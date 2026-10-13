@@ -1,0 +1,99 @@
+extend ElisaProof:
+    private:
+        def proof_replay_summary_source_call(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary) -> (known: bool, call: Ast::Expr):
+            work: mutable usize = 0
+            return proof_replay_summary_source_call_at_with_work(report, trace, summary, 0, &work)
+
+        def proof_replay_summary_source_call_at(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize) -> (known: bool, call: Ast::Expr):
+            work: mutable usize = 0
+            return proof_replay_summary_source_call_at_with_work(report, trace, summary, rebind_depth, &work)
+
+        def proof_replay_summary_source_call_with_work(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, work: mutable usize&) -> (known: bool, call: Ast::Expr):
+            return proof_replay_summary_source_call_at_with_work(report, trace, summary, 0, work)
+
+        def proof_replay_summary_source_call_at_with_work(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize, work: mutable usize&) -> (known: bool, call: Ast::Expr):
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_summary_source_call_at_with_cache(report, trace, summary, rebind_depth, work, &cache)
+
+        def proof_replay_summary_source_call_at_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, summary: ProofExecutableSummary, rebind_depth: usize, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> (known: bool, call: Ast::Expr):
+            result_index: usize = trace.summary_bindings_start + summary.parameters_count
+            return (false, Ast::Expr.Invalid) if result_index >= report.analysis_1.traces.summary_values.count
+            result_value: Ast::Expr = report.analysis_1.traces.summary_values[result_index]
+            match result_value:
+                Ast::Expr.Call(_, _, _, _):
+                    return (true, result_value) if proof_replay_summary_direct_call_source_site_at_with_cache(report, trace, result_value, rebind_depth, work, cache)
+                    return (false, Ast::Expr.Invalid)
+                Ast::Expr.Paren(inner, _):
+                    match inner:
+                        Ast::Expr.Call(_, _, _, _):
+                            return (true, inner) if proof_replay_summary_direct_call_source_site_at_with_cache(report, trace, inner, rebind_depth, work, cache)
+                            return (false, Ast::Expr.Invalid)
+                        _:
+                            return (false, Ast::Expr.Invalid)
+                Ast::Expr.Ident(local_name, binding_position):
+                    if proof_internal_name_is_rebind(local_name):
+                        # A result symbol stands for its declaration's call (result_symbols.elisa).
+                        definition = proof_replay_result_symbol_definition_with_work(report, trace.name, local_name, binding_position, work)
+                        return (false, Ast::Expr.Invalid) if not definition.known or not proof_replay_summary_raw_call_source_site_with_work(report, trace, definition.call, work)
+                        # Standalone source-call inspection has no consumer path to check. When
+                        # replay is validating a certificate fact, require the result symbol to
+                        # be live at that consumer or available through the loop-header
+                        # preservation route; a syntactic call site alone does not prove that the
+                        # call ran on a transfer path.
+                        return (true, definition.call) if:
+                            report.analysis_2.trace_consumer_certificate_index == 0 and report.analysis_2.trace_owner_line == 0
+                            proof_replay_result_symbol_source_available_with_work(report, trace, binding_position, definition.local, definition.call, work)
+                        return (false, Ast::Expr.Invalid)
+                    candidate_matches: mutable usize = 0
+                    candidate_call: mutable Ast::Expr = Ast::Expr.Invalid
+                    for candidate in report.analysis_1.traces.records |candidate, report, trace, summary, local_name, work|:
+                        return (false, Ast::Expr.Invalid) if:
+                            not proof_replay_mutable_local_text_compare_work_charge(candidate.kind, "function-summary", work)
+                            not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, work)
+                            not proof_replay_mutable_local_text_compare_work_charge(candidate.dependency, trace.dependency, work)
+                        continue if candidate.kind != "function-summary" or candidate.name != trace.name or candidate.line != trace.line or candidate.dependency != trace.dependency or candidate.owner_line != trace.owner_line or candidate.summary_ensure_index != trace.summary_ensure_index
+                        continue if candidate.summary_bindings_start > report.analysis_1.traces.summary_values.count or candidate.summary_bindings_count > report.analysis_1.traces.summary_values.count - candidate.summary_bindings_start
+                        continue if candidate.summary_bindings_start > report.analysis_1.traces.summary_names.count or candidate.summary_bindings_count > report.analysis_1.traces.summary_names.count - candidate.summary_bindings_start
+                        continue if summary.parameters_count >= candidate.summary_bindings_count
+                        candidate_result_index: usize = candidate.summary_bindings_start + summary.parameters_count
+                        continue if candidate_result_index >= report.analysis_1.traces.summary_values.count
+                        direct_call: mutable Ast::Expr = report.analysis_1.traces.summary_values[candidate_result_index]
+                        match direct_call:
+                            Ast::Expr.Call(_, _, _, _):
+                                pass
+                            Ast::Expr.Paren(inner, _):
+                                direct_call <- inner if proof_replay_is_call(inner)
+                            _:
+                                continue
+                        continue if candidate.summary_bindings_count != trace.summary_bindings_count
+                        same_parameters: mutable bool = true
+                        if summary.parameters_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                            return (false, Ast::Expr.Invalid)
+                        work <- work + summary.parameters_count
+                        for offset in 0..<summary.parameters_count |offset, same_parameters, candidate, report, trace, summary, work|:
+                            candidate_index: usize = candidate.summary_bindings_start + offset
+                            trace_index: usize = trace.summary_bindings_start + offset
+                            same_parameters <- false if not proof_replay_mutable_local_text_compare_work_charge(report.analysis_1.traces.summary_names[candidate_index], report.analysis_1.traces.summary_names[trace_index], work) or not proof_replay_summary_expr_equal_with_work(report.analysis_1.traces.summary_values[candidate_index], report.analysis_1.traces.summary_values[trace_index], work)
+                        continue if not same_parameters
+                        source_only: bool = report.analysis_2.trace_consumer_certificate_index == 0 and report.analysis_2.trace_owner_line == 0
+                        if source_only:
+                            candidate_matches <- candidate_matches + 1
+                            candidate_call <- direct_call
+                        else:
+                            if proof_replay_result_symbol_source_available_with_work(report, trace, binding_position, local_name, direct_call, work):
+                                candidate_matches <- candidate_matches + 1
+                                candidate_call <- direct_call
+                    # A budget refusal on the last candidate cannot be treated as a proof that
+                    # an earlier matching candidate was unique.
+                    return (false, Ast::Expr.Invalid) if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return (true, candidate_call) if candidate_matches == 1
+                    return (false, Ast::Expr.Invalid)
+                _:
+                    return (false, Ast::Expr.Invalid)
+
+        def proof_replay_is_call(expression: Ast::Expr) -> bool:
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                _:
+                    return false

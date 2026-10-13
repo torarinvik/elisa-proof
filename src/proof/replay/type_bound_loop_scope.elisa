@@ -172,31 +172,107 @@ extend ElisaProof:
             return proof_replay_type_bound_loop_consumer_in_scope_with_work(report, trace, loop_position, body, &work)
 
         def proof_replay_type_bound_loop_consumer_in_scope_with_work(report: ProofReport&, trace: ProofFactTrace, loop_position: Ast::Pos, body: darray[Ast::Stmt]&, work: mutable usize&) -> bool:
-            return true if report.trace_consumer_certificate_index == 0 and report.trace_owner_line == 0
-            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
-            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
-            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+            return true if report.analysis_2.trace_consumer_certificate_index == 0 and report.analysis_2.trace_owner_line == 0
+            return false if report.analysis_2.trace_consumer_certificate_index == 0 or report.analysis_2.trace_consumer_certificate_index > report.analysis_1.certificates.count
+            certificate: ProofGoalCertificate = report.analysis_1.certificates[report.analysis_2.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.line != report.analysis_2.trace_owner_line
             # The binder is introduced after the loop header, so a line-level certificate on
             # that header cannot prove that the binder is in scope.
             return false if:
                 certificate.line <= loop_position.line
-                report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
                 not proof_replay_summary_expr_charge_with_work(certificate.goal, work)
                 not proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, certificate.goal, true, work)
-                report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
-            work <- work + report.goal_attempts.count
+                report.results.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT - work
+            work <- work + report.results.goal_attempts.count
             attempt_matches: mutable usize = 0
-            for attempt in report.goal_attempts |certificate, attempt_matches|:
-                if attempt.has_certificate and attempt.certificate_index < report.certificates.count and attempt.certificate_index == report.trace_consumer_certificate_index - 1:
-                    return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, report.trace_consumer_certificate_index - 1, work)
+            for attempt in report.results.goal_attempts |certificate, attempt_matches|:
+                if attempt.has_certificate and attempt.certificate_index < report.analysis_1.certificates.count and attempt.certificate_index == report.analysis_2.trace_consumer_certificate_index - 1:
+                    return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, report.analysis_2.trace_consumer_certificate_index - 1, work)
                     attempt_matches <- attempt_matches + 1
             return false if attempt_matches != 1
             consumer_matches: mutable usize = 0
             proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &consumer_matches, work, 0)
             return consumer_matches == 1
 
+        def proof_replay_type_bound_loop_fact_in_expr(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, matches: mutable usize&, valid: mutable bool&, consumer_valid: mutable bool&, work: mutable usize&, depth: usize) -> void:
+            return if matches >= 2
+            if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+                matches <- 2
+                return
+            work <- work + 1
+            match expression:
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    pass
+                Ast::Expr.Call(callee, arguments, _, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, callee, matches, valid, consumer_valid, work, depth + 1)
+                    for argument in arguments |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, argument, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, _, _):
+                    for candidate in candidates |report, trace, matches, valid, consumer_valid, work, depth|:
+                        if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        work <- work + 1
+                        for capture in candidate.captures |report, trace, matches, valid, consumer_valid, work, depth|:
+                            proof_replay_type_bound_loop_fact_in_expr(report, trace, capture, matches, valid, consumer_valid, work, depth + 1)
+                    for argument in arguments |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, argument, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Field(object, _, _) | Ast::Expr.Scope(object, _, _) | Ast::Expr.Unary(_, object, _) | Ast::Expr.Move(object, _) | Ast::Expr.RegionNew(object, _, _) | Ast::Expr.Paren(object, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, object, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Index(object, index, _) | Ast::Expr.Binary(object, _, index, _) | Ast::Expr.Refinement(object, index, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, object, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, index, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, object, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, low, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, high, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.IndexN(object, arguments, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, object, matches, valid, consumer_valid, work, depth + 1)
+                    for argument in arguments |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, argument, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, element, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, entry.key, matches, valid, consumer_valid, work, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, entry.value, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, base, matches, valid, consumer_valid, work, depth + 1)
+                    for field in fields |report, trace, matches, valid, consumer_valid, work, depth|:
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, field.value, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Match(subject, arms, _) | Ast::Expr.Catch(subject, arms, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, subject, matches, valid, consumer_valid, work, depth + 1)
+                    for arm in arms |report, trace, matches, valid, consumer_valid, work, depth|:
+                        if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
+                            matches <- 2
+                            return
+                        work <- work + 1
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, arm.guard, matches, valid, consumer_valid, work, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, arm.body, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Comprehension(_, iterable, condition, value, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, iterable, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, condition, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, value, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.GetElse(guarded, recovery, _):
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, guarded, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_body(report, trace, recovery, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Lambda(_, nested, _):
+                    proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Block(nested, value, _, _):
+                    proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, work, depth + 1)
+                    proof_replay_type_bound_loop_fact_in_expr(report, trace, value, matches, valid, consumer_valid, work, depth + 1)
+                Ast::Expr.Invalid:
+                    matches <- 2
+                _:
+                    matches <- 2
+
         def proof_replay_type_bound_loop_fact_in_body(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, matches: mutable usize&, valid: mutable bool&, consumer_valid: mutable bool&, work: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            return if matches >= 2
+            if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT:
+                matches <- 2
+                return
             for statement in body |report, trace, matches, valid, consumer_valid, work, depth|:
                 if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                     matches <- 2
@@ -208,18 +284,37 @@ extend ElisaProof:
                             matches <- matches + 1
                             valid <- proof_replay_type_bound_counting_loop_fact(trace.expression, variables, iterable, position)
                             consumer_valid <- proof_replay_type_bound_loop_consumer_in_scope_with_work(report, trace, position, nested, work)
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, iterable, matches, valid, consumer_valid, work, depth + 1)
                         proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, work, depth + 1)
-                    Ast::Stmt.If(_, then_body, else_body, _):
+                    Ast::Stmt.If(condition, then_body, else_body, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, condition, matches, valid, consumer_valid, work, depth + 1)
                         proof_replay_type_bound_loop_fact_in_body(report, trace, then_body, matches, valid, consumer_valid, work, depth + 1)
                         proof_replay_type_bound_loop_fact_in_body(report, trace, else_body, matches, valid, consumer_valid, work, depth + 1)
-                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                    Ast::Stmt.While(condition, nested, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, condition, matches, valid, consumer_valid, work, depth + 1)
                         proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, work, depth + 1)
-                    Ast::Stmt.Match(_, arms, _):
+                    Ast::Stmt.Block(_, _, _, nested, _):
+                        proof_replay_type_bound_loop_fact_in_body(report, trace, nested, matches, valid, consumer_valid, work, depth + 1)
+                    Ast::Stmt.Match(subject, arms, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, subject, matches, valid, consumer_valid, work, depth + 1)
                         for arm in arms |report, trace, matches, valid, consumer_valid, work, depth|:
                             if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT:
                                 matches <- 2
                                 return
                             work <- work + 1
+                            proof_replay_type_bound_loop_fact_in_expr(report, trace, arm.guard, matches, valid, consumer_valid, work, depth + 1)
                             proof_replay_type_bound_loop_fact_in_body(report, trace, arm.body, matches, valid, consumer_valid, work, depth + 1)
-                    _:
+                    Ast::Stmt.Expr(expression, _) | Ast::Stmt.Return(expression, _) | Ast::Stmt.Contract(_, expression, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, expression, matches, valid, consumer_valid, work, depth + 1)
+                    Ast::Stmt.VarDecl(_, type_expression, initializer, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, type_expression, matches, valid, consumer_valid, work, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, initializer, matches, valid, consumer_valid, work, depth + 1)
+                    Ast::Stmt.Assign(target, _, value, _):
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, target, matches, valid, consumer_valid, work, depth + 1)
+                        proof_replay_type_bound_loop_fact_in_expr(report, trace, value, matches, valid, consumer_valid, work, depth + 1)
+                    Ast::Stmt.Break(_, _) | Ast::Stmt.Continue(_, _):
                         pass
+                    Ast::Stmt.Invalid:
+                        matches <- 2
+                    _:
+                        matches <- 2
