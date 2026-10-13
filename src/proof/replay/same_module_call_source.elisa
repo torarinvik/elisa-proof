@@ -17,18 +17,57 @@ extend ElisaProof:
                         pass
             return count
 
-        def proof_replay_same_module_bare_call(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr) -> (known: bool, call: Ast::Expr):
+        # The owner lookup scans declarations and follows only module and scope bodies.
+        def proof_replay_module_line_scan_reserve(declarations: darray[Ast::Decl]&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |declaration, work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, work)
+                match declaration:
+                    Ast::Decl.Module(_, body, _) | Ast::Decl.Scoped(body, _):
+                        return false if not proof_replay_module_line_scan_reserve(body, work, depth + 1)
+                    _:
+                        pass
+            true
+
+        # The same-module uniqueness query compares both module names and candidate names at
+        # every function row. Reserve those repeated byte comparisons before its raw traversal.
+        def proof_replay_same_module_count_scan_reserve(declarations: darray[Ast::Decl]&, current: sview, owner: sview, name: sview, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
+            for declaration in declarations |declaration, current, owner, name, work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, work)
+                match declaration:
+                    Ast::Decl.Func(candidate, _, _, _, _, _, _):
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(current), work)
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(owner), work)
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(candidate), work)
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(name), work)
+                    Ast::Decl.Module(module_name, body, _):
+                        return false if not proof_replay_same_module_count_scan_reserve(body, module_name, owner, name, work, depth + 1)
+                    Ast::Decl.Scoped(body, _):
+                        return false if not proof_replay_same_module_count_scan_reserve(body, current, owner, name, work, depth + 1)
+                    _:
+                        pass
+            true
+
+        def proof_replay_same_module_bare_call_with_work(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&) -> (known: bool, call: Ast::Expr):
             unknown: (known: bool, call: Ast::Expr) = (false, Ast::Expr.Invalid)
             match call:
                 Ast::Expr.Call(Ast::Expr.Scope(base, name, callee_position), arguments, labels, position):
+                    return unknown if not proof_replay_module_line_scan_reserve(report.source_declarations, work, 0)
                     owner: mutable sview = ""
                     owners: mutable usize = 0
                     proof_replay_module_at_function_line(report.source_declarations, report.replay_owner_line, "", &owner, &owners, 0)
+                    return unknown if not proof_replay_source_work_charge_or_exhaust(sview_len(owner), work)
+                    return unknown if not proof_replay_summary_expr_charge_with_work(base, work)
                     return unknown if owners != 1 or owner == "" or not proof_replay_exact_module_path_matches_owner(owner, base)
+                    return unknown if not proof_replay_same_module_count_scan_reserve(report.source_declarations, "", owner, name, work, 0)
                     return unknown if proof_replay_same_module_function_count(report.source_declarations, "", owner, name, 0) != 1
                     body: mutable darray[Ast::Stmt] = []
-                    return unknown if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
-                    return unknown if proof_replay_source_body_declares(report.source_declarations, body, name) or proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
+                    return unknown if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &body, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    # The query returns true both for a real local declaration and on
+                    # reservation exhaustion. Either case makes rewriting the qualified call
+                    # to a bare identifier unsafe; false is the complete unshadowed result.
+                    return unknown if proof_replay_source_body_declares_with_work(report.source_declarations, body, name, work) or proof_replay_local_binding_parameter_name_present_with_default_limit(report.source_declarations, trace.name, report.replay_owner_line, name, work, 0)
                     return (true, Ast::Expr.Call(Ast::Expr.Ident(name, callee_position), arguments, labels, position))
                 _:
                     return unknown

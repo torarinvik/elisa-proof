@@ -7,20 +7,25 @@ extend ElisaProof:
         def proof_replay_typed_return_pos_equal(left: Ast::Pos, right: Ast::Pos) -> bool:
             return left.line == right.line and left.column == right.column and left.offset == right.offset and left.end_line == right.end_line and left.end_column == right.end_column and left.end_offset == right.end_offset
 
-        def proof_replay_typed_return_signed_width(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, width: mutable i64&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
-            for declaration in declarations |owner, owner_line, width, matches, source_work, depth|:
-                return if not proof_type_audit_work_charge(1, source_work)
+        def proof_replay_typed_return_signed_width(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, width: mutable i64&, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT or not proof_type_audit_work_charge(1, source_work)
+            for declaration in declarations |owner, owner_line, width, body, matches, source_work, depth|:
+                return false if not proof_type_audit_work_charge(1, source_work)
                 match declaration:
-                    Ast::Decl.Func(name, _, return_type, _, _, _, position):
+                    Ast::Decl.Func(name, _, return_type, statements, _, _, position):
+                        return false if not proof_type_audit_work_charge(sview_len(name) + sview_len(owner), source_work)
                         if name == owner and position.line == owner_line:
-                            return if not proof_type_audit_work_charge(sview_len(name) + sview_len(owner), source_work)
+                            return false if not proof_type_audit_work_charge(statements.count, source_work)
                             matches <- matches + 1
                             width <- proof_signed_type_width_with_work(return_type, declarations, 0, source_work)
+                            return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            body.clear()
+                            body.extend(statements)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_replay_typed_return_signed_width(nested, owner, owner_line, width, matches, source_work, depth + 1)
+                        return false if not proof_replay_typed_return_signed_width(nested, owner, owner_line, width, body, matches, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         def proof_replay_typed_return_find_source_with_work(body: darray[Ast::Stmt]&, value: Ast::Expr, position: Ast::Pos, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT
@@ -30,6 +35,7 @@ extend ElisaProof:
                     Ast::Stmt.Return(returned, return_position):
                         if proof_replay_typed_return_pos_equal(return_position, position):
                             return false if not proof_replay_summary_expr_equal_with_work(returned, value, source_work)
+                            return false if not proof_replay_summary_expr_repeat_charge_with_work(returned, 1, source_work) or not proof_replay_summary_expr_repeat_charge_with_work(value, 1, source_work)
                             if proof_replay_local_binding_expr_positions_match(returned, value):
                                 matches <- matches + 1
                     Ast::Stmt.If(_, then_body, else_body, _):
@@ -50,16 +56,12 @@ extend ElisaProof:
             return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line != trace.line
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, _), TokenKind.EqEq, value, _):
-                    return false if not proof_internal_name_is_rebind(symbol) or not proof_closed_integer_arithmetic(value, 0)
+                    return false if not proof_internal_name_is_rebind(symbol) or not proof_replay_summary_expr_repeat_charge_with_work(value, 2, source_work) or not proof_closed_integer_arithmetic(value, 0)
                     width: mutable i64 = 0
                     declaration_matches: mutable usize = 0
-                    proof_replay_typed_return_signed_width(report.source_declarations, trace.name, report.replay_owner_line, &width, &declaration_matches, source_work, 0)
-                    return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    return false if declaration_matches != 1 or width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
                     body: mutable darray[Ast::Stmt] = []
-                    owner_matches: mutable usize = 0
-                    proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, 0)
-                    return false if owner_matches != 1
+                    return false if not proof_replay_typed_return_signed_width(report.source_declarations, trace.name, report.replay_owner_line, &width, &body, &declaration_matches, source_work, 0)
+                    return false if declaration_matches != 1 or width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
                     position: Ast::Pos = Ast::expr_pos(trace.expression)
                     return false if position.line != trace.line
                     source_matches: mutable usize = 0
@@ -82,20 +84,24 @@ extend ElisaProof:
 #   - and it is consumed only by certificates at its own return line.
 extend ElisaProof:
     private:
-        def proof_replay_typed_return_owner(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, return_type: mutable Ast::Expr&, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |owner, owner_line, return_type, body, matches, depth|:
+        def proof_replay_typed_return_owner_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, return_type: mutable Ast::Expr&, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+            for declaration in declarations |owner, owner_line, return_type, body, matches, source_work, depth|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, _, declared_return, statements, _, _, position):
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(name) + sview_len(owner), source_work)
                         if name == owner and position.line == owner_line:
+                            return false if not proof_replay_source_work_charge_or_exhaust(statements.count, source_work)
                             matches <- matches + 1
                             return_type <- declared_return
                             body.clear()
                             body.extend(statements)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        proof_replay_typed_return_owner(nested, owner, owner_line, return_type, body, matches, depth + 1)
+                        return false if not proof_replay_typed_return_owner_with_work(nested, owner, owner_line, return_type, body, matches, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         # The source return value, or one arm of its conditional, is the bound constant.
         # A named constant matches through a validated global-constant fact of the owner.
@@ -103,8 +109,9 @@ extend ElisaProof:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             source_work <- source_work + 1
-            if proof_replay_expr_equal_with_work(source, value, source_work) and proof_replay_local_binding_expr_positions_match(value, source):
-                return true
+            if proof_replay_expr_equal_with_work(source, value, source_work):
+                return false if not proof_replay_summary_expr_repeat_charge_with_work(source, 1, source_work) or not proof_replay_summary_expr_repeat_charge_with_work(value, 1, source_work)
+                return true if proof_replay_local_binding_expr_positions_match(value, source)
             match source:
                 Ast::Expr.If(_, then_value, else_value, _):
                     return proof_replay_typed_return_value_matches_with_work(report, trace, then_value, value, source_work, depth + 1) or proof_replay_typed_return_value_matches_with_work(report, trace, else_value, value, source_work, depth + 1)
@@ -162,8 +169,8 @@ extend ElisaProof:
                     return_type: mutable Ast::Expr = Ast::Expr.Absent
                     body: mutable darray[Ast::Stmt] = []
                     matches: mutable usize = 0
-                    proof_replay_typed_return_owner(report.source_declarations, trace.name, owner_line, &return_type, &body, &matches, 0)
-                    return false if matches != 1
+                    return false if not proof_replay_typed_return_owner_with_work(report.source_declarations, trace.name, owner_line, &return_type, &body, &matches, source_work, 0) or matches != 1
+                    return false if not proof_replay_summary_expr_repeat_charge_with_work(value, 2, source_work)
                     width: i64 = proof_signed_type_width_with_work(return_type, report.source_declarations, 0, source_work)
                     return false if width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
                     found: mutable usize = 0

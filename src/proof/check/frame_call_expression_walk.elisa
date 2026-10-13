@@ -1,0 +1,321 @@
+extend ElisaProof:
+    private:
+        def proof_frame_state_copy_with_work(facts: darray[Ast::Expr]&, values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return false if not proof_frame_source_work_take(report, name, line, facts.count + values.count, "frame-branch-state-copy-work", "branch frame state copying exceeded its bounded source-work budget")
+            for fact in facts |fact, report, name, line|:
+                return false if not proof_frame_expression_rechecks_with_work(fact, report, name, line, 1)
+            for value in values |value, report, name, line|:
+                return false if not proof_frame_expression_rechecks_with_work(value, report, name, line, 1)
+            true
+
+        # Join call-sensitive states using only facts and values shared by both outcomes.
+        # Every structural comparison is charged before the replay comparator runs.
+        def proof_frame_join_call_states(first_facts: darray[Ast::Expr]&, second_facts: darray[Ast::Expr]&, first_values: darray[Ast::Expr]&, second_values: darray[Ast::Expr]&, output_facts: mutable darray[Ast::Expr]&, output_values: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, line: u32) -> void can[Global.Read, Global.Write]:
+            output_facts.clear()
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            for fact in first_facts |fact, output_facts, second_facts, names, parameters, report, owner, line, source_work|:
+                shared: mutable bool = false
+                for other in second_facts |other, fact, shared, report, owner, line|:
+                    equal: (complete: bool, equal: bool) = proof_frame_expr_equal_with_work(other, fact, report, owner, line)
+                    return if not equal.complete
+                    shared <- equal.equal
+                    break if shared
+                continue if not shared
+                duplicate: mutable bool = false
+                for prior in output_facts |prior, fact, duplicate, report, owner, line|:
+                    equal: (complete: bool, equal: bool) = proof_frame_expr_equal_with_work(prior, fact, report, owner, line)
+                    return if not equal.complete
+                    duplicate <- equal.equal
+                    break if duplicate
+                output_facts.push(fact) if not duplicate
+            report.source_effect_index.implicit_effect_work <- source_work
+            # Establish the literal intersection before stability checks, so scalar witnesses
+            # present in just one possible outcome cannot preserve other facts or values.
+            # Seed stability from all literal common facts before filtering. The stability
+            # relation can be mutually supporting (for example, a call fact may depend on a
+            # later scalar marker), so a single ordered pass would make retention depend on
+            # source fact order. Every seed is independently common to both outcomes.
+            common_facts: darray[Ast::Expr] = output_facts
+            stable_facts: mutable darray[Ast::Expr] = []
+            for fact in common_facts |fact, stable_facts, names, parameters, report, owner, line, source_work|:
+                stability: (complete: bool, stable: bool) = proof_expr_call_stable_with_work(fact, common_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0, &source_work)
+                report.source_effect_index.implicit_effect_work <- source_work
+                return if not stability.complete
+                stable_facts.push(fact) if stability.stable
+            output_facts.clear()
+            output_facts.extend(stable_facts)
+            report.source_effect_index.implicit_effect_work <- source_work
+            output_values.clear()
+            count: usize = first_values.count if first_values.count < second_values.count else second_values.count
+            count <- names.count if names.count < count
+            for index in 0..<count |index, first_values, second_values, output_values, output_facts, names, parameters, report, owner, line, source_work|:
+                equal: (complete: bool, equal: bool) = proof_frame_expr_equal_with_work(first_values[index], second_values[index], report, owner, line)
+                return if not equal.complete
+                if equal.equal:
+                    stability: (complete: bool, stable: bool) = proof_expr_call_stable_with_work(first_values[index], stable_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0, &source_work)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return if not stability.complete
+                    output_values.push(first_values[index] if stability.stable else Ast::Expr.Invalid)
+                else:
+                    output_values.push(Ast::Expr.Invalid)
+            report.source_effect_index.implicit_effect_work <- source_work
+
+        # Conditions and other compound expressions can contain calls even when there is no
+        # standalone call statement. Track child calls in evaluation order so later subexpressions
+        # see only validated post-call facts; callers that need a disposable state pass a copy.
+        def proof_check_frame_calls_in_expression[@r](expression: Ast::Expr, facts: mutable darray[Ast::Expr]& @r, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+            expression_position: Ast::Pos = Ast::expr_pos(expression)
+            return if proof_frame_source_work_stop(report, name, expression_position.line)
+            return if not proof_frame_source_work_take(report, name, expression_position.line, 1, "frame-expression-nodes", "frame expression traversal exceeded its bounded source-work budget")
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # Only the source-aware classifier may call this a builtin conversion;
+                    # a method-shaped selector can dispatch to a user `__cast__` hook.
+                    numeric_cast: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
+                    if numeric_cast.known:
+                        (proof_check_frame_calls_in_expression(numeric_cast.receiver, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return
+                    return if not proof_frame_analysis_budget_available(expression, facts, report, name)
+                    integer_conversion: (complete: bool, recognized: bool) = proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask, report, name)
+                    return if not integer_conversion.complete or integer_conversion.recognized
+                    report.budgets.frame_call_steps <- report.budgets.frame_call_steps + 1
+                    # Check children sequentially so an earlier call's effects reach later arguments.
+                    (proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    current_call: Ast::Expr = proof_substitute(expression, names, values)
+                    return if not proof_frame_source_work_take(report, name, expression_position.line, facts.count * 2, "frame-call-fact-copy-work", "frame call fact copying exceeded its bounded source-work budget")
+                    pre_call_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    probe_facts: mutable darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    # The callee resolves the arguments itself; see proof_call_source.
+                    applied: bool = (proof_apply_function(expression, current_call, &probe_facts, functions, names, values, parameter_names, changes, preserves, report, name, annotations) can Global{Read,Write})
+                    return if applied and not proof_frame_analysis_budget_available(expression, probe_facts, report, name)
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    proof_check_opaque_call_frame(current_call, expression, facts, names, parameter_names, changes, preserves, functions, report, name) if not applied
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    facts.clear()
+                    if applied:
+                        return if not proof_frame_source_work_take(report, name, expression_position.line, probe_facts.count, "frame-call-fact-copy-work", "frame call fact copying exceeded its bounded source-work budget")
+                        for fact in probe_facts |facts|:
+                            facts.push(fact)
+                    proof_restore_type_bound_facts(pre_call_facts, facts, names, report, name) if not proof_expr_has_move(expression)
+                    # An opaque nested call reaches an unreferenced by-value scalar local no
+                    # more than a call statement does: the facts over such locals come back.
+                    proof_restore_call_stable_facts(pre_call_facts, facts, names, parameter_names, report, name, proof_statement_lend_roots(expression, functions, names)) if not applied and not proof_expr_has_move(expression)
+                    # A nested call has no destination binding to preserve. Forget every value
+                    # the callee can reach, so a later sibling or the enclosing call sees only
+                    # current-state identifiers, never a pre-call alias expression. A value no
+                    # callee can reach survives under the rule a call statement applies; that is
+                    # what keeps a loop binder's atom across `flags[slot] and done(slot)`.
+                    proof_forget_values_after_call_with_aliases(names, values, facts, parameter_names, report, name, values.count, values.count, Ast::expr_pos(expression), proof_opaque_call_extra_alias_roots(expression, functions, names))
+                Ast::Expr.Paren(inner, _):
+                    (proof_check_frame_calls_in_expression(inner, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Unary(_, operand, _):
+                    (proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Binary(left, operator, right, _):
+                    (proof_check_frame_calls_in_expression(left, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    if operator == TokenKind.And or operator == TokenKind.Or:
+                        return if not proof_frame_expression_rechecks_with_work(right, report, name, expression_position.line, 2)
+                    if (operator == TokenKind.And or operator == TokenKind.Or) and proof_expr_has_executable_call(right):
+                        # The right operand may not execute, even when its calls are pure: a
+                        # pure function can still establish ensures. Join both possible states.
+                        return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                        before_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                        before_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                        (proof_check_frame_calls_in_expression(right, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                        return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                        right_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                        right_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                        proof_frame_join_call_states(before_facts, right_facts, before_values, right_values, facts, values, names, parameter_names, report, name, expression_position.line)
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    else:
+                        (proof_check_frame_calls_in_expression(right, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Field(object, _, _):
+                    (proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Scope(base, _, _):
+                    (proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Index(object, index, _):
+                    (proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    (proof_check_frame_calls_in_expression(index, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Slice(object, low, high, _):
+                    (proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    (proof_check_frame_calls_in_expression(low, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    (proof_check_frame_calls_in_expression(high, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.IndexN(object, arguments, _):
+                    (proof_check_frame_calls_in_expression(object, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.Move(operand, _):
+                    (proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.RegionNew(operand, _, _):
+                    (proof_check_frame_calls_in_expression(operand, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Array(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(element, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(entry.key, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                        (proof_check_frame_calls_in_expression(entry.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.Construct(type_expression, fields, _):
+                    (proof_check_frame_calls_in_expression(type_expression, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    for field in fields |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(field.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    (proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    for field in fields |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(field.value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    (proof_check_frame_calls_in_expression(condition, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    # The arms are alternatives. Run each from the state after the condition,
+                    # then retain only facts and values that hold in both resulting states.
+                    return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                    entry_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    entry_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                    (proof_check_frame_calls_in_expression(then_expr, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                    then_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    then_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                    facts.clear()
+                    return if not proof_frame_state_copy_with_work(entry_facts, entry_values, report, name, expression_position.line)
+                    facts.extend(entry_facts)
+                    values.clear()
+                    values.extend(entry_values)
+                    (proof_check_frame_calls_in_expression(else_expr, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                    else_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    else_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                    proof_frame_join_call_states(then_facts, else_facts, then_values, else_values, facts, values, names, parameter_names, report, name, expression_position.line)
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    (proof_check_frame_calls_in_expression(iterable, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    # A comprehension can run zero times. Check its predicate and body in a
+                    # disposable iteration state, then join that state with the state after the
+                    # iterable (the zero-iteration path).
+                    return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                    entry_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    entry_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                    (proof_check_frame_calls_in_expression(condition, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    (proof_check_frame_calls_in_expression(body, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
+                    iterated_facts: darray[Ast::Expr] @r = proof_copy_exprs(facts)
+                    iterated_values: darray[Ast::Expr] @r = proof_copy_exprs(values)
+                    proof_frame_join_call_states(iterated_facts, entry_facts, iterated_values, entry_values, facts, values, names, parameter_names, report, name, expression_position.line)
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                Ast::Expr.Refinement(base, predicate, _):
+                    (proof_check_frame_calls_in_expression(base, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    (proof_check_frame_calls_in_expression(predicate, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.GetElse(guarded, _, _):
+                    # The recovery body is checked as a statement path by proof_check_returns;
+                    # this expression walk covers only calls evaluated on the successful value
+                    # path and prevents a guarded call from being classified as an opaque frame.
+                    (proof_check_frame_calls_in_expression(guarded, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                Ast::Expr.Catch(guarded, arms, _):
+                    # The return-boundary catch checker applies the guarded call summary on the
+                    # success arm and performs a disposable frame probe for error arms. Walk the
+                    # guarded expression here as well for callers that inspect a catch before
+                    # reaching that boundary.
+                    has_calls: mutable bool = false
+                    return if not proof_frame_expression_rechecks_with_work(guarded, report, name, expression_position.line, 1)
+                    has_calls <- proof_expr_has_call(guarded)
+                    for arm in arms |arm, has_calls, report, name, expression_position|:
+                        return if not proof_frame_expression_rechecks_with_work(arm.guard, report, name, expression_position.line, 1)
+                        has_calls <- has_calls or proof_expr_has_call(arm.guard)
+                        if arm.body.count == 1:
+                            match arm.body[0]:
+                                Ast::Stmt.Expr(value, _):
+                                    return if not proof_frame_expression_rechecks_with_work(value, report, name, expression_position.line, 1)
+                                    has_calls <- has_calls or proof_expr_has_call(value)
+                                _:
+                                    pass
+                    if not has_calls:
+                        (proof_check_frame_calls_in_expression(guarded, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        for arm in arms |facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations|:
+                            (proof_check_frame_calls_in_expression(arm.guard, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                            if arm.body.count == 1:
+                                match arm.body[0]:
+                                    Ast::Stmt.Expr(value, _):
+                                        (proof_check_frame_calls_in_expression(value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                                    _:
+                                        pass
+                        return
+                    (proof_check_frame_calls_in_expression(guarded, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    # A throw can happen after any call in the guarded expression. Until
+                    # exceptional effects have their own summary, error arms begin with no
+                    # carried facts or symbolic values.
+                    return if not proof_frame_source_work_take(report, name, expression_position.line, facts.count + values.count, "frame-catch-state-reset-work", "catch frame state reset exceeded its bounded source-work budget")
+                    facts.clear()
+                    for index in 0..<values.count |index, values|:
+                        values[index] <- Ast::Expr.Invalid
+                    for arm in arms |facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations|:
+                        return if not proof_frame_source_work_take(report, name, expression_position.line, facts.count + values.count, "frame-catch-state-reset-work", "catch frame state reset exceeded its bounded source-work budget")
+                        facts.clear()
+                        for index in 0..<values.count |index, values|:
+                            values[index] <- Ast::Expr.Invalid
+                        (proof_check_frame_calls_in_expression(arm.guard, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                        if arm.body.count == 1:
+                            match arm.body[0]:
+                                Ast::Stmt.Expr(value, _):
+                                    (proof_check_frame_calls_in_expression(value, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                                _:
+                                    pass
+                    # The exceptional transfer of the guarded expression has no separate frame
+                    # summary, so no post-catch fact or binding value is safe to export here.
+                    return if not proof_frame_source_work_take(report, name, expression_position.line, facts.count + values.count, "frame-catch-state-reset-work", "catch frame state reset exceeded its bounded source-work budget")
+                    facts.clear()
+                    for index in 0..<values.count |index, values|:
+                        values[index] <- Ast::Expr.Invalid
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                _:
+                    if changes.count > 0 or preserves.count > 0:
+                        return if not proof_frame_expression_rechecks_with_work(expression, report, name, expression_position.line, 1)
+                    if proof_expr_has_call(expression) and (changes.count > 0 or preserves.count > 0):
+                        report.proof_obligation(false)
+                        proof_add_finding(report, "frame-expression-opaque", expression_position.line, name, "unsupported expression may contain an unmodeled call with frame effects")
+
+        # A summarized outer call must not hide calls evaluated in its callee or arguments.
+        # Check these children against the caller's pre-call facts before applying the outer
+        # summary; the outer ensure is a post-call fact and cannot justify an argument's
+        # precondition.
+        def proof_check_frame_call_children(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, values: mutable darray[Ast::Expr]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> void can[Global.Read, Global.Write]:
+            expression_position: Ast::Pos = Ast::expr_pos(expression)
+            return if proof_frame_source_work_stop(report, name, expression_position.line)
+            match expression:
+                Ast::Expr.Call(callee, arguments, _, _):
+                    (proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                    return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
+                        (proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                _:
+                    pass
+

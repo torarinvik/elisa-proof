@@ -1,0 +1,562 @@
+extend ElisaProof:
+    private:
+        def proof_branch_join_report_exhausted(report: mutable ProofReport&) -> void:
+            report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+
+        # A joined call-bearing fact must survive calls in either outcome independently.
+        # Witnesses from the union of arm facts are not valid evidence for both post-states.
+        def proof_branch_join_call_stable_in_both_arms(expression: Ast::Expr, then_facts: darray[Ast::Expr]&, else_facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview) -> (complete: bool, stable: bool):
+            work: mutable usize = report.source_effect_index.implicit_effect_work
+            then_stability: (complete: bool, stable: bool) = proof_expr_call_stable_with_work(expression, then_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0, &work)
+            if not then_stability.complete:
+                report.source_effect_index.implicit_effect_work <- work
+                return (false, false)
+            if not then_stability.stable:
+                report.source_effect_index.implicit_effect_work <- work
+                return (true, false)
+            else_stability: (complete: bool, stable: bool) = proof_expr_call_stable_with_work(expression, else_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0, &work)
+            report.source_effect_index.implicit_effect_work <- work
+            return (false, false) if not else_stability.complete
+            (true, else_stability.stable)
+
+        def proof_branch_join_reserve_expression(expression: Ast::Expr, repetitions: usize, report: mutable ProofReport&) -> bool:
+            if not proof_replay_summary_expr_repeat_charge_with_work(expression, repetitions, report.source_effect_index.implicit_effect_work):
+                proof_branch_join_report_exhausted(report)
+                return false
+            true
+
+        def proof_branch_join_measure_expression(expression: Ast::Expr, maximum_cost: mutable usize&, report: mutable ProofReport&) -> bool:
+            work: mutable usize = report.source_effect_index.implicit_effect_work
+            cost: mutable usize = 0
+            if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                proof_branch_join_report_exhausted(report)
+                return false
+            if not proof_replay_source_work_charge_or_exhaust(cost, work):
+                proof_branch_join_report_exhausted(report)
+                return false
+            maximum_cost <- cost if cost > maximum_cost
+            report.source_effect_index.implicit_effect_work <- work
+            true
+
+        def proof_branch_join_reserve_names(names: darray[sview]&, report: mutable ProofReport&) -> bool:
+            for name in names |name, report|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), report.source_effect_index.implicit_effect_work)
+            true
+
+        def proof_branch_join_reserve_names_repeated(names: darray[sview]&, repetitions: usize, report: mutable ProofReport&) -> bool:
+            return false if repetitions > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for name in names |name, repetitions, report|:
+                return false if sview_len(name) + 1 > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / (repetitions + 1)
+                amount: usize = (sview_len(name) + 1) * repetitions
+                return false if not proof_replay_source_work_charge_or_exhaust(amount, report.source_effect_index.implicit_effect_work)
+            true
+
+        def proof_branch_join_reserve_body(body: darray[Ast::Stmt]&, repetitions: usize, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_effect_index.implicit_effect_work
+            cost: mutable usize = 0
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_replay_summary_expr_cost_body(body, &cost, work, 0):
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            if repetitions >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            passes: usize = repetitions + 1
+            if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / passes:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            report.source_effect_index.implicit_effect_work <- work + cost * passes
+            true
+
+        # Alias collection performs several call classifications and can resolve a call by
+        # scanning all function rows when names repeat across modules. Reserve a fixed allowance
+        # for those lookups per AST node in every repeated body pass.
+        def proof_branch_join_reserve_alias_body(body: darray[Ast::Stmt]&, repetitions: usize, functions: ProofFunctionTable&, report: mutable ProofReport&) -> bool:
+            work: usize = report.source_effect_index.implicit_effect_work
+            cost: mutable usize = 0
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or not proof_replay_summary_expr_cost_body(body, &cost, work, 0):
+                proof_branch_join_report_exhausted(report)
+                return false
+            function_rows: usize = functions.lookup.names.count
+            if function_rows >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return false
+            multiplier: usize = (function_rows + 1) * 8
+            if multiplier > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / (repetitions + 1):
+                proof_branch_join_report_exhausted(report)
+                return false
+            passes: usize = (repetitions + 1) * multiplier
+            if cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / passes:
+                proof_branch_join_report_exhausted(report)
+                return false
+            report.source_effect_index.implicit_effect_work <- work + cost * passes
+            true
+
+        def proof_join_reads(source: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, arm_values: darray[Ast::Expr]&, limit: usize, report: mutable ProofReport&) -> darray[Ast::Expr]:
+            slot_count: usize = values.count if values.count < names.count else names.count
+            slot_count <- arm_values.count if arm_values.count < slot_count
+            slot_count <- limit if limit < slot_count
+            return [] if not proof_branch_join_reserve_names(names, report)
+            return [] if not proof_replay_source_work_charge_or_exhaust(slot_count, report.source_effect_index.implicit_effect_work)
+            stale: mutable darray[sview] = []
+            for index in 0..<names.count |index, values, names, arm_values, limit, stale|:
+                continue if index >= limit or index >= values.count or proof_ident_name(values[index]) != names[index]
+                stale.push(names[index]) if index >= arm_values.count or proof_ident_name(arm_values[index]) != names[index]
+            return [] if not proof_branch_join_reserve_names(names, report) or not proof_branch_join_reserve_names(stale, report)
+            for fact in source |fact, report, stale|:
+                return [] if not proof_branch_join_reserve_expression(fact, stale.count, report)
+            kept: mutable darray[Ast::Expr] = []
+            for fact in source |stale, kept|:
+                kept.push(fact) if not (any name in stale where proof_expr_mentions_name(fact, name))
+            return kept
+
+        # Re-establish, at a join both arms reach, a fact that one arm states and the other arm
+        # implies. A binding the join forgot is a fresh atom under its own name; on each path it
+        # equals that arm's recorded value, so a candidate holds at the join when each arm proves
+        # it with the forgotten names replaced by the arm's values. That holds even when both arms
+        # record the same `b`: each arm reads its atoms in its own state, and on either path the
+        # joined atom is that arm's value. A name the join kept keeps its atom and is not replaced.
+        # A fact both arms state and read unchanged is left to the literal intersection, which bounds the search. `if flag: best <- slot` thus keeps `best <= CAP`: the
+        # untouched arm states it and the other derives it from `best == slot` and `slot < CAP`.
+        def proof_restore_branch_implied_facts(then_facts: mutable darray[Ast::Expr]&, else_facts: mutable darray[Ast::Expr]&, prior_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, values: darray[Ast::Expr]&, names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, annotations: darray[Ast::EnumAnnotation]&, position: Ast::Pos, arms_call_free: bool) -> void can[Global.Read, Global.Write]:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            capped: mutable usize = limit if limit < values.count else values.count
+            capped <- names.count if names.count < capped
+            capped <- then_values.count if then_values.count < capped
+            capped <- else_values.count if else_values.count < capped
+            return if not proof_replay_source_work_charge_or_exhaust(names.count + capped, report.source_effect_index.implicit_effect_work)
+            then_map: mutable darray[Ast::Expr] = []
+            else_map: mutable darray[Ast::Expr] = []
+            joined: mutable darray[sview] = []
+            for index in 0..<names.count |index, names, values, then_values, else_values, capped, then_map, else_map, joined, position|:
+                forgotten: bool = index < capped and proof_ident_name(values[index]) == names[index]
+                then_map.push(then_values[index] if forgotten else Ast::Expr.Ident(names[index], position))
+                else_map.push(else_values[index] if forgotten else Ast::Expr.Ident(names[index], position))
+                joined.push(names[index]) if forgotten
+            return if joined.count == 0
+            # Equal-renaming expansion scans each arm's facts to find equality witnesses, then
+            # scans those facts again for every matching witness. In the worst case this creates
+            # O(joined × source²) candidates. Reserve that bound before constructing any of them.
+            if then_facts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or else_facts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - then_facts.count or prior_facts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - then_facts.count - else_facts.count:
+                proof_branch_join_report_exhausted(report)
+                return
+            source_candidates: usize = then_facts.count + else_facts.count + prior_facts.count
+            candidate_bound: usize = source_candidates
+            if source_candidates > 0:
+                if source_candidates > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / source_candidates:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                square_bound: usize = source_candidates * source_candidates
+                if square_bound > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                per_name_rename_bound: usize = square_bound * 2
+                if joined.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / per_name_rename_bound:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                rename_bound: usize = joined.count * per_name_rename_bound
+                if source_candidates > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - rename_bound:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                if joined.count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - rename_bound - source_candidates) / source_candidates:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                candidate_bound <- rename_bound + joined.count * source_candidates + source_candidates
+            # Candidate de-duplication compares each candidate against the candidates already
+            # accepted, so reserve the quadratic pair scan too. The AST-size reservations below
+            # apply this pair bound to every source fact before any candidate is generated.
+            if candidate_bound > 0 and candidate_bound > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / candidate_bound:
+                proof_branch_join_report_exhausted(report)
+                return
+            candidate_pair_bound: usize = candidate_bound * candidate_bound
+            repeats: usize = candidate_pair_bound
+            for count in [facts.count, then_facts.count, else_facts.count, names.count, then_names.count, else_names.count, joined.count, parameters.count, report.aliased_names.count, report.shared_extent_names.count, report.shared_fixed_names.count, report.local_extent_names.count, report.threaded_symbols.count, 16] |repeats|:
+                if count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - repeats:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                repeats <- repeats + count
+            if repeats > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return
+            return if not proof_branch_join_reserve_names(names, report)
+            return if not proof_branch_join_reserve_names(then_names, report) or not proof_branch_join_reserve_names(else_names, report) or not proof_branch_join_reserve_names(joined, report)
+            for fact in then_facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            for fact in else_facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            for fact in prior_facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            # Replacing one place can compare every source node with the replacement and can
+            # copy the replacement once per matching occurrence. Bound that product for all
+            # generated candidates before `proof_push_renamed_facts` starts constructing ASTs.
+            maximum_source_cost: mutable usize = 1
+            for fact in then_facts |fact, maximum_source_cost, report|:
+                return if not proof_branch_join_measure_expression(fact, &maximum_source_cost, report)
+            for fact in else_facts |fact, maximum_source_cost, report|:
+                return if not proof_branch_join_measure_expression(fact, &maximum_source_cost, report)
+            for fact in prior_facts |fact, maximum_source_cost, report|:
+                return if not proof_branch_join_measure_expression(fact, &maximum_source_cost, report)
+            maximum_replacement_cost: mutable usize = maximum_source_cost
+            for replacement in then_map |replacement, maximum_replacement_cost, report|:
+                return if not proof_branch_join_measure_expression(replacement, &maximum_replacement_cost, report)
+            for replacement in else_map |replacement, maximum_replacement_cost, report|:
+                return if not proof_branch_join_measure_expression(replacement, &maximum_replacement_cost, report)
+            if maximum_source_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / maximum_replacement_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            expanded_candidate_cost: usize = maximum_source_cost * maximum_replacement_cost
+            per_candidate_rename_cost: usize = expanded_candidate_cost
+            if per_candidate_rename_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return
+            per_candidate_rename_cost <- per_candidate_rename_cost * 8
+            if candidate_bound > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / per_candidate_rename_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            return if not proof_replay_source_work_charge_or_exhaust(candidate_bound * per_candidate_rename_cost, report.source_effect_index.implicit_effect_work)
+            # Each candidate is substituted under both arm maps after generation. The
+            # substitution walks every expanded node and probes the full name map at each
+            # identifier, while candidate de-duplication compares expanded ASTs pairwise.
+            name_scan_cost: mutable usize = 0
+            for name in names |name, name_scan_cost, report|:
+                amount: usize = 1 + sview_len(name)
+                if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - name_scan_cost:
+                    proof_branch_join_report_exhausted(report)
+                    return
+                name_scan_cost <- name_scan_cost + amount
+            maximum_text_cost: usize = maximum_source_cost if maximum_source_cost > maximum_replacement_cost else maximum_replacement_cost
+            if names.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / maximum_text_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            repeated_identifier_cost: usize = names.count * maximum_text_cost
+            if repeated_identifier_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - name_scan_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            substitution_unit: usize = name_scan_cost + repeated_identifier_cost
+            if maximum_replacement_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - substitution_unit:
+                proof_branch_join_report_exhausted(report)
+                return
+            substitution_unit <- substitution_unit + maximum_replacement_cost
+            if substitution_unit > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8 or expanded_candidate_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / (substitution_unit * 8):
+                proof_branch_join_report_exhausted(report)
+                return
+            per_candidate_substitution_cost: usize = expanded_candidate_cost * substitution_unit * 8
+            if candidate_bound > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / per_candidate_substitution_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            return if not proof_replay_source_work_charge_or_exhaust(candidate_bound * per_candidate_substitution_cost, report.source_effect_index.implicit_effect_work)
+            if expanded_candidate_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return
+            pair_comparison_cost: usize = expanded_candidate_cost * 8
+            if candidate_pair_bound > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / pair_comparison_cost:
+                proof_branch_join_report_exhausted(report)
+                return
+            return if not proof_replay_source_work_charge_or_exhaust(candidate_pair_bound * pair_comparison_cost, report.source_effect_index.implicit_effect_work)
+            return if not proof_replay_source_work_charge_or_exhaust(candidate_bound, report.source_effect_index.implicit_effect_work)
+            candidates: mutable darray[Ast::Expr] = []
+            candidates.extend(then_facts)
+            candidates.extend(else_facts)
+            # A fact that held before the branch, a loop invariant such as `cursor <= stop`
+            # among them, is a candidate too, when both arms rebound a name it reads.
+            candidates.extend(prior_facts)
+            # An arm that steps a joined name by one leaves `L <= R` true only one step wider:
+            # `if take: lo <- lo + 1` turns the invariant `lo <= k` into `lo <= k + 1`, which the
+            # loop's later `k <- k + 1` closes. Each widening is still proved in both arms below.
+            proof_push_widened_facts(&candidates, prior_facts, joined, position)
+            # An arm that records a joined name as some other expression, `b: usize = best`,
+            # states its facts over that expression; read them back over the name as well.
+            for index in 0..<then_map.count |index, names, then_map, else_map, joined, then_facts, else_facts, candidates|:
+                continue if not (any name in joined where name == names[index])
+                proof_push_renamed_facts(&candidates, then_facts, then_map[index], names[index]) if proof_ident_name(then_map[index]) != names[index]
+                proof_push_equal_renamings(&candidates, then_facts, names[index])
+                proof_push_equal_renamings(&candidates, else_facts, names[index])
+            accepted: mutable darray[Ast::Expr] = []
+            then_steps: mutable darray[Ast::Expr] = []
+            else_steps: mutable darray[Ast::Expr] = []
+            for fact in candidates |candidates, then_facts, else_facts, facts, names, parameters, report, annotations, then_map, else_map, joined, accepted, then_steps, else_steps, prior_facts, arms_call_free|:
+                continue if not (any name in joined where proof_expr_mentions_name(fact, name))
+                # A local an arm declared ends with the arm, so only its steps may read one.
+                continue if proof_expr_mentions_arm_local(fact, then_names, names.count) or proof_expr_mentions_arm_local(fact, else_names, names.count)
+                continue if any existing in facts where proof_expr_equal(existing, fact)
+                continue if any existing in accepted where proof_expr_equal(existing, fact)
+                # As at the literal intersection, call-free arms need no call-stability for a
+                # candidate that held before the branch, `forall i in 0..<lo: xs[i] < p` among them.
+                held_before: bool = arms_call_free and (any earlier in prior_facts where proof_expr_equal(earlier, fact))
+                # Call-free arms run nothing but their own statements, and each arm proves the
+                # candidate below, so neither a prior fact nor an arm's own needs call-stability.
+                if not held_before and not arms_call_free:
+                    stability: (complete: bool, stable: bool) = proof_branch_join_call_stable_in_both_arms(fact, then_facts, else_facts, names, parameters, report, owner)
+                    if not stability.complete:
+                        proof_branch_join_report_exhausted(report)
+                        return
+                    continue if not stability.stable
+                then_step: Ast::Expr = proof_substitute(fact, names, then_map)
+                else_step: Ast::Expr = proof_substitute(fact, names, else_map)
+                # Both arms stating the fact leave it to the literal intersection only when both
+                # read it unchanged. An arm that rebound a name, `cursor <- cursor + 1`, states it
+                # over the old value; the intersection drops that reading, so it is decided here.
+                # The intersection takes only a prior or call-stable fact; any other is decided here.
+                intersected: mutable bool = held_before
+                if not intersected:
+                    intersection_stability: (complete: bool, stable: bool) = proof_branch_join_call_stable_in_both_arms(fact, then_facts, else_facts, names, parameters, report, owner)
+                    if not intersection_stability.complete:
+                        proof_branch_join_report_exhausted(report)
+                        return
+                    intersected <- intersection_stability.stable
+                continue if intersected and proof_expr_equal(then_step, fact) and proof_expr_equal(else_step, fact) and (any other in then_facts where proof_expr_equal(other, fact)) and (any other in else_facts where proof_expr_equal(other, fact))
+                # The joined fact is recorded through an arm whose own reading is the fact itself,
+                # so its trace is that arm's kernel-checked step.
+                continue if not proof_expr_equal(then_step, fact) and not proof_expr_equal(else_step, fact)
+                continue if not (proof_goal_reported(report, then_facts, then_step, annotations) can Global{Read,Write})
+                continue if not (proof_goal_reported(report, else_facts, else_step, annotations) can Global{Read,Write})
+                accepted.push(fact)
+                then_steps.push(then_step)
+                else_steps.push(else_step)
+            for index in 0..<accepted.count |index, accepted, then_steps, else_steps, then_facts, else_facts, facts, report, owner, position, annotations|:
+                (proof_add_branch_join_fact(then_facts, report, then_steps[index], position.line, owner, annotations) can Global{Read,Write}) if not (any existing in then_facts where proof_expr_equal(existing, then_steps[index]))
+                (proof_add_branch_join_fact(else_facts, report, else_steps[index], position.line, owner, annotations) can Global{Read,Write}) if not (any existing in else_facts where proof_expr_equal(existing, else_steps[index]))
+                then_held: bool = any existing in then_facts where proof_expr_equal(existing, then_steps[index])
+                else_held: bool = any existing in else_facts where proof_expr_equal(existing, else_steps[index])
+                facts.push(accepted[index]) if then_held and else_held
+
+        # Join a binding both arms rebind to different values as `then if c else other`, where `c`
+        # is the condition read before the branch (G75): `if c: t <- a` / `else: t <- b` leaves
+        # `t` as `a if c else b` rather than a fresh atom with no facts, and the kernel reasons
+        # over the conditional directly. Facts an arm states over its value enter guarded by the
+        # path, `not c or F` and `c or G`: each holds on both paths, and each replays from its
+        # arm's own traced fact, so no trust is added. `c` may read only scalars neither arm
+        # rebinds, through plain operators, so it means the same at the join as at the fork.
+        def proof_join_conditional_values(condition: Ast::Expr, then_body: darray[Ast::Stmt]&, else_body: darray[Ast::Stmt]&, functions: mutable ProofFunctionTable&, prior_values: darray[Ast::Expr]&, values: mutable darray[Ast::Expr]&, names: darray[sview]&, then_values: darray[Ast::Expr]&, else_values: darray[Ast::Expr]&, then_facts: darray[Ast::Expr]&, else_facts: darray[Ast::Expr]&, then_names: darray[sview]&, else_names: darray[sview]&, limit: usize, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
+            return if not analyzed
+            preflight_cap: usize = limit if limit < values.count else values.count
+            preflight_cap <- names.count if names.count < preflight_cap
+            preflight_cap <- prior_values.count if prior_values.count < preflight_cap
+            preflight_cap <- then_values.count if then_values.count < preflight_cap
+            preflight_cap <- else_values.count if else_values.count < preflight_cap
+            return if not proof_branch_join_reserve_expression(condition, 4, report)
+            # Reserve alias collection's call-to-function resolution as well as AST traversal
+            # before collecting write sets. A call can scan the whole function table.
+            # Each body pass includes calls to
+            # aliased-name collection, assignment-root collection, and the outer per-slot
+            # written-name membership check. Their nested AST and name work is bounded by
+            # complete body/expression costs, so scale by the slot count here.
+            body_passes: usize = preflight_cap * 2 + 5
+            if body_passes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 2:
+                proof_branch_join_report_exhausted(report)
+                return
+            return if not proof_branch_join_reserve_alias_body(then_body, body_passes, functions, report) or not proof_branch_join_reserve_alias_body(else_body, body_passes, functions, report)
+            return if not proof_branch_join_reserve_names(names, report)
+            # Each fixed-point round checks each expression against the changing-name set.
+            # Reserve the quadratic number of expression visits once across the whole value
+            # set, then reserve the string-list scans for the cubic name-membership loop.
+            if preflight_cap > 0 and preflight_cap > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / preflight_cap:
+                proof_branch_join_report_exhausted(report)
+                return
+            square: usize = preflight_cap * preflight_cap
+            if square > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 4:
+                proof_branch_join_report_exhausted(report)
+                return
+            value_repetitions: usize = square * 4 + preflight_cap * 8 + 16
+            if value_repetitions > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 5:
+                proof_branch_join_report_exhausted(report)
+                return
+            membership_repetitions: usize = square * 4 + preflight_cap * 8 + 16
+            if membership_repetitions > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return
+            if not proof_branch_join_reserve_names_repeated(names, square * 4 + 8, report) or not proof_branch_join_reserve_names_repeated(then_names, preflight_cap + 2, report) or not proof_branch_join_reserve_names_repeated(else_names, preflight_cap + 2, report) or not proof_branch_join_reserve_names_repeated(then_written, membership_repetitions, report) or not proof_branch_join_reserve_names_repeated(else_written, membership_repetitions, report):
+                proof_branch_join_report_exhausted(report)
+                return
+            for value in then_values |value, report, value_repetitions|:
+                return if not proof_branch_join_reserve_expression(value, value_repetitions * 5, report)
+            for value in else_values |value, report, value_repetitions|:
+                return if not proof_branch_join_reserve_expression(value, value_repetitions * 5, report)
+            for value in prior_values |value, report, value_repetitions|:
+                return if not proof_branch_join_reserve_expression(value, value_repetitions * 5, report)
+            return if not proof_join_condition_plain(condition, 0) or not proof_kernel_expression_supported(condition)
+            capped: mutable usize = preflight_cap
+            # What each arm writes, as at a loop entry. An arm that writes a binding and leaves
+            # it as its own atom has reused that atom for a new value inside the arm.
+            then_written: mutable darray[sview] = []
+            no_value_roots: darray[sview] = []
+            proof_collect_aliased_names(then_body, functions, &then_written, false, no_value_roots)
+            proof_collect_assignment_roots(then_body, &then_written)
+            else_written: mutable darray[sview] = []
+            proof_collect_aliased_names(else_body, functions, &else_written, false, no_value_roots)
+            proof_collect_assignment_roots(else_body, &else_written)
+            return if (any name in then_written where name == "*") or (any name in else_written where name == "*")
+            reused: mutable darray[sview] = []
+            for index in 0..<capped |index, names, then_values, else_values, then_written, else_written, reused|:
+                then_reused: bool = (any name in then_written where name == names[index]) and proof_ident_name(then_values[index]) == names[index]
+                else_reused: bool = (any name in else_written where name == names[index]) and proof_ident_name(else_values[index]) == names[index]
+                reused.push(names[index]) if then_reused or else_reused
+            # The bindings that could join as a conditional.
+            chosen: mutable darray[bool] = []
+            for index in 0..<capped |index, names, values, then_values, else_values, then_names, else_names, then_facts, else_facts, parameters, report, chosen|:
+                then_value: Ast::Expr = then_values[index]
+                else_value: Ast::Expr = else_values[index]
+                eligible: bool = proof_ident_name(values[index]) == names[index] and not proof_expr_equal(then_value, else_value) and not proof_expr_mentions_arm_local(then_value, then_names, names.count) and not proof_expr_mentions_arm_local(else_value, else_names, names.count) and proof_kernel_expression_supported(then_value) and proof_kernel_expression_supported(else_value) and proof_expr_call_stable(then_value, then_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0) and proof_expr_call_stable(else_value, else_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                chosen.push(eligible)
+            # An atom keeps its meaning across the join unless the join reuses it: a binding an
+            # arm rebound that stays forgotten here names a new value under its old atom. A
+            # binding that joins as a conditional leaves its atom to the old value. Dropping a
+            # binding from the conditionals can make it such a name, so settle to a fixed point.
+            changing: mutable darray[sview] = []
+            for _ in 0..<capped + 1 |capped, names, values, prior_values, then_values, else_values, chosen, changing, condition, reused, then_written, else_written|:
+                changing.clear()
+                changing.extend(reused)
+                for index in 0..<capped |index, names, values, prior_values, then_values, else_values, chosen, changing, then_written, else_written|:
+                    rebound: bool = not proof_expr_equal(prior_values[index], then_values[index]) or not proof_expr_equal(prior_values[index], else_values[index]) or (any name in then_written where name == names[index]) or (any name in else_written where name == names[index])
+                    changing.push(names[index]) if rebound and proof_ident_name(values[index]) == names[index] and not chosen[index]
+                dropped: mutable bool = false
+                for index in 0..<capped |index, then_values, else_values, chosen, changing, dropped|:
+                    continue if not chosen[index]
+                    if any name in changing where proof_expr_mentions_name(then_values[index], name) or proof_expr_mentions_name(else_values[index], name):
+                        chosen[index] <- false
+                        dropped <- true
+                break if not dropped
+            return if any name in changing where proof_expr_mentions_name(condition, name)
+            then_terms: mutable darray[Ast::Expr] = []
+            else_terms: mutable darray[Ast::Expr] = []
+            for index in 0..<capped |index, values, then_values, else_values, chosen, condition, position, then_terms, else_terms|:
+                continue if not chosen[index]
+                values[index] <- Ast::Expr.If(condition, then_values[index], else_values[index], position)
+                then_terms.push(then_values[index])
+                else_terms.push(else_values[index])
+            return if then_terms.count == 0
+            rebound: darray[sview] = changing
+            negated: Ast::Expr = proof_branch_negation(condition, position)
+            proof_join_guarded_facts(then_facts, else_facts, then_terms, negated, then_names, names, rebound, facts, parameters, report, owner, position)
+            proof_join_guarded_facts(else_facts, then_facts, else_terms, condition, else_names, names, rebound, facts, parameters, report, owner, position)
+
+        # The arm facts over an arm's joined values, each as `other_path or F`. A fact the other
+        # arm states too is left to the literal intersection.
+        def proof_join_guarded_facts(arm_facts: darray[Ast::Expr]&, other_facts: darray[Ast::Expr]&, terms: darray[Ast::Expr]&, other_path: Ast::Expr, arm_names: darray[sview]&, names: darray[sview]&, rebound: darray[sview]&, facts: mutable darray[Ast::Expr]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
+            repeats: usize = arm_facts.count + other_facts.count + terms.count + arm_names.count + names.count + rebound.count + facts.count + parameters.count + report.aliased_names.count + report.shared_extent_names.count + report.shared_fixed_names.count + report.local_extent_names.count + report.threaded_symbols.count + 32
+            return if not proof_branch_join_reserve_expression(other_path, 8, report)
+            return if not proof_branch_join_reserve_names(arm_names, report) or not proof_branch_join_reserve_names(names, report) or not proof_branch_join_reserve_names(rebound, report)
+            for term in terms |term, report|:
+                return if not proof_branch_join_reserve_expression(term, 2, report)
+            return if not proof_branch_join_reserve_names(parameters, report) or not proof_branch_join_reserve_names(report.aliased_names, report) or not proof_branch_join_reserve_names(report.shared_extent_names, report) or not proof_branch_join_reserve_names(report.shared_fixed_names, report) or not proof_branch_join_reserve_names(report.local_extent_names, report) or not proof_branch_join_reserve_names(report.threaded_symbols, report)
+            if repeats > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8:
+                proof_branch_join_report_exhausted(report)
+                return
+            for fact in arm_facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            for fact in other_facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            for fact in facts |fact, report, repeats|:
+                return if not proof_branch_join_reserve_expression(fact, repeats * 8, report)
+            term_names: mutable darray[sview] = []
+            for term in terms |term_names|:
+                proof_collect_plain_idents(term, &term_names, 0)
+            # The arm's own path condition and its conjuncts are trivial under the guard and
+            # would only cost case splits.
+            path_parts: mutable darray[Ast::Expr] = []
+            proof_conjunct_components(proof_branch_negation(other_path, position), &path_parts)
+            path_parts.push(proof_branch_negation(other_path, position))
+            imported: mutable usize = 0
+            for fact in arm_facts |arm_facts, other_facts, term_names, path_parts, other_path, arm_names, names, rebound, facts, parameters, report, owner, position, imported|:
+                break if imported >= PROOF_JOIN_GUARDED_FACT_LIMIT
+                continue if not (any name in term_names where proof_expr_mentions_name(fact, name))
+                continue if any part in path_parts where proof_expr_equal(part, fact)
+                continue if any other in other_facts where proof_expr_equal(other, fact)
+                continue if proof_expr_mentions_arm_local(fact, arm_names, names.count)
+                continue if any name in rebound where proof_expr_mentions_name(fact, name)
+                continue if not proof_expr_call_stable(fact, arm_facts, names, parameters, report.aliased_names, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
+                # A type marker states a term's static type, which no path changes: it joins
+                # unguarded, under the arm's own type-bound trace.
+                if proof_join_type_marker(fact):
+                    facts.push(fact) if not (any existing in facts where proof_expr_equal(existing, fact))
+                    continue
+                guarded: Ast::Expr = Ast::Expr.Binary(other_path, TokenKind.Or, fact, position)
+                continue if any existing in facts where proof_expr_equal(existing, guarded)
+                premises: darray[Ast::Expr] = [fact]
+                before: usize = facts.count
+                proof_add_derived_fact_from(facts, report, guarded, premises, "branch-join", position.line, owner)
+                imported <- imported + 1 if facts.count > before
+
+        def proof_join_type_marker(fact: Ast::Expr) -> bool:
+            match fact:
+                Ast::Expr.Call(Ast::Expr.Ident(callee, _), _, _, _):
+                    return proof_name_is_reserved_internal(callee)
+                _:
+                    return false
+
+        # A condition over scalars and literals through plain operators only: no call, index,
+        # field or other place whose value an arm could change behind a name.
+        def proof_join_condition_plain(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.IntLit(_, _):
+                    return true
+                Ast::Expr.BoolLit(_, _):
+                    return true
+                Ast::Expr.Ident(name, _):
+                    return name != ""
+                Ast::Expr.Paren(inner, _):
+                    return proof_join_condition_plain(inner, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_join_condition_plain(operand, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_join_condition_plain(left, depth + 1) and proof_join_condition_plain(right, depth + 1)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    # A recorded call term, `step(t)` over an atom, names one fixed result: the
+                    # checker substitutes it only once a summary made it a value.
+                    match callee:
+                        Ast::Expr.Ident(_, _):
+                            pass
+                        Ast::Expr.Scope(_, _, _):
+                            pass
+                        _:
+                            return false
+                    for argument in arguments |depth|:
+                        return false if not proof_join_condition_plain(argument, depth + 1)
+                    return true
+                _:
+                    return false
+
+        # The identifiers a term reads, where it is plain enough to walk; anything else adds
+        # nothing, which only narrows the facts imported for it.
+        def proof_collect_plain_idents(expression: Ast::Expr, names: mutable darray[sview]&, depth: usize) -> void:
+            return if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(name, _):
+                    names.push(name) if name != "" and not (any existing in names where existing == name)
+                Ast::Expr.Paren(inner, _):
+                    proof_collect_plain_idents(inner, names, depth + 1)
+                Ast::Expr.Unary(_, operand, _):
+                    proof_collect_plain_idents(operand, names, depth + 1)
+                Ast::Expr.Binary(left, _, right, _):
+                    proof_collect_plain_idents(left, names, depth + 1)
+                    proof_collect_plain_idents(right, names, depth + 1)
+                Ast::Expr.Call(_, arguments, _, _):
+                    for argument in arguments |names, depth|:
+                        proof_collect_plain_idents(argument, names, depth + 1)
+                _:
+                    return
+
+        # An arm's names are the outer ones followed by the locals it declared. Its state joins
+        # the outer one only when no local shadows an outer name, which would make a fact over
+        # that name ambiguous.
+        def proof_arm_names_extend(arm_names: darray[sview]&, names: darray[sview]&) -> bool:
+            return false if arm_names.count < names.count
+            for index in 0..<arm_names.count |index, arm_names, names|:
+                if index < names.count:
+                    return false if arm_names[index] != names[index]
+                else:
+                    return false if any name in names where name == arm_names[index]
+            true
+
+        def proof_expr_mentions_arm_local(fact: Ast::Expr, arm_names: darray[sview]&, outer_count: usize) -> bool:
+            for index in outer_count..<arm_names.count |index, fact, arm_names|:
+                return true if proof_expr_mentions_name(fact, arm_names[index])
+            false
+
+        def proof_push_renamed_facts(candidates: mutable darray[Ast::Expr]&, source: darray[Ast::Expr]&, value: Ast::Expr, name: sview) -> void:
+            alias: Ast::Expr = Ast::Expr.Ident(name, Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0})
+            for fact in source |candidates, value, alias|:
+                renamed: (changed: bool, value: Ast::Expr) = proof_replace_place(fact, value, alias, 0)
+                candidates.push(renamed.value) if renamed.changed

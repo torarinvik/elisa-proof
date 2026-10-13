@@ -1,0 +1,107 @@
+extend ElisaProof:
+    private:
+        def proof_disjunction_has_call_valued_local_alias(facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, found: bool):
+            return (false, false) if exhausted
+            for fact in facts |fact, budget, exhausted|:
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                stripped: mutable Ast::Expr = fact
+                while true |stripped, budget, exhausted|:
+                    match stripped:
+                        Ast::Expr.Paren(inner, _):
+                            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                            stripped <- inner
+                        _:
+                            break
+                return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                match stripped:
+                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                        match left:
+                            Ast::Expr.Ident(_, _):
+                                match right:
+                                    Ast::Expr.Call(_, _, _, _):
+                                        return (true, true)
+                                    _:
+                                        pass
+                            Ast::Expr.Call(_, _, _, _):
+                                match right:
+                                    Ast::Expr.Ident(_, _):
+                                        return (true, true)
+                                    _:
+                                        pass
+                            _:
+                                pass
+                    _:
+                        pass
+            return (true, false)
+
+        # Calls need evaluation identity before equality can safely rewrite them. Treat opaque
+        # expression forms as call-bearing so this scan can only withhold an optimization.
+        def proof_disjunction_term_has_call_with_work(expression: Ast::Expr, budget: mutable usize&, exhausted: mutable bool&, depth: usize) -> (complete: bool, found: bool):
+            return (false, false) if exhausted
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                exhausted <- true
+                return (false, false)
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            match expression:
+                Ast::Expr.Call(_, _, _, _) | Ast::Expr.StaticEffectCall(_, _, _, _, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _):
+                    return (true, true)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_disjunction_term_has_call_with_work(inner, budget, exhausted, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    first: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(left, budget, exhausted, depth + 1)
+                    return (false, false) if not first.complete
+                    return (true, true) if first.found
+                    return proof_disjunction_term_has_call_with_work(right, budget, exhausted, depth + 1)
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    first: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(object, budget, exhausted, depth + 1)
+                    return (false, false) if not first.complete
+                    return (true, true) if first.found
+                    second: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(low, budget, exhausted, depth + 1)
+                    return (false, false) if not second.complete
+                    return (true, true) if second.found
+                    return proof_disjunction_term_has_call_with_work(high, budget, exhausted, depth + 1)
+                Ast::Expr.IndexN(object, indices, _):
+                    first: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(object, budget, exhausted, depth + 1)
+                    return (false, false) if not first.complete
+                    return (true, true) if first.found
+                    for index in indices |budget, exhausted, depth|:
+                        item: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(index, budget, exhausted, depth + 1)
+                        return (false, false) if not item.complete
+                        return (true, true) if item.found
+                    return (true, false)
+                Ast::Expr.Array(items, _) | Ast::Expr.Tuple(items, _) | Ast::Expr.SetLit(items, _):
+                    for item in items |budget, exhausted, depth|:
+                        result: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(item, budget, exhausted, depth + 1)
+                        return (false, false) if not result.complete
+                        return (true, true) if result.found
+                    return (true, false)
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries |budget, exhausted, depth|:
+                        key: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(entry.key, budget, exhausted, depth + 1)
+                        return (false, false) if not key.complete
+                        return (true, true) if key.found
+                        value: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(entry.value, budget, exhausted, depth + 1)
+                        return (false, false) if not value.complete
+                        return (true, true) if value.found
+                    return (true, false)
+                Ast::Expr.Construct(base, fields, _) | Ast::Expr.RecordUpdate(base, fields, _):
+                    first: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(base, budget, exhausted, depth + 1)
+                    return (false, false) if not first.complete
+                    return (true, true) if first.found
+                    for field in fields |budget, exhausted, depth|:
+                        item: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(field.value, budget, exhausted, depth + 1)
+                        return (false, false) if not item.complete
+                        return (true, true) if item.found
+                    return (true, false)
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    first: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(iterable, budget, exhausted, depth + 1)
+                    return (false, false) if not first.complete
+                    return (true, true) if first.found
+                    second: (complete: bool, found: bool) = proof_disjunction_term_has_call_with_work(condition, budget, exhausted, depth + 1)
+                    return (false, false) if not second.complete
+                    return (true, true) if second.found
+                    return proof_disjunction_term_has_call_with_work(body, budget, exhausted, depth + 1)
+                Ast::Expr.Invalid | Ast::Expr.Absent:
+                    return (true, true)
+                _:
+                    return (true, false)

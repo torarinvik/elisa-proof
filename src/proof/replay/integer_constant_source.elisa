@@ -1,35 +1,70 @@
 # Source admission for integer-classification witnesses on opaque high-bit constants.
 extend ElisaProof:
     private:
-        def proof_replay_integer_constant_lookup(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, wanted: darray[sview]&, current: darray[sview]&, name: sview, line: u32, depth: usize) -> (visible: bool, valid: bool, matches: usize):
-            return (true, false, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+        def proof_replay_integer_constant_work_charge(amount: usize, work: mutable usize&) -> bool:
+            if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            work <- work + amount
+            return true
+
+        def proof_replay_integer_constant_text_equal_with_work(left: sview, right: sview, work: mutable usize&) -> (equal: bool, complete: bool):
+            return (false, false) if not proof_replay_integer_constant_work_charge(1, work)
+            return (false, false) if not proof_replay_integer_constant_work_charge(sview_len(left), work)
+            return (false, false) if not proof_replay_integer_constant_work_charge(sview_len(right), work)
+            (left == right, true)
+
+        def proof_replay_integer_constant_scope_equal_with_work(left: darray[sview]&, right: darray[sview]&, work: mutable usize&) -> (equal: bool, complete: bool):
+            return (false, false) if not proof_replay_integer_constant_work_charge(left.count, work)
+            return (false, false) if not proof_replay_integer_constant_work_charge(right.count, work)
+            return (false, true) if left.count != right.count
+            for index in 0..<left.count |index, left, right, work|:
+                return (false, false) if not proof_replay_integer_constant_work_charge(1, work)
+                return (false, false) if not proof_replay_integer_constant_work_charge(sview_len(left[index]), work)
+                return (false, false) if not proof_replay_integer_constant_work_charge(sview_len(right[index]), work)
+                return (false, true) if left[index] != right[index]
+            (true, true)
+
+        def proof_replay_integer_constant_lookup(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, wanted: darray[sview]&, current: darray[sview]&, name: sview, line: u32, work: mutable usize&, depth: usize) -> (visible: bool, valid: bool, matches: usize):
+            return (true, false, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             visible: mutable bool = false
             valid: mutable bool = false
             matches: mutable usize = 0
-            for declaration in declarations |all_declarations, wanted, current, name, line, depth, visible, valid, matches|:
+            for declaration in declarations |all_declarations, wanted, current, name, line, work, depth, visible, valid, matches|:
+                return (true, false, matches) if not proof_replay_integer_constant_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Const(candidate, type_expression, initializer, is_mutable, position):
-                        if candidate == name and proof_replay_global_constant_scope_equal(wanted, current):
+                        candidate_comparison = proof_replay_integer_constant_text_equal_with_work(candidate, name, work)
+                        return (true, false, matches) if not candidate_comparison.complete
+                        candidate_matches: bool = candidate_comparison.equal
+                        scope_matches: mutable bool = false
+                        if candidate_matches:
+                            scope_comparison = proof_replay_integer_constant_scope_equal_with_work(wanted, current, work)
+                            return (true, false, matches) if not scope_comparison.complete
+                            scope_matches <- scope_comparison.equal
+                        if candidate_matches and scope_matches:
                             visible <- true
                             matches <- matches + 1
                             valid <- false
                             type_name: sview = match type_expression:
                                 Ast::Expr.Ident(primitive, _): primitive
                                 _: ""
-                            type_work: mutable usize = 0
-                            builtin: bool = proof_replay_scalar_copy_type_unshadowed(all_declarations, type_name, 0, &type_work)
+                            builtin: bool = proof_replay_scalar_copy_type_unshadowed(all_declarations, type_name, 0, work)
                             if not is_mutable and builtin and position.line == line and (type_name == "u64" or type_name == "usize"):
                                 valid <- match initializer:
                                     Ast::Expr.IntLit(value, _): value < 0
                                     _: false
                     Ast::Decl.Module(module_name, body, _):
+                        scope_copy_work: usize = current.count
+                        if not proof_replay_integer_constant_work_charge(scope_copy_work, work) or not proof_replay_integer_constant_work_charge(sview_len(module_name), work):
+                            return (true, false, matches)
                         next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(current, module_name)
-                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, next_scope, name, line, depth + 1)
+                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, next_scope, name, line, work, depth + 1)
                         visible <- visible or child.visible
                         valid <- child.valid if child.visible
                         matches <- matches + child.matches
                     Ast::Decl.Scoped(body, _):
-                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, current, name, line, depth + 1)
+                        child = proof_replay_integer_constant_lookup(body, all_declarations, wanted, current, name, line, work, depth + 1)
                         visible <- visible or child.visible
                         valid <- child.valid if child.visible
                         matches <- matches + child.matches
@@ -37,29 +72,40 @@ extend ElisaProof:
                         pass
             (visible, valid, matches)
 
-        def proof_replay_integer_constant_owner(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, scope: darray[sview]&, trace: ProofFactTrace, name: sview, owner_line: u32, depth: usize) -> (matches: usize, candidates: usize):
-            return (0, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+        def proof_replay_integer_constant_owner(declarations: darray[Ast::Decl]&, all_declarations: darray[Ast::Decl]&, scope: darray[sview]&, trace: ProofFactTrace, name: sview, owner_line: u32, work: mutable usize&, depth: usize) -> (matches: usize, candidates: usize):
+            return (0, 0) if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             matches: mutable usize = 0
             candidates: mutable usize = 0
-            for declaration in declarations |all_declarations, scope, trace, name, owner_line, depth, matches, candidates|:
+            for declaration in declarations |all_declarations, scope, trace, name, owner_line, work, depth, matches, candidates|:
+                return (0, candidates) if not proof_replay_integer_constant_work_charge(1, work)
                 match declaration:
                     Ast::Decl.Func(owner, parameters, _, body, _, _, position):
-                        if owner == trace.name and position.line == owner_line:
+                        owner_comparison = proof_replay_integer_constant_text_equal_with_work(owner, trace.name, work)
+                        return (matches, candidates) if not owner_comparison.complete
+                        if owner_comparison.equal and position.line == owner_line:
                             matches <- matches + 1
-                            continue if any parameter in parameters where parameter.name == name
-                            continue if proof_replay_source_body_declares(all_declarations, body, name)
+                            parameter_shadow: mutable bool = false
+                            return (matches, candidates) if not proof_replay_integer_constant_work_charge(parameters.count, work)
+                            for parameter in parameters |name, parameter_shadow, work|:
+                                parameter_comparison = proof_replay_integer_constant_text_equal_with_work(parameter.name, name, work)
+                                return (matches, candidates) if not parameter_comparison.complete
+                                parameter_shadow <- true if parameter_comparison.equal
+                            continue if parameter_shadow
+                            continue if proof_replay_source_body_declares_with_work(all_declarations, body, name, work)
                             root_scope: darray[sview] = []
-                            found = proof_replay_integer_constant_lookup(all_declarations, all_declarations, scope, root_scope, name, trace.line, 0)
+                            found = proof_replay_integer_constant_lookup(all_declarations, all_declarations, scope, root_scope, name, trace.line, work, 0)
                             if not found.visible and scope.count > 0:
-                                found <- proof_replay_integer_constant_lookup(all_declarations, all_declarations, root_scope, root_scope, name, trace.line, 0)
+                                found <- proof_replay_integer_constant_lookup(all_declarations, all_declarations, root_scope, root_scope, name, trace.line, work, 0)
                             candidates <- candidates + 1 if found.valid and found.matches == 1
                     Ast::Decl.Module(module_name, body, _):
+                        if not proof_replay_integer_constant_work_charge(scope.count, work) or not proof_replay_integer_constant_work_charge(sview_len(module_name), work):
+                            return (matches, candidates)
                         next_scope: darray[sview] = proof_replay_global_constant_scope_with_module(scope, module_name)
-                        child = proof_replay_integer_constant_owner(body, all_declarations, next_scope, trace, name, owner_line, depth + 1)
+                        child = proof_replay_integer_constant_owner(body, all_declarations, next_scope, trace, name, owner_line, work, depth + 1)
                         matches <- matches + child.matches
                         candidates <- candidates + child.candidates
                     Ast::Decl.Scoped(body, _):
-                        child = proof_replay_integer_constant_owner(body, all_declarations, scope, trace, name, owner_line, depth + 1)
+                        child = proof_replay_integer_constant_owner(body, all_declarations, scope, trace, name, owner_line, work, depth + 1)
                         matches <- matches + child.matches
                         candidates <- candidates + child.candidates
                     _:
@@ -68,6 +114,8 @@ extend ElisaProof:
 
         def proof_replay_integer_constant_source_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return false if trace.kind != "type-bound" or report.replay_owner_line == 0
+            work: mutable usize = 0
+            return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
             canonical: bool = match trace.expression:
                 Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, names, _): callee == "__elisa_primitive_integer_type" and arguments.count == 1 and names.count == 0
                 _: false
@@ -77,5 +125,5 @@ extend ElisaProof:
             name: sview = proof_ident_name(marker.term)
             return false if name == ""
             root_scope: darray[sview] = []
-            owned = proof_replay_integer_constant_owner(report.source_declarations, report.source_declarations, root_scope, trace, name, report.replay_owner_line, 0)
-            owned.matches == 1 and owned.candidates == 1
+            owned = proof_replay_integer_constant_owner(report.source_declarations, report.source_declarations, root_scope, trace, name, report.replay_owner_line, work, 0)
+            work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT and owned.matches == 1 and owned.candidates == 1

@@ -10,67 +10,72 @@
 #     consumer's own line is a loop-entry check and is not entered.
 extend ElisaProof:
     private:
-        def proof_replay_entry_count_old_name_clear(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |depth|:
+        def proof_replay_entry_count_old_name_clear(declarations: darray[Ast::Decl]&, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in declarations |depth, source_work|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 match declaration:
                     Ast::Decl.Func(name, parameters, _, body, _, _, _):
-                        return false if name == "old" or any parameter in parameters where parameter.name == "old"
-                        return false if proof_replay_source_body_declares(declarations, body, "old")
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work) or name == "old"
+                        for parameter in parameters |source_work|:
+                            return false if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(parameter.name), source_work)
+                            return false if parameter.name == "old"
+                        return false if proof_replay_source_body_declares_with_work(declarations, body, "old", source_work)
                     Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if not proof_replay_source_work_charge_or_exhaust(sview_len(name), source_work)
                         return false if name == "old"
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_entry_count_old_name_clear(nested, depth + 1)
+                        return false if not proof_replay_entry_count_old_name_clear(nested, depth + 1, source_work)
                     _:
                         pass
             return true
 
         # Recognize only the source old-count snapshot in a postcondition. Other calls,
         # explicit lends, moves and unsupported forms keep the ordinary conservative scan.
-        def proof_replay_entry_count_postcondition_written(declarations: darray[Ast::Decl]&, expression: Ast::Expr, name: sview, depth: usize) -> bool:
-            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+        def proof_replay_entry_count_postcondition_written(declarations: darray[Ast::Decl]&, expression: Ast::Expr, name: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or not proof_replay_source_work_charge_or_exhaust(1, source_work)
             match expression:
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_replay_entry_count_postcondition_written(declarations, left, name, depth + 1) or proof_replay_entry_count_postcondition_written(declarations, right, name, depth + 1)
+                    return proof_replay_entry_count_postcondition_written(declarations, left, name, depth + 1, source_work) or proof_replay_entry_count_postcondition_written(declarations, right, name, depth + 1, source_work)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_entry_count_postcondition_written(declarations, inner, name, depth + 1)
+                    return proof_replay_entry_count_postcondition_written(declarations, inner, name, depth + 1, source_work)
                 Ast::Expr.Call(Ast::Expr.Ident(callee, _), arguments, argument_names, _):
                     if callee == "old" and arguments.count == 1 and (argument_names.count == 0 or (argument_names.count == 1 and argument_names[0] == "")):
                         match arguments[0]:
                             Ast::Expr.Field(Ast::Expr.Ident(parameter, _), field, _):
                                 if parameter == name and field == "count":
-                                    return not proof_replay_entry_count_old_name_clear(declarations, 0)
+                                    return not proof_replay_entry_count_old_name_clear(declarations, 0, source_work)
                             _:
                                 pass
-                    return proof_replay_source_expr_touches(declarations, expression, name, true, depth + 1)
+                    return proof_replay_source_expr_touches_with_work(declarations, expression, name, true, source_work)
                 _:
-                    return proof_replay_source_expr_touches(declarations, expression, name, true, depth + 1)
+                    return proof_replay_source_expr_touches_with_work(declarations, expression, name, true, source_work)
 
-        def proof_replay_entry_count_written(declarations: darray[Ast::Decl]&, statement: Ast::Stmt, name: sview, depth: usize) -> bool:
-            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+        def proof_replay_entry_count_written(declarations: darray[Ast::Decl]&, statement: Ast::Stmt, name: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or not proof_replay_source_work_charge_or_exhaust(1, source_work)
             match statement:
                 Ast::Stmt.Contract(kind, expression, _):
-                    return proof_replay_entry_count_postcondition_written(declarations, expression, name, depth + 1) if kind == "ensure" or kind == "ensures"
-                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0)
+                    return proof_replay_entry_count_postcondition_written(declarations, expression, name, depth + 1, source_work) if kind == "ensure" or kind == "ensures"
+                    return proof_replay_source_statement_touches_with_work(declarations, statement, name, true, source_work)
                 Ast::Stmt.Assign(Ast::Expr.Index(Ast::Expr.Ident(root, _), index, _), _, value, _):
-                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0) if root != name
-                    return proof_replay_source_expr_touches(declarations, index, name, true, 0) or proof_replay_source_expr_touches(declarations, value, name, true, 0)
+                    return proof_replay_source_statement_touches_with_work(declarations, statement, name, true, source_work) if root != name
+                    return proof_replay_source_expr_touches_with_work(declarations, index, name, true, source_work) or proof_replay_source_expr_touches_with_work(declarations, value, name, true, source_work)
                 Ast::Stmt.If(condition, yes, no, _):
-                    return true if proof_replay_source_expr_touches(declarations, condition, name, true, 0)
-                    return proof_replay_entry_count_body_written(declarations, yes, name, depth + 1) or proof_replay_entry_count_body_written(declarations, no, name, depth + 1)
+                    return true if proof_replay_source_expr_touches_with_work(declarations, condition, name, true, source_work)
+                    return proof_replay_entry_count_body_written(declarations, yes, name, depth + 1, source_work) or proof_replay_entry_count_body_written(declarations, no, name, depth + 1, source_work)
                 Ast::Stmt.While(condition, nested, _) | Ast::Stmt.For(_, _, condition, nested, _):
-                    return true if proof_replay_source_expr_touches(declarations, condition, name, true, 0)
-                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1)
+                    return true if proof_replay_source_expr_touches_with_work(declarations, condition, name, true, source_work)
+                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1, source_work)
                 Ast::Stmt.Expr(Ast::Expr.Block(nested, value, _, _), _):
-                    return true if proof_replay_source_expr_touches(declarations, value, name, true, 0)
-                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1)
+                    return true if proof_replay_source_expr_touches_with_work(declarations, value, name, true, source_work)
+                    return proof_replay_entry_count_body_written(declarations, nested, name, depth + 1, source_work)
                 _:
-                    return proof_replay_source_statement_touches(declarations, statement, name, true, 0)
+                    return proof_replay_source_statement_touches_with_work(declarations, statement, name, true, source_work)
 
-        def proof_replay_entry_count_body_written(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview, depth: usize) -> bool:
+        def proof_replay_entry_count_body_written(declarations: darray[Ast::Decl]&, body: darray[Ast::Stmt]&, name: sview, depth: usize, source_work: mutable usize&) -> bool:
             return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for statement in body |declarations, name, depth|:
-                return true if proof_replay_entry_count_written(declarations, statement, name, depth + 1)
+            for statement in body |declarations, name, depth, source_work|:
+                return true if proof_replay_entry_count_written(declarations, statement, name, depth + 1, source_work)
             return false
 
         def proof_replay_local_binding_entry_count_source(report: ProofReport&, trace: ProofFactTrace, loop_entry: bool) -> bool:
@@ -101,23 +106,24 @@ extend ElisaProof:
                             _:
                                 pass
                     return false if definitions != 1
-                    return false if not proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, parameter, 0)
-                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, parameter)
+                    return false if not proof_replay_value_block_parameter_name_present_with_work(report.source_declarations, trace.name, report.replay_owner_line, parameter, 0, source_work)
+                    body: mutable darray[Ast::Stmt] = []
+                    owner_matches: mutable usize = 0
+                    return false if not proof_replay_local_binding_find_owner_with_work(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0) or owner_matches != 1
+                    return false if proof_replay_source_body_declares_with_work(report.source_declarations, body, parameter, source_work)
                     match trace.expression:
                         Ast::Expr.Binary(_, _, count_place, _):
                             return false if not proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, count_place, false, source_work)
                         _:
                             return false
-                    body: mutable darray[Ast::Stmt] = []
-                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
                     # Function-level certificates can be stamped at the declaration
                     # line even when they describe the post-state. A line cutoff
                     # cannot establish that the receiver is still its entry value.
                     # Match the readonly entry-count route before considering any
                     # loop-entry or source-prefix shortcut.
-                    for statement in body |report, parameter|:
-                        return false if proof_replay_source_statement_touches(report.source_declarations, statement, parameter, true, 0)
-                    for statement in body |report, parameter, loop_entry|:
+                    return false if proof_replay_source_body_touches_with_work(report.source_declarations, body, parameter, true, source_work)
+                    for statement in body |report, parameter, loop_entry, source_work|:
+                        return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                         position: Ast::Pos = proof_replay_statement_position(statement)
                         if position.line > report.trace_owner_line:
                             break
@@ -127,7 +133,7 @@ extend ElisaProof:
                                     break
                                 _:
                                     pass
-                        return false if proof_replay_entry_count_written(report.source_declarations, statement, parameter, 0)
+                        return false if proof_replay_entry_count_written(report.source_declarations, statement, parameter, 0, source_work)
                     return true
                 _:
                     return false

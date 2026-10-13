@@ -299,8 +299,74 @@ extend ElisaProof:
         # its caller's state only through references and globals, so such a fact holds after
         # the call exactly as before it. Anything else — a field, an element, a container, a
         # call, a name the body may reference — is not stable.
-        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+        def proof_call_stable_scalar_term_with_work(expression: Ast::Expr, markers: ProofScalarWitnesses&, marker_scale: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            witnessed: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, markers, marker_scale, budget, exhausted)
+            return witnessed.complete and witnessed.matches
+
+        def proof_expr_call_stable(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, report: mutable ProofReport&, owner: sview, depth: usize) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            result: (complete: bool, stable: bool) = proof_expr_call_stable_with_work(expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, source_work)
+            report.source_effect_index.implicit_effect_work <- source_work
+            result.complete and result.stable
+
+        def proof_expr_call_stable_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, report: ProofReport&, owner: sview, depth: usize, source_work: mutable usize&) -> (complete: bool, stable: bool):
+            if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT:
+                return (true, false)
+            if not proof_replay_summary_expr_charge_with_limit(expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                return (false, false)
+            # The recursive classifier has bounded scans over each of these name lists. Charge
+            # their whole byte cost at each visited expression node before using the legacy
+            # membership predicates, so repeated nested queries share one source-work limit.
+            name_scan_cost: mutable usize = 0
+            for name in names |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in parameters |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in aliased |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in shared_extents |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in shared_fixed |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in local_extents |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            for name in report.threaded_symbols |source_work, name_scan_cost|:
+                return (false, false) if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(name), source_work)
+                name_scan_cost <- name_scan_cost + 1 + sview_len(name)
+            return (false, false) if name_scan_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8
+            return (false, false) if not proof_replay_source_work_charge_or_exhaust(name_scan_cost * 8, source_work)
+            for fact in facts |source_work|:
+                return (false, false) if not proof_replay_summary_expr_charge_with_limit(fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            # The scalar witness builders use the linear-work ceiling internally. Seed that
+            # counter with the part of the ceiling already unavailable to this shared source
+            # walk, then charge only the delta below into source_work.
+            source_remaining: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            linear_budget_start: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - source_remaining if source_remaining < PROOF_LINEAR_SAFETY_WORK_LIMIT else 0
+            linear_budget: mutable usize = linear_budget_start
+            exhausted: mutable bool = false
+            markers_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, linear_budget, exhausted)
+            if not markers_result.complete or exhausted:
+                proof_replay_source_work_charge_or_exhaust(linear_budget - linear_budget_start, source_work)
+                return (false, false)
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(markers_result.witnesses, linear_budget, exhausted)
+            if not marker_scale.complete or exhausted:
+                proof_replay_source_work_charge_or_exhaust(linear_budget - linear_budget_start, source_work)
+                return (false, false)
+            stable: bool = proof_expr_call_stable_core_with_work(expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, markers_result.witnesses, marker_scale.scale, linear_budget, exhausted, source_work, name_scan_cost)
+            if not proof_replay_source_work_charge_or_exhaust(linear_budget - linear_budget_start, source_work):
+                return (false, false)
+            return (false, false) if exhausted or source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (true, stable)
+
+        def proof_expr_call_stable_core_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, aliased: darray[sview]&, shared_extents: darray[sview]&, shared_fixed: darray[sview]&, local_extents: darray[sview]&, report: ProofReport&, owner: sview, depth: usize, markers: ProofScalarWitnesses&, marker_scale: usize, linear_budget: mutable usize&, exhausted: mutable bool&, source_work: mutable usize&, name_scan_cost: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            return false if name_scan_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT / 8 or not proof_replay_source_work_charge_or_exhaust(name_scan_cost * 8, source_work)
             match expression:
                 Ast::Expr.IntLit(_, _):
                     return true
@@ -326,16 +392,16 @@ extend ElisaProof:
                     # immutable, so it names one value whatever its type -- a sibling binder's
                     # value survives a structural recursive call on the other.
                     return true if payload_symbol
-                    return proof_scalar_witnessed(facts, name)
+                    return proof_scalar_witnesses_name(markers, name)
                 Ast::Expr.Scope(_, _, _):
-                    return proof_source_global_constant_term(report, expression, owner)
+                    return proof_source_global_constant_term_with_work(report, expression, owner, source_work)
                 Ast::Expr.Tuple(_, _):
                     # A loop binder's atom `(name, offset)`: the binder is a local of this body.
                     binder: sview = proof_place_root_name(expression, 0)
                     return false if binder == ""
                     return false if any existing in aliased where existing == binder
                     return false if not (any candidate in names where candidate == binder)
-                    return proof_scalar_term_witnessed(expression, facts, 0)
+                    return proof_call_stable_scalar_term_with_work(expression, markers, marker_scale, linear_budget, exhausted)
                 Ast::Expr.Field(_, field_name, _):
                     return false if field_name == ""
                     root: sview = proof_place_root_name(expression, 0)
@@ -361,21 +427,21 @@ extend ElisaProof:
                     return false if not value_root and not shared_extent and not shared_field
                     # The witness is still required, so a place that was never established as a
                     # scalar term is refused here exactly as an unwitnessed name is.
-                    return proof_scalar_term_witnessed(expression, facts, 0)
+                    return proof_call_stable_scalar_term_with_work(expression, markers, marker_scale, linear_budget, exhausted)
                 Ast::Expr.Array(elements, _):
                     # A literal collection is a value, not storage. Nothing a callee can reach
                     # makes `[]` hold something else, so a binding recorded as one keeps that
                     # record -- subject to the same reachability test on the binding itself that
                     # every other retained value passes.
-                    for element in elements |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth|:
-                        return false if not proof_expr_call_stable(element, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                    for element in elements |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost|:
+                        return false if not proof_expr_call_stable_core_with_work(element, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                     return true
                 Ast::Expr.Call(_, arguments, _, _):
                     # A scalar-term marker is a statement about a term's *type*, so it is worth
                     # exactly what the term's identity is worth: if the term still denotes the same
                     # value after the call, the type statement about it still holds.
                     marker: (known: bool, term: Ast::Expr) = proof_marker_argument(expression, "__elisa_primitive_scalar_type")
-                    return proof_expr_call_stable(marker.term, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) if marker.known
+                    return proof_expr_call_stable_core_with_work(marker.term, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost) if marker.known
                     # A width marker is the same kind of type statement, with a literal width.
                     width_marker_name: sview = proof_marker_callee_name(expression)
                     # A place width marker over a call result, `f(x)` typed from its declared return,
@@ -383,7 +449,7 @@ extend ElisaProof:
                     if (width_marker_name == "__elisa_unsigned_type_bound" or width_marker_name == "__elisa_signed_type_bound" or width_marker_name == "__elisa_signed_place_type_bound") and arguments.count == 2:
                         match arguments[1]:
                             Ast::Expr.IntLit(_, _):
-                                return proof_expr_call_stable(arguments[0], facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                                return proof_expr_call_stable_core_with_work(arguments[0], facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                             _:
                                 return false
                     # A tracked scalar-reference state is a private symbolic binding, not an
@@ -391,22 +457,25 @@ extend ElisaProof:
                     # payload is independently stable. Calls that can reach the reference clear
                     # its binding in proof_forget_values_after_call before this restoration runs.
                     reference_state: (known: bool, value: Ast::Expr) = proof_scalar_reference_state_value(expression)
-                    return proof_expr_call_stable(reference_state.value, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) if reference_state.known
+                    return proof_expr_call_stable_core_with_work(reference_state.value, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost) if reference_state.known
                     # An ordinary call term keeps its value across another call when a pure-call
                     # witness says it denotes one value, and its arguments are themselves stable
                     # so the same text still names the same arguments. This is what carries a
                     # callee's summary -- `not f(...) or p` -- past the next call in the body,
                     # together with the witness recorded beside that fact when it is built.
-                    return false if not proof_scalar_term_witnessed(expression, facts, 0)
-                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth|:
+                    return false if not proof_call_stable_scalar_term_with_work(expression, markers, marker_scale, linear_budget, exhausted)
+                    for argument in arguments |facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost|:
+                        if not proof_replay_summary_expr_repeat_charge_with_work(argument, name_scan_cost + 1, source_work):
+                            source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                            return false
                         continue if proof_value_argument_stable(argument, names, parameters, aliased, local_extents, 0)
-                        return false if not proof_expr_call_stable(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                        return false if not proof_expr_call_stable_core_with_work(argument, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_call_stable(inner, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                    return proof_expr_call_stable_core_with_work(inner, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                 Ast::Expr.Unary(operator, operand, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Not
-                    return proof_expr_call_stable(operand, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                    return proof_expr_call_stable_core_with_work(operand, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                 Ast::Expr.Binary(left, operator, right, _):
                     # A formed nullable value's null test is not a scalar
                     # pointee read. Keep only a bare live binding that no call
@@ -418,9 +487,9 @@ extend ElisaProof:
                         tested: sview = b if a == "null" else a
                         if (a == "null" or b == "null") and tested != "" and tested != "null":
                             return not (any blocked in aliased where blocked == tested) and ((any live in names where live == tested) or (any parameter in parameters where parameter == tested))
-                    return proof_expr_call_stable(left, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(right, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                    return proof_expr_call_stable_core_with_work(left, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost) and proof_expr_call_stable_core_with_work(right, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_call_stable(condition, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(then_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1) and proof_expr_call_stable(else_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1)
+                    return proof_expr_call_stable_core_with_work(condition, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost) and proof_expr_call_stable_core_with_work(then_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost) and proof_expr_call_stable_core_with_work(else_expression, facts, names, parameters, aliased, shared_extents, shared_fixed, local_extents, report, owner, depth + 1, markers, marker_scale, linear_budget, exhausted, source_work, name_scan_cost)
                 _:
                     return false
 

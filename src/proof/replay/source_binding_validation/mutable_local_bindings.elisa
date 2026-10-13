@@ -123,24 +123,29 @@ extend ElisaProof:
                     pass
             return false
 
-        def proof_replay_mutable_local_global_constant_collect(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            for declaration in declarations |target, matches, mutable_matches, depth|:
+        def proof_replay_mutable_local_global_constant_collect_with_work(declarations: darray[Ast::Decl]&, target: sview, matches: mutable usize&, mutable_matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + declarations.count
+            for declaration in declarations |target, matches, mutable_matches, source_work, depth|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match declaration:
                     Ast::Decl.Const(name, _, _, is_mutable, _):
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(name, target, source_work)
                         if name == target:
                             matches <- matches + 1
                             mutable_matches <- mutable_matches + 1 if is_mutable
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_mutable_local_global_constant_collect(nested, target, matches, mutable_matches, depth + 1)
+                        return false if not proof_replay_mutable_local_global_constant_collect_with_work(nested, target, matches, mutable_matches, source_work, depth + 1)
                     _:
                         pass
             return true
 
-        def proof_replay_mutable_local_global_constant_immutable(declarations: darray[Ast::Decl]&, target: sview) -> bool:
+        def proof_replay_mutable_local_global_constant_immutable_with_work(declarations: darray[Ast::Decl]&, target: sview, source_work: mutable usize&) -> bool:
             matches: mutable usize = 0
             mutable_matches: mutable usize = 0
-            return false if target == "" or not proof_replay_mutable_local_global_constant_collect(declarations, target, &matches, &mutable_matches, 0)
+            return false if target == "" or not proof_replay_mutable_local_global_constant_collect_with_work(declarations, target, &matches, &mutable_matches, &source_work, 0)
             return matches == 1 and mutable_matches == 0
 
         def proof_replay_mutable_local_live(report: ProofReport&, owner: sview, body: darray[Ast::Stmt]&, index: usize, local_name: sview, consumer_line: u32, nested: bool, loop_entry: bool, consumer_position: Ast::Pos, consumer_position_valid: bool) -> bool:
@@ -176,8 +181,7 @@ extend ElisaProof:
                 if consumer_position_valid and order == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_INVALID and proof_replay_mutable_local_extent_contains_consumer(position, statement_extent, consumer_position):
                     # This statement contains the anchored consumer. Only its prefix can
                     # invalidate the binding; the consumer expression itself may read it.
-                    return false if not proof_replay_summary_owner_source_preflight(report, owner, report.replay_owner_line, source_work)
-                    return false if proof_replay_source_statement_touches(report.source_declarations, body[later], local_name, true, 0)
+                    return false if proof_replay_source_statement_touches_with_work(report.source_declarations, body[later], local_name, true, source_work)
                     break
                 break if order == PROOF_REPLAY_MUTABLE_LOCAL_ORDER_AFTER
                 return false if order != PROOF_REPLAY_MUTABLE_LOCAL_ORDER_BEFORE
@@ -186,8 +190,7 @@ extend ElisaProof:
                 continue if proof_replay_self_update_resymbolized_with_work(report, owner, body[later], local_name, source_work)
                 # So does a call that threads the local (threaded_summaries.elisa).
                 continue if proof_replay_thread_call_resymbolized_with_work(report, owner, body[later], local_name, source_work)
-                return false if not proof_replay_summary_owner_source_preflight(report, owner, report.replay_owner_line, source_work)
-                return false if proof_replay_source_statement_touches(report.source_declarations, body[later], local_name, true, 0)
+                return false if proof_replay_source_statement_touches_with_work(report.source_declarations, body[later], local_name, true, source_work)
             return true
 
         # VALID when the binding statement is found and live at `consumer_line`, INVALID when
@@ -331,21 +334,21 @@ extend ElisaProof:
 
         # Stable values: the immutable-binding rule (literals and unwritten integer parameters under
         # + - * / %), plus unshadowed global constants, whose values the global-constant facts fix.
-        def proof_replay_mutable_local_stable_value(report: ProofReport&, value: Ast::Expr, local_name: sview, owner: sview, depth: usize) -> bool:
+        def proof_replay_mutable_local_stable_value(report: ProofReport&, value: Ast::Expr, local_name: sview, owner: sview, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            return true if proof_replay_local_binding_stable_initializer(value, local_name, report.source_declarations, owner, report.replay_owner_line, 0)
+            return true if proof_replay_local_binding_stable_initializer(value, local_name, report.source_declarations, owner, report.replay_owner_line, source_work, 0)
             match value:
                 Ast::Expr.Ident(name, _):
-                    return false if name == "" or name == local_name or not proof_replay_mutable_local_global_constant_immutable(report.source_declarations, name)
-                    return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, owner, report.replay_owner_line, name, 0)
+                    return false if name == "" or name == local_name or not proof_replay_mutable_local_global_constant_immutable_with_work(report.source_declarations, name, source_work)
+                    return false if proof_replay_local_binding_parameter_name_present_with_default_limit(report.source_declarations, owner, report.replay_owner_line, name, source_work, 0)
                     body: mutable darray[Ast::Stmt] = []
-                    return false if not proof_replay_source_owner_body(report, owner, report.replay_owner_line, &body)
-                    return not proof_replay_source_body_declares(report.source_declarations, body, name)
+                    return false if not proof_replay_source_owner_body_with_work(report, owner, report.replay_owner_line, &body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    return not proof_replay_source_body_declares_with_work(report.source_declarations, body, name, source_work)
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Minus, inner, _):
-                    return proof_replay_mutable_local_stable_value(report, inner, local_name, owner, depth + 1)
+                    return proof_replay_mutable_local_stable_value(report, inner, local_name, owner, source_work, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent
-                    return proof_replay_mutable_local_stable_value(report, left, local_name, owner, depth + 1) and proof_replay_mutable_local_stable_value(report, right, local_name, owner, depth + 1)
+                    return proof_replay_mutable_local_stable_value(report, left, local_name, owner, source_work, depth + 1) and proof_replay_mutable_local_stable_value(report, right, local_name, owner, source_work, depth + 1)
                 _:
                     return false
 
@@ -415,7 +418,7 @@ extend ElisaProof:
                 return false if not proof_replay_mutable_local_expr_equal_with_work(source, expected, &exact, source_work)
                 if exact:
                     return false if not proof_replay_summary_expr_charge_with_work(source, source_work)
-                    return proof_replay_local_binding_stable_initializer(source, target, report.source_declarations, trace.name, report.replay_owner_line, depth)
+                    return proof_replay_local_binding_stable_initializer(source, target, report.source_declarations, trace.name, report.replay_owner_line, source_work, depth)
             match source:
                 Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
                     return proof_replay_summary_call_global_constant_matches_with_work(report, trace, source, expected, source_work)
@@ -465,15 +468,15 @@ extend ElisaProof:
                     return false if not proof_replay_summary_expr_charge_with_work(value, source_work)
                     return false if not proof_replay_summary_expr_charge_with_work(value, source_work)
                     return false if not proof_replay_mutable_local_identifier_scan_charge(value, owner_scan_work, source_work)
-                    return false if not proof_replay_mutable_local_stable_value(report, value, local_name, trace.name, 0)
-                    return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, local_name, 0)
-                    return false if proof_replay_local_binding_global_constant_named(report.source_declarations, local_name, 0)
+                    return false if not proof_replay_mutable_local_stable_value(report, value, local_name, trace.name, source_work, 0)
+                    return false if proof_replay_local_binding_parameter_name_present_with_default_limit(report.source_declarations, trace.name, report.replay_owner_line, local_name, source_work, 0)
+                    return false if proof_replay_local_binding_global_constant_named_with_work(report.source_declarations, local_name, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
                     body: mutable darray[Ast::Stmt] = []
-                    return false if not proof_replay_source_owner_body(report, trace.name, report.replay_owner_line, &body)
+                    return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &body, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
                     consumer_position_valid: bool = proof_replay_mutable_local_consumer_position_with_work(report, trace, body, &consumer_position, source_work)
                     return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
-                    single_top_level_declaration: bool = proof_replay_source_single_declaration(report.source_declarations, body, local_name)
+                    single_top_level_declaration: bool = proof_replay_source_single_declaration_with_work(report.source_declarations, body, local_name, source_work)
                     if single_top_level_declaration:
                         return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
                         if proof_replay_mutable_local_declared(body, local_name):
@@ -508,7 +511,7 @@ extend ElisaProof:
                         match proof_replay_source_unwrap_empty_value_block(block, 0):
                             Ast::Expr.Block(inner, _, _, _):
                                 return false if not proof_replay_mutable_local_body_work_charge(inner, source_work, 0)
-                                if proof_replay_source_single_declaration(report.source_declarations, inner, local_name):
+                                if proof_replay_source_single_declaration_with_work(report.source_declarations, inner, local_name, source_work):
                                     return false if not proof_replay_mutable_local_body_work_charge(inner, source_work, 0)
                                     if proof_replay_mutable_local_declared(inner, local_name):
                                         found <- proof_replay_mutable_local_merge(found, proof_replay_mutable_local_site(report, trace, trace.name, inner, local_name, trace.expression, value, report.trace_owner_line, consumer_position, consumer_position_valid, true, loop_entry, 0, source_work))

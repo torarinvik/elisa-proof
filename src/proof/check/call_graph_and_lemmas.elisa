@@ -128,6 +128,60 @@ extend ElisaProof:
             total <- total + amount
             proof_linear_safety_work_charge(budget, exhausted, amount)
 
+        def proof_frame_source_work_report_exhaustion(report: mutable ProofReport&, name: sview, line: u32, dimension: sview, message: sview) -> void:
+            if not report.budgets.frame_call_reported:
+                report.budgets.frame_call_reported <- true
+                proof_add_budget_finding(report, "frame-analysis-budget", line, name, message, dimension, report.budgets.frame_call_source_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+
+        def proof_frame_source_work_stop(report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return false if report.budgets.frame_call_source_work < PROOF_LINEAR_SAFETY_WORK_LIMIT
+            proof_frame_source_work_report_exhaustion(report, name, line, "frame-expression-work", "frame expression traversal exhausted its bounded source-work budget")
+            true
+
+        def proof_frame_source_work_take(report: mutable ProofReport&, name: sview, line: u32, amount: usize, dimension: sview, message: sview) -> bool:
+            work: mutable usize = report.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            complete: bool = proof_linear_safety_work_charge(&work, &exhausted, amount)
+            report.budgets.frame_call_source_work <- work
+            if not complete:
+                proof_frame_source_work_report_exhaustion(report, name, line, dimension, message)
+            complete
+
+        # Reserve legacy expression scans before they run. Short-circuit classification needs two
+        # passes; opaque-expression classification needs one.
+        def proof_frame_expression_rechecks_with_work(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32, passes: usize) -> bool:
+            work: mutable usize = report.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &work, &exhausted)
+            complete: mutable bool = cost.complete
+            if complete:
+                complete <- proof_linear_safety_work_charge_scaled(&work, &exhausted, cost.cost, passes)
+            report.budgets.frame_call_source_work <- work
+            if not complete:
+                proof_frame_source_work_report_exhaustion(report, name, line, "frame-expression-recheck-work", "frame expression classification exceeded its bounded source-work budget")
+            complete
+
+        def proof_frame_expr_equal_with_work(left: Ast::Expr, right: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> (complete: bool, equal: bool):
+            work: mutable usize = report.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            left_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(left, &work, &exhausted)
+            if not left_cost.complete:
+                report.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, name, line, "frame-fact-comparison-work", "frame fact comparison exceeded its bounded source-work budget")
+                return (false, false)
+            right_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(right, &work, &exhausted)
+            if not right_cost.complete:
+                report.budgets.frame_call_source_work <- work
+                proof_frame_source_work_report_exhaustion(report, name, line, "frame-fact-comparison-work", "frame fact comparison exceeded its bounded source-work budget")
+                return (false, false)
+            comparison_cost: usize = left_cost.cost + right_cost.cost
+            complete: bool = proof_linear_safety_work_charge_scaled(&work, &exhausted, comparison_cost, 1)
+            report.budgets.frame_call_source_work <- work
+            if not complete:
+                proof_frame_source_work_report_exhaustion(report, name, line, "frame-fact-comparison-work", "frame fact comparison exceeded its bounded source-work budget")
+                return (false, false)
+            return (true, proof_expr_equal(left, right))
+
         # The legacy place matcher descends each argument and rechecks nested selector prefixes.
         # Reserve a quadratic AST bound per argument/place pair, plus all place and binding-name
         # comparisons, before calling it. Exhaustion means "may alias" so no frame is preserved.
@@ -191,9 +245,8 @@ extend ElisaProof:
             exhausted: mutable bool = false
             result: (complete: bool, may_alias: bool) = proof_call_may_alias_places_with_work(arguments, places, names, parameter_names, &work, &exhausted)
             report.budgets.frame_call_source_work <- work
-            if exhausted and not report.budgets.frame_call_reported:
-                report.budgets.frame_call_reported <- true
-                proof_add_budget_finding(report, "frame-analysis-budget", line, name, "frame place analysis exceeded its bounded source-work budget", "place-alias-work", work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            if exhausted:
+                proof_frame_source_work_report_exhaustion(report, name, line, "place-alias-work", "frame place analysis exceeded its bounded source-work budget")
             result
 
         def proof_frame_collect_annotations(file: Ast::File&, frame_index: ProofFrameAnnotationIndex, function_name: sview, changes: mutable darray[ProofFramePlace]&, preserves: mutable darray[ProofFramePlace]&) -> void:

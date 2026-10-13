@@ -14624,10 +14624,279 @@ Unknown-call frame checking previously compared every argument against every cal
 recursive AST walks that did not debit the shared frame source-work budget. The producer now
 preflights argument AST cost, selector-prefix rechecks, place paths, and binding-name comparisons
 before invoking the existing matcher. Its reservation includes the quadratic worst case from
-rechecking a nested selector's prefixes for each argument/place pair. If accounting is incomplete
-or over budget, the checker records `frame-analysis-budget` and stops the frame analysis rather
-than treating the call as non-aliasing. All four producer call sites use the bounded wrapper.
+rechecking a nested selector's prefixes for each argument/place pair. The recursive frame-expression
+walker is now a separate module; each visited node and repeated short-circuit call/purity scan uses
+the same budget. Fact-array copies and structural equality checks in the short-circuit state merge
+are charged too, and wide collection walks stop as soon as the budget is exhausted. Incomplete work
+records `frame-analysis-budget` and never becomes a no-alias result. All four producer call sites
+use the bounded matcher wrapper.
 
 The source-length gate and `git diff --check` pass, and static call-site search finds no direct
-matcher callers outside the bounded wrapper. The Elisa parser, replay, and runtime behavior remain
-unqualified while the provenance-matched Stage1 hold is active.
+matcher callers outside the bounded wrapper. The available Stage0 parser accepts the three changed
+checker modules individually; parsing the full checker closure with it fails on unrelated syntax in
+the older parser/compiler snapshot. This is syntax-only evidence. Semantic compile, replay, and
+runtime behavior remain unqualified while the provenance-matched Stage1 hold is active.
+
+### 23.27.465 Close immutable declaration uniqueness accounting (2026-10-13)
+
+The direct immutable declaration replay route already charges its owner preflight and initializer
+work, and its stable-name fallback reserves repeated owner/declaration/body walks per identifier.
+The final source-uniqueness check uses `proof_replay_source_single_declaration_with_work`'s legacy
+preflight pattern rather than the raw predicate, so no additional semantic change was needed. The
+parameter-shadow predicate is still a raw source-body scan in the shared immutable-binding API;
+its current callers span many replay routes, while the available generic work reservation is for
+place-touch/call resolution and is not a tight bound for declaration-only queries. Defer that API
+migration until it can use a dedicated declaration-scan meter and be qualified by Stage1. Static
+gates pass; parser, replay, and runtime remain unqualified under the active Stage1 hold.
+
+### 23.27.466 Meter disjunction discovery walks (2026-10-13)
+
+Disjunctive syllogism and relevant-premise selection called `proof_find_disjunction`, whose recursive
+walk through parentheses and conjunctions did not debit the active linear-search budget. Added
+`proof_disjunction_find_with_work`, which mirrors the established splitter, charges each visited
+node and parenthesis strip, and propagates incomplete/depth-exhausted status to stop the search.
+Both producer split-search call sites now use it; fact order, first/best candidate selection, and
+branch construction remain unchanged. Static call-site search confirms no runtime caller of the
+legacy splitter remains. `git diff --check` and the source-length gate pass. Parser, replay, and
+runtime qualification remain on hold pending the provenance-matched Stage1.
+
+### 23.27.467 Share postcondition scan work in pop snapshots (2026-10-13)
+
+The entry-count postcondition walker now debits one shared source-work unit per visited expression
+node instead of rescanning and charging each node's full subtree, avoiding quadratic accounting on
+large postconditions. The pop-snapshot caller threads its existing work counter through the helper;
+all direct and recursive call sites now use the updated signature. Its fallback touch query retains
+the conservative shared source-touch reservation. Static call-site review, `git diff --check`, and
+the source-length gate pass. Semantic replay remains unqualified under the Stage1 provenance hold.
+
+### 23.27.468 Charge generated disjunction branch nodes before construction (2026-10-13)
+
+A final accounting review found that the work-aware producer splitter charged input traversal but
+not the small branch wrappers it synthesizes for conditional equalities, conjunction distribution,
+and negated conjunctions. It now charges the exact fixed wrapper count before constructing each
+result. Exhaustion returns incomplete and stops search. The entry-count postcondition counter fix
+and this charge both pass `git diff --check` and the source-length gate; no parser or replay claim is
+made under the Stage1 hold.
+
+### 23.27.469 Meter indexed-copy and pop-snapshot source scans (2026-10-13)
+
+The indexed-copy bound route now shares source work across owner preflight, unique-declaration
+validation, local evidence walks, and all four post-copy mutation queries. Repeated statement-touch
+queries use a one-statement body and the shared reservation helper. Pop-snapshot replay now meters
+reserved-name scans, unique-declaration checks, parameter-shadow checks, type equality, and the
+repeated reads of `requires` expressions; its caller shares the same counter through contract
+inspection. A dedicated work-aware parameter-shadow helper was added and used by both routes.
+`git diff --check` and the source-length gate pass. No semantic parsing or replay is claimed under
+the Stage1 provenance hold.
+
+### 23.27.470 Meter indexed-copy equality replay (2026-10-13)
+
+The indexed-copy equality route now meters unique declaration and formal-name scans, parameter
+shadow checks, and all three post-copy mutation queries with its existing shared source-work counter.
+The touch checks use one-statement bodies and the shared touch-query reservation, so call resolution
+and recursive place inspection are accounted for too. `git diff --check` and the source-length gate
+pass; parser/replay qualification remains pending the provenance-matched Stage1.
+
+### 23.27.471 Centralize bounded one-statement touch queries (2026-10-13)
+
+Added a shared one-statement wrapper around the reserved body-touch query and removed three local
+copies. Scalar-copy, indexed-copy bound/equality, and pop-snapshot replay now send mutation checks
+through that shared reservation, which accounts for AST visits and source call resolution. Scalar-
+copy no longer adds a redundant whole-body precharge that existed only to bound its former raw
+matcher. Static call-site search finds no raw statement-touch calls in those four routes;
+`git diff --check` and the source-length gate pass. Stage1 semantic qualification is still pending.
+
+### 23.27.472 Close call-stability and branch-state work gaps (2026-10-13)
+
+Call-stability now charges the expression AST once at entry instead of re-costing every recursive
+subtree, while repeated name, fact, trace, and equality scans debit the shared source-work counter.
+Scalar-witness work starts with only the portion of its linear ceiling still available under that
+counter, and charge failures use an exhaustion sentinel so exact-cap failures propagate as
+incomplete. Call and branch restore loops that already own a local counter use the work-aware
+predicate directly, preserving exhaustion instead of overwriting it.
+
+Branch-join helpers moved into `branch_join_helpers.elisa` to keep modules below the source limit.
+They reserve repeated candidate, rewrite, fact, name, and equality scans before those joins run;
+uncaptured-fact restoration and branch intersections use the shared comparator and stop on
+exhaustion. The frame-expression walker now forks `if` arms, joins only common facts and stable
+values, treats comprehension iterations as optional, and checks call-bearing catch arms from an
+empty fact/value state before discarding their post-state. Call-free catches preserve their state.
+Catch resets and state copies are charged to the frame budget.
+
+`git diff --check` and `python3 scripts/check_source_length.py` pass. Parser, semantic compile,
+proof replay, and runtime qualification remain pending the provenance-matched Stage1 hold.
+
+### 23.27.472 Meter mutable-local and branch-bound replay liveness scans (2026-10-13)
+
+Mutable-local liveness now routes prefix and later-statement mutation checks through the shared
+one-statement touch reservation, and its top-level and nested declaration checks use the metered
+uniqueness helper. Self-update replay also meters its unique-local scan and parameter-name lookup.
+The branch-scalar bound path now meters body/formal visits, uses work-aware declaration and
+parameter-shadow checks, and shares one counter across its type-name scans and requirement reads.
+`git diff --check` and the source-length gate pass. Semantic replay remains unqualified under the
+Stage1 hold.
+
+### 23.27.473 Centralize expression-touch reservations (2026-10-13)
+
+Added a shared work-aware expression-touch query alongside the statement wrapper. Entry-count
+replay no longer carries duplicate one-expression/one-statement adapters, and value-block immutable
+replay now meters initializer and statement touch checks through the shared source reservation.
+This keeps recursive AST walks and per-call declaration/parameter lookup in one budget. Static
+call-site review, `git diff --check`, and the source-length gate pass; semantic replay remains
+unqualified under the Stage1 hold.
+
+### 23.27.474 Use the shared expression-touch budget in self-update replay (2026-10-13)
+
+Self-update resymbolization now checks that its assigned expression does not touch the local through
+the shared work-aware expression-touch query. The former owner preflight was removed from that
+point because the shared query reserves its own declaration and call-resolution scans; statement
+and trace inspections retain their existing charges. `git diff --check` and the source-length gate
+pass. Replay remains unqualified under the Stage1 hold.
+
+### 23.27.475 Bound repeated reads in disjunction refutation (2026-10-13)
+
+The producer disjunction denial scan now uses a work-aware negation reader, charging each stripped
+parenthesis and rejecting the search as incomplete on exhaustion. The closed-safe constant
+prefilter also reserves an overflow-checked quadratic allowance for the goal and every fact: its
+legacy ambiguity check revisits arithmetic subtrees while folding constants, so a single linear
+AST-size charge was not a worst-case bound. The reservation uses the complete expression-cost walk,
+including collection rows and payload sizes, before calling the legacy semantic reader.
+`git diff --check` and the source-length gate pass. The available Stage0 parser accepts the changed
+disjunction, order/sign, fixed-width, work-reader, and congruence modules, plus the compiler's EASM
+decimal parser. Stage0 provenance validation still fails (`aaf1dc3` installed versus the proof pin
+`fa65ef6`), so this is syntax-only evidence; semantic compile, proof replay, and runtime
+qualification remain pending a matching toolchain.
+
+### 23.27.476 Share immutable-binding source scan work (2026-10-13)
+
+Immutable-binding shadow checks now use the metered owner/body helper. The source-pure initializer
+path shares its source-work counter across parameter classification, owner lookup, shadow and write
+scans, and local uniqueness checks; loop-entry, mutable-local, and value-block callers now pass that
+counter through the helper. Branch-join, loop-entry, runtime-fact, boundary-control, and field-copy
+validators also use the metered shadow query where they already own a replay counter. The shared
+wrapper preserves each route's smaller limit instead of charging only against the global replay
+ceiling. Exhaustion fails closed. `git diff --check` and the source-length gate pass. No Elisa
+parser, build, test, or replay was run under the exact-toolchain hold, so semantic and budget parity
+remain unqualified.
+
+### 23.27.477 Reserve quadratic branch-renaming expansion (2026-10-13)
+
+Branch implied-fact restoration now reserves the worst-case equal-renaming expansion before
+constructing candidates. The bound covers each joined name, every matching equality witness, and
+the full arm-fact scan performed for each witness; multiplication is checked against the shared
+source-work limit before expansion. Excessive inputs exhaust the budget and fail closed. `git diff
+--check` and `python3 scripts/check_source_length.py` pass. No tests or builds were run.
+
+### 23.27.478 Close repeated branch-join and shadow-query budget gaps (2026-10-13)
+
+Conditional-value joins now reserve the repeated written-name membership scans and per-value
+arm-local checks at their fixed-point bounds. Their body reservation covers the collection walks,
+while expression-cost reservations cover repeated call-node lookup. Replay parameter-shadow scans
+now accept a caller limit and share accumulated work across loop-entry, mutable-local, runtime-fact,
+control-flow, summary-call, and same-module-call validation. Call-stable source discovery charges
+every scanned fact, including non-equality facts. Short-circuit RHS calls run on a forked state and
+join common facts and stable values, accounting for the possibility that the RHS is skipped even
+when a called function is pure. `git diff --check` and `python3 scripts/check_source_length.py` pass.
+Parser, build, tests, and replay remain pending the provenance-matched Stage1 toolchain.
+
+### 23.27.479 Bound legacy declaration and uniqueness scans (2026-10-13)
+
+The no-counter `source_body_declares` and `source_single_declaration` entry points now delegate to
+the existing reserved work-metered queries. Their raw traversal implementations have explicit
+private `_unmetered` names and are called only after the corresponding reservation succeeds. This
+puts a per-query ceiling on older replay routes while counter-owning callers continue to migrate to
+the shared-counter variants. `git diff --check` and the source-length gate pass. No parser, build,
+test, or replay was run under the exact-toolchain hold; aggregate budget parity remains open for
+legacy routes that still use the compatibility entry points.
+
+### 23.27.478 Split immutable-binding cast helpers (2026-10-13)
+
+The growing immutable-binding replay module exceeded the repository's 600-line source limit after
+concurrent metering work. Moved source-backed match-payload and widening-cast validation into
+`widening_cast_bindings.elisa` and included it next to the immutable-binding module. Both modules
+now fit the limit, and `git diff --check` plus the source-length gate pass. No parser, tests, or
+builds were run.
+
+### 23.27.480 Meter parameter type lookup and stabilize frame joins (2026-10-13)
+
+Replay's immutable-integer formal lookup and unsigned-type lookup now charge declaration, formal,
+name, and type-expression work to the caller's shared source counter. Local-binding initializer,
+loop-condition, and unsigned rebind-bound checks use those work-aware queries; indexed-copy, loop-
+entry, mutable-for, branch-bound, and control-flow validators use the metered immutable-formal
+query. Caller-limited shadow lookup now saturates its caller's meter on an exact-cap incomplete
+walk, and formal-type reservations cover each raw classifier pass.
+
+Frame call-state joins now first construct the facts literally common to both outcomes, then retain
+only those facts that are call-stable using the common set as the witness environment. Equal values
+are checked against that same stable common set, so one outcome's scalar witness cannot leak across
+the join. `git diff --check` and `python3 scripts/check_source_length.py` pass. Parser, build, tests,
+and replay remain pending the provenance-matched Stage1 toolchain.
+
+### 23.27.480 Require branch stability in both post-arm states (2026-10-13)
+
+Branch implied-fact restoration no longer uses the union of then/else/prior candidates as a
+stability witness set. It checks call-bearing candidates against each arm's own post-state facts,
+sharing the caller's source-work counter and failing closed on exhaustion. This prevents evidence
+present in only one outcome from justifying a fact retained across the join. `git diff --check` and
+the source-length gate pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.481 Reject shadowed same-module call rewrites (2026-10-13)
+
+The work-metered source-body declaration query returns `true` when a local shadows the target
+name and also when its reservation is exhausted. Same-module replay now rejects the qualified-to-
+bare call rewrite for either result, matching the original unmetered polarity and the other
+work-aware call sites. A complete unshadowed body is the only case admitted. Static checks pass;
+semantic replay remains pending the provenance-matched Stage1.
+
+### 23.27.482 Meter same-module replay source scans (2026-10-13)
+
+Same-module call reconstruction now reserves the declaration-tree visits and identifier text for
+its owner lookup and unique-function scan before running those legacy traversals. It also charges
+the owner path comparison. If the reservation or path charge exhausts the shared meter, replay
+returns unknown. Static gates pass; semantic qualification remains pending the pinned Stage1.
+
+### 23.27.482 Share source work across remaining binding admission paths (2026-10-13)
+
+Type-bound call-result, local-fact, and local-availability checks now charge body shadow and
+uniqueness scans to their existing work counter. Summary-call constant shadowing also uses its
+shared counter. Integer-constant admission now shares one bounded counter across expression
+sizing, parameter and local shadow checks, owner discovery, and recursive constant lookup; every
+comparison reports incomplete on exhaustion, and the final admission rejects an exhausted walk.
+The installed Stage0 parser accepts these proof modules and the compiler's decimal parser in
+`-emit ast` mode. `git diff --check` and the source-length gate pass. This is syntax-only evidence:
+the installed Stage0 commit differs from the proof repository's pinned compiler revision, so no
+semantic build, proof replay, or runtime qualification is claimed. Two compatibility-helper calls
+remain in `global_constant_validation.elisa`; their individual declaration queries are metered,
+but those callers still need a shared counter across the surrounding recursive search.
+
+### 23.27.484 Reserve AST replacement cost in branch fact joins (2026-10-13)
+
+Branch fact renaming now measures source-fact and replacement expression sizes and reserves their
+product across the candidate bound before structural substitution begins. This accounts for
+repeated place comparisons and copied replacement subtrees when large arm values occur within
+facts. Oversized work fails closed. Static checks pass; semantic qualification remains pending
+the provenance-matched Stage1.
+
+The same-module source-scan reservation was also tightened to meter owner-line discovery and
+unique-function scanning separately; the latter now charges both active-module and resolved-owner
+name comparisons per function row. Immutable unsigned parameter and rebind-type queries reserve
+the cost walk plus their raw type classifier pass.
+
+### 23.27.485 Share global-constant replay work and repair scope comparison callsite (2026-10-13)
+
+Global-constant fact validation now has a caller-metered entry point, used by boundary trace,
+precondition normalization, and summary-call replay. Summary scope equality now calls the existing
+work-aware global-constant comparator and propagates incompleteness instead of referencing a
+removed unmetered helper. Static gates pass; semantic qualification remains pending the pinned
+Stage1.
+
+### 23.27.485 Reject call-valued disjunct congruence (2026-10-13)
+
+Disjunct term matching now rejects syntactic matching and equality-fact substitution whenever
+ either compared term contains a call, because repeated call text may evaluate differently. The
+producer's call-valued local-alias guard handles either equality orientation. Producer and kernel
+replay use bounded, work-metered call scans; malformed or opaque replay nodes fail closed. The
+global-constant replay validator now threads one work counter through candidate discovery, scope
+lookup, function counting, and body-shadow checks. Existing caller preflights reserve the follow-on
+source traversals. Static gates pass; semantic qualification remains pending a provenance-matched
+Stage1 toolchain.

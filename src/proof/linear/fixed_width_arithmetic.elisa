@@ -138,12 +138,27 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_closed_typed_constant_comparison(goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_closed_typed_constant_comparison(goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
+            return false if exhausted
+            expression_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+            return false if not expression_cost.complete
+            # The candidate reader and annotated encoder traverse this restricted expression
+            # separately. Reserve both passes before calling the bounded legacy reader.
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, expression_cost.cost, 2)
             work: mutable usize = 4096
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if not proof_is_comparison(operator)
-                    return false if not proof_typed_constant_expression_candidate(left, annotations, 0, &work) or not proof_typed_constant_expression_candidate(right, annotations, 0, &work)
+                    left_candidate: bool = proof_typed_constant_expression_candidate(left, annotations, 0, &work)
+                    if not left_candidate and work == 0:
+                        exhausted <- true
+                        return false
+                    return false if not left_candidate
+                    right_candidate: bool = proof_typed_constant_expression_candidate(right, annotations, 0, &work)
+                    if not right_candidate and work == 0:
+                        exhausted <- true
+                        return false
+                    return false if not right_candidate
                 _:
                     return false
             nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
@@ -152,9 +167,29 @@ extend ElisaProof:
             return false if root >= nodes.count
             comparison: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return false if comparison.left >= nodes.count or comparison.right >= nodes.count
-            value = ElisaProofKernelCore::typed_constant_expression_comparison(&nodes, comparison.left, comparison.operator, comparison.right)
-            contextual = ElisaProofKernelCore::contextual_unsigned_constant_comparison(&nodes, comparison.left, comparison.operator, comparison.right)
-            return false if not ((value.known and value.value) or (contextual.known and contextual.value))
+            typed_value: (known: bool, value: bool) = ElisaProofKernelCore::typed_constant_expression_comparison_with_goal_work(&nodes, comparison.left, comparison.operator, comparison.right, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            if budget > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                exhausted <- true
+                return false
+            proven: mutable bool = typed_value.known and typed_value.value
+            if not proven:
+                contextual_value: (known: bool, value: bool) = ElisaProofKernelCore::contextual_unsigned_constant_comparison_with_goal_work(&nodes, comparison.left, comparison.operator, comparison.right, &budget, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                if budget > PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                    exhausted <- true
+                    return false
+                proven <- contextual_value.known and contextual_value.value
+            return false if not proven
+            if nodes.count >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            remaining_nodes: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - nodes.count
+            if children.count >= remaining_nodes:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            encoded_size: usize = nodes.count + children.count + 1
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, encoded_size, PROOF_LINEAR_SAFETY_SCAN_MULTIPLIER)
             return (ElisaProofKernelReplay::proof_kernel_replay_goal_report(&nodes, &children, [], root) can Global{Read,Write})
 
         def proof_closed_typed_return_fits(expression: Ast::Expr, width: i64, annotations: darray[Ast::EnumAnnotation]&) -> bool:
