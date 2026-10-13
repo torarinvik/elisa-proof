@@ -28,6 +28,8 @@ Static-audit delta (2026-10-13): the dirty proof tree now extracts qualified mod
 
 Replay follow-up (2026-10-13): direct call-result type witnesses now resolve qualified scalar aliases and nominal declarations using the compiler's root-or-enclosing-module path rule, selecting the deepest matching owner and charging each compared path segment to the replay work budget. The exact callee module path is already known at this boundary. Parameter and local-variable witnesses still reject qualified type paths until their validators carry the owning function scope. `git diff --check` and the source-length gate pass; parser, build, tests, and replay remain under the static-only hold.
 
+Static review scope (2026-10-13): source-bound tactic import now precharges source annotation row count and owner/name bytes against the aggregate action-AST budget before copying annotations into the caller buffer. The later AST census remains in place and charges annotations again conservatively. This change has static review only; no parser, build, tests, or replay were run.
+
 Toolchain recheck (2026-10-13): the newest additional Stage1 artifact found is `../Elisa-compiler/build/goal-compiler-latest-b11e/bin/elisac-stage1`, stamped to compiler commit `b11e9121` from 2026-10-09 with provenance schema v1. It predates current compiler `main` (`d4338ced`) and is not a qualification candidate; no schema-v5 or `d4338ced`-matched provenance artifact was found.
 
 Toolchain recheck (2026-10-13, local benchmark worktree): `/Users/torarinvikbjarko/.codex/worktrees/v5-local-bench-bootstrap/Elisa-compiler/bin/elisac-stage1` has SHA-256 `948a525c3f46dc34b9f4146245e7b9d9d7e13ef4dedae38a981bde4ffa633c8f`; its provenance schema-v5 freshness check passes and records source revision `b77499d4f`. That detached worktree has 77 dirty paths, and its HEAD is not a descendant of current compiler `main` (`cce6b6afc`), so this artifact does not qualify the current Global.Read/Write candidate or proof pin. This check ran only the read-only freshness verifier, not the compiler, tests, or proof replay.
@@ -15496,6 +15498,19 @@ the selected module path through those lookups. The type-bound caller's smaller 
 needs to be enforced by the scoped resolver itself. Diff and source-length gates pass; parser/build
 qualification remains pending.
 
+### 23.27.645 Reuse arena verdicts within one immutable tactic trace (2026-10-13)
+
+Tactic step and branch admission can validate several roots over the same arena. Those private
+paths now share one validation workspace, including visited-depth and validity arrays, so a
+previously validated subgraph can be reused and the O(nodes) workspace initialization occurs once
+per tactic operation. Reuse is explicitly enabled only by the private tactic helpers that retain
+the same arena reference across the root checks; general workspace entry points force fresh array
+initialization, preserving safety when a caller supplies another same-sized arena. This also lets
+the cumulative trace meter charge first-use work and only incremental work for later roots. Static
+call-graph review only; no build or runtime qualification was run. Tactic JSON source-annotation
+copy is also charged against the cumulative action-AST meter before the copy begins; the existing
+action census continues to charge annotation work during tactic execution.
+
 Superseded for frame identity safety by §23.27.545: frame recovery now fails closed when the later
 name-and-line owner lookup is ambiguous. The type-bound caller budget was addressed in §23.27.539.
 
@@ -16622,6 +16637,13 @@ been run. The candidate remains unqualified until semantic bound checking and ba
 one candidate-selection result (including named/default argument mapping), ambiguous candidates fail
 closed, and matched Stage0/Stage1 gates run on a provenance-matched build.
 
+Re-audit of the live candidate at `dfaeb45c6ff6532b59d2a3183557413172f23d6f` confirms this remains
+open: `check_inferred_protocol_argument` and `check_inferred_generic_bound_argument` still return
+when `direct_function_count != 1`, and `walk_expression_for_firm_arg_type_mismatch` still invokes
+the direct checker only for a unique function name. The candidate's dirty parser changes now carry
+generic owner offsets, but those changes are not in pinned compiler main `505351f9` and are not yet
+qualified. No files in the compiler checkout were changed in this audit.
+
 ### 23.27.641 Align arena work admission with advertised node and child caps (2026-10-13)
 
 Static accounting found that the previous 12,000,000-unit arena-local ceiling was below the base
@@ -16685,3 +16707,28 @@ source `7e1251785276c539c98dbe33a12e610e2338cbf4`; the replay manifest is pinned
 `a1a8f2cd75a65755f4bed8574a1e75b7678b8c0` and compiler source `ac2b23ef4d9590e77b40503c0d90df59837d542a`.
 Neither manifest qualifies the current source pair. Static diff and source-length checks pass; no
 parser, build, test, or replay command was run.
+
+### 23.27.646 Reuse arena admission scratch across tactic roots (2026-10-13)
+
+Tactic-step admission can validate before/after states and two auxiliary roots, while branch
+admission validates three roots over the same immutable arena. These trace-local paths now share
+one fresh validation workspace, so verdict arrays initialize once and memoized validity/depth
+are reused across roots. General reusable-workspace APIs force reinitialization on every call;
+same node count is not treated as an arena identity. The private cache path is limited to the
+single tactic operation whose roots are admitted before any mutation. `git diff --check` and the
+source-length gate pass. Parser/build/test/replay qualification remains pending under the
+provenance hold.
+
+### 23.27.647 Audit same-line generic owner identity (2026-10-13)
+
+The proof-side generic binder snapshot retains `(line, name)` but the pinned compiler parser does
+not provide owner offsets. Distinct generic-capable declarations can share a line through line
+directives, so line-scoped name lookup alone may associate a binder with the wrong declaration.
+The source snapshot now builds a bounded hash index of represented generic lines, normalizes the
+parser's bound-line flag, and scans the AST once. It invalidates generic metadata unless each
+represented line identifies exactly one declaration, so missing and ambiguous owners both fail
+closed. The snapshot runs during source preparation before kernel proposition formation; the
+kernel projection and function summary collector both receive its validity bit. Later replay uses
+the same invalid state and refuses generic shadow queries. This is conservative at file scope;
+carrying parser owner offsets through the proof/replay protocol would preserve more valid generic
+programs. Static review only; no parser, build, test, or replay ran under the provenance hold.
