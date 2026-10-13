@@ -67,7 +67,7 @@ def main() -> None:
             "the same-name internal/extern overload premise must compile:\n"
             f"{overload_compile.stdout}\n{overload_compile.stderr}"
         )
-        print("qualified call-summary replay: assignment RHS and safe branch joins replay; stale call-to-call, branch-join, if-return and multi-arm match claims are refused by producer and replay; forged arguments, spans, wrong modules, overloads and nested-call reductions are refused")
+        print("qualified call-summary replay: transitive qualified calls with repeated leaf names replay; assignment RHS and safe branch joins replay; stale call-to-call, branch-join, if-return and multi-arm match claims are refused by producer and replay; forged arguments, spans, wrong modules, overloads and nested-call reductions are refused")
 
 
 if __name__ == "__main__":
