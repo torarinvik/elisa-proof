@@ -1,5 +1,8 @@
 extend ElisaProof:
     private:
+        const PROOF_REPLAY_DETERMINISTIC_IMPORT_NAME_MARKER_COMPARE_WORK: usize = 121
+        const PROOF_REPLAY_DETERMINISTIC_IMPORT_ALIAS_MARKER_COMPARE_WORK: usize = 35
+
         def proof_replay_deterministic_parameter_type(expression: Ast::Expr, depth: usize) -> bool:
             return false if depth >= 96
             match expression:
@@ -70,7 +73,7 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Ident(name, _):
                     return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int"
-                    return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+                    return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uintptr"
                     return true if name == "bool" or name == "char"
                     source = proof_replay_effect_named_declaration(declarations, name, 0)
                     return false if source.matches != 1
@@ -96,7 +99,7 @@ extend ElisaProof:
             match expression:
                 Ast::Expr.Ident(name, _):
                     return true if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "int"
-                    return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uint"
+                    return true if name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize" or name == "uintptr"
                     return true if name == "bool" or name == "char"
                     source: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(declarations, name, work)
                     return false if not source.complete or source.count != 1 or source.head >= declarations.entries.count
@@ -117,6 +120,13 @@ extend ElisaProof:
                     return false
             return false
 
+        def proof_replay_deterministic_import_owner_supported(annotation: Ast::EnumAnnotation, work: mutable usize&) -> bool:
+            # The parser stores from-import sentinels in `owner`. Charge both possible
+            # comparisons, the stored spelling, and the fixed marker bytes before inspecting it.
+            return false if not proof_replay_deterministic_call_budget_charge(sview_len(annotation.owner), work)
+            return false if not proof_replay_deterministic_call_budget_charge(25, work)
+            return annotation.owner != "__from_member" and annotation.owner != "__from_src"
+
         def proof_replay_deterministic_module_alias_imports_supported(annotations: darray[Ast::EnumAnnotation]&, alias_count: mutable usize&, work: mutable usize&) -> bool:
             cursor: mutable usize = 0
             while cursor < annotations.count |cursor, annotations, work|:
@@ -129,12 +139,13 @@ extend ElisaProof:
                 work <- work + sview_len(annotation.name)
                 return false if sview_len(annotation.module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                 work <- work + sview_len(annotation.module)
+                return false if not proof_replay_deterministic_call_budget_product(7, sview_len(annotation.name), work)
+                return false if not proof_replay_deterministic_call_budget_charge(PROOF_REPLAY_DETERMINISTIC_IMPORT_NAME_MARKER_COMPARE_WORK, work)
+                return false if not proof_replay_deterministic_import_owner_supported(annotation, work)
                 if annotation.name == "__using":
                     return false if cursor + 2 >= annotations.count
                     alias: Ast::EnumAnnotation = annotations[cursor + 1]
                     target: Ast::EnumAnnotation = annotations[cursor + 2]
-                    return false if alias.name != "__using_alias" or target.name != "__using_alias_target"
-                    return false if alias.owner == "" or target.owner != annotation.owner or alias.module != target.module or alias.line != annotation.line or target.line != annotation.line or alias.offset != target.offset or alias.offset <= annotation.offset
                     for paired in [alias, target] |paired, work|:
                         return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 1 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                         work <- work + 1
@@ -142,8 +153,20 @@ extend ElisaProof:
                         work <- work + sview_len(paired.owner)
                         return false if sview_len(paired.name) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                         work <- work + sview_len(paired.name)
+                        return false if not proof_replay_deterministic_call_budget_charge(sview_len(paired.name), work)
                         return false if sview_len(paired.module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                         work <- work + sview_len(paired.module)
+                        return false if not proof_replay_deterministic_import_owner_supported(paired, work)
+                    return false if not proof_replay_deterministic_call_budget_charge(PROOF_REPLAY_DETERMINISTIC_IMPORT_ALIAS_MARKER_COMPARE_WORK, work)
+                    # These pairwise equality checks scan source-owned strings again after the
+                    # per-annotation scan and sentinel checks above. Charge both spellings before
+                    # comparing them so equal long aliases cannot exceed the bounded work model.
+                    return false if not proof_replay_deterministic_call_budget_charge(sview_len(annotation.owner), work)
+                    return false if not proof_replay_deterministic_call_budget_charge(sview_len(target.owner), work)
+                    return false if not proof_replay_deterministic_call_budget_charge(sview_len(alias.module), work)
+                    return false if not proof_replay_deterministic_call_budget_charge(sview_len(target.module), work)
+                    return false if alias.name != "__using_alias" or target.name != "__using_alias_target"
+                    return false if alias.owner == "" or target.owner != annotation.owner or alias.module != target.module or alias.line != annotation.line or target.line != annotation.line or alias.offset != target.offset or alias.offset <= annotation.offset
                     alias_count <- alias_count + 1
                     cursor <- cursor + 3
                     continue
@@ -182,27 +205,37 @@ extend ElisaProof:
                                 target: Ast::EnumAnnotation = annotations[index + 2]
                                 return false if sview_len(target.owner) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                                 work <- work + sview_len(target.owner)
-                                if candidate.owner == module and candidate.line == position.line and target.owner == module:
-                                    matches <- matches + 1
-                                    return false if matches > 1
+                                return false if not proof_replay_deterministic_call_budget_charge(1 + sview_len(module), work)
+                                candidate_owner_matches: bool = candidate.owner == module
+                                if candidate_owner_matches and candidate.line == position.line:
+                                    return false if not proof_replay_deterministic_call_budget_charge(1 + sview_len(module), work)
+                                    target_owner_matches: bool = target.owner == module
+                                    if target_owner_matches:
+                                        matches <- matches + 1
+                                        return false if matches > 1
                         return false if matches != 1
                         matched_count <- matched_count + 1
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_deterministic_alias_import_declarations_supported(nested, annotations, import_count, matched_count, work, depth + 1)
-                    _:
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    _:
+                        return false
             return true
 
         # Resolve a qualified deterministic call through the same source-derived module and
         # alias index as checker admission. A single candidate row keeps this exact-owner query
         # bounded while preserving every AST path segment.
-        def proof_replay_deterministic_qualified_path_matches_owner(owner: sview, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, work: mutable usize&) -> bool:
-            return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 2 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+        def proof_replay_deterministic_qualified_path_matches_owner(owner: sview, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, work: mutable usize&) -> (complete: bool, matches: bool):
+            return (false, false) if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or 2 > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
             work <- work + 2
             names: darray[sview] = [wanted]
             owners: darray[sview] = [owner]
             resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(names, owners, aliases, caller_owner, callee, work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
-            return work <= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT and resolved.complete and resolved.row == 0
+            return (false, false) if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or not resolved.complete
+            return (true, resolved.row == 0)
 
         def proof_replay_deterministic_qualified_declaration(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, selected: mutable Ast::Decl&, selected_owner: mutable sview&, selected_row: mutable usize&, matches: mutable usize&, work: mutable usize&) -> bool:
             return false if wanted == ""
@@ -214,11 +247,17 @@ extend ElisaProof:
                 return false if row >= index.entries.count or not proof_replay_deterministic_call_budget_charge(1 + sview_len(index.entries[row].name), work)
                 entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
                 return false if entry.name != wanted
-                if entry.is_function and not entry.is_lemma and proof_replay_deterministic_qualified_path_matches_owner(entry.owner, wanted, callee, caller_owner, aliases, work):
-                    matches <- matches + 1
-                    selected <- entry.declaration
-                    selected_owner <- entry.owner
-                    selected_row <- row
+                # The checker resolves qualified calls in the executable-function table. Type,
+                # value, extern, import, law, and lemma rows share this replay name index, but
+                # they are not candidates in that table.
+                if entry.is_function and not entry.is_lemma:
+                    path_match: (complete: bool, matches: bool) = proof_replay_deterministic_qualified_path_matches_owner(entry.owner, wanted, callee, caller_owner, aliases, work)
+                    return false if not path_match.complete
+                    if path_match.matches:
+                        matches <- matches + 1
+                        selected <- entry.declaration
+                        selected_owner <- entry.owner
+                        selected_row <- row
                 row <- entry.next_index
                 return false if row > index.entries.count
             return row == index.entries.count

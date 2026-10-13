@@ -1,5 +1,5 @@
-# Source-faithful bare-call selection for deterministic-call replay. For duplicate names,
-# prefer the caller's scope, then its nearest lexical parent, then a unique root declaration.
+# Source-faithful bare-call selection for deterministic-call replay. A globally unique declaration
+# resolves directly; duplicate names prefer the caller's scope, then its nearest parent and root.
 extend ElisaProof:
     private:
         def proof_replay_deterministic_path_prefix_equal(index: ProofReplayDeterministicDeclarationIndex&, left_row: usize, right_row: usize, prefix: usize, work: mutable usize&) -> (complete: bool, equal: bool):
@@ -39,6 +39,41 @@ extend ElisaProof:
             return (false, 0, index.entries.count) if row != index.entries.count
             return (true, matches, selected)
 
+        # Type-bound result witnesses historically select the preceding same-name source
+        # declaration before checking its declared return type. Keep that contract distinct
+        # from executable-call resolution, which follows the compiler's function table.
+        def proof_replay_deterministic_preceding_function(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, line: u32, work: mutable usize&) -> (complete: bool, matches: usize, row: usize):
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
+            return (false, 0, index.entries.count) if not group.complete
+            return (true, 0, index.entries.count) if group.count == 0
+            row: mutable usize = group.head
+            selected: mutable usize = index.entries.count
+            matches: mutable usize = 0
+            for _ in 0..<group.count |group, index, row, wanted, line, selected, matches, work|:
+                return (false, 0, index.entries.count) if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, 0, index.entries.count) if not proof_replay_deterministic_call_budget_charge(1 + sview_len(entry.name), work)
+                return (false, 0, index.entries.count) if entry.name != wanted
+                if entry.is_function:
+                    match entry.declaration:
+                        Ast::Decl.Func(_, _, _, _, _, _, position):
+                            if position.line <= line:
+                                replace: mutable bool = selected == index.entries.count
+                                if selected < index.entries.count:
+                                    match index.entries[selected].declaration:
+                                        Ast::Decl.Func(_, _, _, _, _, _, selected_position):
+                                            replace <- position.line > selected_position.line
+                                        _:
+                                            return (false, 0, index.entries.count)
+                                selected <- row if replace
+                        _:
+                            return (false, 0, index.entries.count)
+                row <- entry.next_index
+                return (false, 0, index.entries.count) if row > index.entries.count
+            return (false, 0, index.entries.count) if row != index.entries.count
+            return (true, 1, selected) if selected < index.entries.count
+            return (true, 0, index.entries.count)
+
         def proof_replay_deterministic_bare_declaration(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, caller_row: usize, work: mutable usize&) -> (complete: bool, matches: usize, row: usize, declaration: Ast::Decl, owner: sview):
             missing: usize = index.entries.count
             return (false, 0, missing, Ast::Decl.Invalid, "") if wanted == "" or caller_row >= index.entries.count
@@ -60,11 +95,17 @@ extend ElisaProof:
                 row <- entry.next_index
                 return (false, 0, missing, Ast::Decl.Invalid, "") if row > index.entries.count
             return (false, 0, missing, Ast::Decl.Invalid, "") if row != index.entries.count
+            # The proof function table, like the compiler's callable table, contains executable
+            # function declarations. Constants, types, imports, extern signatures, laws, and
+            # lemmas live in separate namespaces/tables and do not make a unique function target
+            # ambiguous here.
+            return (true, 0, missing, Ast::Decl.Invalid, "") if function_rows.count == 0
+            # The compiler's bare resolver binds a globally unique function before applying
+            # caller-module preference, so preserve that behavior for declarations in modules.
             if function_rows.count == 1:
                 selected: usize = function_rows[0]
                 entry: ProofReplayDeterministicDeclarationEntry = index.entries[selected]
                 return (true, 1, selected, entry.declaration, entry.owner)
-
             same_selected: mutable usize = missing
             same_matches: mutable usize = 0
             for candidate in function_rows |candidate, index, caller, same_selected, same_matches, work|:

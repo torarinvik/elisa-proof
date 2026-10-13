@@ -111,18 +111,27 @@ extend ElisaProof:
                         pass
             return true
 
-        def proof_replay_literal_call_signature(declarations: darray[Ast::Decl]&, name: sview, target_module: sview, current_module: sview, argument_count: usize, argument_names: darray[sview]&, argument_index: usize, width: mutable i64&, function_matches: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT
-            for declaration in declarations |name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, depth|:
+        def proof_replay_literal_call_signature(declarations: darray[Ast::Decl]&, name: sview, target_module: sview, current_module: sview, argument_count: usize, argument_names: darray[sview]&, argument_index: usize, width: mutable i64&, function_matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TRACE_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate_name, parameters, _, _, _, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         if candidate_name == name and current_module == target_module:
                             function_matches <- function_matches + 1
                             return false if argument_count != parameters.count or argument_index >= parameters.count
                             return false if argument_names.count != 0 and argument_names.count != argument_count
-                            for index in 0..<argument_count |index, argument_names|:
+                            for index in 0..<argument_count |index, argument_names, work|:
+                                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                work <- work + 1
                                 return false if argument_names.count > 0 and argument_names[index] != ""
                             parameter: Ast::ParamDecl = parameters[argument_index]
+                            return false if sview_len(parameter.name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                            work <- work + sview_len(parameter.name)
+                            return false if not proof_replay_summary_expr_charge_with_work(parameter.type_expression, work)
                             return false if parameter.is_mutable or parameter.has_default
                             match parameter.type_expression:
                                 Ast::Expr.Ident(type_name, _):
@@ -130,9 +139,11 @@ extend ElisaProof:
                                 _:
                                     return false
                     Ast::Decl.Module(module_name, nested, _):
-                        return false if not proof_replay_literal_call_signature(nested, name, target_module, module_name, argument_count, argument_names, argument_index, width, function_matches, depth + 1)
+                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        return false if not proof_replay_literal_call_signature(nested, name, target_module, module_name, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_literal_call_signature(nested, name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, depth + 1)
+                        return false if not proof_replay_literal_call_signature(nested, name, target_module, current_module, argument_count, argument_names, argument_index, width, function_matches, work, depth + 1)
                     _:
                         pass
             return true
@@ -190,12 +201,10 @@ extend ElisaProof:
             return false if report.trace_owner_line != trace.line
             return false if report.replay_owner_line == 0 or report.replay_owner_line == 4294967295
             return false if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, work)
-            return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + report.source_annotations.count
-            return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
             return false if report.source_declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
             work <- work + report.source_declarations.count
-            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, literal, position):
                     return false if symbol == "" or not proof_replay_source_position_equal(symbol_position, position)
@@ -221,6 +230,10 @@ extend ElisaProof:
                         Ast::Expr.Call(Ast::Expr.Ident(callee_name, _), arguments, argument_names, call_position):
                             return false if callee_name == "" or proof_name_is_reserved_internal(callee_name)
                             return false if not proof_replay_source_position_equal(call_position, position)
+                            return false if proof_replay_local_binding_parameter_name_present_with_default_limit(report.source_declarations, trace.name, report.replay_owner_line, callee_name, work, 0)
+                            caller_body: mutable darray[Ast::Stmt] = []
+                            return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &caller_body, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                            return false if not proof_replay_source_call_locals_unshadowed_at_with_work(caller_body, report.source_annotations, source_call, work)
                             argument_index: mutable usize = arguments.count
                             for index in 0..<arguments.count |index, arguments, literal, argument_index|:
                                 return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
@@ -231,14 +244,11 @@ extend ElisaProof:
                             return false if argument_index >= arguments.count
                             return false if not proof_replay_summary_owner_source_preflight(report, trace.name, report.replay_owner_line, work)
                             overload_count: mutable usize = 0
-                            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, caller_module, "", &overload_count, 0)
+                            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, callee_name, caller_module, "", &overload_count, work, 0)
                             return false if overload_count != 1
-                            global_candidate_count: mutable usize = 0
-                            return false if not proof_replay_summary_global_candidate_count(report.source_declarations, callee_name, &global_candidate_count, 0)
-                            return false if global_candidate_count != 1
                             function_matches: mutable usize = 0
                             width: mutable i64 = 0
-                            return false if not proof_replay_literal_call_signature(report.source_declarations, callee_name, caller_module, "", arguments.count, argument_names, argument_index, &width, &function_matches, 0)
+                            return false if not proof_replay_literal_call_signature(report.source_declarations, callee_name, caller_module, "", arguments.count, argument_names, argument_index, &width, &function_matches, work, 0)
                             return false if function_matches != 1 or width <= 0 or not proof_literal_argument_fits(literal, width, 0)
                             return proof_replay_literal_binding_width_matches(report, symbol, width, position, trace.name, trace.line)
                         _:

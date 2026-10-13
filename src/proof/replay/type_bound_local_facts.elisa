@@ -66,7 +66,7 @@ extend ElisaProof:
                         element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
                         element_name: sview = proof_ident_name(element)
                         return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
-                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uintptr" or element_name == "bool" or element_name == "char"
                         if element_scalar:
                             # The producer records the complete builtin indexed protocol set as
                             # `Index.All` for a primitive element. Bind that aggregate marker to
@@ -131,8 +131,10 @@ extend ElisaProof:
 
         def proof_replay_type_bound_scope_with_module_with_work(current: darray[sview]&, module_name: sview, work: mutable usize&) -> (complete: bool, scope: darray[sview]):
             module_length: usize = sview_len(module_name)
-            return (false, []) if module_length > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT / 2
-            return (false, []) if not proof_replay_type_bound_local_work_charge(module_length * 2, work)
+            if module_length > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT / 3:
+                work <- PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return (false, [])
+            return (false, []) if not proof_replay_type_bound_local_work_charge(module_length * 3, work)
             segments: mutable darray[sview] = []
             segment_start: mutable usize = 0
             qualified: mutable bool = false
@@ -144,7 +146,8 @@ extend ElisaProof:
             if segment_start < module_length:
                 segments.push(string_view_suffix(module_name, segment_start.i64()))
             return (true, segments) if qualified
-            return (false, []) if not proof_replay_type_bound_local_work_charge(current.count + segments.count, work)
+            return (false, []) if not proof_replay_type_bound_local_work_charge(current.count, work)
+            return (false, []) if not proof_replay_type_bound_local_work_charge(segments.count, work)
             normalized: mutable darray[sview] = []
             normalized.extend(current)
             normalized.extend(segments)
@@ -165,10 +168,10 @@ extend ElisaProof:
         def proof_replay_type_bound_local_type_name_charge(name: sview, work: mutable usize&) -> bool:
             name_bytes: usize = sview_len(name)
             return proof_replay_type_bound_local_work_exhaust(work) if name_bytes >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT / 16
-            # Primitive-name resolvers perform a fixed chain of comparisons; charge both the
-            # comparison dispatches and the bytes examined, including for one-character names.
+            # Primitive-name and width resolvers perform separate fixed comparison chains;
+            # charge enough dispatches and bytes for both, including one-character names.
             name_cost: usize = name_bytes + 1
-            return proof_replay_type_bound_local_work_charge(name_cost * 16, work)
+            return proof_replay_type_bound_local_work_charge(name_cost * 24, work)
 
         # Include the cost walk itself and every later body visit. Source uniqueness also
         # compares the requested name at visited nodes, so reserve that byte factor per pass.
@@ -204,8 +207,36 @@ extend ElisaProof:
                             return true if matches > 1
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_type_bound_local_alias_scan(nested, name, matches, target, work, depth + 1)
-                    _:
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    _:
+                        return false
+            return true
+
+        # The fallback alias resolver below is file-wide. Never let an unrelated alias make a
+        # same-spelled nominal type appear scalar; until type lookup carries module paths, any
+        # aggregate declaration with that spelling makes the result ambiguous.
+        def proof_replay_type_bound_local_aggregate_name_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |name, matches, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Struct(candidate, _, _, _, _, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work)
+                        matches <- matches + 1 if candidate == name
+                    Ast::Decl.Enum(candidate, _, _, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(candidate, name, work)
+                        matches <- matches + 1 if candidate == name
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_local_aggregate_name_scan(nested, name, matches, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
             return true
 
         def proof_replay_type_bound_local_const_enum_scan(declarations: darray[Ast::Decl]&, name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
@@ -218,8 +249,20 @@ extend ElisaProof:
                         matches <- matches + 1 if is_const and enum_name == name
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
                         return false if not proof_replay_type_bound_local_const_enum_scan(nested, name, matches, work, depth + 1)
-                    _:
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_type_bound_local_builtin_unshadowed(report: ProofReport&, name: sview, work: mutable usize&) -> bool:
+            aliases: mutable usize = 0
+            target: mutable Ast::Expr = Ast::Expr.Absent
+            return false if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &aliases, &target, work, 0) or aliases != 0
+            aggregates: mutable usize = 0
+            return false if not proof_replay_type_bound_local_aggregate_name_scan(report.source_declarations, name, &aggregates, work, 0) or aggregates != 0
             return true
 
         def proof_replay_type_bound_local_unsigned_width(report: ProofReport&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> i64:
@@ -228,11 +271,16 @@ extend ElisaProof:
                 Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
                     return proof_replay_type_bound_local_unsigned_width(report, base, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
+                    return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                     return proof_replay_type_bound_local_unsigned_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                 Ast::Expr.Ident(name, _):
                     return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    primitive: i64 = proof_unsigned_primitive_width(expression)
-                    return primitive if primitive > 0
+                    if proof_scalar_primitive_type_name(name):
+                        primitive: i64 = proof_unsigned_primitive_width(expression)
+                        return primitive if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
+                        return -1
+                    aggregate_matches: mutable usize = 0
+                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
                     matches: mutable usize = 0
                     target: mutable Ast::Expr = Ast::Expr.Absent
                     return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
@@ -254,11 +302,16 @@ extend ElisaProof:
                 Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
                     return proof_replay_type_bound_local_signed_width(report, base, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
+                    return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
                     return proof_replay_type_bound_local_signed_width(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Ampersand or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                 Ast::Expr.Ident(name, _):
                     return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    primitive: i64 = proof_signed_primitive_width(expression)
-                    return primitive if primitive > 0
+                    if proof_scalar_primitive_type_name(name):
+                        primitive: i64 = proof_signed_primitive_width(expression)
+                        return primitive if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
+                        return -1
+                    aggregate_matches: mutable usize = 0
+                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
                     matches: mutable usize = 0
                     target: mutable Ast::Expr = Ast::Expr.Absent
                     return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &matches, &target, work, 0)
@@ -280,19 +333,28 @@ extend ElisaProof:
                 Ast::Expr.Refinement(base, _, _) | Ast::Expr.Paren(base, _):
                     return proof_replay_type_bound_local_scalar_kind(report, base, work, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
-                    return proof_replay_type_bound_local_scalar_kind(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Lmut or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
+                    return 0 if operator == TokenKind.Ampersand or operator == TokenKind.Lmut
+                    return proof_replay_type_bound_local_scalar_kind(report, inner, work, depth + 1) if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail
                 Ast::Expr.Ident(name, _):
                     return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
-                    return 1 if proof_scalar_primitive_type_name(name)
+                    if proof_scalar_primitive_type_name(name):
+                        return 1 if proof_replay_type_bound_local_builtin_unshadowed(report, name, work)
+                        return -1
                     alias_matches: mutable usize = 0
                     target: mutable Ast::Expr = Ast::Expr.Absent
                     return -1 if not proof_replay_type_bound_local_alias_scan(report.source_declarations, name, &alias_matches, &target, work, 0)
                     return -1 if alias_matches > 1
-                    return proof_replay_type_bound_local_scalar_kind(report, target, work, depth + 1) if alias_matches == 1
+                    if alias_matches == 1:
+                        aggregate_matches: mutable usize = 0
+                        return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source_declarations, name, &aggregate_matches, work, 0) or aggregate_matches > 0
+                        return proof_replay_type_bound_local_scalar_kind(report, target, work, depth + 1)
                     enum_matches: mutable usize = 0
                     return -1 if not proof_replay_type_bound_local_const_enum_scan(report.source_declarations, name, &enum_matches, work, 0)
                     return -1 if enum_matches > 1
-                    return 1 if enum_matches == 1
+                    aggregate_matches: mutable usize = 0
+                    return -1 if not proof_replay_type_bound_local_aggregate_name_scan(report.source_declarations, name, &aggregate_matches, work, 0)
+                    return 1 if enum_matches == 1 and aggregate_matches == 1
+                    return -1 if aggregate_matches != 0
                 Ast::Expr.Scope(_, name, _):
                     return -1 if not proof_replay_type_bound_local_type_name_charge(name, work)
                     alias_matches: mutable usize = 0
@@ -436,7 +498,7 @@ extend ElisaProof:
                         element: Ast::Expr = proof_replay_type_bound_fixed_array_element(local_type)
                         element_name: sview = proof_ident_name(element)
                         return false if not proof_replay_type_bound_local_type_name_charge(element_name, work)
-                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uint" or element_name == "bool" or element_name == "char"
+                        element_scalar: bool = element_name == "i8" or element_name == "i16" or element_name == "i32" or element_name == "i64" or element_name == "isize" or element_name == "int" or element_name == "u8" or element_name == "u16" or element_name == "u32" or element_name == "u64" or element_name == "usize" or element_name == "uintptr" or element_name == "bool" or element_name == "char"
                         if element_scalar:
                             # Keep the certificate-facing source check aligned with the compact
                             # `Index.All` witness emitted for primitive array elements.

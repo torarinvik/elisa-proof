@@ -5,43 +5,70 @@ extend ElisaProof:
         const PROOF_REPLAY_LOCAL_CALL_NO_MATCH: usize = 0
         const PROOF_REPLAY_LOCAL_CALL_EXACT_MATCH: usize = 1
         const PROOF_REPLAY_LOCAL_CALL_AMBIGUOUS: usize = 2
+        # Total marker bytes plus one comparison step for each six name and two owner checks.
+        const PROOF_REPLAY_IMPORT_MARKER_COMPARE_WORK: usize = 121
 
-        def proof_replay_summary_has_unresolved_import(annotations: darray[Ast::EnumAnnotation]&) -> bool:
-            for annotation in annotations:
+        def proof_replay_summary_has_unresolved_import(annotations: darray[Ast::EnumAnnotation]&, work: mutable usize&, limit: usize) -> bool:
+            return true if work > limit or annotations.count > limit - work
+            work <- work + annotations.count
+            for annotation in annotations |work, limit|:
+                remaining: usize = limit - work
+                name_bytes: usize = sview_len(annotation.name)
+                owner_bytes: usize = sview_len(annotation.owner)
+                # Six name sentinels and two owner sentinels may each scan the stored spelling.
+                # The fixed allowance covers their marker bytes and one step per comparison.
+                return true if name_bytes > remaining / 6
+                name_work: usize = name_bytes * 6
+                return true if name_work > remaining or owner_bytes > (remaining - name_work) / 2
+                owner_work: usize = owner_bytes * 2
+                return true if name_work + owner_work > remaining or PROOF_REPLAY_IMPORT_MARKER_COMPARE_WORK > remaining - name_work - owner_work
+                work <- work + name_work + owner_work + PROOF_REPLAY_IMPORT_MARKER_COMPARE_WORK
                 match annotation.name:
-                    "__using" | "__using_alias" | "__using_alias_target" | "__using_member" | "__binding_wildcard_import" | "__from_member" | "__from_src" | "__from_decl":
+                    "__using" | "__using_alias" | "__using_alias_target" | "__using_member" | "__binding_wildcard_import" | "__from_decl":
                         return true
                     _:
                         pass
+                return true if annotation.owner == "__from_member" or annotation.owner == "__from_src"
             return false
 
-        def proof_replay_summary_has_unresolved_declaration_import(declarations: darray[Ast::Decl]&, depth: usize) -> bool:
-            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for declaration in declarations |depth|:
+        def proof_replay_summary_has_unresolved_declaration_import(declarations: darray[Ast::Decl]&, work: mutable usize&, limit: usize, depth: usize) -> bool:
+            return true if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or work > limit or declarations.count > limit - work
+            work <- work + declarations.count
+            for declaration in declarations |work, limit, depth|:
                 match declaration:
                     Ast::Decl.Import(_, _):
                         return true
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return true if proof_replay_summary_has_unresolved_declaration_import(nested, depth + 1)
-                    _:
+                        return true if proof_replay_summary_has_unresolved_declaration_import(nested, work, limit, depth + 1)
+                    Ast::Decl.Invalid:
+                        return true
+                    Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
+                    _:
+                        return true
             return false
 
         # Without the importer's resolved-callee witness, a same-spelled declaration in any
         # namespace may be a candidate for bare-name or qualified lookup. Until lookup identity
         # is carried into the report, require a globally unique declaration spelling.
-        def proof_replay_summary_global_candidate_count(declarations: darray[Ast::Decl]&, name: sview, count: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for declaration in declarations |name, count, depth|:
+        def proof_replay_summary_global_candidate_count(declarations: darray[Ast::Decl]&, name: sview, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |name, count, work, depth|:
                 candidate: mutable sview = ""
                 match declaration:
                     Ast::Decl.Func(candidate_name, _, _, _, _, _, _) | Ast::Decl.Extern(candidate_name, _, _, _, _, _, _, _) | Ast::Decl.Struct(candidate_name, _, _, _, _, _, _) | Ast::Decl.Enum(candidate_name, _, _, _, _) | Ast::Decl.Alias(candidate_name, _, _) | Ast::Decl.Law(candidate_name, _, _) | Ast::Decl.Const(candidate_name, _, _, _, _):
                         candidate <- candidate_name
+                        return false if sview_len(candidate) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate)
                     Ast::Decl.Module(module_name, nested, _):
+                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
                         count <- count + 1 if module_name == name
-                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, depth + 1)
+                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, depth + 1)
+                        return false if not proof_replay_summary_global_candidate_count(nested, name, count, work, depth + 1)
                     Ast::Decl.Import(_, _) | Ast::Decl.Invalid:
                         return false
                     _:
@@ -50,35 +77,83 @@ extend ElisaProof:
                 return false if count > 1
             return true
 
-        def proof_replay_summary_same_module_name_count(declarations: darray[Ast::Decl]&, name: sview, owner_module: sview, current_module: sview, count: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
-            for declaration in declarations |name, owner_module, current_module, count, depth|:
+        def proof_replay_summary_function_owner_module(declarations: darray[Ast::Decl]&, name: sview, line: u32, current: sview, owner: mutable sview&, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |name, line, current, owner, count, work, depth|:
+                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                work <- work + 1
+                match declaration:
+                    Ast::Decl.Func(candidate_name, _, _, _, _, _, position):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
+                        return false if sview_len(name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(name)
+                        if candidate_name == name and position.line == line:
+                            owner <- current
+                            count <- count + 1
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
+                        return false if not proof_replay_summary_function_owner_module(nested, name, line, module_name, owner, count, work, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_summary_function_owner_module(nested, name, line, current, owner, count, work, depth + 1)
+                    Ast::Decl.Invalid | Ast::Decl.Import(_, _):
+                        return false
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_summary_same_module_name_count(declarations: darray[Ast::Decl]&, name: sview, owner_module: sview, current_module: sview, count: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + declarations.count
+            for declaration in declarations |name, owner_module, current_module, count, work, depth|:
                 match declaration:
                     Ast::Decl.Func(candidate_name, _, _, _, _, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         count <- count + 1 if candidate_name == name and current_module == owner_module
                     Ast::Decl.Extern(candidate_name, _, _, _, _, _, _, _):
                         # There is no type-authenticated overload witness in replay. An extern
                         # with the same source name could be the selected call even when an
                         # internal summary of that name is available, so count every signature.
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         count <- count + 1 if candidate_name == name and current_module == owner_module
                     Ast::Decl.Struct(candidate_name, _, _, _, _, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         # These declarations can occupy or introduce a same-name callable/type
                         # namespace. Without resolved callee identity, do not guess which one a
                         # same-spelled call denotes.
                         return false if candidate_name == name and current_module == owner_module
                     Ast::Decl.Enum(candidate_name, _, _, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         return false if candidate_name == name and current_module == owner_module
                     Ast::Decl.Alias(candidate_name, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         return false if candidate_name == name and current_module == owner_module
                     Ast::Decl.Law(candidate_name, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         return false if candidate_name == name and current_module == owner_module
                     Ast::Decl.Const(candidate_name, _, _, _, _):
+                        return false if sview_len(candidate_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(candidate_name)
                         return false if candidate_name == name and current_module == owner_module
                     Ast::Decl.Module(module_name, nested, _):
+                        return false if sview_len(module_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+                        work <- work + sview_len(module_name)
                         return false if module_name == name and current_module == owner_module
-                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, module_name, count, depth + 1)
+                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, module_name, count, work, depth + 1)
                     Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, current_module, count, depth + 1)
+                        return false if not proof_replay_summary_same_module_name_count(nested, name, owner_module, current_module, count, work, depth + 1)
                     Ast::Decl.Import(_, _):
                         # Decl.Import has no resolved target declarations or selected-callee
                         # witness here. It may affect bare-name resolution, including through
@@ -99,15 +174,16 @@ extend ElisaProof:
             # Using/from imports are represented in parser annotations rather than Decl rows.
             # Replay lacks their resolved targets and selected declaration witness, so fail
             # closed if any such resolution metadata appears in the source snapshot.
-            return false if proof_replay_summary_has_unresolved_import(report.source_annotations)
-            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, 0)
+            work: mutable usize = 0
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT, 0)
             owner_module: mutable sview = ""
             owner_count: mutable usize = 0
-            proof_replay_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner_module, &owner_count, 0)
+            return false if not proof_replay_summary_function_owner_module(report.source_declarations, trace.dependency, trace.owner_line, "", &owner_module, &owner_count, work, 0)
             return false if owner_count != 1
             same_module_count: mutable usize = 0
-            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, trace.dependency, owner_module, "", &same_module_count, 0)
+            return false if not proof_replay_summary_same_module_name_count(report.source_declarations, trace.dependency, owner_module, "", &same_module_count, work, 0)
             return false if same_module_count != 1
             global_candidate_count: mutable usize = 0
-            return false if not proof_replay_summary_global_candidate_count(report.source_declarations, trace.dependency, &global_candidate_count, 0)
+            return false if not proof_replay_summary_global_candidate_count(report.source_declarations, trace.dependency, &global_candidate_count, work, 0)
             return global_candidate_count == 1

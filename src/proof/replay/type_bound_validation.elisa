@@ -7,7 +7,7 @@ extend ElisaProof:
         def proof_replay_type_bound_scalar_constant_type(type_expression: Ast::Expr) -> bool:
             match type_expression:
                 Ast::Expr.Ident(type_name, _):
-                    return type_name == "i8" or type_name == "i16" or type_name == "i32" or type_name == "i64" or type_name == "isize" or type_name == "int" or type_name == "u8" or type_name == "u16" or type_name == "u32" or type_name == "u64" or type_name == "usize" or type_name == "uint" or type_name == "bool" or type_name == "char"
+                    return type_name == "i8" or type_name == "i16" or type_name == "i32" or type_name == "i64" or type_name == "isize" or type_name == "int" or type_name == "u8" or type_name == "u16" or type_name == "u32" or type_name == "u64" or type_name == "usize" or type_name == "uintptr" or type_name == "bool" or type_name == "char"
                 _:
                     return false
 
@@ -527,19 +527,16 @@ extend ElisaProof:
 
         def proof_replay_type_bound_source_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
-            return proof_replay_type_bound_source_valid_with_work(report, trace, &work)
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_type_bound_source_valid_with_work(report, trace, &work, &cache)
 
-        def proof_replay_type_bound_source_valid_with_work(report: mutable ProofReport&, trace: ProofFactTrace, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_source_valid_with_work(report: ProofReport&, trace: ProofFactTrace, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             return false if trace.kind != "type-bound" or trace.name == "" or trace.line == 0 or trace.owner_line != 0
             return false if work >= PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
             owner_line: mutable u32 = 0
             owner_search_complete: mutable bool = true
             proof_replay_type_bound_owner_function_line(report.source_declarations, trace.name, trace.line, &owner_line, &owner_search_complete, work, 0)
             return false if not owner_search_complete or owner_line == 0
-            matches: mutable usize = 0
-            valid: mutable bool = false
-            proof_replay_type_bound_parameter_declaration(report, trace, report.source_declarations, owner_line, matches, valid, work, 0)
-            return true if matches == 1 and valid
             owner_parameters: mutable darray[Ast::ParamDecl] = []
             function_body: mutable darray[Ast::Stmt] = []
             owner_matches: mutable usize = 0
@@ -549,15 +546,23 @@ extend ElisaProof:
             # The source-backed validators below may scan this body once for each candidate
             # binding. Reject oversized or incomplete trees before entering those scans.
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
+            return true if proof_replay_type_bound_call_result_fact_with_work(report, trace.name, owner_line, owner_parameters, function_body, trace.expression, work, cache)
+            # Call-result replay has module-scoped import shadow checks. Other type-bound
+            # witnesses still lack import target identities and retain the conservative gate.
+            return false if proof_replay_summary_has_unresolved_import(report.source_annotations, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT)
+            return false if proof_replay_summary_has_unresolved_declaration_import(report.source_declarations, work, PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT, 0)
+            matches: mutable usize = 0
+            valid: mutable bool = false
+            proof_replay_type_bound_parameter_declaration(report, trace, report.source_declarations, owner_line, matches, valid, work, 0)
+            return true if matches == 1 and valid
             return true if proof_replay_type_bound_scalar_constant_fact_with_work(report, owner_parameters, function_body, owner_line, trace, work)
-            return true if proof_replay_type_bound_call_result_fact_with_work(report, owner_parameters, function_body, trace.expression, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
             if proof_replay_type_bound_local_scalar_fact_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work):
                 return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, owner_parameters, function_body, true, work)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_unsigned_rebind_fact_with_work(report, trace, owner_parameters, function_body, work)
+            return true if proof_replay_type_bound_unsigned_rebind_fact_with_work(report, trace, owner_parameters, function_body, work, cache)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
-            return true if proof_replay_type_bound_unsigned_rebind_range_fact_with_work(report, trace, owner_parameters, function_body, work)
+            return true if proof_replay_type_bound_unsigned_rebind_range_fact_with_work(report, trace, owner_parameters, function_body, work, cache)
             return false if not proof_replay_type_bound_extent_preflight_with_work(function_body, trace.expression, true, Ast::Expr.Absent, false, work)
             if proof_replay_type_bound_local_array_witness_with_work(report, owner_parameters, function_body, trace.expression, trace.line, work):
                 return proof_replay_type_bound_local_scalar_consumer_available_with_work(report, trace, owner_parameters, function_body, false, work)
@@ -577,4 +582,8 @@ extend ElisaProof:
 extend ElisaProof:
     public:
         def proof_replay_type_bound_source_valid_budgeted(report: mutable ProofReport&, trace: ProofFactTrace, work: mutable usize&) -> bool:
-            proof_replay_type_bound_source_valid_with_work(report, trace, work)
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            proof_replay_type_bound_source_valid_with_work(report, trace, work, &cache)
+
+        def proof_replay_type_bound_source_valid_budgeted_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            proof_replay_type_bound_source_valid_with_work(report, trace, work, cache)
