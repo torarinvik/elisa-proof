@@ -15836,11 +15836,14 @@ proof qualification remains pending.
 ### 23.27.581 Share kernel tactic transition work budget (2026-10-13)
 
 Kernel tactic transitions now carry one bounded work counter through effect-free term walks,
-proposition and fact equality, and assumption containment searches. Expression equality is called
-with only the remaining transition budget and debits its observed node/string work; repeated fact
-scans also charge each candidate. This prevents shared DAG fan-out and long fact lists from resetting
-a fresh equality or effect budget at each step. `git diff --check` and `scripts/check_source_length.py`
-pass; parser/build/runtime qualification remains unavailable under the pinned toolchain hold.
+proposition and fact equality, assumption containment, range-bound collection and equality closure,
+quantifier substitution, rewrite replacement, simp traversal and constant evaluation, and tactic
+candidate loops. Recursive transformations roll back appended arena nodes on exhaustion or when
+the resulting proposition fails comparison. Expression equality receives only the remaining
+transition budget and debits observed node/string work; repeated fact and candidate scans also
+charge each item. This prevents shared DAG fan-out and long lists from resetting nested budgets.
+`git diff --check` and `scripts/check_source_length.py` pass; parser/build/runtime qualification
+remains unavailable under the pinned toolchain hold.
 
 ### 23.27.582 Specify bounded type-environment reads
 
@@ -15849,3 +15852,171 @@ over-budget sentinel otherwise. Indexed row access specifies exact correspondenc
 local row and the canonical empty binding outside both ranges. A fieldwise binding equality lemma
 supports that contract. Strict compilation of the exact extracted helpers passed with the F7b6
 Stage1 compiler; source-length and diff checks pass. Whole-project qualification remains pending.
+### 23.27.583 Share tactic simplify constant-evaluation work (2026-10-13)
+
+Comparison folding in the kernel's independent `simp` replay now charges direct literal and
+compound constant evaluation to the enclosing tactic transition budget. This removes a nested
+65,536-step budget that could otherwise multiply across repeated comparisons over shared arena
+subterms while preserving exact direct nonnegative literals. Diff and source-length checks pass;
+semantic qualification remains pending the matching Stage1 toolchain.
+
+### 23.27.584 Resolve type-bound call results in caller module scope (2026-10-13)
+
+Call-result type-bound replay now selects its callee with the compiler-aligned caller-module and
+visible-import resolver. This preserves forward declarations and prevents a same-name peer-module
+declaration from supplying the witnessed return type. Existing local shadow, import shadow, and
+declared return-type checks still apply. `git diff --check` and the source-length gate pass;
+parser/build/replay qualification remains unavailable under the pinned toolchain hold.
+
+### 23.27.585 Meter arena label scans in tactic effect checks
+
+The tactic replay's effect-free walker now charges node-kind and operator spelling scans, plus
+typed-literal sort and secondary-name checks, on every visit. Shared DAG re-visits therefore pay
+for the string comparisons they trigger instead of consuming only a node unit. Diff and
+source-length gates pass; whole-project semantic qualification remains pending the matching
+Stage1 toolchain.
+
+### 23.27.586 Specify typing-binding validation kinds and budget
+
+Typing-binding validation now rejects immediately when its shared work counter is already over
+budget and specifies that successful validation remains within budget. Its postconditions enumerate
+all accepted binding kinds and give exact field constraints for module context, bare-call owner, local
+shadow, incomplete-function, and module-owner-segment rows. The exact extracted validator and its
+text-comparison dependency compile strictly under the F7b6 Stage1 compiler; source-length and diff
+checks pass. Whole-project qualification remains pending.
+
+### 23.27.587 Share transition budget with tactic proposition and closure checks
+
+Tactic-step and branch-state proposition validation now consume their existing shared transition
+counter. `have` proposition checks and closing goal-depth searches use the same counter, so exact,
+decide, have, and solved simp cannot reset a fresh goal-search allowance after earlier transition
+work. Diff and source-length gates pass; semantic qualification remains pending the matching Stage1.
+
+### 23.27.588 Restore tactic replay arenas after temporary proof searches
+
+Tactic replay now snapshots the arena around closure/depth checks and truncates temporary
+proposition nodes for `exact`, `decide`, `have`, and solved `simp`. Failed `simp` also restores
+nodes allocated during simplification. This keeps repeated accepted or rejected replay checks
+from accumulating discarded terms, while unsolved `simp` retains its rewritten goal root for the
+accepted transition. Diff and source-length gates pass; semantic qualification remains pending.
+
+### 23.27.589 Make rejected tactic replay transitions transactional
+
+`proof_kernel_replay_tactic_step_impl` now snapshots node and child arena counts and restores them
+whenever transition replay rejects. This covers early validation failures and work-budget exhaustion
+in addition to action-specific substitution mismatches, while accepted transitions retain nodes
+needed by their resulting state. Diff and source-length gates pass; semantic qualification remains
+pending the matching Stage1 compiler.
+
+### 23.27.590 Discard successful tactic comparison scratch roots
+
+Successful instantiate, rewrite, and simp replay now truncate their generated substitution,
+replacement, and simplification roots after proving structural equality with the already admitted
+after-state roots. Solved actions already roll back goal-depth search allocations. Transition
+replay therefore retains no speculative terms regardless of acceptance. Diff and source-length
+gates pass; semantic qualification remains pending the matching Stage1 compiler.
+
+The instantiate work-limit and invalid-root early exit also restores the substitution snapshot,
+covering the path where a partially built witness cannot be compared to the after-state.
+
+### 23.27.591 Split tactic arena admission from transition replay
+
+The arena-admission walkers now live in `tactic_arena_validation.elisa`, keeping the transition
+replay module under the source-length ceiling as rollback and replay logic grows. The facade
+includes the validator module before tactic replay. The instantiate substitution failure path now
+also truncates its snapshot when work is exhausted or the returned root is invalid. Diff and
+source-length gates pass; semantic qualification remains pending the matching Stage1 compiler.
+
+### 23.27.592 Specify canonical typing-binding shapes
+
+Typing-binding validation now specifies the common type-identity and container-element invariants
+for every accepted row, plus the complete key and metadata constraints for value, reference, function,
+type, field, function-parameter, and enum rows. The exact extracted validator and metered comparison
+helper compile strictly with F7b6 Stage1. `git diff --check` and `scripts/check_source_length.py`
+pass; full-project qualification remains pending.
+
+### 23.27.593 Reuse typed tactic arena admission
+
+The typed tactic API already validates both state snapshots and every present auxiliary root
+before type inference. It now marks that internal admission for transition replay, avoiding a
+second full arena walk for the same roots. Untyped calls continue to validate at the transition
+boundary. Diff and source-length gates pass; semantic qualification remains pending the matching
+Stage1 compiler.
+
+### 23.27.594 Share declaration index across typed tactic validation
+
+Typed tactic replay now builds the declaration typing index once and reuses it for both state
+proposition checks and tactic-argument sorting. The environment scan preflight still runs before
+index construction, and each state's proposition walk retains its own existing work allowance.
+Each state's work counter starts at the shared index-build cost, preserving its prior total-work
+ceiling. This removes two redundant environment-index builds per transition without widening
+acceptance.
+Diff and source-length gates pass; semantic qualification remains pending the matching Stage1
+compiler.
+
+### 23.27.595 Order tactic simplification after its shared work meter
+
+The facade now includes `goal_search_work_budget.elisa` before `tactic_simplify.elisa`, so the
+simplifier's shared charge helper and work-limit constant are declared before use. The extracted
+numeric constant helper remains included earlier. Diff and source-length gates pass; semantic
+qualification remains pending the matching Stage1 compiler.
+
+### 23.27.596 Align call-result callee resolution with source module scope
+
+Call-result replay now resolves qualified module-alias callees to one exact declaration and uses
+caller-module/parent precedence before checking explicit selective or wildcard imports for bare
+calls. Bare names with multiple executable declarations fail closed because this witness does not
+reproduce backend argument-type overload selection. Added a positive module-alias width example and
+a negative forward local-shadowing example. Static source gates pass; the examples remain unrun
+under the pinned toolchain hold.
+
+### 23.27.597 Bound bare call-result replay to exact positional shapes
+
+Bare call-result witnesses now require all declared formals to be supplied positionally, since
+this resolver does not reproduce backend overload matching by argument types and defaults. The
+former global unique-name guard was removed because it rejected exact caller-scope and selective
+import winners merely due to unrelated peer declarations. Callable extern name collisions still
+fail closed, and selective import metadata verifies its adjacent `__using_member` partner. Added a
+positive local-over-peer width case beside the negative forward-shadow case. Static diff and source
+length gates pass; semantic qualification remains unrun under the pinned toolchain hold.
+
+### 23.27.598 Account for backend precedence in bare call-result witnesses
+
+Bare witnesses now exclude names and arities dispatched to backend intrinsics, reject callable
+extern name collisions, and compare the selected scope against the active caller before trusting
+the backend's owner fallback. Same-scope candidates must have one declaration at the call arity;
+parent and imported candidates must have a globally unique executable name. This conservatively
+rejects unresolved type-based overload competition until replay can infer argument types. Static
+diff and source-length gates pass; parser, build and replay qualification remain pending.
+
+### 23.27.599 Preserve the call-result overload limitation accurately
+
+The AST-only source call-result validator does not receive the proposition kernel's typed
+environment or inferred argument sorts. Nonzero-argument backend overload choice is type-sensitive,
+so the replay rejects same-name competition outside the uniquely selected caller-scope shape.
+Parent/import fallback still requires a globally unique function name; top-level and zero-argument
+caller-module winners have narrower precedence-based admissions. A complete typed resolver must
+match positional and named arguments, including defaults, references and contextual literals, and
+reject incomplete signatures. The focused harness now contains module-alias, local, selective-import,
+wildcard-import and forward-shadow examples; they remain unrun under the static-only hold.
+
+### 23.27.600 Preserve exact root and zero-argument module call precedence
+
+Bare call-result replay admits a zero-argument call when its selected zero-formal function is
+unique in the caller's exact module scope, or when source resolution selects a unique zero-formal
+root function. The backend checks the module's matching shape before root fallback; a root
+zero-arity candidate cannot be redirected by a differently shaped peer. For nonzero root calls,
+replay now admits a unique same-arity root declaration: `emit_direct_call` resolves within that
+root owner before peer-owner fallback. Other nonzero calls with competing names still require
+typed overload matching or global uniqueness. `git diff --check` passes; the current shared-tree
+source-length gate reports 18 over-limit files. Semantic qualification remains pending.
+
+### 23.27.601 Exclude all direct bare-call dispatch collisions
+
+Bare call-result replay now excludes `dense_key/2` and `llvm_va_copy/2`, plus one-argument scalar
+prefix conversions. For one-argument names declared as packed structs or enums, it also declines
+the witness because the backend may dispatch through a matching prefix `__cast__` hook. These
+checks run before a declared function return type can be used. Static diff and source-length gates
+remain required; at this checkpoint `git diff --check` passes, but `scripts/check_source_length.py`
+reports 18 over-limit files elsewhere in the shared tree. Parser, build and replay qualification
+remain pending under the static-only hold.
