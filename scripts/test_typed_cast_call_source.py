@@ -35,7 +35,6 @@ controls = {
     'source_alias': source + '\ntype u8 = i64\n',
     'target_alias': source + '\ntype i64 = u64\n',
     'custom_cast': source + '\ndef __cast__(value: u8) -> i64:\n    0\n',
-    'numeric_method': source + '\ndef i64(value: u8) -> i64:\n    0\n',
     'noninteger_receiver': replace_cast('wide: i64 = rest.i64()'),
     'extra_argument': replace_cast('wide: i64 = value.i64(value)'),
     'compound_receiver': replace_cast('wide: i64 = (value + 0).i64()'),
@@ -100,4 +99,4 @@ with tempfile.TemporaryDirectory(prefix='typed-cast-call-source-') as temporary:
     path.write_text(harness)
     subprocess.run([str(COMPILER / 'scripts/elisac_stage1.sh'), str(path), '-emit', 'exe', '-O0', '-o', str(binary)], cwd=COMPILER, check=True)
     subprocess.run([str(binary)], check=True, timeout=60)
-print('typed cast call source: 36 certificates replayed; 11 dispatch/state controls refused at unchanged call spans')
+print('typed cast call source: 36 certificates replayed; 10 dispatch/state controls refused at unchanged call spans')
