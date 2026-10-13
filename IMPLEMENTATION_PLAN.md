@@ -8,7 +8,8 @@ This section controls immediate work. The roadmaps and inventories below retain 
 
 2. **Qualify Global.Read/Write enforcement at runtime.** The checker and parity matrix are already on compiler `main`; the source-only authority audit passes with 29 positive declarations, 18 false-control declarations, `source_bound=true`, and three closure files. Once a provenance-matched Stage1 exists, run `test/parity/mutable_global_authority_smoke.sh`, `test/parity/mutable_global_cli_smoke.sh`, and `test/parity/global_permissions_smoke.sh`. Preserve direct read, write, read-modify-write requiring both grants, exact-grant success, wrong-member rejection, alias/reference access, and transitive propagation as explicit controls. Do not mark the feature complete from source-only checks.
 
-3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `8285b732`, which adds shared solver work budgeting. Lexical type-resolution, captured-block write, loop-binder, and tactic trace-budget changes remain uncommitted and static-only. Tactic state and rewrite helpers are split into ordered `state.elisa` and `rewrite_helpers.elisa` modules; `operations.elisa` is 559 lines, within the 600-line source limit. The pending state API adds per-state action, snapshot, solver, preflight, source-summary, and action-AST quotas plus proportional child-branch budgets. `git diff --check` and the source-length gate pass, but parser, build, and replay qualification remain pending. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls on a matching Stage1. Keep resource accounting fail-closed and retain a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an entire accepted action trace. Standalone `proof_tactic_replay` now routes exact/decide/simp/have through shared solver and preflight counters instead of resetting them per step; this source change still needs a runtime regression on the matching Stage1.
+3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `c59c73c9`; recent code commits bound import, JSON/tactic, suggestion-output, and repair-index work and add guarded recursive-decrease checking. The current source tree passes `git diff --check` and the 600-line gate, but parser, build, and replay qualification remain pending on a matching compiler tuple. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls. Keep resource accounting fail-closed and retain a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an accepted action trace. Standalone `proof_tactic_replay` routes exact/decide/simp/have through shared solver and preflight counters. The compiler's unresolved overloaded inferred-bound gap is recorded under item 23.27.638; it requires exact candidate identity and formal-to-actual mapping before bound checks can safely cover overloads.
+
 
 4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Skip performance timing and benchmark comparisons under the latest user instruction; static source, LLVM IR, and assembly-shape review can continue. Archived timing data is historical and does not justify an optimization.
 
@@ -16588,3 +16589,27 @@ without that path. Ordinary body calls still use the nil-path wrapper. Mutual SC
 path-independent and are documented as a separate expressiveness limit in `8b322c64`. Static review
 only; no tests or builds were run, so the previously observed recursive sview failure remains
 unverified against this change.
+
+### 23.27.638 Match recursive SMT identifier collection to lowered arguments (2026-10-13)
+
+Core commits `817b61b4` and `54bbcf61` extend the selective free-identifier walk to include safe-call
+receivers and the SMT-selected arguments for calls, plus resolved struct-literal and record-update
+arguments. This prevents the recursive solver from leaving a callee formal unbound when the
+translation uses a synthesized or reordered argument. Independent static review confirmed those
+paths match the AST lowering helpers. Tests and builds were not run under the current no-new-jobs
+instruction.
+
+### 23.27.638 Keep overloaded inferred protocol bounds unqualified (2026-10-13)
+
+Static audit of the dirty compiler candidate found that `walk_expression_for_firm_arg_type_mismatch`
+skips `check_firm_call_arguments` when a direct call name has multiple function declarations, and
+both inferred-bound checkers independently return for non-unique names. The initializer-only
+`resolve_generic_call_types.elisa` path does not select overload candidates. Backend code does have
+`overload_index_for_args`, which selects a `FnTable` row, but it is unavailable to Semantic and does
+not expose the selected `DeclId` or formal-to-actual mapping there. This leaves no candidate-aware
+inferred protocol-bound check visible in the audited Stage1 source; a call matching only a bounded
+generic overload may therefore lack its required `GenericInterfaceBoundUnsatisfied` diagnostic.
+Positive and negative overload fixtures have been added to the candidate parity suite, but have not
+been run. The candidate remains unqualified until semantic bound checking and backend emission share
+one candidate-selection result (including named/default argument mapping), ambiguous candidates fail
+closed, and matched Stage0/Stage1 gates run on a provenance-matched build.
