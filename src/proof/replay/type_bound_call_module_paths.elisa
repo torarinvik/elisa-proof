@@ -1,0 +1,102 @@
+# Resolve qualified types by the complete module path and leaf declaration.
+extend ElisaProof:
+    private:
+        def proof_replay_type_bound_function_scope_lookup_with_work(declarations: darray[Ast::Decl]&, current_scope: mutable darray[sview]&, owner_line: u32, found_scope: mutable darray[sview]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_CONSTANT_SCOPE_DEPTH_LIMIT
+            for declaration in declarations |current_scope, owner_line, found_scope, matches, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Func(_, _, _, _, _, _, position):
+                        if position.line == owner_line:
+                            matches <- matches + 1
+                            return false if matches > 1 or not proof_replay_type_bound_local_work_charge(current_scope.count, work)
+                            found_scope.clear()
+                            found_scope.extend(current_scope)
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
+                        return false if not nested_scope.complete
+                        saved_count: usize = current_scope.count
+                        current_scope <- nested_scope.scope
+                        return false if not proof_replay_type_bound_function_scope_lookup_with_work(nested, current_scope, owner_line, found_scope, matches, work, depth + 1)
+                        current_scope.resize(saved_count)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_function_scope_lookup_with_work(nested, current_scope, owner_line, found_scope, matches, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        def proof_replay_type_bound_call_type_owner_scan_with_work(declarations: darray[Ast::Decl]&, current_scope: mutable darray[sview]&, wanted_scope: darray[sview]&, wanted_name: sview, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT
+            for declaration in declarations |current_scope, wanted_scope, wanted_name, matches, work, depth|:
+                return false if not proof_replay_type_bound_local_work_charge(1, work)
+                match declaration:
+                    Ast::Decl.Alias(name, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _):
+                        return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
+                        if name == wanted_name:
+                            exact: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(current_scope, wanted_scope, work)
+                            return false if not exact.complete
+                            matches <- matches + 1 if exact.equal
+                            return true if matches > 1
+                    Ast::Decl.Extern(name, _, _, _, callable, _, _, _):
+                        if not callable:
+                            return false if not proof_replay_type_bound_local_text_compare_charge(name, wanted_name, work)
+                            if name == wanted_name:
+                                exact: (complete: bool, equal: bool) = proof_replay_type_bound_scope_equal_with_work(current_scope, wanted_scope, work)
+                                return false if not exact.complete
+                                matches <- matches + 1 if exact.equal
+                                return true if matches > 1
+                    Ast::Decl.Module(module_name, nested, _):
+                        nested_scope: (complete: bool, scope: darray[sview]) = proof_replay_type_bound_scope_with_module_with_work(current_scope, module_name, work)
+                        return false if not nested_scope.complete
+                        saved_count: usize = current_scope.count
+                        current_scope <- nested_scope.scope
+                        return false if not proof_replay_type_bound_call_type_owner_scan_with_work(nested, current_scope, wanted_scope, wanted_name, matches, work, depth + 1)
+                        current_scope.resize(saved_count)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_type_bound_call_type_owner_scan_with_work(nested, current_scope, wanted_scope, wanted_name, matches, work, depth + 1)
+                    Ast::Decl.Invalid:
+                        return false
+                    Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    _:
+                        return false
+            return true
+
+        # Match the complete written module path against each lexical prefix, deepest first.
+        # This mirrors compiler type-path resolution: a partial deeper prefix does not prevent
+        # a complete match from an enclosing module or root.
+        def proof_replay_type_bound_call_qualified_module_scope_with_work(report: ProofReport&, written_scope: darray[sview]&, wanted_name: sview, resolution_scope: darray[sview]&, work: mutable usize&) -> (complete: bool, found: bool, scope: darray[sview]):
+            return (true, false, []) if written_scope.count == 0
+            prefix_count: mutable usize = resolution_scope.count
+            while prefix_count > 0 |prefix_count, resolution_scope, written_scope, wanted_name, report, work|:
+                candidate_scope: mutable darray[sview] = []
+                for index in 0..<prefix_count |index, resolution_scope, candidate_scope, work|:
+                    return (false, false, []) if not proof_replay_type_bound_local_work_charge(1, work)
+                    candidate_scope.push(resolution_scope[index])
+                return (false, false, []) if not proof_replay_type_bound_local_work_charge(written_scope.count, work)
+                candidate_scope.extend(written_scope)
+                matches: mutable usize = 0
+                current_scope: mutable darray[sview] = []
+                complete: bool = proof_replay_type_bound_call_type_owner_scan_with_work(report.source.source_declarations, &current_scope, candidate_scope, wanted_name, &matches, work, 0)
+                return (false, false, []) if not complete or matches > 1
+                return (true, true, candidate_scope) if matches == 1
+                prefix_count <- prefix_count - 1
+            # Stage0 tries module-alias rewrites after lexical candidates and before the raw
+            # root spelling. Alias expansion is not replayed here, so do not let a root literal
+            # win when the same head is a visible module alias.
+            alias_shadow: (complete: bool, shadowed: bool) = proof_replay_type_bound_import_name_shadowed_with_work(report.source.source_annotations, resolution_scope, written_scope[0], true, work)
+            return (false, false, []) if not alias_shadow.complete
+            return (true, false, []) if alias_shadow.shadowed
+            root_scope: mutable darray[sview] = []
+            return (false, false, []) if not proof_replay_type_bound_local_work_charge(written_scope.count, work)
+            root_scope.extend(written_scope)
+            root_matches: mutable usize = 0
+            root_current_scope: mutable darray[sview] = []
+            root_complete: bool = proof_replay_type_bound_call_type_owner_scan_with_work(report.source.source_declarations, &root_current_scope, root_scope, wanted_name, &root_matches, work, 0)
+            return (false, false, []) if not root_complete or root_matches > 1
+            return (true, true, root_scope) if root_matches == 1
+            return (true, false, [])

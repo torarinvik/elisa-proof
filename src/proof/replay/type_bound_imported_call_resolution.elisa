@@ -235,7 +235,122 @@ extend ElisaProof:
                 return (true, false) if not assigned[parameter_index] and not parameters[parameter_index].has_default
             return (true, true)
 
-        def proof_replay_type_bound_bare_target_emitter_safe_with_work(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, wanted_line: u32, argument_count: usize, argument_names: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, caller_scope: darray[sview]&, target_scope: darray[sview]&, work: mutable usize&) -> bool:
+        def proof_replay_type_bound_bare_type_mentions_name_with_work(expression: Ast::Expr, wanted: sview, work: mutable usize&, depth: usize) -> (complete: bool, present: bool):
+            return (false, false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_replay_type_bound_local_work_charge(1, work)
+            match expression:
+                Ast::Expr.Absent:
+                    return (true, false)
+                Ast::Expr.Ident(name, _):
+                    return (false, false) if not proof_replay_type_bound_local_text_compare_charge(name, wanted, work)
+                    return (true, name == wanted)
+                Ast::Expr.Scope(base, name, _):
+                    return (false, false) if not proof_replay_type_bound_local_text_compare_charge(name, wanted, work)
+                    return (true, true) if name == wanted
+                    return proof_replay_type_bound_bare_type_mentions_name_with_work(base, wanted, work, depth + 1)
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _):
+                    return proof_replay_type_bound_bare_type_mentions_name_with_work(inner, wanted, work, depth + 1)
+                Ast::Expr.Refinement(base, predicate, _):
+                    left: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(base, wanted, work, depth + 1)
+                    return (false, false) if not left.complete
+                    return (true, true) if left.present
+                    proof_replay_type_bound_bare_type_mentions_name_with_work(predicate, wanted, work, depth + 1)
+                Ast::Expr.Index(head, argument, _) | Ast::Expr.Binary(head, _, argument, _):
+                    left: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(head, wanted, work, depth + 1)
+                    return (false, false) if not left.complete
+                    return (true, true) if left.present
+                    proof_replay_type_bound_bare_type_mentions_name_with_work(argument, wanted, work, depth + 1)
+                Ast::Expr.IndexN(head, arguments, _):
+                    left: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(head, wanted, work, depth + 1)
+                    return (false, false) if not left.complete
+                    return (true, true) if left.present
+                    for argument in arguments |argument, wanted, work, depth|:
+                        found: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(argument, wanted, work, depth + 1)
+                        return (false, false) if not found.complete
+                        return (true, true) if found.present
+                    return (true, false)
+                Ast::Expr.Tuple(elements, _) | Ast::Expr.Array(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements |element, wanted, work, depth|:
+                        found: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(element, wanted, work, depth + 1)
+                        return (false, false) if not found.complete
+                        return (true, true) if found.present
+                    return (true, false)
+                _:
+                    return (false, false)
+
+        def proof_replay_type_bound_bare_generic_parameter_inferred_with_work(parameters: darray[Ast::ParamDecl]&, argument_count: usize, argument_names: darray[sview]&, generic_name: sview, work: mutable usize&) -> (complete: bool, present: bool):
+            return (false, false) if argument_names.count != 0 and argument_names.count != argument_count
+            return (false, false) if not proof_replay_type_bound_local_work_charge(parameters.count, work)
+            assigned: mutable darray[bool] = [false for _ in 0..<parameters.count]
+            inferred: mutable bool = false
+            next_position: mutable usize = 0
+            for source_position in 0..<argument_count |source_position, argument_count, argument_names, parameters, generic_name, assigned, inferred, next_position, work|:
+                argument_name: sview = argument_names[source_position] if argument_names.count > 0 else ""
+                selected: mutable usize = parameters.count
+                if argument_name != "":
+                    matches: mutable usize = 0
+                    for parameter_index in 0..<parameters.count |parameter_index, parameters, argument_name, selected, matches, work|:
+                        return (false, false) if not proof_replay_type_bound_local_text_compare_charge(parameters[parameter_index].name, argument_name, work)
+                        if parameters[parameter_index].name == argument_name:
+                            selected <- parameter_index
+                            matches <- matches + 1
+                    return (false, false) if matches > 1
+                else:
+                    while next_position < parameters.count and assigned[next_position] |next_position, assigned|:
+                        next_position <- next_position + 1
+                    selected <- next_position
+                    next_position <- next_position + 1 if next_position < parameters.count
+                continue if selected >= parameters.count
+                return (false, false) if assigned[selected]
+                assigned[selected] <- true
+                mentions: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(parameters[selected].type_expression, generic_name, work, 0)
+                return (false, false) if not mentions.complete
+                inferred <- true if mentions.present
+                # The pinned Stage1 inference helper pairs the raw argument at this source
+                # position with the formal at the same index, even for named calls. Preserve
+                # that behavior as an overapproximation alongside the label-aware mapping.
+                if source_position < parameters.count and source_position != selected:
+                    raw_mentions: (complete: bool, present: bool) = proof_replay_type_bound_bare_type_mentions_name_with_work(parameters[source_position].type_expression, generic_name, work, 0)
+                    return (false, false) if not raw_mentions.complete
+                    inferred <- true if raw_mentions.present
+            return (true, inferred)
+
+        def proof_replay_type_bound_bare_generic_candidate_with_work(report: ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, argument_count: usize, argument_names: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_metadata_valid: bool, work: mutable usize&) -> (complete: bool, present: bool):
+            # Bare inferred generic calls need an argument from which to infer the type slot;
+            # the pinned emitter declines the zero-argument case before generic dispatch.
+            return (true, false) if argument_count == 0
+            return (false, false) if not generic_metadata_valid or generic_lines.count != generic_names.count
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
+            return (false, false) if not group.complete
+            row: mutable usize = group.head
+            for _ in 0..<group.count |group, index, wanted, row, generic_lines, work|:
+                return (false, false) if row >= index.entries.count or not proof_replay_type_bound_local_work_charge(1, work)
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                if entry.is_function and not entry.is_lemma:
+                    match entry.declaration:
+                        Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                            return (false, false) if not proof_replay_type_bound_local_text_compare_charge(name, wanted, work)
+                            if name == wanted:
+                                generic_parameters: mutable darray[sview] = []
+                                for generic_index in 0..<generic_lines.count |generic_index, generic_lines, generic_names, position, generic_parameters, work|:
+                                    return (false, false) if not proof_replay_type_bound_local_work_charge(1, work)
+                                    generic_parameters.push(generic_names[generic_index]) if generic_lines[generic_index] == position.line
+                                if generic_parameters.count > 0:
+                                    shape: (complete: bool, matches: bool) = proof_replay_type_bound_candidate_accepts_call_shape_with_work(index, parameters, argument_count, argument_names, annotations, position.line, work)
+                                    return (false, false) if not shape.complete
+                                    if shape.matches:
+                                        all_inferable: mutable bool = true
+                                        for generic_name in generic_parameters |generic_name, parameters, argument_count, argument_names, all_inferable, work|:
+                                            inferred: (complete: bool, present: bool) = proof_replay_type_bound_bare_generic_parameter_inferred_with_work(parameters, argument_count, argument_names, generic_name, work)
+                                            return (false, false) if not inferred.complete
+                                            all_inferable <- false if not inferred.present
+                                        return (true, true) if all_inferable
+                        _:
+                            return (false, false)
+                row <- entry.next_index
+            return (false, false) if row != index.entries.count
+            return (true, false)
+
+        def proof_replay_type_bound_bare_target_emitter_safe_with_work(report: ProofReport&, index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, wanted_line: u32, argument_count: usize, argument_names: darray[sview]&, annotations: darray[Ast::EnumAnnotation]&, caller_scope: darray[sview]&, target_scope: darray[sview]&, generic_lines: darray[u32]&, generic_names: darray[sview]&, generic_metadata_valid: bool, work: mutable usize&) -> bool:
             # Replay does not infer argument sorts. Mirror shape-based owner precedence,
             # including defaults and labels, then require one accepting row in that owner.
             group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
@@ -279,12 +394,16 @@ extend ElisaProof:
                             return false
                 row <- entry.next_index
             return false if row != index.entries.count or selected_count != 1
-            if target_scope.count == caller_scope.count:
-                same_scope: mutable bool = true
+            same_scope: mutable bool = target_scope.count == caller_scope.count
+            if same_scope:
                 for scope_index in 0..<target_scope.count |scope_index, target_scope, caller_scope, same_scope, work|:
                     return false if not proof_replay_type_bound_local_text_compare_charge(target_scope[scope_index], caller_scope[scope_index], work)
                     same_scope <- false if target_scope[scope_index] != caller_scope[scope_index]
-                return selected_caller_shape and caller_shape_count == 1 if same_scope
+            if same_scope and caller_scope.count > 0:
+                return selected_caller_shape and caller_shape_count == 1
+            generic_candidate: (complete: bool, present: bool) = proof_replay_type_bound_bare_generic_candidate_with_work(report, index, wanted, argument_count, argument_names, annotations, generic_lines, generic_names, generic_metadata_valid, work)
+            return false if not generic_candidate.complete or generic_candidate.present
+            return selected_caller_shape and caller_shape_count == 1 if same_scope
             if target_scope.count == 0:
                 return false if caller_shape_count != 0
                 return selected_root_shape and root_shape_count == 1

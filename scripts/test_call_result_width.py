@@ -68,6 +68,40 @@ assert unproven(data) == [
     ("ensure-unproven", 32, "swapped_arguments"),
 ], unproven(data)
 
+code, data = check("rejected_relative_module_type_width.elisa")
+assert code == 1 and data["status"] == "failed", code
+assert data["source"]["admissible"] is True, data["source"]
+assert data["summary"]["semantic_errors"] == 0, data["semantic_diagnostics"]
+assert data["replay"]["gaps"] == 0, data["replay"]
+assert data["replay"]["certificates"] == data["replay"]["replayed"], data["replay"]
+assert not data["trust"]["trusted_assumptions"], data["trust"]
+assert sorted((finding["kind"], finding["line"], finding["name"])
+              for finding in data["findings"]) == [
+    ("ensure-unproven", 22, "local_parameter_scope_collision"),
+    ("ensure-unproven", 26, "call_result_scope_collision"),
+    ("ensure-unproven", 59, "deep_local_parameter_scope_collision"),
+    ("ensure-unproven", 63, "deep_call_result_scope_collision"),
+    ("ensure-unproven", 119, "module_alias_type_path_refusal"),
+    ("ensure-unproven", 123, "module_alias_parameter_type_path_refusal"),
+    ("ensure-unproven", 133, "generic_result_primitive_name_shadow"),
+], data["findings"]
+assert any(row["name"] == "root_qualified_type_positive" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "parent_module_parameter_fallback" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "parent_module_call_result_fallback" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "deep_local_parameter_width_positive" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "deep_call_result_width_positive" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "partial_parent_module_parameter_fallback" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "partial_parent_module_call_result_fallback" and row["proved"]
+           for row in data["functions"]), data["functions"]
+assert any(row["name"] == "root_overload_after_incompatible_generic" and row["proved"]
+           for row in data["functions"]), data["functions"]
+
 code, data = check("rejected_call_result_shadowed_u32.elisa")
 assert code == 1 and data["status"] == "failed", code
 assert unproven(data) == [

@@ -16097,7 +16097,10 @@ Stage0 also failed during parsing because the current proof source uses syntax u
 pinned compiler. `scripts/qualify_prebuilt_test.sh --json` still refuses the existing October 11
 binary because it does not match the current proof source. `git diff --check` and
 `python3 scripts/check_source_length.py` pass; pattern-collision and source-authority regressions
-remain unexecuted against a matching proof product.
+remain unexecuted against a matching proof product. A semantic-only smoke of all 29 string,
+character, and fixed-width collision witnesses with the pinned Stage0 reports no parse or type
+errors; its nonzero exit is from the deliberately false postconditions, so it is not proof replay
+or end-to-end admission evidence.
 
 A separate type-resolution audit found that compiler lookup resolves qualified module prefixes
 from the owning function's lexical module path, while the proof's qualified scalar-shape helper
@@ -16117,17 +16120,41 @@ pending a matched Stage1.
 
 The replay resolver matches the complete written module path and leaf declaration against the
 owning function's deepest lexical module and each parent through root. Pinned Stage0's
-`resolveType` builds this same sequence of complete candidates; the fixture checks fallback when
-`Outer::N::M::Sub` exists but has no `Word`, while `Outer::M::Sub::Word` does. The current Stage1
-`ga_module` helper instead commits
-to the nearest first segment, so Stage0 parity and that Stage1 semantic path diverge on partial
-prefixes; this fixture remains unrun under the exact-toolchain hold. Stage0 inserts alias rewrites
-after lexical candidates but before the raw root path. Replay therefore checks nonroot lexical
-literal paths, then fails closed on a visible alias before considering root; a fixture also places
-a literal root `Alias::Word` beside `using M as Alias` to catch wrong root precedence. Qualified
-parameter, local, and call-result scalar facts share the owner-scope behavior. Generic names are
-checked at the exact owner declaration line before a builtin width or scalar kind is admitted.
-Other fixture cases cover root-qualified and nested width collisions, parent fallback, module-alias
-refusal, and call results.
+`resolveType` builds this same sequence of complete candidates; the pinned Stage1 source also uses
+complete relative paths in type-path and binding-capability checks. Its `ga_module` helper commits
+to a nearest first segment only in the separate Global Authority alias/struct analysis, so that
+helper alone does not establish a type-lookup mismatch. The fixture checks fallback when
+`Outer::N::M::Sub` exists but has no `Word`, while `Outer::M::Sub::Word` does. Alias-qualified paths
+remain fail-closed: Stage0 tries visible alias rewrites before the raw root spelling, while replay
+does not expand them and refuses a visible alias before considering root. A fixture also places a
+literal root `Alias::Word` beside `using M as Alias`. Qualified parameter, local, and call-result
+scalar facts share the owner-scope behavior. Generic names are checked at the exact owner
+declaration line before a builtin width or scalar kind is admitted. Other fixture cases cover
+root-qualified and nested width collisions, parent fallback, and call results.
 `git diff --check` and the source-length gate pass; parser, build, and replay have not run against a
-source-matched Stage1.
+source-matched Stage1. The focused fixture also checks a generic function whose binder is named
+`u32`; call-result replay must not treat that binder as the primitive width when resolving its
+return type. Both generic shadow queries are keyed to the active declaration line, with bounded
+work charged for each recorded binder inspected. The exact pinned Stage0 semantic smoke accepts the
+fixture's type declarations and reports only the expected proof-lint failures for the deliberately
+false width-collision contracts. The fixture's negated ensures use `not result`, and its module alias
+is declared at root so `M` resolves to the intended root module before colliding with literal
+`Alias::Word`; this compiler-side smoke does not qualify proof replay.
+
+### 23.27.608 Decline unresolved generic precedence in bare call-result witnesses (2026-10-13)
+
+Pinned Stage1 dispatch checks a matching function in the caller's nonroot module before inferred
+generic dispatch, then tries a generic before root and other-owner lookup. Replay has source shape
+and selected declaration identity but does not infer actual argument types, so it cannot establish
+the typed exact-overload condition that lets a root concrete function outrank a same-named generic.
+The bare call-result witness now checks declaration-line generic metadata and declines root/other-
+owner cases only when a same-named generic accepts the call shape and each declared type binder
+occurs in a supplied formal type. This excludes generic binders that remain unbound; the pinned
+emitter infers each slot by unifying supplied actuals against corresponding formal types, including
+nested applications and fixed-array extents. Replay maps labels to supplied formals and also
+accounts for Stage1's positional inference loop on named calls. It retains the caller-module fast
+path, whose precedence is shape-based in the pinned emitter. The scan charges each declaration,
+candidate generic line, compared function-name byte, and inspected formal type to the bounded
+replay work counter. A positive fixture covers a two-type-parameter generic beside a one-argument
+root overload. Only static diff and source-length gates were run; proof parser, build, and replay
+remain under the toolchain hold.
