@@ -16751,19 +16751,12 @@ bounded counter.
 
 ### 23.27.648 Refresh compiler source pin to current main (2026-10-13)
 
-Elisa-compiler `main` and `origin/main` advanced to
-`c29c5f6730a34aa7089db8d62d4208a119a014a3`; `ELISA_COMPILER_REV` records that revision. The
-checkout is currently dirty in three semantic source files (`check_append_only_store.elisa`,
-`check_append_only_store_body.elisa`, and `check_append_only_store_walk.elisa`), `semantic_api.elisa`,
-and four `test/proofs/` files: the positive and negative DArray pointer step-bound fixtures, their
-checker, and `check_runtime_dict_key_policy.py`. The pinned commit
-includes DArray indexing/codegen changes, append-only-store and store-through analysis updates,
-and corresponding bounds proofs. The available proof manifest is from proof HEAD
-`5fd8a73bd4f0a002f239748ec963a96b1f28ee87` and compiler source `7e1251785276c539c98dbe33a12e610e2338cbf4`;
-the replay manifest is from proof HEAD `a1a8f2cd75a65755f4bed8574a1e75b7678b8c0c` and compiler
-source `ac2b23ef4d9590e77b40503c0d90df59837d542a`. Neither manifest matches proof HEAD
-`894e870f11f3a29f75cc79f0d9e2b3364dd616f6` or the new compiler pin. The source pin is current, but
-no matching proof/compiler product qualifies. No build, parser, test, or replay was run.
+This pin was advanced again under item 23.27.651 to compiler commit
+`2a37b88c5acd5399e1653413fe58315348ae3083`; the earlier `c29c5f...` source qualification is
+superseded. The current local compiler checkout has uncommitted generic-bound work plus unrelated
+benchmark and fixture edits, so `ELISA_COMPILER_REV` identifies only its committed tree. The
+available proof and replay manifests predate the current proof/compiler pair and do not qualify it.
+No build, parser, test, or replay was run.
 
 ### 23.27.649 Include protocol default method owners in generic identity scan (2026-10-13)
 
@@ -16771,8 +16764,20 @@ The parser stores runnable protocol default method declarations in `Ast::File.pr
 
 ### 23.27.650 Reuse generic-owner scan results during specialization checks (2026-10-13)
 
-The compiler's explicit interface-specialization check now collects the selected parameter's matching bound names in the same pass that counts ordinary generic parameters. The expression walker also checks each argument of `Expr.IndexN` against the corresponding generic parameter, closing the previous explicit multi-argument specialization gap. The proof producer and replay generic-shadow helpers were rechecked: both query by the active declaration line and spelling, using bounded `(line, name)` indexes; the earlier broad-name warning does not apply to current source. Static diff review passes; parser/build/test/replay qualification remains pending. Overloaded generic bounds remain open: skipping a same-name overload set avoids attaching a bound to the wrong declaration, but without shared candidate resolution the frontend still lacks a sound way to decide which candidate's obligation applies.
+This compiler-side work is extended under item 23.27.652: explicit multi-argument specialization now checks the matching parameter, line-keyed target and caller rows require a unique symbol owner, and ambiguous bound-bearing direct overloads are rejected with a frontend diagnostic. The proof producer and replay generic-shadow helpers query by active declaration line and spelling using bounded `(line, name)` indexes. Qualification remains pending. Shared candidate selection is still required to preserve valid calls to bounded overload sets without false rejection.
 
 ### 23.27.651 Pin current compiler main and index typestate markers (2026-10-13)
 
-Elisa-compiler `main` and `origin/main` advanced to `2a37b88c5acd5399e1653413fe58315348ae3083`; the proof pin now records that commit. It adds exact source offsets to synthesized typestate markers and extends explicit generic interface checks to each `Expr.IndexN` argument. The proof owner census now builds one bounded hash index of those marker offsets, with a separate occupancy bit so byte offset zero is represented normally; this avoids an annotation scan for every same-line function. Marker-index construction and lookup both charge the existing source-work budget. Compiler `main` currently has separate uncommitted semantic/test and benchmark-reference changes; the pin names only the committed main revision. The available proof and replay manifests do not match this proof/compiler pair. Static source review and `git diff --check` only; no parser, build, test, replay, or timing was run.
+Elisa-compiler `main` and `origin/main` advanced to `2a37b88c5acd5399e1653413fe58315348ae3083`; `ELISA_COMPILER_REV` records that exact commit. Its explicit marker offset identifies the generated constructor even at byte zero. The proof owner census scans source declarations plus protocol default methods, counts same-line owners, excludes only the marked constructor by exact offset, and builds a bounded offset index with charged construction and lookup. Compiler `main` has separate uncommitted semantic-bound and unrelated fixture/benchmark edits; they are not covered by this pin. Available manifests do not match the current pair. No parser/build/test/replay/timing was run.
+
+### 23.27.652 Scope generic bounds to declaration identity and reject unresolved overload obligations (2026-10-13)
+
+The compiler now requires a unique symbol owner for each line-keyed caller or target before trusting generic rows. The firm-argument pass sets/restores the active function `DeclId`, then passes that caller line to generic-to-generic bound discharge; parameter and bound matching is a single ordered pass. Explicit `Index`/`IndexN` checks compare each argument against its corresponding target generic parameter. If a direct overload set contains protocol-bound parameters or explicit bound rows but selection is unavailable, Semantic emits a diagnostic instead of silently dropping the obligation. These checks are conservative when line identity is ambiguous, and the symbol-line uniqueness predicate still scans symbol rows per use; migrate generic side tables to declaration identity and share the overload resolver to regain precision and reduce repeated work. The proof snapshot's exact constructor marker offset is now aligned with its pinned compiler revision. Static source review plus whitespace/source-length gates only; no parser, build, tests, replay, or timing were run. The overload changes remain unqualified and need positive/negative fixtures under a provenance-matched compiler.
+
+### 23.27.653 Preserve opaque resource call results through wrappers (2026-10-14)
+
+Resource binding analysis now treats call results as opaque when the callee is unresolved, return markers are incomplete, the result is a reference or `sview`, or the return is non-scalar. The bounded expression walk follows calls inside static-effect calls, slices, indices, binary expressions, collection/record constructors and updates, conditionals, and refinements; branch/deferred forms fail closed. The call-argument classifier uses the same summary so a non-scalar return cannot be serialized as an ordinary value, and recursive read work is debited to the shared source-work counter. The resource implementation was split into `opaque_call_results.elisa` and `statement_bindings.elisa` to keep the source-size gate green. `git diff --check` and `scripts/check_source_length.py` pass; no parser/build/tests/replay ran under the provenance hold. Scalar extern calls without an internal function summary remain conservatively opaque, and the expression audit still merits matched positive and negative regression coverage.
+
+### 23.27.653 Fail closed on incomplete resource metadata without losing scalar precision (2026-10-14)
+
+Resource-call classification now receives the callee table and distinguishes verified scalar results from unknown, reference, and region-view results. Incomplete local and parameter markers remain explicitly opaque; borrow creation, call forwarding, and writes through such bindings cannot manufacture a capability. A bounded expression walk detects opaque results nested in constructors, conditionals, collections, and call arguments, fails closed for branch/deferred forms whose result summary is unavailable, and treats invalid AST nodes or new unhandled variants as opaque. The focused `smc_error_binding_index` compiler fix is already superseded on current compiler `main` by the newer error-family resolution and `StructTable` refactor, so no cherry-pick or pin change is needed. Static source review and `git diff --check` only; no parser, build, tests, replay, or timing were run, so this resource hardening remains unqualified pending the user's validation hold.
