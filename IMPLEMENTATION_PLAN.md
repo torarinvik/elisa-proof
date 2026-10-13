@@ -8,7 +8,7 @@ This section controls immediate work. The roadmaps and inventories below retain 
 
 2. **Qualify Global.Read/Write enforcement at runtime.** The checker and parity matrix are already on compiler `main`; the source-only authority audit passes with 29 positive declarations, 18 false-control declarations, `source_bound=true`, and three closure files. Once a provenance-matched Stage1 exists, run `test/parity/mutable_global_authority_smoke.sh`, `test/parity/mutable_global_cli_smoke.sh`, and `test/parity/global_permissions_smoke.sh`. Preserve direct read, write, read-modify-write requiring both grants, exact-grant success, wrong-member rejection, alias/reference access, and transitive propagation as explicit controls. Do not mark the feature complete from source-only checks.
 
-3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `c59c73c9`; recent code commits bound import, JSON/tactic, suggestion-output, and repair-index work and add guarded recursive-decrease checking. The current source tree passes `git diff --check` and the 600-line gate, but parser, build, and replay qualification remain pending on a matching compiler tuple. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls. Keep resource accounting fail-closed and retain a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an accepted action trace. Standalone `proof_tactic_replay` routes exact/decide/simp/have through shared solver and preflight counters. The compiler's unresolved overloaded inferred-bound gap is recorded under item 23.27.638; it requires exact candidate identity and formal-to-actual mapping before bound checks can safely cover overloads.
+3. **Close proof-replay trust gaps before adding new automation.** Proof `main` is at `752a647b`; recent commits bound import, JSON/tactic, suggestion-output, and repair-index work, add guarded recursive-decrease checking, and align recursive SMT free-identifier collection with lowered call arguments. The current source tree passes `git diff --check` and the 600-line gate, but parser, build, and replay qualification remain pending on a matching compiler tuple. Finish scope-sensitive type resolution for call-result, parameter, and local witnesses, including Stage0 lexical-path and alias precedence, then run focused runtime controls. Keep resource accounting fail-closed and retain a trace-wide work ceiling so a bounded tactic step cannot be multiplied across an accepted action trace. Standalone `proof_tactic_replay` routes exact/decide/simp/have through shared solver and preflight counters. The compiler's unresolved overloaded inferred-bound gap is recorded under item 23.27.639; it requires exact candidate identity and formal-to-actual mapping before bound checks can safely cover overloads.
 
 
 4. **Run the full matching proof/compiler gates.** On one frozen source/toolchain tuple, run the focused Global grant and replay suites, the full proof suite, strict O2/O3 compilation, and provenance checks. Keep failed logs and generated artifacts under the relevant ignored `build/` directory. Skip performance timing and benchmark comparisons under the latest user instruction; static source, LLVM IR, and assembly-shape review can continue. Archived timing data is historical and does not justify an optimization.
@@ -16599,7 +16599,15 @@ translation uses a synthesized or reordered argument. Independent static review 
 paths match the AST lowering helpers. Tests and builds were not run under the current no-new-jobs
 instruction.
 
-### 23.27.638 Keep overloaded inferred protocol bounds unqualified (2026-10-13)
+### 23.27.639 Respect arm-local names in recursive SMT obligations (2026-10-13)
+
+Core commit `4ca0e20b` tracks match-pattern binders while collecting free identifiers, scopes them
+over each arm's guard and body, and declines unsupported pattern/body shapes. This prevents arm-local
+names from being mistaken for callee formals and avoids attempting a selective substitution on a
+match form the scalar translator cannot consume. Static diff review only; tests and builds were not
+run under the current instruction.
+
+### 23.27.639 Keep overloaded inferred protocol bounds unqualified (2026-10-13)
 
 Static audit of the dirty compiler candidate found that `walk_expression_for_firm_arg_type_mismatch`
 skips `check_firm_call_arguments` when a direct call name has multiple function declarations, and
