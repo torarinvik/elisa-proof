@@ -1,5 +1,20 @@
+const PROOF_COUNTEREXAMPLE_WORK_LIMIT: usize = 1000000000
+
 extend ElisaProof:
     public:
+        def proof_counterexample_charge_product(work: mutable usize&, first: usize, second: usize, third: usize, fourth: usize, fifth: usize) -> bool:
+            return false if work > PROOF_COUNTEREXAMPLE_WORK_LIMIT
+            return true if first == 0 or second == 0 or third == 0 or fourth == 0 or fifth == 0
+            return false if first > PROOF_COUNTEREXAMPLE_WORK_LIMIT / second
+            product: usize = first * second
+            return false if product > PROOF_COUNTEREXAMPLE_WORK_LIMIT / third
+            product <- product * third
+            return false if product > (PROOF_COUNTEREXAMPLE_WORK_LIMIT - work) / fourth
+            product <- product * fourth
+            return false if product > (PROOF_COUNTEREXAMPLE_WORK_LIMIT - work) / fifth
+            work <- work + product * fifth
+            return true
+
         def proof_small_comparison_value(left: i64, operator: TokenKind, right: i64) -> bool:
             return left == right if operator == TokenKind.EqEq
             return left != right if operator == TokenKind.BangEq
@@ -186,7 +201,7 @@ extend ElisaProof:
         # machine evaluator can establish a non-wrapping result at the sampled state.
         # Source-constant equalities are the sole exception to requiring a primitive marker: their
         # exact immutable declaration and integer value are independently recorded as a trace.
-        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+        def proof_counterexample_integer_atom(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, operator_mask: usize, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             match expression:
                 Ast::Expr.IntLit(_, _):
@@ -201,15 +216,14 @@ extend ElisaProof:
                     integer_width: bool = proof_unsigned_width_in_expression(expression, facts) > 0 or proof_signed_marker_width_for_term(facts, expression) > 0
                     return constant.known and ((integer_width and proof_scalar_term_witnessed(expression, facts, depth + 1)) or proof_counterexample_source_constant_term(expression, facts, report, owner))
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_integer_atom(inner, facts, report, owner, depth + 1)
+                    return proof_counterexample_integer_atom(inner, facts, report, owner, operator_mask, depth + 1)
                 Ast::Expr.Unary(TokenKind.Plus, _, _) | Ast::Expr.Unary(TokenKind.Minus, _, _):
                     return proof_constant_int(expression).known
                 Ast::Expr.Binary(left, TokenKind.Minus, right, _):
                     width: i64 = proof_unsigned_width_in_expression(expression, facts)
                     return false if width != 8 and width != 16 and width != 32
-                    operator_mask: usize = proof_source_primitive_operator_mask(report.source_annotations)
                     return false if not proof_source_arithmetic_operator_guard(expression, facts, operator_mask)
-                    return proof_counterexample_integer_atom(left, facts, report, owner, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, depth + 1)
+                    return proof_counterexample_integer_atom(left, facts, report, owner, operator_mask, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, operator_mask, depth + 1)
                 _:
                     return false
 
@@ -227,23 +241,22 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, depth: usize) -> bool:
+        def proof_counterexample_fragment(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: ProofReport&, owner: sview, operator_mask: usize, depth: usize) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
             return true if proof_type_marker_callee(expression) or proof_counterexample_qualified_unsigned_marker(expression, facts)
             match expression:
                 Ast::Expr.BoolLit(_, _):
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_counterexample_fragment(inner, facts, report, owner, depth + 1)
+                    return proof_counterexample_fragment(inner, facts, report, owner, operator_mask, depth + 1)
                 Ast::Expr.Unary(TokenKind.Not, operand, _):
-                    return proof_counterexample_fragment(operand, facts, report, owner, depth + 1)
+                    return proof_counterexample_fragment(operand, facts, report, owner, operator_mask, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return proof_counterexample_fragment(left, facts, report, owner, depth + 1) and proof_counterexample_fragment(right, facts, report, owner, depth + 1)
+                        return proof_counterexample_fragment(left, facts, report, owner, operator_mask, depth + 1) and proof_counterexample_fragment(right, facts, report, owner, operator_mask, depth + 1)
                     return false if not proof_is_comparison(operator)
-                    operator_mask: usize = proof_source_primitive_operator_mask(report.source_annotations)
                     return false if not proof_source_arithmetic_operator_guard(expression, facts, operator_mask)
-                    return true if proof_counterexample_integer_atom(left, facts, report, owner, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, depth + 1)
+                    return true if proof_counterexample_integer_atom(left, facts, report, owner, operator_mask, depth + 1) and proof_counterexample_integer_atom(right, facts, report, owner, operator_mask, depth + 1)
                     return (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and proof_counterexample_boolean_atom(left, facts, depth + 1) and proof_counterexample_boolean_atom(right, facts, depth + 1)
                 _:
                     return false
@@ -319,9 +332,60 @@ extend ElisaProof:
         # Populate `assignments` only after an exact falsifying state is found. The result uses
         # ordinary equality expressions so existing JSON tooling can display/replay it directly.
         def proof_find_machine_counterexample(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: ProofReport&, owner: sview, assignments: mutable darray[Ast::Expr]&) -> bool:
-            return false if not proof_counterexample_fragment(goal, facts, report, owner, 0)
+            total_nodes: mutable usize = 0
+            fact_nodes: mutable usize = 0
+            cost_work: mutable usize = 0
+            for fact in facts |total_nodes, cost_work|:
+                fact_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost(fact, &fact_cost, cost_work, 0)
+                return false if fact_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - total_nodes
+                total_nodes <- total_nodes + fact_cost
+                return false if fact_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - fact_nodes
+                fact_nodes <- fact_nodes + fact_cost
+                return false if fact_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost_work
+                cost_work <- cost_work + fact_cost
+            goal_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost(goal, &goal_cost, cost_work, 0)
+            return false if goal_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - total_nodes
+            total_nodes <- total_nodes + goal_cost
+            return false if goal_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost_work
+            trace_nodes: mutable usize = 0
+            trace_cost_work: mutable usize = 0
+            for trace in report.traces.records |trace_nodes, trace_cost_work|:
+                return false if trace_nodes >= PROOF_COUNTEREXAMPLE_WORK_LIMIT
+                trace_nodes <- trace_nodes + 1
+                trace_text_cost: usize = sview_len(trace.name) + sview_len(trace.kind)
+                return false if trace_text_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - trace_nodes
+                trace_nodes <- trace_nodes + trace_text_cost
+                trace_expression_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost(trace.expression, &trace_expression_cost, trace_cost_work, 0)
+                return false if trace_expression_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - trace_cost_work
+                trace_cost_work <- trace_cost_work + trace_expression_cost
+                return false if trace_expression_cost > PROOF_COUNTEREXAMPLE_WORK_LIMIT - trace_nodes
+                trace_nodes <- trace_nodes + trace_expression_cost
+            # Fragment validation and candidate collection repeatedly inspect the premise
+            # frame for each expression term, while name and candidate deduplication are
+            # quadratic in expression size. Source-constant classification can also scan the
+            # trace table twice for each fact lookup. Reserve these bounds before entering them.
+            preprocessing_work: mutable usize = 0
+            fact_read_nodes: usize = fact_nodes if fact_nodes > 0 else 1
+            return false if not proof_counterexample_charge_product(&preprocessing_work, total_nodes, fact_read_nodes, 1, 32, 1)
+            return false if not proof_counterexample_charge_product(&preprocessing_work, total_nodes, total_nodes, 1, 32, 1)
+            return false if not proof_counterexample_charge_product(&preprocessing_work, total_nodes, fact_nodes, trace_nodes, 16, 1)
+            operator_mask_work: mutable usize = 0
+            operator_mask_result: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_with_work(report.source_annotations, &operator_mask_work)
+            return false if not operator_mask_result.complete
+            return false if operator_mask_work > PROOF_COUNTEREXAMPLE_WORK_LIMIT - preprocessing_work
+            preprocessing_work <- preprocessing_work + operator_mask_work
+            annotation_scan_work: mutable usize = 0
+            for annotation in report.source_annotations |annotation_scan_work|:
+                return false if annotation_scan_work >= PROOF_COUNTEREXAMPLE_WORK_LIMIT
+                annotation_scan_work <- annotation_scan_work + 1
+                return false if sview_len(annotation.owner) > PROOF_COUNTEREXAMPLE_WORK_LIMIT - annotation_scan_work
+                annotation_scan_work <- annotation_scan_work + sview_len(annotation.owner)
+            return false if not proof_counterexample_fragment(goal, facts, report, owner, operator_mask_result.mask, 0)
             for fact in facts:
-                return false if not proof_counterexample_fragment(fact, facts, report, owner, 0)
+                return false if not proof_counterexample_fragment(fact, facts, report, owner, operator_mask_result.mask, 0)
             names: mutable darray[sview] = []
             for fact in facts |names|:
                 proof_counterexample_collect_names(fact, &names, facts)
@@ -354,6 +418,15 @@ extend ElisaProof:
                 return false if counts[counts.count - 1] == 0
             values: mutable darray[i64] = []
             values.resize(names.count)
+            leaf_assignments: mutable usize = 1
+            for count in counts |leaf_assignments|:
+                return false if count == 0 or leaf_assignments > PROOF_GOAL_COUNTEREXAMPLE_BUDGET / count
+                leaf_assignments <- leaf_assignments * count
+            # Each complete model evaluates the expressions and resolves each identifier
+            # against the full premise frame. The separate name-index scan has at most six
+            # entries and is covered by the linear AST term.
+            return false if not proof_counterexample_charge_product(&preprocessing_work, leaf_assignments, total_nodes, fact_read_nodes, 32, 1)
+            return false if not proof_counterexample_charge_product(&preprocessing_work, leaf_assignments, total_nodes, fact_read_nodes, annotation_scan_work, 1)
             budget: mutable usize = PROOF_GOAL_COUNTEREXAMPLE_BUDGET
             found: bool = proof_counterexample_search(0, names, &values, starts, counts, candidates, facts, goal, report.source_annotations, &budget)
             return false if not found

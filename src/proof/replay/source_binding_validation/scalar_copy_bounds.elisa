@@ -2,16 +2,17 @@
 # This authorizes the copied guard only, never equality to a subsequently changed field.
 extend ElisaProof:
     private:
-        def proof_replay_scalar_copy_type_unshadowed(declarations: darray[Ast::Decl]&, name: sview, depth: usize, work: mutable usize&) -> bool:
-            return false if depth >= 64
-            for declaration in declarations |name, depth, work|:
-                return false if work >= 4096
-                work <- work + 1
+        def proof_replay_scalar_copy_type_unshadowed(declarations: darray[Ast::Decl]&, name: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return false if depth >= 64 or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in declarations |name, depth, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match declaration:
                     Ast::Decl.Struct(candidate, _, _, _, _, _, _) | Ast::Decl.Enum(candidate, _, _, _, _) | Ast::Decl.Alias(candidate, _, _):
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(candidate, name, source_work)
                         return false if candidate == name
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_scalar_copy_type_unshadowed(nested, name, depth + 1, work)
+                        return false if not proof_replay_scalar_copy_type_unshadowed(nested, name, depth + 1, source_work)
                     _:
                         pass
             true
@@ -32,12 +33,19 @@ extend ElisaProof:
                             return false
                     context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
                     return false if not context.known or context.body.count > 4096
-                    return false if any formal in context.formals where formal == target
-                    return false if not proof_replay_source_single_declaration(report.source_declarations, context.body, target)
+                    return false if context.formals.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                    for formal in context.formals |target, source_work|:
+                        return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        source_work <- source_work + 1
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(formal, target, source_work)
+                        return false if formal == target
+                    return false if not proof_replay_source_single_declaration_with_work(report.source_declarations, context.body, target, &source_work)
                     copy_index: mutable usize = context.body.count
                     source_value: mutable Ast::Expr = Ast::Expr.Invalid
                     local_width: mutable i64 = 0
-                    for index in 0..<context.body.count |context, trace, target, target_position, copy_index, source_value, local_width|:
+                    for index in 0..<context.body.count |context, trace, target, target_position, copy_index, source_value, local_width, source_work|:
+                        return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        source_work <- source_work + 1
                         match context.body[index]:
                             Ast::Stmt.VarDecl(local, type_expression, initializer, position):
                                 if local == target:
@@ -55,22 +63,28 @@ extend ElisaProof:
                             root <- receiver
                         _:
                             return false
-                    return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, root)
+                    return false if proof_replay_source_body_declares_with_work(report.source_declarations, context.body, root, &source_work)
                     decoded = ElisaProofFrameSource::place(source_value, &context.formals)
                     return false if not decoded.known
                     typed = ElisaProofFrameSource::place_type(&report.source_declarations, trace.name, report.replay_owner_line, decoded.place)
                     return false if not typed.known
-                    type_work: mutable usize = 0
                     primitive_names: darray[sview] = ["u8", "u16", "u32", "u64", "usize"]
-                    for primitive in primitive_names |report, type_work|:
-                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, primitive, 0, &type_work)
+                    for primitive in primitive_names |report, source_work|:
+                        return false if not proof_replay_scalar_copy_type_unshadowed(report.source_declarations, primitive, 0, &source_work)
                     source_width: i64 = proof_unsigned_type_width_with_work(typed.type_expression, report.source_declarations, 0, &source_work)
                     return false if source_width <= 0 or source_width > local_width
                     return false if source_width < 63 and literal_value > proof_unsigned_width_max(source_width)
                     guard_found: mutable bool = false
                     expected_guard: Ast::Expr = Ast::Expr.Binary(source_value, comparison, literal, Ast::expr_pos(source_value))
+                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(expected_guard, 1, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     return false if proof_source_expression_has_overloaded_operator(expected_guard, report.source_primitive_operator_mask, 0)
-                    for index in 0..<context.body.count |context, copy_index, target, guard_found, expected_guard|:
+                    touch_scan_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost_body(context.body, &touch_scan_cost, source_work, 0)
+                    return false if touch_scan_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                    source_work <- source_work + touch_scan_cost
+                    for index in 0..<context.body.count |context, copy_index, target, guard_found, expected_guard, source_work|:
+                        return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        source_work <- source_work + 1
                         if index > copy_index:
                             return false if proof_replay_source_statement_touches(report.source_declarations, context.body[index], target, true, 0)
                         if index >= copy_index:
@@ -79,7 +93,7 @@ extend ElisaProof:
                         # Other statements require an explicit reaching-state proof.
                         match context.body[index]:
                             Ast::Stmt.If(condition, yes, no, _):
-                                return false if no.count != 0 or yes.count != 1 or not proof_replay_expr_equal(condition, expected_guard)
+                                return false if no.count != 0 or yes.count != 1 or not proof_replay_summary_expr_equal_with_limit(condition, expected_guard, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                                 match yes[0]:
                                     Ast::Stmt.Return(_, _):
                                         guard_found <- true

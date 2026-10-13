@@ -22,27 +22,29 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_replay_typed_return_find_source(body: darray[Ast::Stmt]&, value: Ast::Expr, position: Ast::Pos, matches: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT
-            for statement in body |body, value, position, matches, depth|:
+        def proof_replay_typed_return_find_source_with_work(body: darray[Ast::Stmt]&, value: Ast::Expr, position: Ast::Pos, matches: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_TYPED_RETURN_DEPTH_LIMIT
+            for statement in body |body, value, position, matches, source_work, depth|:
+                return false if not proof_type_audit_work_charge(1, source_work)
                 match statement:
                     Ast::Stmt.Return(returned, return_position):
-                        if proof_replay_typed_return_pos_equal(return_position, position) and proof_replay_expr_equal(returned, value) and proof_replay_local_binding_expr_positions_match(returned, value):
-                            matches <- matches + 1
+                        if proof_replay_typed_return_pos_equal(return_position, position):
+                            return false if not proof_replay_summary_expr_equal_with_work(returned, value, source_work)
+                            if proof_replay_local_binding_expr_positions_match(returned, value):
+                                matches <- matches + 1
                     Ast::Stmt.If(_, then_body, else_body, _):
-                        proof_replay_typed_return_find_source(then_body, value, position, matches, depth + 1)
-                        proof_replay_typed_return_find_source(else_body, value, position, matches, depth + 1)
-                    Ast::Stmt.While(_, nested, _):
-                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
-                    Ast::Stmt.For(_, _, _, nested, _):
-                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
-                    Ast::Stmt.Block(_, _, _, nested, _):
-                        proof_replay_typed_return_find_source(nested, value, position, matches, depth + 1)
+                        return false if not proof_replay_typed_return_find_source_with_work(then_body, value, position, matches, source_work, depth + 1)
+                        return false if not proof_replay_typed_return_find_source_with_work(else_body, value, position, matches, source_work, depth + 1)
+                    Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
+                        return false if not proof_replay_typed_return_find_source_with_work(nested, value, position, matches, source_work, depth + 1)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |arm, value, position, matches, depth|:
-                            proof_replay_typed_return_find_source(arm.body, value, position, matches, depth + 1)
+                        return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                        source_work <- source_work + arms.count
+                        for arm in arms |arm, value, position, matches, source_work, depth|:
+                            return false if not proof_replay_typed_return_find_source_with_work(arm.body, value, position, matches, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         def proof_replay_local_binding_typed_return_constant_source_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if trace.name == "" or report.replay_owner_line == 0 or report.trace_owner_line != trace.line
@@ -61,7 +63,7 @@ extend ElisaProof:
                     position: Ast::Pos = Ast::expr_pos(trace.expression)
                     return false if position.line != trace.line
                     source_matches: mutable usize = 0
-                    proof_replay_typed_return_find_source(body, value, position, &source_matches, 0)
+                    return false if not proof_replay_typed_return_find_source_with_work(body, value, position, &source_matches, source_work, 0)
                     return source_matches == 1
                 _:
                     return false
@@ -97,44 +99,54 @@ extend ElisaProof:
 
         # The source return value, or one arm of its conditional, is the bound constant.
         # A named constant matches through a validated global-constant fact of the owner.
-        def proof_replay_typed_return_value_matches(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, value: Ast::Expr, depth: usize) -> bool:
+        def proof_replay_typed_return_value_matches_with_work(report: ProofReport&, trace: ProofFactTrace, source: Ast::Expr, value: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
-            return true if proof_replay_expr_equal(source, value) and proof_replay_local_binding_expr_positions_match(value, source)
+            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            source_work <- source_work + 1
+            if proof_replay_expr_equal_with_work(source, value, source_work) and proof_replay_local_binding_expr_positions_match(value, source):
+                return true
             match source:
                 Ast::Expr.If(_, then_value, else_value, _):
-                    return proof_replay_typed_return_value_matches(report, trace, then_value, value, depth + 1) or proof_replay_typed_return_value_matches(report, trace, else_value, value, depth + 1)
+                    return proof_replay_typed_return_value_matches_with_work(report, trace, then_value, value, source_work, depth + 1) or proof_replay_typed_return_value_matches_with_work(report, trace, else_value, value, source_work, depth + 1)
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_typed_return_value_matches(report, trace, inner, value, depth + 1)
+                    return proof_replay_typed_return_value_matches_with_work(report, trace, inner, value, source_work, depth + 1)
                 Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
-                    return proof_replay_summary_call_global_constant_matches(report, trace, source, value)
+                    return proof_replay_summary_call_global_constant_matches_with_work(report, trace, source, value, source_work)
                 _:
                     return false
 
         # Count the source returns at `position` whose value is `value`; `at_tail` admits the
         # function's final expression statement, which the producer checks as a return.
-        def proof_replay_typed_return_sites(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: Ast::Pos, value: Ast::Expr, at_tail: bool, found: mutable usize&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
+        def proof_replay_typed_return_sites_with_work(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: Ast::Pos, value: Ast::Expr, at_tail: bool, found: mutable usize&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             index: mutable usize = 0
             body_count: usize = body.count
-            for statement in body |report, trace, body_count, position, value, at_tail, found, depth, index|:
+            for statement in body |report, trace, body_count, position, value, at_tail, found, source_work, depth, index|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 index <- index + 1
                 match statement:
-                    Ast::Stmt.Return(returned, statement_position):
-                        if returned is source_value:
-                            found <- found + 1 if proof_replay_source_position_equal(statement_position, position) and proof_replay_typed_return_value_matches(report, trace, source_value, value, 0)
+                    Ast::Stmt.Return(source_value, statement_position):
+                        if proof_replay_source_position_equal(statement_position, position):
+                            if proof_replay_typed_return_value_matches_with_work(report, trace, source_value, value, source_work, 0):
+                                found <- found + 1
                     Ast::Stmt.Expr(source_value, statement_position):
-                        if at_tail and index == body_count:
-                            found <- found + 1 if proof_replay_source_position_equal(statement_position, position) and proof_replay_typed_return_value_matches(report, trace, source_value, value, 0)
+                        if at_tail and index == body_count and proof_replay_source_position_equal(statement_position, position):
+                            if proof_replay_typed_return_value_matches_with_work(report, trace, source_value, value, source_work, 0):
+                                found <- found + 1
                     Ast::Stmt.If(_, yes, no, _):
-                        proof_replay_typed_return_sites(report, trace, yes, position, value, false, found, depth + 1)
-                        proof_replay_typed_return_sites(report, trace, no, position, value, false, found, depth + 1)
+                        return false if not proof_replay_typed_return_sites_with_work(report, trace, yes, position, value, false, found, source_work, depth + 1)
+                        return false if not proof_replay_typed_return_sites_with_work(report, trace, no, position, value, false, found, source_work, depth + 1)
                     Ast::Stmt.While(_, nested, _) | Ast::Stmt.For(_, _, _, nested, _) | Ast::Stmt.Block(_, _, _, nested, _):
-                        proof_replay_typed_return_sites(report, trace, nested, position, value, false, found, depth + 1)
+                        return false if not proof_replay_typed_return_sites_with_work(report, trace, nested, position, value, false, found, source_work, depth + 1)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |report, trace, position, value, found, depth|:
-                            proof_replay_typed_return_sites(report, trace, arm.body, position, value, false, found, depth + 1)
+                        return false if arms.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                        source_work <- source_work + arms.count
+                        for arm in arms |arm, report, trace, position, value, found, source_work, depth|:
+                            return false if not proof_replay_typed_return_sites_with_work(report, trace, arm.body, position, value, false, found, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         def proof_replay_local_binding_typed_return_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
@@ -155,7 +167,7 @@ extend ElisaProof:
                     width: i64 = proof_signed_type_width_with_work(return_type, report.source_declarations, 0, source_work)
                     return false if width <= 0 or not proof_signed_constant_at_width(value, width, 0).known
                     found: mutable usize = 0
-                    proof_replay_typed_return_sites(report, trace, body, symbol_position, value, true, &found, 0)
+                    return false if not proof_replay_typed_return_sites_with_work(report, trace, body, symbol_position, value, true, &found, source_work, 0)
                     return false if found != 1
                     return proof_replay_rebind_definition_unique_with_work(report, trace, symbol, symbol_position, value, false, source_work)
                 _:

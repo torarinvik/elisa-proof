@@ -1,29 +1,6 @@
 extend ElisaProof:
     private:
-        def proof_local_rebind_binding(report: ProofReport&, expression: Ast::Expr, owner: sview, names: darray[sview]&) -> (known: bool, path: Ast::Expr, value: Ast::Expr):
-            for trace in report.traces.records:
-                continue if trace.name != owner or trace.kind != "local-binding"
-                continue if not proof_expr_equal(trace.expression, expression)
-                match expression:
-                    Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                        match left:
-                            Ast::Expr.Ident(local_name, _):
-                                match right:
-                                    Ast::Expr.Ident(rebind_name, _):
-                                        is_rebind: mutable bool = false
-                                        for index in 0..<PROOF_INTERNAL_REBIND_SYMBOL_COUNT |index, rebind_name, is_rebind|:
-                                            is_rebind <- true if rebind_name == proof_internal_rebind_name(index)
-                                        if is_rebind and (any live in names where live == local_name):
-                                            return (true, right, left)
-                                    _:
-                                        pass
-                            _:
-                                pass
-                    _:
-                        pass
-            return (false, Ast::Expr.Invalid, Ast::Expr.Invalid)
-
-        def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: ProofReport&, owner: sview, lends: darray[sview]) -> void:
+        def proof_restore_call_stable_facts(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview, lends: darray[sview]) -> void:
             analyzed: bool = report.aliased_owner == owner and owner != "" and not (any existing in report.aliased_names where existing == "*")
             return if not analyzed
             # What this call can reach: the lends that outlive their own call, together with the
@@ -41,11 +18,20 @@ extend ElisaProof:
             # original, independently traced fact is what is kept.
             constant_paths: mutable darray[Ast::Expr] = []
             constant_values: mutable darray[Ast::Expr] = []
-            for fact in source |constant_paths, constant_values, report, owner|:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            for fact in source |constant_paths, constant_values, report, owner, source_work|:
                 match fact:
                     Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
                         symbol: sview = proof_ident_name(left)
-                        constant_path: bool = symbol == "" and proof_fact_is_global_constant(report, fact, owner)
+                        constant_path: bool = false
+                        if symbol == "":
+                            if not proof_replay_summary_expr_charge_with_limit(fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                                report.source_effect_index.implicit_effect_work <- source_work
+                                return
+                            constant_path <- proof_fact_is_global_constant_with_work(report, fact, owner, &source_work)
+                            if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                                report.source_effect_index.implicit_effect_work <- source_work
+                                return
                         literal_symbol: mutable bool = false
                         if symbol != "" and proof_name_is_reserved_internal(symbol):
                             match right:
@@ -56,13 +42,26 @@ extend ElisaProof:
                         if constant_path or literal_symbol:
                             constant_paths.push(left)
                             constant_values.push(right)
-                        binding: (known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding(report, fact, owner, names)
+                        binding: (complete: bool, known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding_with_work(report, fact, owner, names, &source_work)
+                        if not binding.complete:
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return
                         if binding.known:
                             constant_paths.push(binding.path)
                             constant_values.push(binding.value)
                     _:
                         pass
-            for fact in source |source, facts, names, parameters, report, blocked, constant_paths, constant_values|:
+            report.source_effect_index.implicit_effect_work <- source_work
+            for fact in source |source, facts, names, parameters, report, blocked, constant_paths, constant_values, source_work|:
+                if not proof_replay_summary_expr_repeat_charge_with_work(fact, constant_paths.count + 2, &source_work):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                for path_index in 0..<constant_paths.count |path_index, constant_paths, constant_values, source_work|:
+                    if not proof_replay_summary_expr_repeat_charge_with_work(constant_paths[path_index], 1, &source_work) or not proof_replay_summary_expr_repeat_charge_with_work(constant_values[path_index], 1, &source_work):
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
                 # Most facts are stable as written; the rewrite copies the tree once per path, so
                 # it runs only for a fact the plain walk refuses.
                 stable: mutable bool = proof_expr_call_stable(fact, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
@@ -73,8 +72,20 @@ extend ElisaProof:
                         probe <- replaced.value if replaced.changed
                     stable <- proof_expr_call_stable(probe, source, names, parameters, blocked, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
                 continue if not stable
-                continue if any existing in facts where proof_expr_equal(existing, fact)
+                if not proof_replay_summary_expr_charge_with_limit(fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                duplicate: mutable bool = false
+                for existing in facts |existing, fact, duplicate, source_work, facts|:
+                    if not proof_replay_summary_expr_repeat_charge_with_work(existing, 4, &source_work):
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    duplicate <- true if proof_expr_equal(existing, fact)
+                continue if duplicate
                 facts.push(fact)
+            report.source_effect_index.implicit_effect_work <- source_work
 
         # Give a fresh opaque symbol only to the bindings a captured block can actually write.
         # The capture list is the block's whole reach, so an uncaptured binding keeps its symbolic

@@ -1,14 +1,38 @@
 # Authenticate immutable scalar equations inside direct declaration value blocks.
 extend ElisaProof:
     private:
-        def proof_replay_value_block_unique_local(report: ProofReport&, body: darray[Ast::Stmt]&, statements: darray[Ast::Stmt]&, outer_position: Ast::Pos, local: sview, owner: sview) -> bool:
-            return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, owner, report.replay_owner_line, local, 0)
-            return false if not proof_replay_source_single_declaration(report.source_declarations, statements, local)
+        def proof_replay_value_block_parameter_name_present_with_work(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, parameter_name: sview, depth: usize, source_work: mutable usize&) -> bool:
+            return true if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in declarations |owner, owner_line, parameter_name, depth, source_work|:
+                return true if not proof_replay_source_work_charge_or_exhaust(1, source_work)
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, position):
+                        return true if not proof_replay_source_work_charge_or_exhaust(sview_len(name) + sview_len(owner), source_work)
+                        if name == owner and position.line == owner_line:
+                            for parameter in parameters |parameter_name, source_work|:
+                                return true if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(parameter.name), source_work)
+                                return true if parameter.name == parameter_name
+                            return false
+                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
+                        return true if proof_replay_value_block_parameter_name_present_with_work(nested, owner, owner_line, parameter_name, depth + 1, source_work)
+                    Ast::Decl.Import(_, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
+                        pass
+                    Ast::Decl.Invalid:
+                        return true
+                    _:
+                        return true
+            return false
+
+        def proof_replay_value_block_unique_local_with_work(report: ProofReport&, body: darray[Ast::Stmt]&, statements: darray[Ast::Stmt]&, outer_position: Ast::Pos, local: sview, owner: sview, source_work: mutable usize&) -> bool:
+            return false if proof_replay_value_block_parameter_name_present_with_work(report.source_declarations, owner, report.replay_owner_line, local, 0, source_work)
+            return false if not proof_replay_source_single_declaration_with_work(report.source_declarations, statements, local, source_work)
+            return false if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
             outside: mutable darray[Ast::Stmt] = []
-            for statement in body |outside|:
+            for statement in body |outside, source_work|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 position: Ast::Pos = proof_statement_position(statement)
                 outside.push(statement) if not proof_replay_source_position_equal(position, outer_position)
-            return not proof_replay_source_body_declares(report.source_declarations, outside, local)
+            return not proof_replay_source_body_declares_with_work(report.source_declarations, outside, local, source_work)
 
         def proof_replay_value_block_immutable_binding_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             match trace.expression:
@@ -49,22 +73,27 @@ extend ElisaProof:
                                                 return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or inner_extent_cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
                                                 source_work <- source_work + inner_extent_cost
                                                 inner_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(inner, 0)
-                                                if stable and inner_extent.offsets_complete and inner_extent.end_offset <= consumer_position.offset and consumer_position.offset < outer_extent.end_offset and proof_replay_value_block_unique_local(report, body, statements, outer_position, local, trace.name) and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position):
-                                                    return false if not proof_replay_summary_expr_charge_with_work(initializer, source_work) or not proof_replay_summary_expr_charge_with_work(source_value, source_work)
-                                                    return false if not proof_replay_summary_expr_charge_with_work(initializer, source_work)
-                                                    return true if proof_replay_expr_equal(initializer, source_value) and not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
+                                                if stable and inner_extent.offsets_complete and inner_extent.end_offset <= consumer_position.offset and consumer_position.offset < outer_extent.end_offset and proof_replay_value_block_unique_local_with_work(report, body, statements, outer_position, local, trace.name, source_work) and proof_replay_local_binding_pos_matches(trace.expression, position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), position):
+                                                    exact_initializer: bool = proof_replay_summary_expr_equal_with_work(initializer, source_value, source_work)
+                                                    return false if not exact_initializer and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                                    return false if not exact_initializer or not proof_replay_summary_expr_charge_with_work(initializer, source_work)
+                                                    return true if not proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
                                             return false if not proof_replay_summary_expr_charge_with_work(yielded, source_work) or not proof_replay_summary_expr_charge_with_work(local_type, source_work) or not proof_replay_summary_expr_charge_with_work(outer_type, source_work)
-                                            yielded_local <- true if immutable and proof_ident_name(yielded) == local and proof_expr_equal(local_type, outer_type)
+                                            if immutable and proof_ident_name(yielded) == local:
+                                                exact_type: bool = proof_replay_summary_expr_equal_with_work(local_type, outer_type, source_work)
+                                                return false if not exact_type and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                                yielded_local <- true if exact_type
                                         _:
                                             pass
                                 if outer == target and yielded_local:
                                     return false if not proof_replay_mutable_local_identifier_scan_charge(yielded, owner_scan_work, source_work)
                                     return false if not proof_replay_summary_expr_charge_with_work(outer_type, source_work) or not proof_replay_summary_expr_charge_with_work(outer_type, source_work)
                                     valid_outer_type: bool = proof_replay_local_binding_integer_type(outer_type, 0) and not proof_replay_local_binding_mutable_integer_type(outer_type)
-                                    valid_yielded_local: bool = proof_replay_source_single_declaration(report.source_declarations, body, target) and not proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0) and proof_replay_value_block_unique_local(report, body, statements, outer_position, proof_ident_name(yielded), trace.name)
+                                    valid_yielded_local: bool = proof_replay_source_single_declaration_with_work(report.source_declarations, body, target, source_work) and not proof_replay_value_block_parameter_name_present_with_work(report.source_declarations, trace.name, report.replay_owner_line, target, 0, source_work) and proof_replay_value_block_unique_local_with_work(report, body, statements, outer_position, proof_ident_name(yielded), trace.name, source_work)
                                     if valid_outer_type and valid_yielded_local and outer_extent.end_offset <= consumer_position.offset and proof_replay_local_binding_pos_matches(trace.expression, outer_position) and proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), outer_position):
-                                        return false if not proof_replay_summary_expr_charge_with_work(yielded, source_work) or not proof_replay_summary_expr_charge_with_work(source_value, source_work)
-                                        return true if proof_replay_expr_equal(yielded, source_value)
+                                        exact_yielded: bool = proof_replay_summary_expr_equal_with_work(yielded, source_value, source_work)
+                                        return false if not exact_yielded and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                        return true if exact_yielded
                             _:
                                 pass
                 _:
@@ -81,7 +110,7 @@ extend ElisaProof:
                     body: mutable darray[Ast::Stmt] = []
                     matches: mutable usize = 0
                     proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &body, &matches, 0)
-                    return false if matches != 1 or body.count > 64 or proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, target, 0)
+                    return false if matches != 1 or body.count > 64 or proof_replay_value_block_parameter_name_present_with_work(report.source_declarations, trace.name, report.replay_owner_line, target, 0, source_work)
                     return false if not proof_replay_mutable_local_body_work_charge_fail_closed(body, source_work, 0)
                     consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
                     return false if not proof_replay_mutable_local_consumer_position_with_work(report, trace, body, &consumer_position, source_work)
@@ -119,7 +148,7 @@ extend ElisaProof:
                                 match statements[0]:
                                     Ast::Stmt.VarDecl(local, local_type, Ast::Expr.IntLit(_, _), _):
                                         continue if not proof_replay_local_binding_integer_type(local_type, 0) or proof_replay_local_binding_mutable_integer_type(local_type) or proof_replay_local_binding_integer_type_name(local_type, 0) != proof_replay_local_binding_integer_type_name(target_scalar_type, 0) or proof_ident_name(yielded) != local or proof_ident_name(source_value) != local
-                                        continue if not proof_replay_value_block_unique_local(report, body, statements, block_position, local, trace.name)
+                                        continue if not proof_replay_value_block_unique_local_with_work(report, body, statements, block_position, local, trace.name, source_work)
                                         match statements[1]:
                                             Ast::Stmt.Assign(Ast::Expr.Ident(written, _), TokenKind.LArrow, Ast::Expr.Ident(read, _), position):
                                                 assignment_extent: ProofReplayTypeBoundSourceExtent = proof_replay_type_bound_stmt_extent(statements[1], 0)

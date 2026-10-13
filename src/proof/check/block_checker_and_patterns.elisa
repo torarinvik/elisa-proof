@@ -3,6 +3,24 @@ extend ElisaProof:
         const PROOF_FRAME_CALL_ANALYSIS_BUDGET: usize = 256
         const PROOF_FRAME_FACT_STATE_BUDGET: usize = 512
 
+        def proof_frame_conversion_evidence_with_work(goal: Ast::Expr, facts: darray[Ast::Expr]&, operator_mask: usize, check_operators: bool, report: mutable ProofReport&, name: sview) -> (complete: bool, safe: bool):
+            work: mutable usize = report.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            operator_safe: mutable bool = true
+            if check_operators:
+                operator_safe <- proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, &work, &exhausted)
+            if operator_safe and not exhausted:
+                evidence: (complete: bool, integer: bool, has_width: bool) = proof_source_integer_conversion_evidence_with_work(goal, facts, &work, &exhausted)
+                operator_safe <- evidence.complete and evidence.integer and evidence.has_width
+            report.budgets.frame_call_source_work <- work
+            if exhausted:
+                if not report.budgets.frame_call_reported:
+                    report.budgets.frame_call_reported <- true
+                    position: Ast::Pos = Ast::expr_pos(goal)
+                    proof_add_budget_finding(report, "frame-analysis-budget", position.line, name, "frame operator analysis exceeded its bounded source-work budget", "operator-work", work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                return (false, false)
+            return (true, operator_safe)
+
         def proof_frame_analysis_budget_available(expression: Ast::Expr, facts: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview) -> bool:
             within_steps: bool = report.budgets.frame_call_steps < PROOF_FRAME_CALL_ANALYSIS_BUDGET
             within_facts: bool = facts.count <= PROOF_FRAME_FACT_STATE_BUDGET
@@ -16,25 +34,28 @@ extend ElisaProof:
                 proof_add_budget_finding(report, "frame-analysis-budget", position.line, name, "frame analysis exceeded its bounded symbolic-state budget", dimension, observed, limit)
             return false
 
-        def proof_frame_integer_conversion(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, operator_mask: usize) -> bool:
+        def proof_frame_integer_conversion(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, operator_mask: usize, report: mutable ProofReport&, name: sview) -> (complete: bool, recognized: bool):
             match proof_strip_parens(expression):
                 Ast::Expr.Call(callee, arguments, _, _):
                     conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, arguments.count, functions)
-                    return false if not conversion.known
+                    return (true, false) if not conversion.known
                     match proof_strip_parens(conversion.receiver):
                         Ast::Expr.Ident(_, _):
-                            return proof_signed_marker_width_for_term(facts, conversion.receiver) > 0 or proof_unsigned_width_in_expression(conversion.receiver, facts) > 0
+                            width_guard: (complete: bool, safe: bool) = proof_frame_conversion_evidence_with_work(conversion.receiver, facts, operator_mask, false, report, name)
+                            return (width_guard.complete, width_guard.safe)
                         Ast::Expr.Binary(_, operator, _, _):
-                            return false if operator != TokenKind.Plus and operator != TokenKind.Minus
-                            return false if not proof_source_arithmetic_operator_guard(conversion.receiver, facts, operator_mask) or not proof_disjunction_denial_integer_term(conversion.receiver, facts, 0)
-                            return proof_signed_width_in_expression(conversion.receiver, facts) > 0 or proof_unsigned_width_in_expression(conversion.receiver, facts) > 0
+                            return (true, false) if operator != TokenKind.Plus and operator != TokenKind.Minus
+                            operator_guard: (complete: bool, safe: bool) = proof_frame_conversion_evidence_with_work(conversion.receiver, facts, operator_mask, true, report, name)
+                            return (false, false) if not operator_guard.complete
+                            return (true, operator_guard.safe)
                         _:
-                            return false
+                            return (true, false)
                 _:
-                    return false
+                    return (true, false)
 
         def proof_check_opaque_call_frame(expression: Ast::Expr, source_expression: Ast::Expr, facts: darray[Ast::Expr]&, names: darray[sview]&, parameter_names: darray[sview]&, changes: darray[ProofFramePlace]&, preserves: darray[ProofFramePlace]&, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview) -> void:
-            return if proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask)
+            integer_conversion: (complete: bool, recognized: bool) = proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask, report, name)
+            return if not integer_conversion.complete or integer_conversion.recognized
             match expression:
                 Ast::Expr.Call(callee, arguments, _, position):
                     called: sview = proof_callable_name(callee)
@@ -51,10 +72,14 @@ extend ElisaProof:
                             proof_check_direct_frame_write(receiver, names, parameter_names, changes, preserves, report, name, position.line)
                         _:
                             pass
-                    if changes.count > 0 and proof_call_may_alias_places(arguments, changes, names, parameter_names):
+                    changes_alias: (complete: bool, may_alias: bool) = proof_frame_call_may_alias_places_with_work(arguments, changes, names, parameter_names, report, name, position.line)
+                    return if not changes_alias.complete
+                    if changes_alias.may_alias:
                         report.proof_obligation(false)
                         proof_add_finding(report, "frame-call-opaque", position.line, name, "unknown call may write through a caller frame argument")
-                    if preserves.count > 0 and proof_call_may_alias_places(arguments, preserves, names, parameter_names):
+                    preserves_alias: (complete: bool, may_alias: bool) = proof_frame_call_may_alias_places_with_work(arguments, preserves, names, parameter_names, report, name, position.line)
+                    return if not preserves_alias.complete
+                    if preserves_alias.may_alias:
                         report.proof_obligation(false)
                         proof_add_finding(report, "frame-preserve-opaque", position.line, name, "unknown call may write a preserved caller place")
                 _:
@@ -73,13 +98,10 @@ extend ElisaProof:
                         (proof_check_frame_calls_in_expression(numeric_cast.receiver, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
                         return
                     return if not proof_frame_analysis_budget_available(expression, facts, report, name)
-                    return if proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask)
+                    integer_conversion: (complete: bool, recognized: bool) = proof_frame_integer_conversion(expression, facts, functions, report.source_primitive_operator_mask, report, name)
+                    return if not integer_conversion.complete or integer_conversion.recognized
                     report.budgets.frame_call_steps <- report.budgets.frame_call_steps + 1
-                    # Evaluation proceeds through the callee and arguments before the call
-                    # summary is applied. In particular, the outer postcondition must not
-                    # justify an argument precondition. Once a child call is checked, carry its
-                    # post-call fact state into the next child; otherwise a mutating first
-                    # argument could be incorrectly treated as invisible to a later argument.
+                    # Check children sequentially so an earlier call's effects reach later arguments.
                     (proof_check_frame_calls_in_expression(callee, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
                     for argument in arguments |facts, names, values, parameter_names, changes, preserves, functions, report, name|:
                         (proof_check_frame_calls_in_expression(argument, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})

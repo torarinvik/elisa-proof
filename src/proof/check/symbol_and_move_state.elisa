@@ -14,11 +14,21 @@ extend ElisaProof:
             source: darray[Ast::Expr] = proof_copy_exprs(facts)
             rebind_paths: mutable darray[Ast::Expr] = []
             rebind_values: mutable darray[Ast::Expr] = []
-            for fact in source |rebind_paths, rebind_values, source, names, report, owner|:
-                binding: (known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding(report, fact, owner, names)
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            for fact in source |rebind_paths, rebind_values, source, names, report, owner, source_work|:
+                if not proof_replay_summary_expr_charge_with_limit(fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                binding: (complete: bool, known: bool, path: Ast::Expr, value: Ast::Expr) = proof_local_rebind_binding_with_work(report, fact, owner, names, &source_work)
+                if not binding.complete:
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
                 if binding.known:
                     rebind_paths.push(binding.path)
                     rebind_values.push(binding.value)
+            report.source_effect_index.implicit_effect_work <- source_work
             # A compiler rebind symbol can have a verified range summary while the source local
             # is represented separately by local == __elisa_rebind_N. Materialize the
             # equality-substituted summary through the ordinary proof-step path before applying
@@ -27,18 +37,45 @@ extend ElisaProof:
             # drops this fact whenever the call can reach that local.
             annotations: darray[Ast::EnumAnnotation] = []
             budget: mutable usize = PROOF_ALIAS_TRANSFER_BUDGET
-            for fact in source |fact, source, rebind_paths, rebind_values, facts, report, owner, annotations, budget|:
+            source_work <- report.source_effect_index.implicit_effect_work
+            for fact in source |fact, source, rebind_paths, rebind_values, facts, report, owner, annotations, budget, source_work|:
                 continue if budget == 0
                 probe: mutable Ast::Expr = fact
                 changed: mutable bool = false
                 for path_index in 0..<rebind_paths.count |path_index, probe, changed, rebind_paths, rebind_values|:
+                    if not proof_replay_summary_expr_repeat_charge_with_work(fact, 2, &source_work):
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
                     replaced: (changed: bool, value: Ast::Expr) = proof_tactic_replace(probe, rebind_paths[path_index], rebind_values[path_index])
                     changed <- changed or replaced.changed
                     probe <- replaced.value if replaced.changed
-                continue if not changed or any existing in facts where proof_expr_equal(existing, probe)
+                continue if not changed
+                duplicate: mutable bool = false
+                for existing in facts |existing, probe, duplicate, source_work, facts|:
+                    if not proof_replay_summary_expr_repeat_charge_with_work(existing, 4, &source_work):
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    duplicate <- true if proof_expr_equal(existing, probe)
+                continue if duplicate
+                if not proof_replay_summary_expr_repeat_charge_with_work(probe, 4, &source_work):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                for premise in source |premise, probe, source_work, source|:
+                    if not proof_replay_summary_expr_repeat_charge_with_work(premise, 4, &source_work):
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                if not proof_replay_summary_expr_charge_with_limit(probe, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
                 continue if not (proof_goal(source, probe, annotations) can Global{Read,Write})
                 budget <- budget - 1
                 proof_add_derived_fact_from(facts, report, probe, source, "proof-step", Ast::expr_pos(fact).line, owner)
+            report.source_effect_index.implicit_effect_work <- source_work
             original: darray[Ast::Expr] = proof_copy_exprs(facts)
             keep: mutable darray[bool] = []
             source_work: mutable usize = report.source_effect_index.implicit_effect_work
@@ -48,8 +85,16 @@ extend ElisaProof:
                 retained <- true if bound_name != "" and ((any candidate in names where candidate == bound_name) or (any parameter in parameters where parameter == bound_name)) and proof_fact_is_type_bound_with_work(report, fact, owner, &source_work)
                 enum_witness: bool = proof_unique_builtin_const_enum_member_witness_with_work(fact, report, &source_work) if not retained
                 retained <- true if not retained and enum_witness and proof_fact_is_type_bound_with_work(report, fact, owner, &source_work)
-                retained <- true if not retained and proof_fact_is_global_mutable_array_type_fact(report, fact, owner)
-                retained <- true if not retained and proof_fact_is_source_global_constant(report, fact, owner)
+                retained <- true if not retained and proof_fact_is_global_mutable_array_type_fact_with_work(report, fact, owner, &source_work)
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                retained <- true if not retained and proof_fact_is_source_global_constant_with_work(report, fact, owner, &source_work)
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
                 stable: mutable bool = analyzed and proof_expr_call_stable(fact, original, names, parameters, call_aliases, report.shared_extent_names, report.shared_fixed_names, report.local_extent_names, report, owner, 0)
                 if not retained and analyzed and not stable and rebind_paths.count > 0:
                     probe: mutable Ast::Expr = fact
@@ -107,53 +152,99 @@ extend ElisaProof:
                     return proof_expr_equal(inner, side)
                 _:
                     return false
-        # A direct field store changes the named aggregate, not unrelated by-value facts. Drop
-        # every fact that mentions that root (plus keep only independently sourced type/global
-        # witnesses); preserving facts about other parameters is necessary for post-state proofs
-        # such as storing a value already known to be non-null.
-        def proof_clear_facts_for_mutated_root(facts: mutable darray[Ast::Expr]&, root: sview, report: ProofReport&, owner: sview) -> void:
+        def proof_clear_facts_for_mutated_root(facts: mutable darray[Ast::Expr]&, root: sview, report: mutable ProofReport&, owner: sview) -> void:
             return if root == ""
             original_count: usize = facts.count
             write_index: mutable usize = 0
-            for read_index in 0..<original_count |facts, root, report, owner, original_count, write_index|:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            for read_index in 0..<original_count |facts, root, report, owner, original_count, write_index, source_work|:
                 fact: Ast::Expr = facts[read_index]
-                continue if proof_expr_mentions_name(fact, root) and not proof_fact_is_type_bound(report, fact, owner) and not proof_fact_is_source_global_constant(report, fact, owner)
+                if not proof_replay_summary_expr_charge_with_limit(fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                if not proof_replay_source_work_charge_or_exhaust(sview_len(root), source_work):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                mentions: bool = proof_expr_mentions_name(fact, root)
+                if mentions:
+                    is_type_bound: bool = proof_fact_is_type_bound_with_work(report, fact, owner, &source_work)
+                    is_global_constant: bool = false if is_type_bound or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else proof_fact_is_source_global_constant_with_work(report, fact, owner, &source_work)
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
+                    continue if not is_type_bound and not is_global_constant
                 facts[write_index] <- fact
                 write_index <- write_index + 1
             facts.resize(write_index)
+            report.source_effect_index.implicit_effect_work <- source_work
 
         def proof_clear_facts_keep_type_bounds(facts: mutable darray[Ast::Expr]&, names: darray[sview]&, parameters: darray[sview]&, report: mutable ProofReport&, owner: sview) -> void:
             original_count: usize = facts.count
             write_index: mutable usize = 0
             source_work: mutable usize = report.source_effect_index.implicit_effect_work
             for read_index in 0..<original_count |facts, names, parameters, report, owner, original_count, write_index, source_work|:
-                if proof_fact_is_global_constant(report, facts[read_index], owner):
+                if not proof_replay_summary_expr_charge_with_limit(facts[read_index], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                if proof_fact_is_global_constant_with_work(report, facts[read_index], owner, &source_work):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
                     facts[write_index] <- facts[read_index]
                     write_index <- write_index + 1
                     continue
                 fact: Ast::Expr = facts[read_index]
-                if proof_fact_is_global_mutable_array_type_fact(report, fact, owner):
+                if proof_fact_is_global_mutable_array_type_fact_with_work(report, fact, owner, &source_work):
+                    if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                        facts.clear()
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
                     facts[write_index] <- fact
                     write_index <- write_index + 1
                     continue
                 bound_name: sview = proof_type_bound_name(fact)
                 enum_member_witness: bool = proof_unique_builtin_const_enum_member_witness_with_work(fact, report, &source_work)
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
                 continue if bound_name == "" and not enum_member_witness
-                continue if bound_name != "" and not (any candidate in names where candidate == bound_name) and not (any parameter in parameters where parameter == bound_name)
-                continue if not proof_fact_is_type_bound_with_work(report, fact, owner, &source_work)
+                if bound_name != "":
+                    live_name: mutable bool = false
+                    for candidate in names |candidate, parameters, source_work, bound_name, live_name|:
+                        if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(candidate) + sview_len(bound_name), source_work):
+                            facts.clear()
+                            report.source_effect_index.implicit_effect_work <- source_work
+                            return
+                        live_name <- true if candidate == bound_name
+                    if not live_name:
+                        for parameter in parameters |parameter, source_work, bound_name, live_name|:
+                            if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(parameter) + sview_len(bound_name), source_work):
+                                facts.clear()
+                                report.source_effect_index.implicit_effect_work <- source_work
+                                return
+                            live_name <- true if parameter == bound_name
+                    continue if not live_name
+                is_bound: bool = proof_fact_is_type_bound_with_work(report, fact, owner, &source_work)
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    facts.clear()
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    return
+                continue if not is_bound
                 facts[write_index] <- fact
                 write_index <- write_index + 1
             facts.resize(write_index)
             report.source_effect_index.implicit_effect_work <- source_work
 
-        # An imported `const NAME: T = literal` fact names an immutable declaration, so no write,
-        # call or loop iteration can falsify it. Clearing it anyway loses `CAP == 8` at a loop
-        # exit while the goal still has CAP unfolded to 8. Only facts this function traced as
-        # "global-constant" qualify; replay revalidates each against its declaration.
-        # The trace scan runs only for the `NAME == literal` shape an import records.
-        def proof_fact_is_global_constant(report: ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
+        def proof_fact_is_global_constant_with_work(report: ProofReport&, fact: Ast::Expr, owner: sview, source_work: mutable usize&) -> bool:
             match fact:
                 Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    return false if not proof_replay_summary_expr_charge_with_limit(left, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                     # A qualified import names its constant by path, `Limits::TOP == 8`.
                     path: mutable darray[sview] = []
                     return false if proof_ident_name(left) == "" and not proof_qualified_constant_flatten(left, &path, 0)
@@ -166,19 +257,20 @@ extend ElisaProof:
                             return false
                 _:
                     return false
-            for index in report.global_constant_trace_ids |index, report, fact, owner|:
+            for index in report.global_constant_trace_ids |index, report, fact, owner, source_work|:
+                return false if not proof_replay_source_work_charge_or_exhaust(1, source_work)
                 continue if index < report.traces.active_start or index >= report.traces.records.count
-                return true if report.traces.records[index].kind == "global-constant" and report.traces.records[index].name == owner and proof_expr_equal(report.traces.records[index].expression, fact)
+                trace: ProofFactTrace = report.traces.records[index]
+                return false if not proof_replay_source_work_charge_or_exhaust(sview_len(trace.kind) + sview_len(trace.name), source_work)
+                continue if trace.kind != "global-constant" or trace.name != owner
+                equal: bool = proof_replay_summary_expr_equal_with_limit(trace.expression, fact, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                return false if not equal and source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return true if equal
             return false
 
-        # A statement snapshot is used only to restore compiler-derived type bounds after a
-        # move. Copying the entire symbolic state here needlessly duplicates call summaries and
-        # branch predicates on every statement; those facts are never read by the restore pass.
-        def proof_copy_type_bound_facts(source: darray[Ast::Expr]&, report: ProofReport&, owner: sview) -> darray[Ast::Expr]:
-            result: mutable darray[Ast::Expr] = []
-            for fact in source |fact, result, report, owner|:
-                result.push(fact) if proof_fact_is_type_bound(report, fact, owner)
-            return result
+        def proof_fact_is_global_constant(report: ProofReport&, fact: Ast::Expr, owner: sview) -> bool:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            proof_fact_is_global_constant_with_work(report, fact, owner, &source_work)
 
         # A binding becomes an opaque symbol again whenever its new value is not expressible in
         # terms of the existing symbols: a declaration reuses a spelling, an unsigned local is
@@ -221,23 +313,10 @@ extend ElisaProof:
                 continue if target_index == 0 or target_index >= cascaded_widths.count
                 proof_add_unsigned_binding_facts(facts, report, targets[target_index], cascaded_widths[target_index], position.line, owner, position)
 
-        # Bind an unsigned local to its own symbol instead of substituting its value. The symbol
-        # keeps its compiler width through every later substitution, so wrapping arithmetic on
-        # it stays visible to the unsigned range guard rather than being folded into signed
-        # literal arithmetic. The value is recorded as an equality only when it is itself
-        # range-safe under the current facts; a possibly wrapping initializer leaves the symbol
-        # opaque within its declared type range.
-        # A rebind whose value is written over the binding's own symbol cannot record that value
-        # under that symbol: `rounds == rounds + 1` is cyclic, and refusing it is what dropped the
-        # new value and, with it, every fact about the old one. The new value gets a fresh symbol
-        # instead. The old symbol then denotes the old value and nothing else -- the source name is
-        # bound to the fresh symbol, so every substitution reaches the new value and every fact
-        # already recorded stays true of the value it was taken over.
-        #
-        # The names are drawn from the shared fixed pool rather than built, and the pool is per function:
-        # nothing here can construct an identifier, and a shared counter would run a long program
-        # out of names for a short one. Exhausting the pool falls back to the old behaviour, which
-        # forgets rather than assumes. The exact generated spellings are reserved at import time.
+        # Keep unsigned locals as symbols so their compiler width stays visible; record an
+        # initializer only when it is range-safe, and otherwise keep the value opaque.
+        # Self-referential updates get a fresh symbol so old facts still describe the old value.
+        # Names come from a reserved per-function pool; exhaustion forgets rather than assumes.
         def proof_rebind_symbol(report: mutable ProofReport&) -> sview:
             index: usize = report.rebind_symbols
             return "" if index >= PROOF_INTERNAL_REBIND_SYMBOL_COUNT
@@ -308,33 +387,6 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_restore_type_bound_facts_except(source: darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, names: darray[sview]&, report: ProofReport&, owner: sview, excluded: sview) -> void:
-            hashes: mutable darray[u32] = []
-            hashed: mutable bool = false
-            for fact in source |fact, facts, names, report, owner, excluded, hashes, hashed|:
-                bound_name: sview = proof_type_bound_name(fact)
-                if proof_fact_is_global_mutable_array_type_fact(report, fact, owner):
-                    continue if bound_name == excluded
-                    if not hashed:
-                        hashes <- proof_fact_list_shape_hashes(facts)
-                        hashed <- true
-                    hash: u32 = proof_expr_shape_hash(fact, 0)
-                    if not proof_fact_list_contains_hashed(facts, hashes, fact, hash):
-                        facts.push(fact)
-                        hashes.push(hash)
-                    continue
-                continue if bound_name == "" or bound_name == excluded
-                continue if not (any candidate in names where candidate == bound_name)
-                continue if not proof_fact_is_type_bound(report, fact, owner)
-                # The duplicate check reads the target's hashes, taken once on first need.
-                if not hashed:
-                    hashes <- proof_fact_list_shape_hashes(facts)
-                    hashed <- true
-                hash: u32 = proof_expr_shape_hash(fact, 0)
-                if not proof_fact_list_contains_hashed(facts, hashes, fact, hash):
-                    facts.push(fact)
-                    hashes.push(hash)
-
         # Return the binding root affected by a move. Field and index moves consume the
         # containing binding from this kernel's name-based state; precise subfield ownership is
         # intentionally left to the compiler's affine checker until the proof state has binding
@@ -358,132 +410,11 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_collect_move_roots(expression: Ast::Expr, roots: mutable darray[sview]&) -> void:
-            match expression:
-                Ast::Expr.Move(operand, _):
-                    root: sview = proof_move_root(operand)
-                    roots.push(root) if root != "" and not (any existing in roots where existing == root)
-                    proof_collect_move_roots(operand, roots)
-                Ast::Expr.Paren(inner, _):
-                    proof_collect_move_roots(inner, roots)
-                Ast::Expr.Unary(_, operand, _):
-                    proof_collect_move_roots(operand, roots)
-                Ast::Expr.Binary(left, _, right, _):
-                    proof_collect_move_roots(left, roots)
-                    proof_collect_move_roots(right, roots)
-                Ast::Expr.Call(callee, arguments, _, _):
-                    proof_collect_move_roots(callee, roots)
-                    for argument in arguments |roots|:
-                        proof_collect_move_roots(argument, roots)
-                Ast::Expr.Field(object, _, _):
-                    proof_collect_move_roots(object, roots)
-                Ast::Expr.Scope(base, _, _):
-                    proof_collect_move_roots(base, roots)
-                Ast::Expr.Index(object, index, _):
-                    proof_collect_move_roots(object, roots)
-                    proof_collect_move_roots(index, roots)
-                Ast::Expr.Slice(object, low, high, _):
-                    proof_collect_move_roots(object, roots)
-                    proof_collect_move_roots(low, roots)
-                    proof_collect_move_roots(high, roots)
-                Ast::Expr.IndexN(object, arguments, _):
-                    proof_collect_move_roots(object, roots)
-                    for argument in arguments |roots|:
-                        proof_collect_move_roots(argument, roots)
-                Ast::Expr.RegionNew(operand, _, _):
-                    proof_collect_move_roots(operand, roots)
-                Ast::Expr.Array(elements, _):
-                    for element in elements |roots|:
-                        proof_collect_move_roots(element, roots)
-                Ast::Expr.Tuple(elements, _):
-                    for element in elements |roots|:
-                        proof_collect_move_roots(element, roots)
-                Ast::Expr.SetLit(elements, _):
-                    for element in elements |roots|:
-                        proof_collect_move_roots(element, roots)
-                Ast::Expr.DictLit(entries, _):
-                    for entry in entries |roots|:
-                        proof_collect_move_roots(entry.key, roots)
-                        proof_collect_move_roots(entry.value, roots)
-                Ast::Expr.Construct(_, fields, _):
-                    for field in fields |roots|:
-                        proof_collect_move_roots(field.value, roots)
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    proof_collect_move_roots(base, roots)
-                    for field in fields |roots|:
-                        proof_collect_move_roots(field.value, roots)
-                Ast::Expr.If(condition, then_expr, else_expr, _):
-                    proof_collect_move_roots(condition, roots)
-                    proof_collect_move_roots(then_expr, roots)
-                    proof_collect_move_roots(else_expr, roots)
-                Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    proof_collect_move_roots(iterable, roots)
-                    proof_collect_move_roots(condition, roots)
-                    proof_collect_move_roots(body, roots)
-                Ast::Expr.Refinement(base, predicate, _):
-                    proof_collect_move_roots(base, roots)
-                    proof_collect_move_roots(predicate, roots)
-                Ast::Expr.GetElse(guarded, _, _):
-                    # Recovery statements execute on the failure branch and are checked against
-                    # a cloned state. Only a move in the successful guarded value invalidates the
-                    # enclosing success-path binding here; recovery-side moves are collected by
-                    # the nested proof_check_returns invocation.
-                    proof_collect_move_roots(guarded, roots)
-                Ast::Expr.Block(statements, value, _, _):
-                    for statement in statements |roots|:
-                        match statement:
-                            Ast::Stmt.VarDecl(_, _, initializer, _):
-                                proof_collect_move_roots(initializer, roots)
-                            Ast::Stmt.Assign(_, _, initializer, _):
-                                proof_collect_move_roots(initializer, roots)
-                            Ast::Stmt.Expr(statement_expression, _):
-                                proof_collect_move_roots(statement_expression, roots)
-                            Ast::Stmt.Return(statement_value, _):
-                                if statement_value is returned:
-                                    proof_collect_move_roots(returned, roots)
-                            _:
-                                pass
-                    proof_collect_move_roots(value, roots)
-                _:
-                    pass
-
-        def proof_statement_move_roots(statement: Ast::Stmt, roots: mutable darray[sview]&) -> void:
-            match statement:
-                Ast::Stmt.Return(value, _):
-                    if value is returned:
-                        proof_collect_move_roots(returned, roots)
-                Ast::Stmt.Expr(expression, _):
-                    proof_collect_move_roots(expression, roots)
-                Ast::Stmt.VarDecl(_, _, initializer, _):
-                    proof_collect_move_roots(initializer, roots)
-                Ast::Stmt.Assign(target, _, initializer, _):
-                    proof_collect_move_roots(target, roots)
-                    proof_collect_move_roots(initializer, roots)
-                Ast::Stmt.If(condition, _, _, _):
-                    proof_collect_move_roots(condition, roots)
-                Ast::Stmt.While(condition, _, _):
-                    proof_collect_move_roots(condition, roots)
-                Ast::Stmt.For(_, _, iterable, _, _):
-                    proof_collect_move_roots(iterable, roots)
-                Ast::Stmt.Match(scrutinee, _, _):
-                    proof_collect_move_roots(scrutinee, roots)
-                Ast::Stmt.Block(block_kind, _, _, block_body, _):
-                    if block_kind == "assert_by" and block_body.count > 0:
-                        match block_body[0]:
-                            Ast::Stmt.Contract(_, goal, _):
-                                proof_collect_move_roots(goal, roots)
-                            _:
-                                pass
-                Ast::Stmt.Contract(kind, expression, _):
-                    proof_collect_move_roots(expression, roots) if kind == "assert"
-                _:
-                    pass
-
         # A move invalidates all symbolic values conservatively, then marks the consumed root as
         # unavailable. This makes a later use substitute to Invalid and prevents the proof
         # checker from proving a post-move property from a pre-move alias. The compiler's own
         # affine/linear/region passes remain the authority for exact ownership legality.
-        def proof_invalidate_moved_roots(roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: ProofReport&, owner: sview, position: Ast::Pos) -> void:
+        def proof_invalidate_moved_roots(roots: darray[sview], names: mutable darray[sview]&, values: mutable darray[Ast::Expr]&, facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, position: Ast::Pos) -> void:
             return if roots.count == 0
             proof_forget_values(names, values, position)
             # A transfer invalidates what is known about the moved roots, not the declared type of
@@ -492,18 +423,57 @@ extend ElisaProof:
             # same retention rule used at call and control-flow havoc points.
             original_count: usize = facts.count
             write_index: mutable usize = 0
-            for read_index in 0..<original_count |facts, names, roots, report, owner, original_count, write_index|:
+            source_work: mutable usize = report.source_effect_index.implicit_effect_work
+            for read_index in 0..<original_count |facts, names, roots, report, owner, original_count, write_index, source_work|:
+                if not proof_replay_summary_expr_charge_with_limit(facts[read_index], source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT):
+                    facts.resize(write_index)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    for index in 0..<values.count |index, values|:
+                        values[index] <- Ast::Expr.Invalid
+                    return
                 bound_name: sview = proof_type_bound_name(facts[read_index])
                 continue if bound_name == ""
-                continue if any root in roots where root == bound_name
-                continue if not (any candidate in names where candidate == bound_name)
-                continue if not proof_fact_is_type_bound(report, facts[read_index], owner)
+                moved_root: mutable bool = false
+                for root in roots |root, source_work, bound_name, moved_root|:
+                    if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(root) + sview_len(bound_name), source_work):
+                        facts.resize(write_index)
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        for index in 0..<values.count |index, values|:
+                            values[index] <- Ast::Expr.Invalid
+                        return
+                    moved_root <- true if root == bound_name
+                continue if moved_root
+                live_name: mutable bool = false
+                for candidate in names |candidate, source_work, bound_name, live_name|:
+                    if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(candidate) + sview_len(bound_name), source_work):
+                        facts.resize(write_index)
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        for index in 0..<values.count |index, values|:
+                            values[index] <- Ast::Expr.Invalid
+                        return
+                    live_name <- true if candidate == bound_name
+                continue if not live_name
+                is_bound: bool = proof_fact_is_type_bound_with_work(report, facts[read_index], owner, &source_work)
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    facts.resize(write_index)
+                    report.source_effect_index.implicit_effect_work <- source_work
+                    for index in 0..<values.count |index, values|:
+                        values[index] <- Ast::Expr.Invalid
+                    return
+                continue if not is_bound
                 facts[write_index] <- facts[read_index]
                 write_index <- write_index + 1
             facts.resize(write_index)
+            report.source_effect_index.implicit_effect_work <- source_work
             for root in roots |root, names, values|:
                 for index in 0..<names.count |index, names, values, root|:
+                    if not proof_replay_source_work_charge_or_exhaust(1 + sview_len(root) + sview_len(names[index]), source_work):
+                        for invalid_index in 0..<values.count |invalid_index, values|:
+                            values[invalid_index] <- Ast::Expr.Invalid
+                        report.source_effect_index.implicit_effect_work <- source_work
+                        return
                     values[index] <- Ast::Expr.Invalid if names[index] == root
+            report.source_effect_index.implicit_effect_work <- source_work
 
         # The parser keeps a body contract's head verbatim, and `ensures` is the plural
         # spelling of the postcondition head, so both spellings are one contract kind.
@@ -520,10 +490,5 @@ extend ElisaProof:
                         pass
             return result
 
-        # Function/loop specifications are logical state, not executable expression contexts.
-        # `old(...)` is modeled separately; other calls require an explicit purity proof and a
-        # state-observation model for contract evaluation.
-        # A contract may mention a call only when the callee was independently classified as a
-        # total pure function. This is deliberately stricter than merely checking that the call
-        # has an `ensure`: a precondition, mutable parameter, write, or opaque transitive call
-        # would make the call a partial/effectful expression rather than a stable logical value.
+        # Contract calls require proven total purity; `old(...)` is modeled separately.
+        # Preconditions, mutable parameters, writes, or opaque transitive calls make a call unstable.

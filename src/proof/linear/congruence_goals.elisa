@@ -1,100 +1,19 @@
 include "./signed_product_growth.elisa"
-# Congruence seeds and case-split goal depth for the linear tier.
+# Case-split goal search for the linear tier.
 extend ElisaProof:
     public:
-        # Congruence can only seed a class from a positive equality premise. Check that cheap
-        # shape before lowering a large fact frame into a scratch arena; the ordinary arithmetic,
-        # identity, and model tiers already handled every goal that needs no equality premise.
-        # Conjunction is the only proposition whose equality children are exported here, and
-        # `not (a != b)` is the equivalent positive form used by the kernel seed rule.
-        def proof_congruence_has_seed(expression: Ast::Expr, depth: usize) -> bool:
-            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_congruence_has_seed(inner, depth + 1)
-                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
-                    return true
-                Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_congruence_has_seed(left, depth + 1) or proof_congruence_has_seed(right, depth + 1)
-                Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    match inner:
-                        Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
-                            return true
-                        _:
-                            pass
-                _:
-                    pass
-            return false
+        def proof_congruence_goal_with_work(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            fact_nodes: mutable usize = 0
+            return false if not proof_linear_safety_fact_shape_total_with_work(facts, &fact_nodes, budget, exhausted)
+            goal_nodes: mutable usize = 0
+            return false if not proof_linear_safety_expression_shape_with_work(goal, 0, &goal_nodes, budget, exhausted)
+            return false if goal_nodes > PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_nodes
+            total_nodes: usize = fact_nodes + goal_nodes
+            return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, total_nodes, 8)
+            proof_congruence_goal(facts, goal, annotations, exhausted)
 
-        def proof_congruence_has_seed_in_facts(facts: darray[Ast::Expr]&) -> bool:
-            for fact in facts |fact|:
-                return true if proof_congruence_has_seed(fact, 0)
-            return false
-
-        # Whether an equality premise, in the shapes `proof_congruence_has_seed` reads, has the
-        # literal `value` as one side. Parentheses are looked through, which only admits more.
-        def proof_congruence_seed_has_literal(expression: Ast::Expr, value: i64, depth: usize) -> bool:
-            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
-            match expression:
-                Ast::Expr.Paren(inner, _):
-                    return proof_congruence_seed_has_literal(inner, value, depth + 1)
-                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
-                    return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
-                Ast::Expr.Binary(left, TokenKind.And, right, _):
-                    return proof_congruence_seed_has_literal(left, value, depth + 1) or proof_congruence_seed_has_literal(right, value, depth + 1)
-                Ast::Expr.Unary(TokenKind.Not, inner, _):
-                    match inner:
-                        Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
-                            return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
-                        _:
-                            pass
-                _:
-                    pass
-            return false
-
-        def proof_congruence_literal_side(side: Ast::Expr, value: i64) -> bool:
-            match proof_strip_parens(side):
-                Ast::Expr.IntLit(literal, _):
-                    return literal == value
-                _:
-                    return false
-            return false
-
-        # The closure merges a leaf only through a premise that names it as one side: the
-        # congruence step relates terms with operands. An integer literal goal side that no
-        # premise names stays alone in its class, so `b == 9` beside the case `b == 32` is
-        # refused here without lowering every fact into a scratch arena.
-        def proof_congruence_literal_side_unseeded(facts: darray[Ast::Expr]&, side: Ast::Expr) -> bool:
-            match side:
-                Ast::Expr.IntLit(value, _):
-                    for fact in facts |fact, value|:
-                        return false if proof_congruence_seed_has_literal(fact, value, 0)
-                    return true
-                _:
-                    return false
-            return false
-
-        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
-            return false if not proof_kernel_expression_supported(goal)
-            return false if not proof_congruence_has_seed_in_facts(facts)
-            match goal:
-                Ast::Expr.Binary(goal_left, TokenKind.EqEq, goal_right, _):
-                    if not proof_expr_equal(goal_left, goal_right):
-                        return false if proof_congruence_literal_side_unseeded(facts, goal_left) or proof_congruence_literal_side_unseeded(facts, goal_right)
-                _:
-                    pass
-            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
-            children: mutable darray[usize] = []
-            roots: mutable darray[usize] = []
-            for fact in facts |fact, nodes, children, roots, annotations|:
-                continue if not proof_kernel_expression_supported(fact)
-                roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
-            return false if roots.count == 0
-            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
-            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status(&nodes, &children, roots, goal_root, exhausted)
-
-        # Weakening: drop every premise the wrap guard cannot read and retry the goal. Replay
-        # sees the certificate's smaller fact list, so nothing unreadable is ever consumed.
+        # Weakening: discard premises the wrap guard cannot read and retry the goal. Replay
+        # sees the smaller fact list, so the proof never consumes an unreadable premise.
         def proof_goal_without_unsafe_premises(facts: darray[Ast::Expr]&, kept: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
             return false if kept.count == facts.count
             (proof_goal_depth(kept, goal, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
@@ -111,30 +30,50 @@ extend ElisaProof:
                     # The source replay boundary currently rejects local-binding facts because it
                     # cannot authenticate their reaching definitions. Do not let any disjunction
                     # search path build a theorem certificate from that incomplete context.
-                    return false if proof_disjunction_has_call_valued_local_alias(facts)
-                    return true if proof_source_arithmetic_operator_guard(goal, facts, operator_mask) and proof_closed_formula_width_uniform(goal) and proof_closed_formula_at_width(goal, 64, true, 0).value
+                    call_alias_scan: (complete: bool, found: bool) = proof_disjunction_has_call_valued_local_alias(facts, budget, exhausted)
+                    return false if not call_alias_scan.complete or exhausted
+                    return false if call_alias_scan.found
+                    disjunction_operator_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
+                    return false if exhausted
+                    if disjunction_operator_safe:
+                        width_uniform: bool = proof_closed_formula_width_uniform_with_work(goal, budget, exhausted)
+                        return false if exhausted
+                        return true if width_uniform
                     # A disjunction that is itself a fact, the branch condition `b == 32 or
                     # b == 9 or ...` a join re-proves in its own arm, is closed by assumption
                     # here, behind the same operator guard the assumption step below passes.
                     # Recursing into the left alternative first ran a full failing case split
                     # over that very fact at every nesting level of the chain. Taking the
                     # assumption early returns only what the step below would return.
-                    if proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
-                        for fact in facts:
-                            return true if proof_fact_contains(fact, goal)
+                    if disjunction_operator_safe:
+                        for fact in facts |fact, budget, exhausted|:
+                            contained: (complete: bool, contains: bool) = proof_disjunction_fact_contains_with_work(fact, goal, budget, exhausted, 0)
+                            return false if not contained.complete
+                            return true if contained.contains
                     # If the same conditional occurs under both alternatives, split once
                     # around the whole disjunction before spending the proof budget on a
                     # failing left branch. Each path then reduces one alternative to reflexivity.
+                    nested_scan_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(goal, budget, exhausted)
+                    return false if not nested_scan_cost.complete or not proof_linear_safety_work_charge_scaled(budget, exhausted, nested_scan_cost.cost, 1)
                     nested: (found: bool, value: Ast::Expr) = proof_first_nested_conditional(goal, 0, 0)
-                    return true if nested.found and proof_source_arithmetic_operator_guard(goal, facts, operator_mask) and (proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-                    return true if not proof_source_expression_has_overloaded_operator(goal, operator_mask, 0) and proof_disjunction_direct_branch(goal, facts, 0)
-                    return true if proof_source_arithmetic_operator_guard(goal, facts, operator_mask) and (proof_disjunction_premise_entails_goal(goal, facts, annotations) can Global{Read,Write})
-                    false_left: (applicable: bool, proven: bool) = (proof_disjunction_false_left_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+                    return false if exhausted
+                    return true if nested.found and disjunction_operator_safe and (proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
+                    goal_overloaded: bool = proof_source_expression_has_overloaded_operator_with_work(goal, operator_mask, budget, exhausted)
+                    return false if exhausted
+                    direct: bool = false if goal_overloaded else proof_disjunction_direct_branch(goal, facts, 0, disjunction_operator_safe, budget, exhausted)
+                    return false if exhausted
+                    return true if direct
+                    if disjunction_operator_safe:
+                        premise_entails_goal: bool = (proof_disjunction_premise_entails_goal(goal, facts, annotations, budget, exhausted) can Global{Read,Write})
+                        return false if exhausted
+                        return true if premise_entails_goal
+                    false_left: (applicable: bool, proven: bool) = (proof_disjunction_false_left_goal(facts, goal, annotations, operator_mask, disjunction_operator_safe, depth, budget, split_depth, exhausted) can Global{Read,Write})
                     return false_left.proven if false_left.applicable
                     # Preserve correlations before a failing left-alternative search spends
                     # fuel splitting this same premise. The kernel uses this order too.
-                    if proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
-                        candidate: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal) can Global{Read,Write})
+                    if disjunction_operator_safe:
+                        candidate: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal, annotations, budget, exhausted) can Global{Read,Write})
+                        return false if exhausted
                         exhausted <- true if candidate.known and split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT
                         if candidate.known and split_depth < PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                             left_facts: mutable darray[Ast::Expr] = []
@@ -155,19 +94,25 @@ extend ElisaProof:
             # imported operator elsewhere in the frame suppress this local proof.
             match proof_strip_parens(goal):
                 Ast::Expr.Binary(left, operator, right, _):
-                    if proof_is_comparison(operator) and not proof_source_expression_has_overloaded_operator(goal, operator_mask, 0):
-                        return true if proof_comparison_from_equality_literal(left, operator, right, facts)
+                    if proof_is_comparison(operator):
+                        goal_overloaded: bool = proof_source_expression_has_overloaded_operator_with_work(goal, operator_mask, budget, exhausted)
+                        return false if exhausted
+                        if not goal_overloaded:
+                            return true if proof_comparison_from_equality_literal(left, operator, right, facts)
                 _:
                     pass
             # Reject overloaded operators before arithmetic conversion rules.
-            return false if not proof_source_arithmetic_operator_guard(goal, facts, operator_mask)
+            arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
+            return false if exhausted or not arithmetic_guard_safe
             return true if proof_signed_scaled_quotient_sum_goal(facts, goal)
             # A Boolean call may be the surviving alternative of a verified
             # summary. Eliminate only explicitly refuted siblings, without
             # spending case-split fuel on unrelated selector summaries.
             match proof_strip_parens(goal):
                 Ast::Expr.Call(_, _, _, _):
-                    return true if (proof_disjunction_premise_entails_goal(goal, facts, annotations) can Global{Read,Write})
+                    premise_entails_goal: bool = (proof_disjunction_premise_entails_goal(goal, facts, annotations, budget, exhausted) can Global{Read,Write})
+                    return false if exhausted
+                    return true if premise_entails_goal
                 _:
                     pass
             return true if proof_logical_join_identity(facts, goal)
@@ -256,16 +201,17 @@ extend ElisaProof:
             # Disjunctive syllogism consumes no case split: retain the surviving
             # subexpression, with fewer connective nodes and unchanged fact count.
             for index in 0..<facts.count |index, facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted|:
+                fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(facts[index], budget, exhausted)
+                return false if not fact_cost.complete
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, fact_cost.cost, 2)
                 candidate: (known: bool, left: Ast::Expr, right: Ast::Expr) = proof_find_disjunction(facts[index])
                 continue if not candidate.known
-                left_refuted: bool = (proof_disjunct_refuted(candidate.left, facts, annotations, 0) can Global{Read,Write})
-                right_refuted: bool = (proof_disjunct_refuted(candidate.right, facts, annotations, 0) can Global{Read,Write})
+                left_refuted: bool = (proof_disjunct_refuted(candidate.left, facts, annotations, budget, exhausted, 0) can Global{Read,Write})
+                return false if exhausted
+                right_refuted: bool = (proof_disjunct_refuted(candidate.right, facts, annotations, budget, exhausted, 0) can Global{Read,Write})
+                return false if exhausted
                 continue if not left_refuted and not right_refuted
-                # Charge the existing work budget, not quantifier nesting depth.
-                if budget >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS:
-                    exhausted <- true
-                    return false
-                budget <- budget + 1
+                return false if not proof_linear_safety_work_charge_scaled(budget, exhausted, facts.count + 1, 1)
                 reduced: mutable darray[Ast::Expr] = []
                 reduced.extend(facts)
                 reduced[index] <- candidate.right if left_refuted else candidate.left
@@ -282,13 +228,12 @@ extend ElisaProof:
             match goal:
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
                     return true if (proof_goal_depth(facts, right, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
-                    return false if not proof_disjunction_denial_fragment(left, facts, 0)
                     if split_depth >= PROOF_LINEAR_CASE_SPLIT_DEPTH_LIMIT:
                         exhausted <- true
                         return false
                     denied_facts: mutable darray[Ast::Expr] = []
                     denied_facts.extend(facts)
-                    if not proof_push_disjunction_denial(left, &denied_facts, facts.count + PROOF_DISJUNCTION_DENIAL_FACT_LIMIT, 0):
+                    if not proof_push_disjunction_denial(left, &denied_facts, facts.count + PROOF_DISJUNCTION_DENIAL_FACT_LIMIT, 0, budget, exhausted):
                         exhausted <- true
                         return false
                     return (proof_goal_depth(denied_facts, right, annotations, operator_mask, depth + 1, budget, split_depth + 1, exhausted) can Global{Read,Write})
@@ -315,7 +260,8 @@ extend ElisaProof:
             # mirror in `proof_kernel_replay_goal_depth_remaining`.
             if split_depth == 0 and proof_facts_have_disjunction(facts) and proof_comparison_goal_shape(goal):
                 return true if (proof_field_place_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
-            selected: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal) can Global{Read,Write})
+            selected: (known: bool, index: usize, left: Ast::Expr, right: Ast::Expr) = (proof_find_goal_relevant_disjunction(facts, goal, annotations, budget, exhausted) can Global{Read,Write})
+            return false if exhausted
             disjunction_index: usize = selected.index if selected.known else facts.count
             disjunction_left: Ast::Expr = selected.left
             disjunction_right: Ast::Expr = selected.right
@@ -359,8 +305,11 @@ extend ElisaProof:
                     unsigned_free: mutable bool = proof_unsigned_width_in_expression(goal, facts) == 0
                     for fact in facts |fact, unsigned_free|:
                         unsigned_free <- false if proof_unsigned_width_in_expression(fact, facts) != 0
-                    if unsigned_free and proof_source_arithmetic_operator_guard(goal, facts, operator_mask):
-                        return true if proof_congruence_goal(facts, goal, annotations, exhausted)
+                    if unsigned_free:
+                        equality_arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
+                        return false if exhausted
+                        if equality_arithmetic_guard_safe:
+                            return true if proof_congruence_goal_with_work(facts, goal, annotations, budget, exhausted)
                 _:
                     pass
             return true if proof_closed_safe_constant_comparison_in(goal, facts)
@@ -378,7 +327,9 @@ extend ElisaProof:
             # A closed goal true at every width holds even when each disjunct alone is
             # width-dependent, `(0 - 1) < 0 or (0 - 1) >= 22`. A false one may still close
             # from inconsistent premises below.
-            return true if proof_closed_formula_width_uniform(goal) and proof_closed_formula_at_width(goal, 64, true, 0).value
+            width_uniform: bool = proof_closed_formula_width_uniform_with_work(goal, budget, exhausted)
+            return false if exhausted
+            return true if width_uniform
             return false if quantifier_kind == "" and proof_has_ambiguous_integer_constant_in(goal, facts, 0)
             # An ambiguous premise is dropped rather than refusing the goal: forgetting a fact
             # only weakens the premises, so a module constant such as `NONE == -1` no longer
@@ -536,7 +487,8 @@ extend ElisaProof:
                                 pass
                     return true if (proof_nested_conditional_goal(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                     if proof_is_comparison(operator):
-                        return false if not proof_source_arithmetic_operator_guard(goal, facts, operator_mask)
+                        denial_arithmetic_guard_safe: bool = proof_source_arithmetic_operator_guard_with_work(goal, facts, operator_mask, budget, exhausted)
+                        return false if exhausted or not denial_arithmetic_guard_safe
                         return true if proof_linear_goal(left, operator, right, facts)
                         # Cancellation reads each side as a sum over the integers, which is only
                         # sound here: the wrap guard above has certified every operation in it.
@@ -558,7 +510,7 @@ extend ElisaProof:
                         return true if (proof_comparison_congruence_fact(facts, goal, annotations, operator_mask, depth, budget, split_depth, exhausted) can Global{Read,Write})
                         # Congruence is the last equality tier and runs only after the
                         # fixed-width safety guards above rejected every wrapping premise/goal.
-                        return proof_congruence_goal(facts, goal, annotations, exhausted) if operator == TokenKind.EqEq
+                        return proof_congruence_goal_with_work(facts, goal, annotations, budget, exhausted) if operator == TokenKind.EqEq
                         return false
                 _:
                     pass

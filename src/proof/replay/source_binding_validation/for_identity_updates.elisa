@@ -2,13 +2,13 @@
 # Its equation is available solely in the exact original preservation goal.
 extend ElisaProof:
     private:
-        def proof_replay_for_identity_loop(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, statement: Ast::Stmt, target: sview, symbol: Ast::Expr, depth: usize) -> bool:
+        def proof_replay_for_identity_loop(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, statement: Ast::Stmt, target: sview, symbol: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 64
             match statement:
                 Ast::Stmt.Expr(Ast::Expr.Block(statements, _, captures, _), _):
                     return false if statements.count != 1
                     return false if captures.count != 1 or captures[0] != target
-                    return proof_replay_for_identity_loop(report, trace, certificate, statements[0], target, symbol, depth + 1)
+                    return proof_replay_for_identity_loop(report, trace, certificate, statements[0], target, symbol, source_work, depth + 1)
                 Ast::Stmt.For(bind, variables, iterable, body, position):
                     return false if bind != "" or variables.count != 1 or variables[0] == target or position.line != certificate.line
                     return false if body.count != 2 or proof_expr_has_call(iterable)
@@ -23,28 +23,28 @@ extend ElisaProof:
                     match body[0]:
                         Ast::Stmt.Contract("invariant", expression, _):
                             return false if proof_source_expression_has_overloaded_operator(expression, report.source_primitive_operator_mask, 0)
-                            normalized: Ast::Expr = proof_replay_local_initializer_constants(report, trace, expression, 0)
+                            normalized: Ast::Expr = proof_replay_local_initializer_constants_with_work(report, trace, expression, source_work, 0)
                             expected: Ast::Expr = proof_replay_substitute(normalized, target, symbol)
-                            return false if not proof_replay_expr_equal(expected, certificate.goal)
+                            return false if not proof_replay_summary_expr_equal_with_work(expected, certificate.goal, source_work)
                             # Entry certificates contain no loop invariant. Preservation must
                             # carry this exact source invariant, not an arbitrary stamped fact.
-                            for index in 0..<certificate.facts_count |report, certificate, normalized, position|:
+                            for index in 0..<certificate.facts_count |report, certificate, normalized, position, source_work|:
                                 origin: usize = report.traces.origin_indices[certificate.facts_start + index]
                                 continue if origin >= report.traces.records.count
                                 fact: ProofFactTrace = report.traces.records[origin]
-                                return true if fact.kind == "loop-invariant" and fact.name == trace.name and fact.line == position.line and proof_replay_expr_equal(fact.expression, normalized)
+                                return true if fact.kind == "loop-invariant" and fact.name == trace.name and fact.line == position.line and proof_replay_summary_expr_equal_with_work(fact.expression, normalized, source_work)
                             return false
                         _:
                             return false
                 _:
                     return false
 
-        def proof_replay_for_identity_initializer(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, expression: Ast::Expr, target: sview, symbol: Ast::Expr, depth: usize) -> bool:
+        def proof_replay_for_identity_initializer(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, expression: Ast::Expr, target: sview, symbol: Ast::Expr, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 64
             match expression:
                 Ast::Expr.Block(statements, value, captures, _):
                     return false if captures.count != 0
-                    return proof_replay_for_identity_initializer(report, trace, certificate, value, target, symbol, depth + 1) if statements.count == 0
+                    return proof_replay_for_identity_initializer(report, trace, certificate, value, target, symbol, source_work, depth + 1) if statements.count == 0
                     return false if statements.count != 2
                     match value:
                         Ast::Expr.Ident(yielded, _):
@@ -56,17 +56,16 @@ extend ElisaProof:
                             return false if local != target or proof_replay_local_binding_unsigned_type_name(type_expression, 0) == ""
                         _:
                             return false
-                    return proof_replay_for_identity_loop(report, trace, certificate, statements[1], target, symbol, 0)
+                    return proof_replay_for_identity_loop(report, trace, certificate, statements[1], target, symbol, source_work, 0)
                 _:
                     return false
 
-        def proof_replay_for_identity_update_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
+        def proof_replay_for_identity_update_source(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
             return false if certificate.name != trace.name or certificate.rule != "goal" or certificate.line != report.trace_owner_line
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
-            work: mutable usize = 0
-            return false if not proof_replay_captured_entry_environment(&report.source_declarations, 0, &work)
+            return false if not proof_replay_captured_entry_environment_with_source_work(report.source_declarations, source_work)
             match trace.expression:
                 Ast::Expr.Binary(Ast::Expr.Ident(symbol_name, symbol_position), TokenKind.EqEq, Ast::Expr.Ident(target, _), _):
                     return false if symbol_name != proof_internal_rebind_name(0) or target == "" or proof_internal_name_is_rebind(target)
@@ -79,23 +78,29 @@ extend ElisaProof:
                         match context.body[0]:
                             Ast::Stmt.Return(returned, _):
                                 if returned is expression:
-                                    return proof_replay_for_identity_initializer(report, trace, certificate, expression, target, symbol, 0)
+                                    return proof_replay_for_identity_initializer(report, trace, certificate, expression, target, symbol, source_work, 0)
                             _:
                                 pass
                     if context.body.count == 2:
                         match context.body[0]:
                             Ast::Stmt.VarDecl(_, _, initializer, _):
-                                return true if proof_replay_for_identity_initializer(report, trace, certificate, initializer, target, symbol, 0)
+                                return true if proof_replay_for_identity_initializer(report, trace, certificate, initializer, target, symbol, source_work, 0)
                             _:
                                 pass
-                    for index in 0..<context.body.count |index, report, trace, certificate, context, target, symbol|:
+                    prefix_unambiguous: mutable bool = true
+                    for index in 0..<context.body.count |index, report, trace, certificate, context, target, symbol, source_work, prefix_unambiguous|:
+                        return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                        source_work <- source_work + 1
+                        if index >= 2 and prefix_unambiguous:
+                            prefix_unambiguous <- proof_replay_local_binding_first_rebind_prefix_statement_with_work(context.body[index - 2], source_work)
+                            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         continue if index == 0
-                        continue if not proof_replay_local_binding_first_rebind_is_unambiguous(context.body, index, 0)
+                        continue if not prefix_unambiguous
                         match context.body[index - 1]:
                             Ast::Stmt.VarDecl(local, type_expression, _, _):
                                 continue if local != target or not proof_replay_local_binding_mutable_integer_type(type_expression)
                                 continue if proof_replay_local_binding_unsigned_type_name(type_expression, 0) == ""
-                                return true if proof_replay_for_identity_loop(report, trace, certificate, context.body[index], target, symbol, 0)
+                                return true if proof_replay_for_identity_loop(report, trace, certificate, context.body[index], target, symbol, source_work, 0)
                             _:
                                 pass
                     return false

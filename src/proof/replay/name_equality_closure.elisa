@@ -1,9 +1,12 @@
 extend ElisaProof:
     private:
         const PROOF_REPLAY_EQUALITY_WORK_LIMIT: usize = 1048576
+        # Each node can trigger nine width probes plus typing/fallback scans over a nested
+        # subtree. Sixteen passes leave room for those scans while adapting to measured depth.
+        const PROOF_REPLAY_AMBIGUITY_SCAN_FACTOR: usize = 16
 
         def proof_replay_equality_work_charge(amount: usize, work: mutable usize&) -> bool:
-            return (false, 0) if work > PROOF_REPLAY_EQUALITY_WORK_LIMIT
+            return false if work > PROOF_REPLAY_EQUALITY_WORK_LIMIT
             return false if amount > PROOF_REPLAY_EQUALITY_WORK_LIMIT - work
             work <- work + amount
             return true
@@ -12,7 +15,7 @@ extend ElisaProof:
         # replay counter. The shared structural cost walker counts payloads and child arrays;
         # repetitions reserves the worst-case repeated comparisons made by the caller.
         def proof_replay_expr_cost_charge_with_work(expression: Ast::Expr, work: mutable usize&) -> (complete: bool, cost: usize):
-            return false if work > PROOF_REPLAY_EQUALITY_WORK_LIMIT
+            return (false, 0) if work > PROOF_REPLAY_EQUALITY_WORK_LIMIT
             cost: mutable usize = 0
             return (false, 0) if not proof_replay_summary_expr_cost(expression, &cost, work, 0)
             return (false, 0) if cost == 0 or not proof_replay_equality_work_charge(cost, work)
@@ -28,6 +31,101 @@ extend ElisaProof:
         def proof_replay_charge_expr_pair_repetitions_with_work(left: Ast::Expr, right: Ast::Expr, repetitions: usize, work: mutable usize&) -> bool:
             return false if not proof_replay_charge_expr_repetitions_with_work(left, repetitions, work)
             proof_replay_charge_expr_repetitions_with_work(right, repetitions, work)
+
+        def proof_replay_charge_expr_product_with_work(left: Ast::Expr, right: Ast::Expr, work: mutable usize&) -> bool:
+            left_size: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(left, work)
+            return false if not left_size.complete
+            right_size: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(right, work)
+            return false if not right_size.complete or left_size.cost == 0
+            return false if right_size.cost > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / left_size.cost
+            proof_replay_equality_work_charge(left_size.cost * right_size.cost, work)
+
+        # Simultaneous substitution scans the active name stack at identifier and binder
+        # nodes. Reserve the quadratic worst case before traversing a block with many locals.
+        def proof_replay_charge_expr_self_product_with_work(expression: Ast::Expr, work: mutable usize&) -> bool:
+            measured: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(expression, work)
+            return false if not measured.complete or measured.cost > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / measured.cost
+            proof_replay_equality_work_charge(measured.cost * measured.cost, work)
+
+        # Measure the deepest expression path the ambiguity predicates may revisit. The
+        # structural cost pass bounds this walk's total nodes; unsupported control forms are
+        # terminals for the ambiguity predicate and therefore do not add child depth here.
+        def proof_replay_ambiguity_depth(expression: Ast::Expr, depth: usize) -> usize:
+            return PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.RegionNew(inner, _, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
+                    return proof_replay_ambiguity_depth(inner, depth + 1)
+                Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _) | Ast::Expr.Refinement(left, right, _):
+                    left_depth: usize = proof_replay_ambiguity_depth(left, depth + 1)
+                    right_depth: usize = proof_replay_ambiguity_depth(right, depth + 1)
+                    return left_depth if left_depth >= right_depth else right_depth
+                Ast::Expr.Slice(object, low, high, _) | Ast::Expr.If(object, low, high, _):
+                    object_depth: usize = proof_replay_ambiguity_depth(object, depth + 1)
+                    low_depth: usize = proof_replay_ambiguity_depth(low, depth + 1)
+                    high_depth: usize = proof_replay_ambiguity_depth(high, depth + 1)
+                    deepest: usize = object_depth if object_depth >= low_depth else low_depth
+                    return deepest if deepest >= high_depth else high_depth
+                Ast::Expr.Call(callee, arguments, _, _) | Ast::Expr.IndexN(callee, arguments, _):
+                    deepest: mutable usize = proof_replay_ambiguity_depth(callee, depth + 1)
+                    for argument in arguments |deepest, depth|:
+                        argument_depth: usize = proof_replay_ambiguity_depth(argument, depth + 1)
+                        deepest <- argument_depth if argument_depth > deepest
+                    return deepest
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    deepest: mutable usize = depth + 1
+                    for element in elements |deepest, depth|:
+                        element_depth: usize = proof_replay_ambiguity_depth(element, depth + 1)
+                        deepest <- element_depth if element_depth > deepest
+                    return deepest
+                Ast::Expr.DictLit(entries, _):
+                    deepest: mutable usize = depth + 1
+                    for entry in entries |deepest, depth|:
+                        key_depth: usize = proof_replay_ambiguity_depth(entry.key, depth + 1)
+                        value_depth: usize = proof_replay_ambiguity_depth(entry.value, depth + 1)
+                        deepest <- key_depth if key_depth > deepest
+                        deepest <- value_depth if value_depth > deepest
+                    return deepest
+                Ast::Expr.Construct(type_expression, fields, _) | Ast::Expr.RecordUpdate(type_expression, fields, _):
+                    deepest: mutable usize = proof_replay_ambiguity_depth(type_expression, depth + 1)
+                    for field in fields |deepest, depth|:
+                        field_depth: usize = proof_replay_ambiguity_depth(field.value, depth + 1)
+                        deepest <- field_depth if field_depth > deepest
+                    return deepest
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    iterable_depth: usize = proof_replay_ambiguity_depth(iterable, depth + 1)
+                    condition_depth: usize = proof_replay_ambiguity_depth(condition, depth + 1)
+                    body_depth: usize = proof_replay_ambiguity_depth(body, depth + 1)
+                    deepest: usize = iterable_depth if iterable_depth >= condition_depth else condition_depth
+                    return deepest if deepest >= body_depth else body_depth
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _) | Ast::Expr.Match(_, _, _) | Ast::Expr.Catch(_, _, _) | Ast::Expr.GetElse(_, _, _) | Ast::Expr.Lambda(_, _, _) | Ast::Expr.Block(_, _, _, _):
+                    return depth + 1
+                _:
+                    return depth + 1
+
+        def proof_replay_charge_expr_depth_repetitions_with_work(expression: Ast::Expr, passes_per_level: usize, work: mutable usize&) -> bool:
+            measured: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(expression, work)
+            return false if not measured.complete or not proof_replay_equality_work_charge(measured.cost, work)
+            depth: usize = proof_replay_ambiguity_depth(expression, 0)
+            repetitions: usize = depth * passes_per_level
+            return false if repetitions > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / measured.cost
+            proof_replay_equality_work_charge(measured.cost * repetitions, work)
+
+        def proof_replay_charge_ambiguity_scan_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> bool:
+            measured_expression: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(expression, work)
+            return false if not measured_expression.complete
+            return false if not proof_replay_equality_work_charge(measured_expression.cost, work)
+            depth: usize = proof_replay_ambiguity_depth(expression, 0)
+            expression_repetitions: usize = depth * PROOF_REPLAY_AMBIGUITY_SCAN_FACTOR
+            return false if expression_repetitions > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / measured_expression.cost
+            return false if not proof_replay_equality_work_charge(measured_expression.cost * expression_repetitions, work)
+            fact_cost: mutable usize = 0
+            for fact in facts |fact, fact_cost, work|:
+                measured_fact: (complete: bool, cost: usize) = proof_replay_expr_cost_charge_with_work(fact, work)
+                return false if not measured_fact.complete or measured_fact.cost > PROOF_REPLAY_EQUALITY_WORK_LIMIT - fact_cost
+                fact_cost <- fact_cost + measured_fact.cost
+            fact_repetitions: usize = measured_expression.cost * expression_repetitions
+            return false if fact_cost > 0 and fact_repetitions > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / fact_cost
+            proof_replay_equality_work_charge(fact_cost * fact_repetitions, work)
 
         def proof_replay_add_lower_with_work(bounds: mutable darray[ProofReplayBound]&, name: sview, value: i64, work: mutable usize&) -> bool:
             return true if name == ""
@@ -184,7 +282,7 @@ extend ElisaProof:
 
         def proof_replay_alias_name_index(names: darray[sview]&, name: sview, work: mutable usize&) -> (complete: bool, index: usize):
             index: mutable usize = 0
-            while index < names.count |index, names, name|:
+            while index < names.count |index, names, name, work|:
                 return (false, names.count) if not proof_replay_equality_work_charge(1 + sview_len(names[index]) + sview_len(name), work)
                 return (true, index) if names[index] == name
                 index <- index + 1

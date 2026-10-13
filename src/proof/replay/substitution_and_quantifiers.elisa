@@ -37,6 +37,9 @@ extend ElisaProof:
 
         def proof_replay_exact_int(expression: Ast::Expr, facts: darray[Ast::Expr]&) -> ProofReplayInt:
             work: mutable usize = 0
+            return proof_replay_exact_int_with_work(expression, facts, work)
+
+        def proof_replay_exact_int_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, work: mutable usize&) -> ProofReplayInt:
             constant_check: (complete: bool, constant: ProofReplayInt) = proof_replay_constant_int_with_equality_work(expression, work)
             return ProofReplayInt{known: false, value: 0} if not constant_check.complete
             return constant_check.constant if constant_check.constant.known
@@ -306,36 +309,45 @@ extend ElisaProof:
                 _:
                     return Ast::Expr.Invalid
 
-        def proof_replay_quantifier_values(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, binder: sview, values: darray[Ast::Expr]&) -> bool:
+        def proof_replay_quantifier_values(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, binder: sview, values: darray[Ast::Expr]&, work: mutable usize&) -> bool:
             return false if values.count == 0 and kind == "exists"
             return false if values.count > PROOF_REPLAY_QUANTIFIER_VALUE_LIMIT
-            for candidate in values |candidate, facts, body, binder, kind|:
+            for candidate in values |candidate, facts, body, binder, kind, work|:
+                return false if not proof_replay_charge_expr_product_with_work(body, candidate, work)
                 instance: Ast::Expr = proof_replay_substitute(body, binder, candidate)
-                proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                proven: bool = proof_replay_goal_with_work(facts, instance, 0, work)
                 return false if kind == "forall" and not proven
                 return true if kind == "exists" and proven
             return kind == "forall"
 
-        def proof_replay_quantifier_entries(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, key_binder: sview, value_binder: sview, entries: darray[Ast::DictEntry]&) -> bool:
+        def proof_replay_quantifier_entries(kind: sview, facts: darray[Ast::Expr]&, body: Ast::Expr, key_binder: sview, value_binder: sview, entries: darray[Ast::DictEntry]&, work: mutable usize&) -> bool:
             return false if entries.count == 0 and kind == "exists"
             return false if entries.count > PROOF_REPLAY_QUANTIFIER_ENTRY_LIMIT
-            for entry in entries |entry, facts, body, key_binder, value_binder, kind|:
+            for entry in entries |entry, facts, body, key_binder, value_binder, kind, work|:
+                return false if not proof_replay_charge_expr_product_with_work(body, entry.key, work)
+                return false if not proof_replay_charge_expr_product_with_work(body, entry.value, work)
+                # `substitute_many` searches the accumulated block-local name stack for each
+                # identifier. Bound that nested scan by the square of the body cost before
+                # allowing the instantiated expression to enter recursive goal replay.
+                return false if not proof_replay_charge_expr_self_product_with_work(body, work)
                 substitution_names: darray[sview] = [key_binder, value_binder]
                 substitution_values: darray[Ast::Expr] = [entry.key, entry.value]
                 instance: Ast::Expr = proof_replay_substitute_many(body, substitution_names, substitution_values)
-                proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                proven: bool = proof_replay_goal_with_work(facts, instance, 0, work)
                 return false if kind == "forall" and not proven
                 return true if kind == "exists" and proven
             return kind == "forall"
 
         def proof_replay_quantifier(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr) -> bool:
-            return proof_replay_quantifier_depth(kind, facts, expression, 0)
+            work: mutable usize = 0
+            return proof_replay_quantifier_depth(kind, facts, expression, work, 0)
 
-        def proof_replay_quantifier_depth(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr, depth: usize) -> bool:
+        def proof_replay_quantifier_depth(kind: sview, facts: darray[Ast::Expr]&, expression: Ast::Expr, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            return false if not proof_replay_equality_work_charge(1, work)
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_quantifier_depth(kind, facts, inner, depth + 1)
+                    return proof_replay_quantifier_depth(kind, facts, inner, work, depth + 1)
                 Ast::Expr.Block(statements, body, _, _):
                     return false if statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
                     match statements[0]:
@@ -344,9 +356,11 @@ extend ElisaProof:
                             match range_expression:
                                 Ast::Expr.Binary(lower_expression, range_operator, upper_expression, _):
                                     return false if range_operator != TokenKind.RangeLt and range_operator != TokenKind.RangeLe
+                                    return false if not proof_replay_charge_ambiguity_scan_with_work(lower_expression, facts, work)
+                                    return false if not proof_replay_charge_ambiguity_scan_with_work(upper_expression, facts, work)
                                     return false if proof_has_ambiguous_integer_constant(lower_expression, 0) or proof_has_ambiguous_integer_constant(upper_expression, 0)
-                                    lower: ProofReplayInt = proof_replay_exact_int(lower_expression, facts)
-                                    upper: ProofReplayInt = proof_replay_exact_int(upper_expression, facts)
+                                    lower: ProofReplayInt = proof_replay_exact_int_with_work(lower_expression, facts, work)
+                                    upper: ProofReplayInt = proof_replay_exact_int_with_work(upper_expression, facts, work)
                                     return false if not lower.known or not upper.known
                                     if range_operator == TokenKind.RangeLt and lower.value >= upper.value:
                                         return kind == "forall"
@@ -361,9 +375,11 @@ extend ElisaProof:
                                     return false if width.value <= 0 or width.value > PROOF_REPLAY_QUANTIFIER_VALUE_LIMIT.i64()
                                     candidate: mutable i64 = lower.value
                                     offset: mutable i64 = 0
-                                    while offset < width.value |offset, candidate, facts, body, binder, kind|:
-                                        instance: Ast::Expr = proof_replay_substitute(body, binder, Ast::Expr.IntLit(candidate, Ast::pos_at_line(0)))
-                                        proven: bool = proof_replay_goal_depth(facts, instance, 0)
+                                    while offset < width.value |offset, candidate, facts, body, binder, kind, work|:
+                                        candidate_expression: Ast::Expr = Ast::Expr.IntLit(candidate, Ast::pos_at_line(0))
+                                        return false if not proof_replay_charge_expr_product_with_work(body, candidate_expression, work)
+                                        instance: Ast::Expr = proof_replay_substitute(body, binder, candidate_expression)
+                                        proven: bool = proof_replay_goal_with_work(facts, instance, 0, work)
                                         return false if kind == "forall" and not proven
                                         return true if kind == "exists" and proven
                                         offset <- offset + 1
@@ -377,13 +393,13 @@ extend ElisaProof:
                             match range_expression:
                                 Ast::Expr.Array(elements, _):
                                     return false if statements.count != 1
-                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements, work)
                                 Ast::Expr.Tuple(elements, _):
                                     return false if statements.count != 1
-                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements, work)
                                 Ast::Expr.SetLit(elements, _):
                                     return false if statements.count != 1
-                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements)
+                                    return proof_replay_quantifier_values(kind, facts, body, binder, elements, work)
                                 Ast::Expr.DictLit(entries, _):
                                     return false if statements.count != ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
                                     match statements[1]:
@@ -393,7 +409,7 @@ extend ElisaProof:
                                         # the AST replay path as well as in the source-neutral one.
                                         Ast::Stmt.VarDecl(value_binder, _, Ast::Expr.IntLit(initializer, _), _):
                                             return false if value_binder == "" or value_binder == binder or initializer != 0
-                                            return proof_replay_quantifier_entries(kind, facts, body, binder, value_binder, entries)
+                                            return proof_replay_quantifier_entries(kind, facts, body, binder, value_binder, entries, work)
                                         _:
                                             pass
                                 _:
@@ -448,15 +464,17 @@ extend ElisaProof:
                 return false if fact_size.cost > 0 and goal_size.cost > (PROOF_REPLAY_EQUALITY_WORK_LIMIT - work) / fact_size.cost
                 return false if not proof_replay_equality_work_charge(fact_size.cost * goal_size.cost, work)
                 return true if proof_replay_fact_contains(fact, goal)
+            # The helper charges one structural cost pass; reserve all ten formula reads
+            # performed by width-uniformity plus its explicit 64-bit query.
             return false if not proof_replay_charge_expr_repetitions_with_work(goal, 10, work)
             return true if proof_closed_formula_width_uniform(goal) and proof_closed_formula_at_width(goal, 64, true, 0).value
-            return false if not proof_replay_charge_expr_repetitions_with_work(goal, (facts.count + 1) * 8, work)
+            return false if not proof_replay_charge_ambiguity_scan_with_work(goal, facts, work)
             return false if proof_has_ambiguous_integer_constant_in(goal, facts, 0)
             # Mirrors the search: an ambiguous premise is dropped, never read as a number.
             admitted_facts: mutable darray[Ast::Expr] = []
             dropped_fact: mutable bool = false
             for fact in facts |fact, facts, admitted_facts, dropped_fact, work|:
-                return false if not proof_replay_charge_expr_repetitions_with_work(fact, (facts.count + 1) * 8, work)
+                return false if not proof_replay_charge_ambiguity_scan_with_work(fact, facts, work)
                 if proof_has_ambiguous_integer_constant_in(fact, facts, 0):
                     dropped_fact <- true
                 else:
@@ -490,6 +508,7 @@ extend ElisaProof:
                             return not value
                         Ast::Expr.Binary(left, operator, right, _):
                             negated_operator: TokenKind = proof_replay_comparison_negation(operator)
+                            return false if negated_operator != TokenKind.Eof and not proof_replay_charge_expr_pair_repetitions_with_work(left, right, 2, work)
                             return proof_replay_constant_comparison(left, negated_operator, right) if negated_operator != TokenKind.Eof
                         _:
                             pass
@@ -519,9 +538,11 @@ extend ElisaProof:
                     negated_operator: TokenKind = proof_replay_comparison_negation(operator)
                     primitive: (complete: bool, matches: bool) = proof_replay_primitive_comparison_with_work(left, right, facts, work)
                     if negated_operator != TokenKind.Eof and primitive.complete and primitive.matches:
-                        return false if not proof_replay_charge_expr_pair_repetitions_with_work(left, right, 8, work)
+                        return false if not proof_replay_charge_expr_pair_repetitions_with_work(left, right, PROOF_REPLAY_AST_DEPTH_LIMIT, work)
                         return operator == TokenKind.EqEq or operator == TokenKind.LtEq or operator == TokenKind.GtEq if proof_replay_definitionally_equal(left, right)
-                    return proof_replay_constant_comparison(left, operator, right) if negated_operator != TokenKind.Eof and proof_replay_constant_comparison(left, operator, right)
+                    if negated_operator != TokenKind.Eof:
+                        return false if not proof_replay_charge_expr_pair_repetitions_with_work(left, right, 2, work)
+                        return true if proof_replay_constant_comparison(left, operator, right)
                     return true if proof_replay_interval_comparison(left, operator, right, facts, work)
                     return true if proof_replay_interval_goal(left, operator, right, facts, work)
                     return true if proof_replay_affine_comparison(left, operator, right, facts, work)

@@ -2,44 +2,121 @@
 # pure indexed assignment evaluates the index, before the assignment writes.
 extend ElisaProof:
     private:
-        def proof_replay_field_copy_next_write_body(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, target: sview, source_value: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
+        def proof_replay_field_copy_work_charge(amount: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
+            work <- work + amount
+            return true
+
+        # FrameSource::owner and the parameter/source-name helpers walk the declaration tree.
+        # Count the rows and the names inspected by those scans before calling them.
+        def proof_replay_field_copy_declaration_scan_cost(declarations: darray[Ast::Decl]&, cost: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_AST_DEPTH_LIMIT
+            return false if declarations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+            cost <- cost + declarations.count
+            for declaration in declarations |cost, depth|:
+                match declaration:
+                    Ast::Decl.Func(name, parameters, _, _, _, _, _):
+                        return false if not proof_replay_field_copy_work_charge(sview_len(name), cost)
+                        return false if parameters.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - cost
+                        cost <- cost + parameters.count
+                        for parameter in parameters |cost|:
+                            return false if not proof_replay_field_copy_work_charge(sview_len(parameter.name), cost)
+                            return false if not proof_replay_summary_expr_cost(parameter.type_expression, cost, 0, 0)
+                    Ast::Decl.Module(name, nested, _):
+                        return false if not proof_replay_field_copy_work_charge(sview_len(name), cost)
+                        return false if not proof_replay_field_copy_declaration_scan_cost(nested, cost, depth + 1)
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_replay_field_copy_declaration_scan_cost(nested, cost, depth + 1)
+                    Ast::Decl.Const(name, _, _, _, _) | Ast::Decl.Struct(name, _, _, _, _, _, _) | Ast::Decl.Enum(name, _, _, _, _) | Ast::Decl.Alias(name, _, _) | Ast::Decl.Law(name, _, _) | Ast::Decl.Extern(name, _, _, _, _, _, _, _):
+                        return false if not proof_replay_field_copy_work_charge(sview_len(name), cost)
+                    _:
+                        pass
+            return true
+
+        def proof_replay_field_copy_expr_cost(expression: Ast::Expr, work: usize) -> (complete: bool, cost: usize):
+            cost: mutable usize = 0
+            complete: bool = proof_replay_summary_expr_cost(expression, &cost, work, 0)
+            return (complete, cost)
+
+        def proof_replay_field_copy_expr_scan_charge(expression: Ast::Expr, work: mutable usize&) -> bool:
+            measured: (complete: bool, cost: usize) = proof_replay_field_copy_expr_cost(expression, work)
+            return false if not measured.complete
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or measured.cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2
+            proof_replay_field_copy_work_charge(measured.cost * 2, work)
+
+        # A source-touch scan resolves every call argument against declarations. Its upper
+        # bound is the expression traversal times the declaration rows that each call can scan.
+        def proof_replay_field_copy_source_touch_charge(expression: Ast::Expr, declaration_cost: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            measured: (complete: bool, cost: usize) = proof_replay_field_copy_expr_cost(expression, work)
+            return false if not measured.complete
+            return false if measured.cost == 0 or declaration_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / measured.cost
+            return false if not proof_replay_field_copy_work_charge(measured.cost * declaration_cost, work)
+            proof_replay_field_copy_work_charge(measured.cost, work)
+
+        def proof_replay_field_copy_next_write_body(report: ProofReport&, trace: ProofFactTrace, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, target: sview, source_value: Ast::Expr, declaration_cost: usize, depth: usize, work: mutable usize&) -> bool:
             return false if depth >= 64 or body.count > 4096
-            for index in 0..<body.count |index, report, trace, certificate, body, target, source_value, depth, work|:
-                return false if work >= 4096
+            for index in 0..<body.count |index, report, trace, certificate, body, target, source_value, declaration_cost, depth, work|:
+                return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 work <- work + 1
                 match body[index]:
                     Ast::Stmt.VarDecl(local, type_expression, initializer, position):
                         continue if local != target or position.line != trace.line or index + 1 >= body.count
+                        return false if not proof_replay_field_copy_expr_scan_charge(type_expression, work)
                         continue if proof_replay_local_binding_unsigned_type_name(type_expression, 0) == ""
                         continue if not proof_replay_local_binding_pos_matches(trace.expression, position)
-                        continue if not proof_replay_expr_equal(initializer, source_value)
+                        continue if not proof_replay_summary_expr_equal_with_limit(initializer, source_value, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                        return false if not proof_replay_field_copy_expr_scan_charge(initializer, work)
                         continue if proof_source_expression_has_overloaded_operator(initializer, report.source_primitive_operator_mask, 0)
                         local_width: i64 = proof_unsigned_type_width_with_work(type_expression, report.source_declarations, 0, work)
-                        continue if work > 4096
+                        continue if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         width_facts: mutable darray[Ast::Expr] = []
-                        for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, width_facts|:
+                        width_facts_cost: mutable usize = 0
+                        for fact_index in 0..<certificate.facts_count |fact_index, report, certificate, trace, width_facts, work|:
+                            return false if not proof_replay_field_copy_work_charge(1, work)
                             origin: usize = report.traces.origin_indices[certificate.facts_start + fact_index]
                             continue if origin >= report.traces.records.count
                             source_trace: ProofFactTrace = report.traces.records[origin]
-                            width_facts.push(report.certificate_facts[certificate.facts_start + fact_index]) if source_trace.kind == "type-bound" and source_trace.name == trace.name
+                            return false if not proof_replay_field_copy_work_charge(sview_len(source_trace.kind) + sview_len(source_trace.name) + sview_len(trace.name), work)
+                            if source_trace.kind == "type-bound" and source_trace.name == trace.name:
+                                fact: Ast::Expr = report.certificate_facts[certificate.facts_start + fact_index]
+                                fact_cost: (complete: bool, cost: usize) = proof_replay_field_copy_expr_cost(fact, work)
+                                return false if not fact_cost.complete or not proof_replay_field_copy_work_charge(fact_cost.cost, work)
+                                return false if fact_cost.cost > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - width_facts_cost
+                                width_facts_cost <- width_facts_cost + fact_cost.cost
+                                width_facts.push(fact)
+                        source_value_cost: (complete: bool, cost: usize) = proof_replay_field_copy_expr_cost(source_value, work)
+                        continue if not source_value_cost.complete or source_value_cost.cost == 0
+                        return false if not proof_replay_field_copy_work_charge(source_value_cost.cost, work)
+                        return false if width_facts.count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / source_value_cost.cost
+                        return false if not proof_replay_field_copy_work_charge(width_facts.count * source_value_cost.cost, work)
+                        comparison_cost: usize = width_facts_cost + width_facts.count * source_value_cost.cost
+                        return false if comparison_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 4
+                        return false if not proof_replay_field_copy_work_charge(comparison_cost * 4, work)
                         source_width: i64 = proof_unsigned_place_marker_width(width_facts, source_value)
                         continue if local_width <= 0 or source_width <= 0 or source_width > local_width
                         match body[index + 1]:
                             Ast::Stmt.Assign(Ast::Expr.Index(object, Ast::Expr.Ident(used, _), access_position), TokenKind.LArrow, value, _):
                                 continue if used != target or access_position.line != certificate.line
-                                continue if proof_expr_has_call(object) or proof_expr_has_call(value) or proof_expr_has_move(object) or proof_expr_has_move(value)
-                                continue if proof_source_expression_has_overloaded_operator(object, report.source_primitive_operator_mask, 0) or proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
+                                return false if not proof_replay_field_copy_expr_scan_charge(object, work) or not proof_replay_field_copy_expr_scan_charge(value, work)
+                                continue if proof_expr_has_call(object) or proof_expr_has_call(value)
+                                return false if not proof_replay_field_copy_expr_scan_charge(object, work) or not proof_replay_field_copy_expr_scan_charge(value, work)
+                                continue if proof_expr_has_move(object) or proof_expr_has_move(value)
+                                return false if not proof_replay_field_copy_expr_scan_charge(object, work) or not proof_replay_field_copy_expr_scan_charge(value, work)
+                                return false if not proof_replay_field_copy_source_touch_charge(object, declaration_cost, work) or not proof_replay_field_copy_source_touch_charge(value, declaration_cost, work)
                                 continue if proof_replay_source_expr_touches(report.source_declarations, object, target, true, 0) or proof_replay_source_expr_touches(report.source_declarations, value, target, true, 0)
+                                return false if not proof_replay_field_copy_expr_scan_charge(object, work) or not proof_replay_field_copy_expr_scan_charge(value, work)
+                                continue if proof_source_expression_has_overloaded_operator(object, report.source_primitive_operator_mask, 0) or proof_source_expression_has_overloaded_operator(value, report.source_primitive_operator_mask, 0)
                                 local_symbol: Ast::Expr = Ast::Expr.Ident(target, position)
                                 expected: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, access_position), TokenKind.LtEq, local_symbol, access_position) if certificate.rule == "index-lower" else Ast::Expr.Binary(local_symbol, TokenKind.Lt, Ast::Expr.Field(object, "count", access_position), access_position)
-                                return true if proof_replay_expr_equal(expected, certificate.goal)
+                                return true if proof_replay_summary_expr_equal_with_limit(expected, certificate.goal, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
                             _:
                                 pass
                     Ast::Stmt.Block(_, _, _, nested, _):
-                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, nested, target, source_value, depth + 1, work)
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, nested, target, source_value, declaration_cost, depth + 1, work)
                     Ast::Stmt.If(_, yes, no, _):
-                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, yes, target, source_value, depth + 1, work)
-                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, no, target, source_value, depth + 1, work)
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, yes, target, source_value, declaration_cost, depth + 1, work)
+                        return true if proof_replay_field_copy_next_write_body(report, trace, certificate, no, target, source_value, declaration_cost, depth + 1, work)
                     _:
                         pass
             return false
@@ -47,6 +124,8 @@ extend ElisaProof:
         def proof_replay_field_copy_next_write_source(report: ProofReport&, trace: ProofFactTrace) -> bool:
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
             certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            work: mutable usize = 0
+            return false if not proof_replay_field_copy_work_charge(sview_len(certificate.name) + sview_len(trace.name) + sview_len(certificate.rule), &work)
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line or (certificate.rule != "index-lower" and certificate.rule != "index-upper")
             return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
             return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
@@ -58,12 +137,29 @@ extend ElisaProof:
                             root <- receiver
                         _:
                             return false
+                    return false if not proof_replay_field_copy_work_charge(sview_len(target) + sview_len(root), &work)
                     return false if target == "" or proof_internal_name_is_rebind(target) or not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(target, target_position), Ast::expr_pos(trace.expression))
+                    declaration_cost: mutable usize = 0
+                    return false if not proof_replay_field_copy_declaration_scan_cost(report.source_declarations, &declaration_cost, 0)
+                    return false if declaration_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3
+                    return false if not proof_replay_field_copy_work_charge(declaration_cost * 3, &work)
                     context = ElisaProofFrameSource::owner(&report.source_declarations, trace.name, report.replay_owner_line)
-                    return false if not context.known or any formal in context.formals where formal == target
+                    return false if not context.known
+                    return false if not proof_replay_field_copy_work_charge(context.formals.count, &work)
+                    for formal in context.formals |formal, root, target, work|:
+                        formal_compare_cost: usize = sview_len(formal) + sview_len(root) + sview_len(target)
+                        return false if formal_compare_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 3
+                        return false if not proof_replay_field_copy_work_charge(formal_compare_cost * 3, &work)
+                    return false if any formal in context.formals where formal == target
                     return false if not any formal in context.formals where formal == root
+                    body_cost: mutable usize = 0
+                    return false if not proof_replay_summary_expr_cost_body(context.body, &body_cost, work, 0)
+                    return false if body_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 2
+                    return false if not proof_replay_field_copy_work_charge(body_cost * 2, &work)
+                    return false if body_cost != 0 and declaration_cost > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / body_cost
+                    return false if not proof_replay_field_copy_work_charge(body_cost * declaration_cost, &work)
                     return false if not proof_replay_local_binding_parameter_source_unshadowed(report.source_declarations, trace.name, report.replay_owner_line, root)
-                    work: mutable usize = 0
-                    return proof_replay_field_copy_next_write_body(report, trace, certificate, context.body, target, source_value, 0, &work)
+                    return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    return proof_replay_field_copy_next_write_body(report, trace, certificate, context.body, target, source_value, declaration_cost, 0, &work)
                 _:
                     return false

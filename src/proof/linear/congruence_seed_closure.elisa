@@ -1,0 +1,94 @@
+# Congruence seed detection and equality closure.
+extend ElisaProof:
+    public:
+        # Congruence can only seed a class from a positive equality premise. Check that cheap
+        # shape before lowering a large fact frame into a scratch arena; the ordinary arithmetic,
+        # identity, and model tiers already handled every goal that needs no equality premise.
+        # Conjunction is the only proposition whose equality children are exported here, and
+        # `not (a != b)` is the equivalent positive form used by the kernel seed rule.
+        def proof_congruence_has_seed(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_has_seed(inner, depth + 1)
+                Ast::Expr.Binary(_, TokenKind.EqEq, _, _):
+                    return true
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_congruence_has_seed(left, depth + 1) or proof_congruence_has_seed(right, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(_, TokenKind.BangEq, _, _):
+                            return true
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_congruence_has_seed_in_facts(facts: darray[Ast::Expr]&) -> bool:
+            for fact in facts |fact|:
+                return true if proof_congruence_has_seed(fact, 0)
+            return false
+
+        # Whether an equality premise, in the shapes `proof_congruence_has_seed` reads, has the
+        # literal `value` as one side. Parentheses are looked through, which only admits more.
+        def proof_congruence_seed_has_literal(expression: Ast::Expr, value: i64, depth: usize) -> bool:
+            return false if depth >= PROOF_CONGRUENCE_SCAN_DEPTH
+            match expression:
+                Ast::Expr.Paren(inner, _):
+                    return proof_congruence_seed_has_literal(inner, value, depth + 1)
+                Ast::Expr.Binary(left, TokenKind.EqEq, right, _):
+                    return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                Ast::Expr.Binary(left, TokenKind.And, right, _):
+                    return proof_congruence_seed_has_literal(left, value, depth + 1) or proof_congruence_seed_has_literal(right, value, depth + 1)
+                Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    match inner:
+                        Ast::Expr.Binary(left, TokenKind.BangEq, right, _):
+                            return proof_congruence_literal_side(left, value) or proof_congruence_literal_side(right, value)
+                        _:
+                            pass
+                _:
+                    pass
+            return false
+
+        def proof_congruence_literal_side(side: Ast::Expr, value: i64) -> bool:
+            match proof_strip_parens(side):
+                Ast::Expr.IntLit(literal, _):
+                    return literal == value
+                _:
+                    return false
+            return false
+
+        # The closure merges a leaf only through a premise that names it as one side: the
+        # congruence step relates terms with operands. An integer literal goal side that no
+        # premise names stays alone in its class, so `b == 9` beside the case `b == 32` is
+        # refused here without lowering every fact into a scratch arena.
+        def proof_congruence_literal_side_unseeded(facts: darray[Ast::Expr]&, side: Ast::Expr) -> bool:
+            match side:
+                Ast::Expr.IntLit(value, _):
+                    for fact in facts |fact, value|:
+                        return false if proof_congruence_seed_has_literal(fact, value, 0)
+                    return true
+                _:
+                    return false
+            return false
+
+        def proof_congruence_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, exhausted: mutable bool&) -> bool:
+            return false if not proof_kernel_expression_supported(goal)
+            return false if not proof_congruence_has_seed_in_facts(facts)
+            match goal:
+                Ast::Expr.Binary(goal_left, TokenKind.EqEq, goal_right, _):
+                    if not proof_expr_equal(goal_left, goal_right):
+                        return false if proof_congruence_literal_side_unseeded(facts, goal_left) or proof_congruence_literal_side_unseeded(facts, goal_right)
+                _:
+                    pass
+            nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode] = []
+            children: mutable darray[usize] = []
+            roots: mutable darray[usize] = []
+            for fact in facts |fact, nodes, children, roots, annotations|:
+                continue if not proof_kernel_expression_supported(fact)
+                roots.push(proof_kernel_encode_annotated(fact, &nodes, &children, annotations))
+            return false if roots.count == 0
+            goal_root: usize = proof_kernel_encode_annotated(goal, &nodes, &children, annotations)
+            return ElisaProofKernelReplay::proof_kernel_replay_congruence_report_status(&nodes, &children, roots, goal_root, exhausted)
+

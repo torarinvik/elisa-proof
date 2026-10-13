@@ -114,6 +114,88 @@ extend ElisaProof:
                     return true if proof_argument_may_alias_place(argument, place) and proof_current_parameter(names, parameter_names, place.root)
             return false
 
+        def proof_frame_alias_scan_text_cost(text: sview, total: mutable usize&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            length: usize = sview_len(text)
+            if length >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            amount: usize = length + 1
+            if total > PROOF_LINEAR_SAFETY_WORK_LIMIT - amount:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return false
+            total <- total + amount
+            proof_linear_safety_work_charge(budget, exhausted, amount)
+
+        # The legacy place matcher descends each argument and rechecks nested selector prefixes.
+        # Reserve a quadratic AST bound per argument/place pair, plus all place and binding-name
+        # comparisons, before calling it. Exhaustion means "may alias" so no frame is preserved.
+        def proof_call_may_alias_places_with_work(arguments: darray[Ast::Expr]&, places: darray[ProofFramePlace]&, names: darray[sview]&, parameter_names: darray[sview]&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, may_alias: bool):
+            if exhausted:
+                return (false, true)
+            if arguments.count == 0 or places.count == 0:
+                return (true, false)
+            if arguments.count > PROOF_LINEAR_SAFETY_WORK_LIMIT / places.count:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return (false, true)
+            pair_count: usize = arguments.count * places.count
+            return (false, true) if not proof_linear_safety_work_charge_scaled(budget, exhausted, pair_count, 1)
+            argument_scan_cost: mutable usize = 0
+            for argument in arguments |argument, argument_scan_cost, budget, exhausted|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(argument, budget, exhausted)
+                return (false, true) if not cost.complete
+                return (false, true) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                if cost.cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                    budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    exhausted <- true
+                    return (false, true)
+                increment: usize = cost.cost + 1
+                if increment > PROOF_LINEAR_SAFETY_WORK_LIMIT - argument_scan_cost:
+                    budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                    exhausted <- true
+                    return (false, true)
+                argument_scan_cost <- argument_scan_cost + increment
+            # For each argument/place pair the legacy prefix checker can re-scan the entire
+            # argument once per nested selector. Reserve O(AST^2), not just O(AST), before it.
+            return (false, true) if not proof_linear_safety_work_charge_product4_with_work(budget, exhausted, argument_scan_cost, argument_scan_cost, places.count, 4, 1)
+            place_scan_cost: mutable usize = 0
+            for place in places |place, place_scan_cost, budget, exhausted|:
+                return (false, true) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                return (false, true) if not proof_frame_alias_scan_text_cost(place.root, &place_scan_cost, &budget, &exhausted)
+                return (false, true) if not proof_frame_alias_scan_text_cost(place.field, &place_scan_cost, &budget, &exhausted)
+                return (false, true) if not proof_frame_alias_scan_text_cost(place.field2, &place_scan_cost, &budget, &exhausted)
+                return (false, true) if not proof_frame_alias_scan_text_cost(place.field3, &place_scan_cost, &budget, &exhausted)
+            if arguments.count > PROOF_LINEAR_SAFETY_WORK_LIMIT / 4:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return (false, true)
+            place_repetitions: usize = arguments.count * 4
+            return (false, true) if not proof_linear_safety_work_charge_scaled(budget, exhausted, place_scan_cost, place_repetitions)
+            parameter_scan_cost: mutable usize = 1
+            for name in names |name, parameter_scan_cost, budget, exhausted|:
+                return (false, true) if not proof_frame_alias_scan_text_cost(name, &parameter_scan_cost, &budget, &exhausted)
+            for parameter in parameter_names |parameter, parameter_scan_cost, budget, exhausted|:
+                return (false, true) if not proof_frame_alias_scan_text_cost(parameter, &parameter_scan_cost, &budget, &exhausted)
+            if parameter_scan_cost > (PROOF_LINEAR_SAFETY_WORK_LIMIT - 4) / 2:
+                budget <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+                exhausted <- true
+                return (false, true)
+            pair_comparison_cost: usize = parameter_scan_cost * 2 + 4
+            return (false, true) if not proof_linear_safety_work_charge_scaled(budget, exhausted, pair_count, pair_comparison_cost)
+            (true, proof_call_may_alias_places(arguments, places, names, parameter_names))
+
+        def proof_frame_call_may_alias_places_with_work(arguments: darray[Ast::Expr]&, places: darray[ProofFramePlace]&, names: darray[sview]&, parameter_names: darray[sview]&, report: mutable ProofReport&, name: sview, line: u32) -> (complete: bool, may_alias: bool):
+            work: mutable usize = report.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            result: (complete: bool, may_alias: bool) = proof_call_may_alias_places_with_work(arguments, places, names, parameter_names, &work, &exhausted)
+            report.budgets.frame_call_source_work <- work
+            if exhausted and not report.budgets.frame_call_reported:
+                report.budgets.frame_call_reported <- true
+                proof_add_budget_finding(report, "frame-analysis-budget", line, name, "frame place analysis exceeded its bounded source-work budget", "place-alias-work", work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            result
+
         def proof_frame_collect_annotations(file: Ast::File&, frame_index: ProofFrameAnnotationIndex, function_name: sview, changes: mutable darray[ProofFramePlace]&, preserves: mutable darray[ProofFramePlace]&) -> void:
             header_change_roots: mutable darray[sview] = []
             header_change_fields: mutable darray[sview] = []

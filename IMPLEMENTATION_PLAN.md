@@ -14451,3 +14451,183 @@ step-block continuation.
 Source-only admission reports 13 positive declarations and 6 false controls over the two-file
 proof closure. Python syntax and whitespace checks pass. The toolchain hold remains active; no
 Elisa parsing, compiler build, test, or proof replay was run.
+
+### 23.27.457 Prove DArray iterator invalidation through local aliases (2026-10-13)
+
+The iterator-invalidation pass now resolves bounded chains of local reference aliases and applies
+that resolution to relocating method receivers. This closes a gap where `alias = &xs; alias.push(..)`
+inside `for value in xs:` was not connected to the live iterator's source, even though mutable-ref
+function arguments already used the alias map. The resolver is a small production module with a
+recursive lookup specification, scan invariants, a recursive bounded-resolution model, and a loop
+invariant connecting production traversal to that model. Alias initializers, bare identifier copies,
+and rebinding assignments are collected across control flow. Duplicate alias names resolve to the
+empty sentinel so branch-dependent targets and shadowed scopes remain conservative. Cycles also
+return the empty sentinel, and consumers treat it as possibly naming the active source. Ten positive
+theorems cover refinement, direct and two-hop aliases, unrelated and absent aliases, self and two-
+node cycles, ambiguous targets, and conservative unknown handling. Three rejected controls claim
+that direct mutation, cyclic aliases, or ambiguous aliases cannot name the iterator source. The
+source-bound checker ties the proof to the production module, mutator and mutable-reference
+consumers, alias collection, semantic pass inclusion, and pipeline call.
+
+Source-only admission reports 10 positive theorems and 3 false controls over the three-file proof
+closure. Python syntax and compiler whitespace checks pass. The proof toolchain is pinned to
+compiler revision `b8ebc0a`, while compiler `main` is now `c451c8b8e`; no Stage1 product matching
+that current compiler head is available. Elisa-Proof elaboration, compiler builds, diagnostic
+tests, and proof replay were not run.
+
+### 23.27.458 Tighten replay work accounting for fixed-width ambiguity checks (2026-10-13)
+
+The current dirty replay patch shares a hard equality-work limit across bounded quantifier
+substitution, premise scans, interval/difference reasoning, and recursive goal replay. Its
+fixed-width ambiguity reservation now measures expression depth and scales repeated subtree and
+premise scans by that depth, with `PROOF_REPLAY_AMBIGUITY_SCAN_FACTOR = 16` for width probes and
+typing/fallback scans. It reserves work proportional to expression cost times depth, and premise
+cost times that repeated expression work. This reduces the earlier fixed-factor rejection cliff
+for shallow formulas while preserving the hard cap. The width-uniformity gate instead reserves its
+ten complete formula reads from structural cost, without a depth multiplier. Repeated local-alias and decimal-saturation comparisons consume their
+caller's source-work counter. Simultaneous dictionary substitution reserves a quadratic bound for
+its growing local-name stack; finite and range single-binder substitution reserve the same
+quadratic local-name lookup bound plus the body-by-candidate product. The
+producer and replay fixed-width uniformity probes now charge for ten full formula reads using
+structural cost rather than multiplying by depth; width-probe exhaustion stops that search path.
+Disjunction search meters and caches its repeated arithmetic-operator guard. The call-valued local
+alias gate now charges each premise, each leading parenthesis, and the final shape check to the
+same goal-search budget; an incomplete scan stops the goal before it can produce a proof.
+The nested-conditional pre-scan also reserves one full expression pass.
+Mutable-for entry validation shares source work across owner scans, invariant comparisons, and
+initializer constant resolution; captured loop entry validation shares that counter as well.
+Alias and identity update validation classify eligible contract prefixes in one charged scan
+instead of rechecking every prefix for each candidate. Captured-entry declaration scans debit the
+shared counter on both success and rejection paths. Legacy loop-source invariant matching now
+charges nested body/trace scans and uses the incremental contract-prefix check. Decimal-saturation
+source checks debit owner, fact, and expression visits, including the recursive contract-prefix scan.
+The next high-value follow-up is to meter the remaining producer disjunction path: relevance
+recursively compares candidate subtrees against goal disjuncts, and atom equivalence rescans the
+premise list. Refutation and direct-branch helpers also walk facts without the shared counter.
+Recent source changes add conservative preflight bounds for counterexample preprocessing/model
+evaluation and float propositional validation/evaluation, and charge the literal-call site scan.
+Continue with the remaining older loop-source scans and source validators that still contain raw
+equality or declaration walks, including field-copy and scalar-copy provenance. Preserve
+fail-closed exhaustion and the hard cap, then add focused large-premise, nested-expression, and
+many-binder controls when the exact compiler is available.
+
+Current source-only checks (`git diff --check` and the source-length gate) pass. The installed
+Stage1 still records provenance schema v1 while the current checker requires v5. Fresh Stage0
+seeds against compiler `c451c8b8e` and the clean `527ac6d4a` reference both failed before
+producing Stage1, with shared lifetime-escape diagnostics in `codegen_stmt_assign_place.elisa` and
+missing `Global` grants in `check_global_authority.elisa`; a Stage0 repair task is active. A
+proof-project semantic build, test, and replay remain unrun, so the dirty patch is unqualified. The
+available Stage0 bootstrap's parse-only mode accepts the changed `relevant_disjunctions`, `congruence_goals`,
+`substitution_and_quantifiers`, and `name_equality_closure` files; this is syntax evidence only.
+First obtain a provenance-matched Stage1 from a stable current compiler source snapshot, then run
+the focused ambiguity, quantifier, and replay suites.
+
+### 23.27.459 Bind DArray resize to iterator mutation policy (2026-10-13)
+
+The iterator mutation classifier is now a small production module with an independent ghost
+specification. The semantic invalidation pass calls that classifier, and the source-bound checker
+binds its result to the DArray resize lowering, which grows by repeatedly calling the possibly
+reallocating push path. This closes the prior omission where `xs.resize(n)` could grow the saved
+iteration buffer without being rejected. The proof adds a general classifier/specification
+refinement claim, a positive `resize` classification, and a rejected false claim that `resize` is
+allowed during iteration. Existing alias resolver proofs remain in the same closure.
+
+Source-only admission reports 12 positive theorems and 4 false controls over the four-file proof
+closure. The decimal parser's adjacent source cleanup also uses the proved StringView `.length`
+and `[index]` syntax; the checked-decimal and StringView-index source gates pass. These are source
+and binding checks only. The proof repository remains pinned to compiler `b8ebc0a`, while compiler
+`main` is `c451c8b8e`; no matching Stage1 product is available, so no Elisa parse, proof replay,
+compiler build, or runtime test is claimed.
+
+### 23.27.460 Use checked StringView properties in signed-decimal parsing (2026-10-13)
+
+The EASM signed-decimal parser, its independent recursive reference, and their contracts now use
+`text.length` and `text[index]` consistently. Existing StringView proofs already establish that
+the `.length` property denotes the signed extent and that an in-range index agrees with the checked
+byte helper; the checked-decimal source checker binds these parser claims to the same guarded syntax.
+Source-only admission passes with 17 positive parser claims and 9 parser false controls, and the
+StringView-index gate passes with 8 positive claims and 6 false controls. Full proof replay remains
+unverified under the compiler revision mismatch recorded above.
+
+### 23.27.461 Specify reference-initializer typestate widening (2026-10-13)
+
+Reference initializer compatibility now delegates its non-identity exception to a small production
+predicate. The exception admits only a named expected target, an unqualified container actual
+target, the same nominal name, and a unique typestate declaration. Exact target identity and
+unknown-target conservatism remain separate earlier branches in the production checker. The
+uniqueness scan now has recursive specifications for saturating struct-name cardinality (0, 1, or
+many) and typestate-registry membership, with production loop invariants for both scans. Saturation
+avoids counter wraparound making duplicate declarations appear unique. The proof projection binds
+`Symbol.name`, `Symbol.kind`, `SymbolTable.symbols`, the typestate-name registry, and `SymbolKind`
+variant order to the production semantic types. Positive cases cover exact uniqueness, duplicates,
+unrelated names, unregistered names, non-struct declarations, and the empty table. Six additional
+claims prove widening classifier/specification agreement and the positive/negative behavior of each
+premise. Six false controls claim either duplicate/non-struct/unregistered declarations are unique
+or that generic, differently named, or ambiguous references may widen. The source-bound admission
+check ties these rules to `reference_initializer_matches` and preserves unknown-target diagnostic
+suppression.
+
+Source-only admission reports 14 positive theorems and 6 false controls over the four-file proof
+closure. No Elisa parsing or proof replay was run: the proof repository remains pinned to compiler
+`b8ebc0a`, while the compiler is at `c451c8b8e`.
+
+### 23.27.462 Prove affine linear-exit leak decisions (2026-10-13)
+
+The reverse scan that records unconsumed linear locals on `return`, `break`, and `continue` now
+delegates each scope step to a production policy with an executable postcondition against an
+independent ghost specification. The policy makes the loop-scope sentinel transition explicit,
+keeps the stopped state sticky, and excludes already-consumed and already-recorded names. It also
+provides a predecessor operation whose contract proves that decrementing a nonzero scan position
+stays inside the scope array. The affine checker uses that operation, a decreasing measure, and a
+scope-count invariant. The source-bound checker requires those bindings and locks down the proof
+bodies. The artifact covers transition refinement, predecessor safety, sentinel behavior,
+live-resource reporting, consumed-resource exclusion, and duplicate suppression; seven false
+controls challenge those claims.
+
+Source-only admission reports 12 positive theorems and 7 false controls over a three-file proof
+closure. Elisa parsing and replay remain unverified under the compiler revision mismatch recorded
+above. The EASM checked-decimal source gate also passes after changing its sign checks to the
+requested `text.length` and `text[0]` form.
+
+### 23.27.463 Re-establish syntax evidence for the active replay patch (2026-10-13)
+
+The active proof patch now passes the available Stage0 parser over all 38 changed Elisa files;
+this is syntax-only evidence. The current grammar treats `tail` as reserved, so the integrated
+certificate helper's local was renamed to `tail_index`. Congruence seed detection and its replay
+closure were split into their own included module to keep every source below the 600-line gate.
+`git diff --check`, the source-length gate, the kernel-audit accounting adversarial test, and the
+kernel-inventory unit tests pass.
+
+Follow-up source review tightened the remaining replay accounting edges: search-break type names,
+self-update equalities, and scalar-copy operator scans now debit the active work counter. Mutable
+local and loop self-update equality use the shared-cost comparator. Post-call global-array and
+source-constant trace lookups now charge trace rows and structural comparisons to the enclosing
+fact filter, which clears the frame on exhaustion. The source-constant scan uses one trace pass
+while retaining the exact type-bound and qualified-constant witness conjunction. Counterexample
+evaluation now reserves annotation-row scans for every leaf and possible recursive literal visit;
+the source-constant preflight no longer needs a nested trace-table product after the lookup was
+made single-pass. The refusal diagnostic reserves expression-by-frame and annotation work before
+running the legacy width checks. A producer disjunction relevance/refutation budget audit remains
+active; its search path still needs shared exhaustion propagation before this accounting pass is
+complete.
+
+Do not expand the patch into broad theorem additions while the compiler qualification hold remains.
+The next high-ROI source work is to charge recursive disjunction relevance/refutation against the
+shared search budget, then finish the older source-binding scans that still repeat declaration or
+equality walks. Once a provenance-matched Stage1 is available, run focused semantic and replay
+controls for the work-accounting, quantified substitution, and binding-liveness changes before
+committing them. No semantic compile, proof replay, or timing run is claimed here.
+
+### 23.27.464 Bound unknown-call frame alias scans (2026-10-13)
+
+Unknown-call frame checking previously compared every argument against every caller place with
+recursive AST walks that did not debit the shared frame source-work budget. The producer now
+preflights argument AST cost, selector-prefix rechecks, place paths, and binding-name comparisons
+before invoking the existing matcher. Its reservation includes the quadratic worst case from
+rechecking a nested selector's prefixes for each argument/place pair. If accounting is incomplete
+or over budget, the checker records `frame-analysis-budget` and stops the frame analysis rather
+than treating the call as non-aliasing. All four producer call sites use the bounded wrapper.
+
+The source-length gate and `git diff --check` pass, and static call-site search finds no direct
+matcher callers outside the bounded wrapper. The Elisa parser, replay, and runtime behavior remain
+unqualified while the provenance-matched Stage1 hold is active.

@@ -196,6 +196,18 @@ extend ElisaProof:
                         return false
             return true
 
+        def proof_replay_local_binding_first_rebind_prefix_statement_with_work(statement: Ast::Stmt, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            work <- work + 1
+            match statement:
+                Ast::Stmt.Contract(kind, expression, _):
+                    return false if kind != "requires" and kind != "ensure" and kind != "ensures"
+                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(expression, 1, work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                    # Reserve a cost walk and the one legacy prefix-expression pass.
+                    proof_replay_local_binding_prefix_expression_safe(expression, 0)
+                _:
+                    return false
+
         def proof_replay_local_binding_condition_valid(condition: Ast::Expr, target: sview, declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, depth: usize) -> bool:
             return false if depth >= PROOF_REPLAY_LOCAL_BINDING_DEPTH_LIMIT
             match condition:
@@ -247,9 +259,11 @@ extend ElisaProof:
                 _:
                     return ""
 
-        def proof_replay_local_binding_bound_invariant(body: darray[Ast::Stmt]&, target: sview, bound: sview, owner: sview, consumer_line: u32, report: ProofReport&) -> bool:
+        def proof_replay_local_binding_bound_invariant(body: darray[Ast::Stmt]&, target: sview, bound: sview, owner: sview, consumer_line: u32, report: ProofReport&, source_work: mutable usize&) -> bool:
             matches: mutable usize = 0
-            for statement in body |target, bound, owner, consumer_line, report, matches|:
+            for statement in body |target, bound, owner, consumer_line, report, matches, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match statement:
                     Ast::Stmt.Contract(kind, expression, _):
                         continue if kind != "invariant"
@@ -257,8 +271,10 @@ extend ElisaProof:
                             Ast::Expr.Binary(Ast::Expr.Ident(left_name, _), TokenKind.LtEq, Ast::Expr.Ident(right_name, _), _):
                                 continue if left_name != target or right_name != bound
                                 source_trace_matches: mutable bool = false
-                                for trace in report.traces.records |owner, consumer_line, expression|:
-                                    if trace.kind == "loop-invariant" and trace.name == owner and trace.line == consumer_line and proof_replay_expr_equal(trace.expression, expression) and proof_replay_local_binding_expr_positions_match(trace.expression, expression):
+                                for trace in report.traces.records |owner, consumer_line, expression, source_work|:
+                                    return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                    source_work <- source_work + 1
+                                    if trace.kind == "loop-invariant" and trace.name == owner and trace.line == consumer_line and proof_replay_summary_expr_equal_with_work(trace.expression, expression, source_work) and proof_replay_local_binding_expr_positions_match(trace.expression, expression):
                                         source_trace_matches <- true
                                 matches <- matches + 1 if source_trace_matches
                             _:
@@ -267,15 +283,19 @@ extend ElisaProof:
                         pass
             return matches == 1
 
-        def proof_replay_local_binding_contract_match(body: darray[Ast::Stmt]&, owner: sview, consumer_line: u32, report: ProofReport&) -> bool:
+        def proof_replay_local_binding_contract_match(body: darray[Ast::Stmt]&, owner: sview, consumer_line: u32, report: ProofReport&, source_work: mutable usize&) -> bool:
             matches: mutable usize = 0
-            for statement in body |owner, consumer_line, report|:
+            for statement in body |owner, consumer_line, report, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match statement:
                     Ast::Stmt.Contract(kind, expression, _):
                         continue if kind != "invariant"
                         source_contract_matches: mutable bool = false
-                        for trace in report.traces.records |owner, consumer_line, expression|:
-                            if trace.kind == "loop-invariant" and trace.name == owner and trace.line == consumer_line and proof_replay_expr_equal(trace.expression, expression) and proof_replay_local_binding_expr_positions_match(trace.expression, expression):
+                        for trace in report.traces.records |owner, consumer_line, expression, source_work|:
+                            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            source_work <- source_work + 1
+                            if trace.kind == "loop-invariant" and trace.name == owner and trace.line == consumer_line and proof_replay_summary_expr_equal_with_work(trace.expression, expression, source_work) and proof_replay_local_binding_expr_positions_match(trace.expression, expression):
                                 source_contract_matches <- true
                         matches <- matches + 1 if source_contract_matches
                     _:
@@ -284,8 +304,9 @@ extend ElisaProof:
 
         # Add a candidate only for a direct while statement or the parser's exact captured-loop
         # wrapper: Expr(Block(header declarations..., While(...), ..., captures)).
-        def proof_replay_local_binding_candidate(body: darray[Ast::Stmt]&, index: usize, consumer_line: u32, report: ProofReport&, owner: sview, expected_binding: sview, loop_body: mutable darray[Ast::Stmt]&, loop_condition: mutable Ast::Expr&, binding_type: mutable Ast::Expr&, initializer: mutable Ast::Expr&, binding_position: mutable Ast::Pos&) -> bool:
+        def proof_replay_local_binding_candidate(body: darray[Ast::Stmt]&, index: usize, consumer_line: u32, report: ProofReport&, owner: sview, expected_binding: sview, loop_body: mutable darray[Ast::Stmt]&, loop_condition: mutable Ast::Expr&, binding_type: mutable Ast::Expr&, initializer: mutable Ast::Expr&, binding_position: mutable Ast::Pos&, source_work: mutable usize&) -> bool:
             return false if index == 0 or index >= body.count
+            return false if not proof_replay_summary_owner_source_preflight(report, owner, report.replay_owner_line, source_work)
             match body[index - 1]:
                 Ast::Stmt.VarDecl(declared_name, declared_type, declared_value, declared_position):
                     return false if declared_name != expected_binding or not proof_replay_local_binding_integer_type(declared_type, 0)
@@ -296,7 +317,7 @@ extend ElisaProof:
                     match body[index]:
                         Ast::Stmt.While(condition, statements, position):
                             return false if position.line != consumer_line
-                            return false if not proof_replay_local_binding_contract_match(statements, owner, consumer_line, report)
+                            return false if not proof_replay_local_binding_contract_match(statements, owner, consumer_line, report, source_work)
                             return false if not proof_replay_local_binding_condition_valid(condition, expected_binding, report.source_declarations, owner, report.replay_owner_line, 0)
                             loop_body.extend(statements)
                             loop_condition <- condition
@@ -313,7 +334,7 @@ extend ElisaProof:
                                 Ast::Stmt.While(condition, statements, position):
                                     return false if position.line != block_position.line
                                     return false if position.line != consumer_line
-                                    return false if not proof_replay_local_binding_contract_match(statements, owner, consumer_line, report)
+                                    return false if not proof_replay_local_binding_contract_match(statements, owner, consumer_line, report, source_work)
                                     return false if not proof_replay_local_binding_condition_valid(condition, expected_binding, report.source_declarations, owner, report.replay_owner_line, 0)
                                     return false if not any captured in captures where captured == expected_binding
                                     match condition:
@@ -370,20 +391,26 @@ extend ElisaProof:
                 return true if proof_replay_loop_context_constant_expression(report, context_trace, expression, context_trace.expression, 0, source_work)
             return false
 
-        def proof_replay_local_binding_loop_source(report: ProofReport&, trace: ProofFactTrace, target: sview, source_value: Ast::Expr, consumer_line: u32, require_rebind: bool) -> bool:
+        def proof_replay_local_binding_loop_source(report: ProofReport&, trace: ProofFactTrace, target: sview, source_value: Ast::Expr, consumer_line: u32, require_rebind: bool, source_work: mutable usize&) -> bool:
             return false if consumer_line == 0 or target == ""
             function_body: mutable darray[Ast::Stmt] = []
             owner_matches: mutable usize = 0
             proof_replay_local_binding_find_owner(report.source_declarations, trace.name, report.replay_owner_line, &function_body, &owner_matches, 0)
             return false if owner_matches != 1
             candidates: mutable usize = 0
-            for index in 0..<function_body.count |index, function_body, consumer_line, report, trace, target, source_value, require_rebind, candidates|:
+            prefix_unambiguous: mutable bool = true
+            for index in 0..<function_body.count |index, function_body, consumer_line, report, trace, target, source_value, require_rebind, candidates, prefix_unambiguous, source_work|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
+                if index >= 2 and prefix_unambiguous:
+                    prefix_unambiguous <- proof_replay_local_binding_first_rebind_prefix_statement_with_work(function_body[index - 2], source_work)
+                    return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 loop_body: mutable darray[Ast::Stmt] = []
                 condition: mutable Ast::Expr = Ast::Expr.Invalid
                 binding_type: mutable Ast::Expr = Ast::Expr.Invalid
                 initializer: mutable Ast::Expr = Ast::Expr.Invalid
                 binding_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
-                if proof_replay_local_binding_candidate(function_body, index, consumer_line, report, trace.name, target, &loop_body, &condition, &binding_type, &initializer, &binding_position):
+                if proof_replay_local_binding_candidate(function_body, index, consumer_line, report, trace.name, target, &loop_body, &condition, &binding_type, &initializer, &binding_position, source_work):
                     return false if binding_position.line == 0
                     if require_rebind:
                         return false if proof_replay_local_binding_unsigned_type_name(binding_type, 0) == ""
@@ -391,7 +418,9 @@ extend ElisaProof:
                         invariant_count: mutable usize = 0
                         valid_body: mutable bool = true
                         source_assignment_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
-                        for statement in loop_body |target, source_value, trace, assignment_count, invariant_count, valid_body, source_assignment_position|:
+                        for statement in loop_body |target, source_value, trace, assignment_count, invariant_count, valid_body, source_assignment_position, source_work|:
+                            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                            source_work <- source_work + 1
                             match statement:
                                 Ast::Stmt.Contract(kind, _, _):
                                     invariant_count <- invariant_count + 1 if kind == "invariant"
@@ -402,23 +431,23 @@ extend ElisaProof:
                                     valid_body <- false if assigned_name != target or assignment_position.line != trace.line
                                     valid_body <- false if not proof_replay_local_binding_pos_matches(trace.expression, assignment_position)
                                     valid_body <- false if not proof_replay_local_binding_expr_positions_match(source_value, assigned_value)
-                                    valid_body <- false if not proof_replay_expr_equal(assigned_value, source_value)
+                                    valid_body <- false if not proof_replay_summary_expr_equal_with_work(assigned_value, source_value, source_work)
                                 _:
                                     valid_body <- false
                         continue if not valid_body or invariant_count == 0 or assignment_count != 1
                         return false if not proof_replay_local_binding_self_update(source_value, target, 0)
                         bound_name: sview = proof_replay_local_binding_rebind_bound(condition, target, binding_type, report.source_declarations, trace.name, report.replay_owner_line, 0)
                         return false if bound_name == ""
-                        return false if not proof_replay_local_binding_bound_invariant(loop_body, target, bound_name, trace.name, consumer_line, report)
+                        return false if not proof_replay_local_binding_bound_invariant(loop_body, target, bound_name, trace.name, consumer_line, report, source_work)
                         match trace.expression:
                             Ast::Expr.Binary(Ast::Expr.Ident(symbol, symbol_position), TokenKind.EqEq, _, _):
                                 return false if symbol != proof_internal_rebind_name(0)
                                 return false if not proof_replay_local_binding_pos_matches(Ast::Expr.Ident(symbol, symbol_position), source_assignment_position)
                             _:
                                 return false
-                        return false if not proof_replay_local_binding_first_rebind_is_unambiguous(function_body, index, 0)
+                        return false if not prefix_unambiguous
                     else:
-                        return false if not proof_replay_expr_equal(initializer, source_value)
+                        return false if not proof_replay_summary_expr_equal_with_work(initializer, source_value, source_work)
                         return false if not proof_replay_local_binding_expr_positions_match(source_value, initializer)
                         return false if binding_position.line != trace.line
                         return false if not proof_replay_local_binding_pos_matches(trace.expression, binding_position)

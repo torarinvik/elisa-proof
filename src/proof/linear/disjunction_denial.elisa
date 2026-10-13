@@ -5,10 +5,14 @@ extend ElisaProof:
         # De Morgan changes only a checked propositional goal, never its facts.
         def proof_negated_boolean_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, annotations: darray[Ast::EnumAnnotation]&, operator_mask: usize, depth: usize, budget: mutable usize&, split_depth: usize, exhausted: mutable bool&) -> bool can[Global.Read, Global.Write]:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
-            match proof_strip_parens(goal):
+            goal_stripped: (complete: bool, value: Ast::Expr) = proof_disjunction_strip_parens_with_work(goal, budget, exhausted)
+            return false if not goal_stripped.complete
+            match goal_stripped.value:
                 Ast::Expr.Unary(TokenKind.Not, operand, position):
-                    return false if not proof_disjunction_denial_fragment(operand, facts, 0)
-                    match proof_strip_parens(operand):
+                    return false if not proof_disjunction_denial_fragment_with_work(operand, facts, annotations.count, budget, exhausted, 0)
+                    operand_stripped: (complete: bool, value: Ast::Expr) = proof_disjunction_strip_parens_with_work(operand, budget, exhausted)
+                    return false if not operand_stripped.complete
+                    match operand_stripped.value:
                         Ast::Expr.Unary(TokenKind.Not, positive, _):
                             return (proof_goal_depth(facts, positive, annotations, operator_mask, depth + 1, budget, split_depth, exhausted) can Global{Read,Write})
                         Ast::Expr.Binary(left, operator, right, _):
@@ -82,6 +86,94 @@ extend ElisaProof:
                 _:
                     return false
 
+        def proof_disjunction_denial_boolean_atom_witnessed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, budget: mutable usize&, exhausted: mutable bool&) -> bool:
+            for fact in facts |fact, expression, budget, exhausted|:
+                return false if not proof_linear_safety_work_charge(budget, exhausted, 1)
+                match fact:
+                    Ast::Expr.Call(callee, arguments, _, _):
+                        callee_name: sview = proof_ident_name(callee)
+                        return false if not proof_linear_safety_work_charge(budget, exhausted, sview_len(callee_name))
+                        if callee_name == "__elisa_verified_total_bool_atom" and arguments.count == 2:
+                            match arguments[1]:
+                                Ast::Expr.StringLit(_, _):
+                                    pass
+                                _:
+                                    continue
+                            equal: (complete: bool, equal: bool) = proof_disjunction_expr_equal_with_work(arguments[0], expression, budget, exhausted)
+                            return false if not equal.complete
+                            return true if equal.equal
+                    _:
+                        pass
+            return false
+
+        def proof_disjunction_denial_value_closed_with_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, closed: bool):
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.BoolLit(_, _):
+                    return (true, true)
+                Ast::Expr.Tuple(_, _) | Ast::Expr.Binary(_, TokenKind.Plus, _, _) | Ast::Expr.Binary(_, TokenKind.Minus, _, _) | Ast::Expr.Binary(_, TokenKind.Slash, _, _) | Ast::Expr.Binary(_, TokenKind.Star, _, _):
+                    result: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(expression, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                    return (false, false) if not result.complete
+                    return (true, result.integer)
+                Ast::Expr.Call(_, _, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    result: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(expression, markers, marker_scale, budget, exhausted)
+                    return (false, false) if not result.complete
+                    return (true, result.matches)
+                Ast::Expr.Field(base, _, _) | Ast::Expr.Scope(base, _, _) | Ast::Expr.Paren(base, _):
+                    return proof_disjunction_denial_value_closed_with_work(base, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                Ast::Expr.If(condition, then_value, else_value, _):
+                    condition_result: (complete: bool, closed: bool) = proof_disjunction_denial_fragment_with_markers_work(condition, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                    return (false, false) if not condition_result.complete or not condition_result.closed
+                    then_result: (complete: bool, closed: bool) = proof_disjunction_denial_value_closed_with_work(then_value, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                    return (false, false) if not then_result.complete or not then_result.closed
+                    return proof_disjunction_denial_value_closed_with_work(else_value, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                _:
+                    return (true, false)
+
+        def proof_disjunction_denial_fragment_with_markers_work(expression: Ast::Expr, facts: darray[Ast::Expr]&, markers: ProofScalarWitnesses&, marker_scale: usize, fact_scan_cost: usize, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, closed: bool):
+            return (false, false) if not proof_linear_safety_work_charge(budget, exhausted, 1)
+            return (true, false) if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Ident(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Field(_, _, _) | Ast::Expr.Scope(_, _, _) | Ast::Expr.Index(_, _, _) | Ast::Expr.IndexN(_, _, _):
+                    return proof_disjunction_denial_value_closed_with_work(expression, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                Ast::Expr.Call(_, _, _, _):
+                    return (true, proof_disjunction_denial_boolean_atom_witnessed_with_work(expression, facts, budget, exhausted))
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(TokenKind.Not, inner, _):
+                    return proof_disjunction_denial_fragment_with_markers_work(inner, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                Ast::Expr.Binary(left, operator, right, _):
+                    if operator == TokenKind.Or or operator == TokenKind.And:
+                        left_result: (complete: bool, closed: bool) = proof_disjunction_denial_fragment_with_markers_work(left, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                        return (false, false) if not left_result.complete or not left_result.closed
+                        return proof_disjunction_denial_fragment_with_markers_work(right, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                    equality: bool = operator == TokenKind.EqEq or operator == TokenKind.BangEq
+                    ordering: bool = operator == TokenKind.Lt or operator == TokenKind.LtEq or operator == TokenKind.Gt or operator == TokenKind.GtEq
+                    integer_order: bool = false
+                    if ordering:
+                        left_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(left, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                        return (false, false) if not left_integer.complete
+                        right_integer: (complete: bool, integer: bool) = proof_disjunction_denial_integer_term_with_work(right, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                        return (false, false) if not right_integer.complete
+                        left_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(left, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not left_scalar.complete
+                        right_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(right, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not right_scalar.complete
+                        integer_order <- left_integer.integer and right_integer.integer and left_scalar.matches and right_scalar.matches
+                    null_equality: bool = equality and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
+                    primitive_equality: bool = false
+                    if equality and not null_equality:
+                        left_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(left, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not left_scalar.complete
+                        right_scalar: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(right, markers, marker_scale, budget, exhausted)
+                        return (false, false) if not right_scalar.complete
+                        primitive_equality <- left_scalar.matches and right_scalar.matches
+                    return (true, false) if not integer_order and not (equality and (primitive_equality or null_equality))
+                    left_value: (complete: bool, closed: bool) = proof_disjunction_denial_value_closed_with_work(left, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                    return (false, false) if not left_value.complete or not left_value.closed
+                    return proof_disjunction_denial_value_closed_with_work(right, facts, markers, marker_scale, fact_scan_cost, depth + 1, budget, exhausted)
+                _:
+                    return (true, false)
+
         # Boolean calls are proposition atoms only when the checker emitted the dedicated
         # marker after resolving one source declaration, checking its direct `bool` return,
         # proving its total-pure summary, and admitting its call preconditions. The marker
@@ -120,10 +212,12 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_push_disjunction_denial(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, limit: usize, depth: usize) -> bool:
+        def proof_push_disjunction_denial(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, limit: usize, depth: usize, budget: mutable usize&, exhausted: mutable bool&) -> bool:
             return false if depth >= PROOF_ANALYSIS_RECURSION_DEPTH_LIMIT or facts.count >= limit
-            return false if not proof_disjunction_denial_fragment(expression, facts, 0)
-            stripped: Ast::Expr = proof_strip_parens(expression)
+            return false if not proof_disjunction_denial_fragment_with_work(expression, facts, 0, budget, exhausted, 0)
+            stripped_result: (complete: bool, value: Ast::Expr) = proof_disjunction_strip_parens_with_work(expression, budget, exhausted)
+            return false if not stripped_result.complete
+            stripped: Ast::Expr = stripped_result.value
             position: Ast::Pos = Ast::expr_pos(stripped)
             match stripped:
                 Ast::Expr.Unary(TokenKind.Not, inner, _):
@@ -131,14 +225,15 @@ extend ElisaProof:
                 Ast::Expr.BoolLit(value, _):
                     facts.push(Ast::Expr.BoolLit(not value, position))
                 Ast::Expr.Binary(left, TokenKind.Or, right, _):
-                    return proof_push_disjunction_denial(left, facts, limit, depth + 1) and proof_push_disjunction_denial(right, facts, limit, depth + 1)
+                    return proof_push_disjunction_denial(left, facts, limit, depth + 1, budget, exhausted) and proof_push_disjunction_denial(right, facts, limit, depth + 1, budget, exhausted)
                 Ast::Expr.Binary(left, operator, right, _):
                     complement: TokenKind = proof_comparison_negation(operator)
-                    null_equality: bool = (operator == TokenKind.EqEq or operator == TokenKind.BangEq) and (proof_ident_name(left) == "null" or proof_ident_name(right) == "null")
-                    if complement != TokenKind.Eof and (proof_primitive_comparison(left, right, facts) or null_equality):
-                        facts.push(Ast::Expr.Binary(left, complement, right, position))
-                    else:
+                    if complement == TokenKind.Eof:
                         facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
+                        return true
+                    # The work-aware fragment check immediately above already established
+                    # primitive operands (or the dedicated null-equality case).
+                    facts.push(Ast::Expr.Binary(left, complement, right, position))
                 _:
                     facts.push(Ast::Expr.Unary(TokenKind.Not, stripped, position))
             return true
