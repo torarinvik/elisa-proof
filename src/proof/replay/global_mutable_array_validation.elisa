@@ -104,20 +104,24 @@ extend ElisaProof:
                     _:
                         pass
 
-        def proof_replay_global_mutable_array_find_owner(declarations: darray[Ast::Decl]&, name: sview, declaration_line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, depth: usize) -> void:
-            return if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT
-            for declaration in declarations |name, declaration_line, matches, parameters, body, position, depth|:
+        def proof_replay_global_mutable_array_find_owner_with_work(declarations: darray[Ast::Decl]&, name: sview, declaration_line: u32, matches: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, body: mutable darray[Ast::Stmt]&, position: mutable Ast::Pos&, source_work: mutable usize&, depth: usize) -> bool:
+            return false if depth >= PROOF_REPLAY_GLOBAL_MUTABLE_ARRAY_DEPTH_LIMIT or source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            for declaration in declarations |name, declaration_line, matches, parameters, body, position, source_work, depth|:
+                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                source_work <- source_work + 1
                 match declaration:
                     Ast::Decl.Func(candidate, candidate_parameters, _, candidate_body, _, _, candidate_position):
+                        return false if not proof_replay_mutable_local_text_compare_work_charge(candidate, name, source_work)
                         if candidate == name and candidate_position.line == declaration_line:
                             matches <- matches + 1
                             parameters <- candidate_parameters
                             body <- candidate_body
                             position <- candidate_position
                     Ast::Decl.Scoped(scoped, _):
-                        proof_replay_global_mutable_array_find_owner(scoped, name, declaration_line, matches, parameters, body, position, depth + 1)
+                        return false if not proof_replay_global_mutable_array_find_owner_with_work(scoped, name, declaration_line, matches, parameters, body, position, source_work, depth + 1)
                     _:
                         pass
+            return true
 
         def proof_replay_global_mutable_array_marker_term(expression: Ast::Expr) -> (known: bool, term: Ast::Expr):
             match expression:
@@ -183,26 +187,29 @@ extend ElisaProof:
                 _:
                     return false
 
+        def proof_replay_global_mutable_array_source_preflight_with_work(report: ProofReport&, owner: sview, owner_line: u32, source_work: mutable usize&) -> bool:
+            return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            found: mutable Ast::Expr = Ast::Expr.Invalid
+            found_owner_line: mutable u32 = 0
+            matches: mutable usize = 0
+            owners: mutable usize = 0
+            return proof_replay_summary_call_exact_span_in_declarations(report.source_declarations, owner, owner_line, Ast::Expr.Invalid, &found, &found_owner_line, &matches, &owners, source_work, 0)
+
         def proof_replay_global_mutable_array_type_fact_is_valid(report: ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
             return proof_replay_global_mutable_array_type_fact_is_valid_with_work(report, trace, &work)
 
         def proof_replay_global_mutable_array_type_fact_is_valid_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            source_start: usize = source_work
-            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, trace.owner_line, source_work)
-            preflight_work: usize = source_work - source_start
-            # The validator below revisits the declaration tree to find the owner and global,
-            # count root bindings, and check for shadowing. Reserve two more preflight-sized
-            # passes for those repeated scans, plus the annotation lookup.
-            return false if preflight_work > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / 2
-            source_work <- source_work + preflight_work * 2
+            return false if not proof_replay_global_mutable_array_source_preflight_with_work(report, trace.name, trace.owner_line, source_work)
+            # The exact-span walk establishes complete source shape; later declaration and body
+            # walks charge their own work instead of reserving hypothetical passes in advance.
             return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
             source_work <- source_work + report.source_annotations.count
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, source_work)
-            return proof_replay_global_mutable_array_type_fact_is_valid_unmetered(report, trace, source_work)
+            return proof_replay_global_mutable_array_type_fact_is_valid_after_preflight(report, trace, source_work)
 
-        def proof_replay_global_mutable_array_type_fact_is_valid_unmetered(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+        def proof_replay_global_mutable_array_type_fact_is_valid_after_preflight(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
             return false if trace.kind != "global-mutable-array-type" and trace.kind != "global-mutable-array-index-bound" and trace.kind != "type-bound"
             return false if trace.name == "" or trace.line == 0 or trace.owner_line == 0
             return false if report.replay_owner_line == 0 or trace.owner_line != report.replay_owner_line
@@ -210,7 +217,7 @@ extend ElisaProof:
             owner_parameters: mutable darray[Ast::ParamDecl] = []
             owner_body: mutable darray[Ast::Stmt] = []
             owner_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
-            proof_replay_global_mutable_array_find_owner(report.source_declarations, trace.name, trace.owner_line, &owner_matches, &owner_parameters, &owner_body, &owner_position, 0)
+            return false if not proof_replay_global_mutable_array_find_owner_with_work(report.source_declarations, trace.name, trace.owner_line, &owner_matches, &owner_parameters, &owner_body, &owner_position, source_work, 0)
             return false if owner_matches != 1 or owner_position.line != trace.owner_line
             global_matches: mutable usize = 0
             global_valid: mutable bool = false

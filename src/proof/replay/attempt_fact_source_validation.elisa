@@ -1,0 +1,124 @@
+# Parser-origin admission for the facts exposed to source-bound proof tactics.
+extend ElisaProof:
+    public:
+        def proof_replay_fact_trace_index(report: mutable ProofReport&, fact: Ast::Expr, owner: sview) -> usize:
+            # Once replay reports a resource-budget failure, do not turn an unavailable index
+            # into a repeated full scan for every certificate fact. Such a report cannot prove
+            # certificates, and the budget diagnostic remains authoritative.
+            return report.traces.records.count if report.kernel.budget_exhausted or report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+            index_capacity: usize = report.traces.index_values.count
+            return report.traces.records.count if index_capacity > PROOF_REPLAY_TRACE_INDEX_SLOT_BUDGET
+            index_ready: bool = index_capacity > 0 and report.traces.index_hashes.count == index_capacity and report.traces.next_indices.count == report.traces.records.count and report.traces.expression_index_values.count == index_capacity and report.traces.expression_index_hashes.count == index_capacity and report.traces.expression_hashes.count == report.traces.records.count and report.traces.next_expression_indices.count == report.traces.records.count
+            # The index is rebuilt before certificate-origin lookup. If it is missing or has a
+            # malformed shape, fail closed instead of doing a full trace scan for every fact.
+            return report.traces.records.count if not index_ready
+            expression_shape: (supported: bool, hash: u32) = proof_replay_trace_expression_hash(report, fact, 0)
+            return report.traces.records.count if not expression_shape.supported
+            expression_hash: u32 = expression_shape.hash
+            indexed_head: usize = proof_replay_fact_expression_head(report, owner, expression_hash)
+            return report.traces.records.count if indexed_head >= report.traces.records.count
+            trace_index: mutable usize = indexed_head
+            probes: mutable usize = 0
+            while trace_index < report.traces.records.count and probes < report.traces.records.count |trace_index, report, fact, owner, probes|:
+                trace: ProofFactTrace = report.traces.records[trace_index]
+                return report.traces.records.count if not proof_replay_trace_lookup_charge_amount(report, sview_len(trace.name))
+                return report.traces.records.count if trace.name != owner or trace_index >= report.traces.expression_hashes.count or report.traces.expression_hashes[trace_index] != expression_hash
+                # The structural equality preflight bounds its two expression walks.
+                return report.traces.records.count if not proof_replay_trace_expression_equality_work(report, fact)
+                return report.traces.records.count if not proof_replay_trace_expression_equality_work(report, trace.expression)
+                return trace_index if proof_replay_expr_equal(trace.expression, fact)
+                trace_index <- proof_replay_trace_expression_chain_next(report, trace_index, owner, expression_hash)
+                probes <- probes + 1
+            return report.traces.records.count
+
+    private:
+        # Every tactic attempt needs strict source-trace admission for all of its hypotheses,
+        # including attempts with a replayed certificate. Certificate replay may omit an
+        # unsupported premise and still prove the goal from the remaining facts; that is not
+        # enough to authorize the full fact slice for source-bound tactic use.
+        def proof_replay_attempt_fact_context_source_valid_with_work(report: mutable ProofReport&, attempt_index: usize, source_work: mutable usize&, validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace&, structural_cache: mutable ProofReplayStructuralValidationCache&) -> bool can[Global.Read, Global.Write]:
+            return false if attempt_index >= report.goal_attempts.count
+            attempt: ProofGoalAttempt = report.goal_attempts[attempt_index]
+            consumer_certificate: mutable usize = 0
+            if attempt.proven:
+                return false if not attempt.has_certificate or attempt.certificate_index >= report.certificates.count
+                certificate: ProofGoalCertificate = report.certificates[attempt.certificate_index]
+                return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, attempt.certificate_index, &source_work)
+                consumer_certificate <- attempt.certificate_index + 1
+            else:
+                return false if attempt.has_certificate
+            return false if attempt.facts_count != attempt.kernel_facts_count
+            return false if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
+            return false if attempt.kernel_facts_start > report.kernel.certificate_facts.count or attempt.kernel_facts_count > report.kernel.certificate_facts.count - attempt.kernel_facts_start
+            return true if attempt.facts_count == 0
+            return false if attempt.name == "" or attempt.line == 0
+            owner_line: u32 = proof_replay_trace_owner_source_position_line_for_attempt_with_work(report, attempt, source_work)
+            validation_workspace.source_scan_work_used <- source_work
+            return false if owner_line == 0
+            saved_owner_line: u32 = report.replay_owner_line
+            saved_consumer_line: u32 = report.trace_owner_line
+            saved_consumer_certificate: usize = report.trace_consumer_certificate_index
+            saved_consumer_attempt: usize = report.trace_consumer_attempt_index
+            report.replay_owner_line <- owner_line
+            report.trace_owner_line <- attempt.line
+            report.trace_consumer_certificate_index <- consumer_certificate
+            report.trace_consumer_attempt_index <- attempt_index + 1
+            dependency_stack: mutable darray[sview] = [attempt.name]
+            active_certificates: mutable darray[usize] = []
+            valid: mutable bool = true
+            for offset in 0..<attempt.facts_count |offset, report, attempt, dependency_stack, active_certificates, validation_workspace, structural_cache, valid|:
+                if validation_workspace.source_scan_work_used >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    valid <- false
+                    break
+                validation_workspace.source_scan_work_used <- validation_workspace.source_scan_work_used + 1
+                fact: Ast::Expr = report.certificate_facts[attempt.facts_start + offset]
+                fact_root: usize = report.kernel.certificate_facts[attempt.kernel_facts_start + offset]
+                if fact_root >= report.kernel.nodes.count or not proof_replay_ast_matches_kernel(report, fact, fact_root, 0):
+                    valid <- false
+                    break
+                origin_index: usize = proof_replay_fact_trace_index(report, fact, attempt.name)
+                if origin_index >= report.traces.records.count:
+                    valid <- false
+                    break
+                origin: ProofFactTrace = report.traces.records[origin_index]
+                if origin.kind == "local-binding" and not proof_replay_local_binding_fact_live_with_cache(report, origin, validation_workspace.source_scan_work_used, &structural_cache.deterministic_calls):
+                    valid <- false
+                    break
+                if not (proof_replay_fact_trace_is_valid_with_stack(report, origin, attempt.name, 0, dependency_stack, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
+                    valid <- false
+                    break
+                if not (proof_replay_kernel_fact_root_is_traced_with_stack(report, fact_root, attempt.name, dependency_stack, false, active_certificates, validation_workspace, structural_cache) can Global{Read,Write}):
+                    valid <- false
+                    break
+            source_work <- validation_workspace.source_scan_work_used
+            report.replay_owner_line <- saved_owner_line
+            report.trace_owner_line <- saved_consumer_line
+            report.trace_consumer_certificate_index <- saved_consumer_certificate
+            report.trace_consumer_attempt_index <- saved_consumer_attempt
+            valid and report.traces.lookup_work_used <= PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET
+
+        def proof_replay_attempt_fact_source_status_snapshot(report: mutable ProofReport&, goal_source_statuses: darray[bool]&, goal_source_complete: bool, source_work: mutable usize&) -> (statuses: darray[bool], complete: bool) can[Memory.Allocate, Global.Read, Global.Write]:
+            statuses: mutable darray[bool] = []
+            return (statuses, false) if not goal_source_complete or goal_source_statuses.count != report.goal_attempts.count
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return (statuses, false)
+            validation_workspace: mutable ElisaProofKernelReplay::ProofKernelReplayValidationWorkspace = ElisaProofKernelReplay::proof_kernel_replay_validation_workspace_new()
+            validation_workspace.source_scan_work_used <- source_work
+            validation_workspace.allow_replayed_dependency_memo <- true
+            structural_cache: mutable ProofReplayStructuralValidationCache = ProofReplayStructuralValidationCache{}
+            for attempt_index in 0..<report.goal_attempts.count |attempt_index, report, goal_source_statuses, statuses, source_work|:
+                if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return ([], false)
+                source_work <- source_work + 1
+                validation_workspace.source_scan_work_used <- source_work
+                attempt: ProofGoalAttempt = report.goal_attempts[attempt_index]
+                source_facts_valid: bool = false
+                if goal_source_statuses[attempt_index]:
+                    source_facts_valid <- proof_replay_attempt_fact_context_source_valid_with_work(report, attempt_index, &source_work, &validation_workspace, &structural_cache) can Global{Read,Write}
+                source_work <- validation_workspace.source_scan_work_used
+                if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT:
+                    return ([], false)
+                statuses.push(source_facts_valid)
+                if report.traces.lookup_work_used > PROOF_REPLAY_TRACE_LOOKUP_WORK_BUDGET:
+                    return ([], false)
+            return (statuses, statuses.count == report.goal_attempts.count)

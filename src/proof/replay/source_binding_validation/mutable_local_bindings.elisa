@@ -22,37 +22,63 @@ extend ElisaProof:
         const PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_OUTSIDE: usize = 3
         const PROOF_REPLAY_MUTABLE_LOCAL_SCOPE_INSIDE: usize = 4
 
-        # A serialized certificate position is usable only after the goal is tied to one exact
-        # source assertion/contract and its unique proven goal attempt. Consumers without that
-        # caller source site remain unavailable to mutable-local liveness checks.
+        # A certificate consumer is tied to one exact source assertion/contract and its unique
+        # proven attempt. An open source attempt may anchor only its own goal after the checked
+        # view has admitted that exact obligation; unsupported consumer contexts still fail closed.
         def proof_replay_mutable_local_consumer_position(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: mutable Ast::Pos&) -> bool:
             work: mutable usize = 0
             return proof_replay_mutable_local_consumer_position_with_work(report, trace, body, position, &work)
 
         def proof_replay_mutable_local_consumer_position_with_work(report: ProofReport&, trace: ProofFactTrace, body: darray[Ast::Stmt]&, position: mutable Ast::Pos&, source_work: mutable usize&) -> bool:
-            return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
-            certificate_index: usize = report.trace_consumer_certificate_index - 1
-            certificate: ProofGoalCertificate = report.certificates[certificate_index]
-            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
-            return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
-            return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
-            source_work <- source_work + report.goal_attempts.count
+            certificate: mutable ProofGoalCertificate = ProofGoalCertificate{goal: Ast::Expr.Invalid, facts_start: 0, facts_count: 0, kernel_goal: 0, kernel_facts_start: 0, kernel_facts_count: 0, line: 0, name: "", rule: "goal", replayed: false}
+            if report.trace_consumer_certificate_index != 0:
+                return false if report.trace_consumer_certificate_index > report.certificates.count
+                certificate_index: usize = report.trace_consumer_certificate_index - 1
+                certificate <- report.certificates[certificate_index]
+                return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+                return false if report.goal_attempts.count > PROOF_REPLAY_TYPE_BOUND_SOURCE_USE_WORK_LIMIT
+                return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + report.goal_attempts.count
+                attempt_matches: mutable usize = 0
+                for attempt in report.goal_attempts |report, certificate, certificate_index, attempt_matches, source_work|:
+                    return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                    source_work <- source_work + 1
+                    continue if not attempt.has_certificate or attempt.certificate_index != certificate_index
+                    return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, certificate_index, source_work)
+                    return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
+                    attempt_matches <- attempt_matches + 1
+                return false if attempt_matches != 1
+            else:
+                # An open attempt has no certificate. Its goal was admitted against the exact
+                # source obligation before attempt-fact validation; retain that position as the
+                # consumer anchor instead of disabling immutable source facts wholesale.
+                return false if report.trace_consumer_attempt_index == 0 or report.trace_consumer_attempt_index > report.goal_attempts.count
+                attempt_index: usize = report.trace_consumer_attempt_index - 1
+                attempt: ProofGoalAttempt = report.goal_attempts[attempt_index]
+                return false if attempt.proven or attempt.has_certificate or attempt.rule != "goal"
+                return false if attempt.name != trace.name or attempt.line != report.trace_owner_line
+                return false if attempt.facts_count != attempt.kernel_facts_count
+                return false if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
+                return false if attempt.kernel_facts_start > report.kernel.certificate_facts.count or attempt.kernel_facts_count > report.kernel.certificate_facts.count - attempt.kernel_facts_start
+                certificate <- ProofGoalCertificate{goal: attempt.goal, facts_start: attempt.facts_start, facts_count: attempt.facts_count, kernel_goal: attempt.kernel_goal, kernel_facts_start: attempt.kernel_facts_start, kernel_facts_count: attempt.kernel_facts_count, line: attempt.line, name: attempt.name, rule: attempt.rule, source_phase: attempt.source_phase, source_call_position: attempt.source_call_position, replayed: false}
             return false if not proof_replay_summary_expr_charge_with_work(certificate.goal, source_work)
             return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
-            return false if not proof_replay_type_bound_extent_preflight(body, Ast::Expr.Absent, false, certificate.goal, true)
+            extent_work: mutable usize = 0
+            extent_complete: bool = proof_replay_type_bound_extent_preflight_with_work(body, Ast::Expr.Absent, false, certificate.goal, true, &extent_work)
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or extent_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            source_work <- source_work + extent_work
+            return false if not extent_complete
             return false if not proof_replay_mutable_local_body_work_charge(body, source_work, 0)
             source_matches: mutable usize = 0
-            proof_replay_type_bound_consumer_source_site_in_body(body, certificate, &source_matches, 0)
+            site_work: mutable usize = 0
+            proof_replay_type_bound_consumer_source_site_in_body_with_work(body, certificate, &source_matches, &site_work, 0)
+            if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or site_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return false
+            source_work <- source_work + site_work
             return false if source_matches != 1
-            attempt_matches: mutable usize = 0
-            for attempt in report.goal_attempts |report, certificate, certificate_index, attempt_matches|:
-                return false if source_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                source_work <- source_work + 1
-                continue if not attempt.has_certificate or attempt.certificate_index != certificate_index
-                return false if not proof_replay_attempt_matches_certificate_with_work(report, attempt, certificate, certificate_index, source_work)
-                return false if not proof_replay_type_bound_goal_position_matches(attempt.goal, certificate.goal)
-                attempt_matches <- attempt_matches + 1
-            return false if attempt_matches != 1
             position <- Ast::expr_pos(certificate.goal)
             return position.line != 0 and position.offset != 0 and position.end_offset != 0
 

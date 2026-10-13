@@ -95,3 +95,145 @@ extend ElisaProof:
                         pass
                 return (2, false) if matches > 1
             return (matches, valid and matches == 1)
+
+        def proof_replay_extern_identity_work_charge(amount: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            if amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            work <- work + amount
+            return true
+
+        def proof_replay_extern_identity_annotations_charge(annotations: darray[Ast::EnumAnnotation]&, expected: ProofExternSignature&, work: mutable usize&) -> bool:
+            for annotation in annotations |work|:
+                return false if not proof_replay_extern_identity_work_charge(1, work)
+                return false if not proof_replay_extern_identity_work_charge(sview_len(annotation.name), work)
+                return false if not proof_replay_extern_identity_work_charge(sview_len(annotation.owner), work)
+                return false if not proof_replay_extern_identity_work_charge(sview_len(annotation.module), work)
+                return false if not proof_replay_extern_identity_work_charge(sview_len(expected.name), work)
+                return false if not proof_replay_extern_identity_work_charge(sview_len(expected.return_type_name), work)
+            return true
+
+        def proof_replay_extern_identity_row_work_charge(annotations: darray[Ast::EnumAnnotation]&, name: sview, line: u32, members: darray[sview]&, work: mutable usize&) -> bool:
+            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            row_bytes: mutable usize = 0
+            reference_count: mutable usize = 0
+            reference_bytes: mutable usize = 0
+            member_bytes: mutable usize = 0
+            for member in members |member_bytes|:
+                size: usize = sview_len(member)
+                if size > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - member_bytes:
+                    work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return false
+                member_bytes <- member_bytes + size
+            for annotation in annotations |annotation, name, line, row_bytes, reference_count, reference_bytes|:
+                if annotation.line == line and annotation.owner == "__extern_effect_row_text" and sview_len(annotation.name) > row_bytes:
+                    row_bytes <- sview_len(annotation.name)
+                if annotation.line == line and annotation.owner == "__extern_effect_ref":
+                    reference_count <- reference_count + 1
+                    size: usize = sview_len(annotation.name)
+                    if size > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - reference_bytes:
+                        work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                        return false
+                    reference_bytes <- reference_bytes + size
+            count_work: usize = 128 * 128 * 3
+            if reference_count > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - count_work) / 128:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            count_work <- count_work + reference_count * 128
+            return false if not proof_replay_extern_identity_work_charge(count_work, work)
+            return false if row_bytes > 4096
+            if row_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 136:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_replay_extern_identity_work_charge(row_bytes * 136, work)
+            if members.count != 0 and row_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / members.count:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_replay_extern_identity_work_charge(members.count * row_bytes, work)
+            if member_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 256:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_replay_extern_identity_work_charge(member_bytes * 256, work)
+            if reference_count != 0 and row_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / reference_count:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return false if not proof_replay_extern_identity_work_charge(reference_count * row_bytes, work)
+            if reference_count != 0 and reference_bytes > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work) / 128:
+                work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return false
+            return proof_replay_extern_identity_work_charge(reference_bytes * 128, work)
+
+        # Meter source identity independently while preserving the legacy predicate.
+        # The metadata helpers below are charged before their bounded row/annotation scans.
+        def proof_replay_extern_declaration_identity_with_work(declarations: darray[Ast::Decl]&, parameters: darray[Ast::ExternParam]&, annotations: darray[Ast::EnumAnnotation]&, expected: ProofExternSignature&, depth: usize, work: mutable usize&) -> (matches: usize, valid: bool):
+            return (2, false) if depth >= 96 or expected.name == ""
+            matches: mutable usize = 0
+            valid: mutable bool = false
+            for declaration in declarations |parameters, annotations, expected, depth, matches, valid, work|:
+                name: mutable sview = ""
+                match declaration:
+                    Ast::Decl.Extern(found, _, _, _, _, _, _, _):
+                        name <- found
+                    Ast::Decl.Func(found, _, _, _, _, _, _) | Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Enum(found, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _) | Ast::Decl.Module(found, _, _):
+                        name <- found
+                    _:
+                        pass
+                return (2, false) if not proof_replay_extern_identity_work_charge(1, work)
+                return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(name), work)
+                return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(expected.name), work)
+                match declaration:
+                    Ast::Decl.Extern(found, first, arity, variadic, callable, result_type, _, position):
+                        if found == expected.name:
+                            matches <- matches + 1
+                            start: usize = first.usize()
+                            count: usize = arity.usize()
+                            return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(result_type), work)
+                            return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(expected.return_type_name), work)
+                            valid <- position.line == expected.line and callable == expected.callable and variadic == expected.variadic and result_type == expected.return_type_name and count == expected.declared_arity
+                            valid <- false if not callable or not expected.parameters_valid or start > parameters.count
+                            if start <= parameters.count:
+                                valid <- false if count > parameters.count - start or count != expected.parameters.count
+                                if valid:
+                                    for offset in 0..<count |offset, parameters, expected, start, valid, work|:
+                                        actual: Ast::ExternParam = parameters[start + offset]
+                                        wanted: Ast::ExternParam = expected.parameters[offset]
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(16, work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(actual.name), work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(actual.type_name), work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(actual.element_type_name), work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(wanted.name), work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(wanted.type_name), work)
+                                        return (2, false) if not proof_replay_extern_identity_work_charge(sview_len(wanted.element_type_name), work)
+                                        valid <- false if not proof_replay_extern_parameter_matches(actual, wanted)
+                            if valid:
+                                annotation_pass: usize = 0
+                                while annotation_pass < 4 |annotation_pass, annotations, work|:
+                                    return (2, false) if not proof_replay_extern_identity_annotations_charge(annotations, expected, work)
+                                    annotation_pass <- annotation_pass + 1
+                                row_bound: bool = proof_replay_extern_identity_row_work_charge(annotations, found, position.line, expected.effects, work)
+                                if not row_bound:
+                                    return (2, false) if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                                    valid <- false
+                                else:
+                                    valid <- valid and proof_replay_extern_effect_row_matches(annotations, found, position.line, &expected.effects)
+                                valid <- valid and proof_replay_extern_return_metadata_matches(annotations, expected)
+                    Ast::Decl.Func(found, _, _, _, _, _, _) | Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Enum(found, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _):
+                        if found == expected.name:
+                            matches <- matches + 1
+                            valid <- false
+                    Ast::Decl.Module(found, body, _):
+                        if found == expected.name:
+                            matches <- matches + 1
+                            valid <- false
+                        nested: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity_with_work(&body, parameters, annotations, expected, depth + 1, work)
+                        matches <- matches + nested.matches
+                        valid <- nested.valid if nested.matches != 0
+                    Ast::Decl.Scoped(body, _):
+                        nested: (matches: usize, valid: bool) = proof_replay_extern_declaration_identity_with_work(&body, parameters, annotations, expected, depth + 1, work)
+                        matches <- matches + nested.matches
+                        valid <- nested.valid if nested.matches != 0
+                    _:
+                        pass
+                return (2, false) if matches > 1
+            return (matches, valid and matches == 1)

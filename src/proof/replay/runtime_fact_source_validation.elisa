@@ -5,9 +5,18 @@ extend ElisaProof:
     private:
         const PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT: usize = 16384
 
-        def proof_replay_runtime_fact_pure_function(report: ProofReport&, name: sview, argument_count: usize, declaration: Ast::Decl, work: mutable usize&) -> bool:
+        def proof_replay_runtime_fact_expression_operators_safe(expression: Ast::Expr, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, scratch: mutable ProofReport&, work: mutable usize&) -> bool:
+            return false if work >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
+            scratch.source_effect_index.implicit_effect_work <- 0
+            overloaded: bool = proof_structural_typed_operator_expression_has_overload(expression, parameters, declaration_line, scratch, 0)
+            observed: usize = scratch.source_effect_index.implicit_effect_work
+            return false if observed > PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - work
+            work <- work + observed
+            not overloaded
+
+        def proof_replay_runtime_fact_pure_function(report: ProofReport&, name: sview, argument_count: usize, declaration: Ast::Decl, work: mutable usize&, scratch: mutable ProofReport&) -> bool:
             match declaration:
-                Ast::Decl.Func(found_name, parameters, return_type, body, effects, _, _):
+                Ast::Decl.Func(found_name, parameters, return_type, body, effects, _, position):
                     return false if found_name != name or effects.count != 0 or parameters.count != argument_count or parameters.count > 64 or body.count != 1
                     return false if not proof_replay_control_match_guard_scalar_type(return_type)
                     for parameter_index in 0..<parameters.count |parameter_index, parameters, work|:
@@ -22,6 +31,8 @@ extend ElisaProof:
                     match body[0]:
                         Ast::Stmt.Return(value, _):
                             if value is returned:
+                                return false if not proof_replay_summary_expr_charge_with_limit(returned, work, PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT)
+                                return false if not proof_replay_runtime_fact_expression_operators_safe(returned, parameters, position.line, scratch, work)
                                 return proof_replay_control_match_guard_pure_expression(report, returned, parameters, work, 0)
                             return false
                         _:
@@ -29,7 +40,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_runtime_fact_call_is_pure(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&, owner_source_work: usize) -> bool:
+        def proof_replay_runtime_fact_call_is_pure(report: ProofReport&, trace: ProofFactTrace, call: Ast::Expr, work: mutable usize&, owner_source_work: usize, scratch: mutable ProofReport&) -> bool:
             return false if trace.name == "" or report.replay_owner_line == 0
             return false if report.source_annotations.count > PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - work
             work <- work + report.source_annotations.count
@@ -41,7 +52,7 @@ extend ElisaProof:
                     selected: mutable Ast::Decl = Ast::Decl.Invalid
                     matches: mutable usize = 0
                     return false if not proof_replay_control_match_guard_function_collect(report.source_declarations, name, selected, &matches, work, 0)
-                    return false if matches != 1 or not proof_replay_runtime_fact_pure_function(report, name, arguments.count, selected, work)
+                    return false if matches != 1 or not proof_replay_runtime_fact_pure_function(report, name, arguments.count, selected, work, scratch)
                     return false if not proof_replay_control_match_guard_charge_declarations(report.source_declarations, work, 0)
                     return false if proof_replay_local_binding_parameter_name_present(report.source_declarations, trace.name, report.replay_owner_line, name, 0)
                     return false if owner_source_work > PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - work
@@ -50,7 +61,7 @@ extend ElisaProof:
                 _:
                     return false
 
-        def proof_replay_runtime_fact_expression_stable(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, depth: usize) -> bool:
+        def proof_replay_runtime_fact_expression_stable(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, scratch: mutable ProofReport&, depth: usize) -> bool:
             return false if depth >= 64 or work >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
             work <- work + 1
             match expression:
@@ -59,41 +70,39 @@ extend ElisaProof:
                 Ast::Expr.Ident(name, _):
                     return name != ""
                 Ast::Expr.Paren(inner, _):
-                    return proof_replay_runtime_fact_expression_stable(report, trace, inner, work, owner_source_work, depth + 1)
+                    return proof_replay_runtime_fact_expression_stable(report, trace, inner, work, owner_source_work, scratch, depth + 1)
                 Ast::Expr.Unary(operator, inner, _):
                     return false if operator != TokenKind.Not and operator != TokenKind.Minus
-                    protocol: sview = proof_builtin_unary_operator_protocol(operator)
-                    return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source_primitive_operator_mask, protocol)
-                    return proof_replay_runtime_fact_expression_stable(report, trace, inner, work, owner_source_work, depth + 1)
+                    return proof_replay_runtime_fact_expression_stable(report, trace, inner, work, owner_source_work, scratch, depth + 1)
                 Ast::Expr.Binary(left, operator, right, _):
                     return false if operator != TokenKind.Plus and operator != TokenKind.Minus and operator != TokenKind.Star and operator != TokenKind.Slash and operator != TokenKind.Percent and operator != TokenKind.EqEq and operator != TokenKind.BangEq and operator != TokenKind.Lt and operator != TokenKind.LtEq and operator != TokenKind.Gt and operator != TokenKind.GtEq and operator != TokenKind.And and operator != TokenKind.Or
-                    protocol: sview = proof_builtin_operator_protocol(operator)
-                    return false if protocol != "" and proof_source_primitive_operator_mask_has(report.source_primitive_operator_mask, protocol)
-                    return false if not proof_replay_runtime_fact_expression_stable(report, trace, left, work, owner_source_work, depth + 1)
-                    return proof_replay_runtime_fact_expression_stable(report, trace, right, work, owner_source_work, depth + 1)
+                    return false if not proof_replay_runtime_fact_expression_stable(report, trace, left, work, owner_source_work, scratch, depth + 1)
+                    return proof_replay_runtime_fact_expression_stable(report, trace, right, work, owner_source_work, scratch, depth + 1)
                 Ast::Expr.Call(Ast::Expr.Ident(name, _), arguments, labels, _):
                     return false if name == "" or name == "old" or labels.count != 0
                     return false if name == "i8" or name == "i16" or name == "i32" or name == "i64" or name == "isize" or name == "u8" or name == "u16" or name == "u32" or name == "u64" or name == "usize"
-                    return false if not proof_replay_runtime_fact_call_is_pure(report, trace, expression, work, owner_source_work)
-                    for argument in arguments |report, trace, work, owner_source_work, depth|:
-                        return false if not proof_replay_runtime_fact_expression_stable(report, trace, argument, work, owner_source_work, depth + 1)
+                    return false if not proof_replay_runtime_fact_call_is_pure(report, trace, expression, work, owner_source_work, scratch)
+                    for argument in arguments |report, trace, work, owner_source_work, scratch, depth|:
+                        return false if not proof_replay_runtime_fact_expression_stable(report, trace, argument, work, owner_source_work, scratch, depth + 1)
                     return true
                 _:
                     return false
 
-        def proof_replay_runtime_fact_expression_is_stable(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize) -> bool:
-            return proof_replay_runtime_fact_expression_stable(report, trace, expression, work, owner_source_work, 0)
+        def proof_replay_runtime_fact_expression_is_stable(report: ProofReport&, trace: ProofFactTrace, expression: Ast::Expr, work: mutable usize&, owner_source_work: usize, scratch: mutable ProofReport&) -> bool:
+            return proof_replay_runtime_fact_expression_stable(report, trace, expression, work, owner_source_work, scratch, 0)
 
-        def proof_replay_runtime_fact_source_statement_matches(report: ProofReport&, trace: ProofFactTrace, source_certificate: ProofGoalCertificate, statement: Ast::Stmt, work: mutable usize&, owner_source_work: usize) -> bool:
+        def proof_replay_runtime_fact_source_statement_matches(report: ProofReport&, trace: ProofFactTrace, source_certificate: ProofGoalCertificate, statement: Ast::Stmt, work: mutable usize&, owner_source_work: usize, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, scratch: mutable ProofReport&) -> bool:
             if trace.kind == "runtime-assert":
                 match statement:
-                    Ast::Stmt.Contract("assert", expression, position):
+                    Ast::Stmt.Contract("assert", expression, _):
                         return false if not proof_replay_control_assertion_matches(statement, source_certificate)
-                        return proof_replay_runtime_fact_expression_is_stable(report, trace, expression, work, owner_source_work)
+                        return false if not proof_replay_runtime_fact_expression_operators_safe(expression, parameters, declaration_line, scratch, work)
+                        return proof_replay_runtime_fact_expression_is_stable(report, trace, expression, work, owner_source_work, scratch)
                     Ast::Stmt.Expr(Ast::Expr.Call(Ast::Expr.Ident("assert", _), arguments, labels, _), position):
                         return false if position.line != trace.line or arguments.count != 1 or labels.count != 0
                         return false if not proof_replay_control_assertion_matches(statement, source_certificate)
-                        return proof_replay_runtime_fact_expression_is_stable(report, trace, arguments[0], work, owner_source_work)
+                        return false if not proof_replay_runtime_fact_expression_operators_safe(arguments[0], parameters, declaration_line, scratch, work)
+                        return proof_replay_runtime_fact_expression_is_stable(report, trace, arguments[0], work, owner_source_work, scratch)
                     _:
                         return false
             if trace.kind == "runtime-guard":
@@ -103,8 +112,9 @@ extend ElisaProof:
                         return false if not proof_replay_control_assert_by_goal_matches(statement, source_certificate)
                         match body[0]:
                             Ast::Stmt.Contract(kind, expression, _):
-                                return false if kind == "assert"
-                                return proof_replay_runtime_fact_expression_is_stable(report, trace, expression, work, owner_source_work)
+                                return false if kind != "assert"
+                                return false if not proof_replay_runtime_fact_expression_operators_safe(expression, parameters, declaration_line, scratch, work)
+                                return proof_replay_runtime_fact_expression_is_stable(report, trace, expression, work, owner_source_work, scratch)
                             _:
                                 return false
                     _:
@@ -114,13 +124,13 @@ extend ElisaProof:
         def proof_replay_runtime_fact_use_matches(statement: Ast::Stmt, certificate: ProofGoalCertificate) -> bool:
             return proof_replay_control_assertion_matches(statement, certificate) or proof_replay_control_assert_by_goal_matches(statement, certificate)
 
-        def proof_replay_runtime_fact_find_owner_body(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
+        def proof_replay_runtime_fact_find_owner_body(declarations: darray[Ast::Decl]&, owner: sview, owner_line: u32, body: mutable darray[Ast::Stmt]&, parameters: mutable darray[Ast::ParamDecl]&, matches: mutable usize&, work: mutable usize&, depth: usize) -> bool:
             return false if depth >= 64
-            for declaration in declarations |owner, owner_line, body, matches, work, depth|:
+            for declaration in declarations |owner, owner_line, body, parameters, matches, work, depth|:
                 return false if work >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
                 work <- work + 1
                 match declaration:
-                    Ast::Decl.Func(name, _, _, function_body, _, _, position):
+                    Ast::Decl.Func(name, function_parameters, _, function_body, _, _, position):
                         if sview_len(name) > PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - work:
                             work <- PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
                             return false
@@ -131,8 +141,10 @@ extend ElisaProof:
                             work <- work + function_body.count
                             body.clear()
                             body.extend(function_body)
+                            parameters.clear()
+                            parameters.extend(function_parameters)
                     Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_replay_runtime_fact_find_owner_body(nested, owner, owner_line, body, matches, work, depth + 1)
+                        return false if not proof_replay_runtime_fact_find_owner_body(nested, owner, owner_line, body, parameters, matches, work, depth + 1)
                     Ast::Decl.Import(_, _) | Ast::Decl.Const(_, _, _, _, _) | Ast::Decl.Extern(_, _, _, _, _, _, _, _) | Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _) | Ast::Decl.Alias(_, _, _) | Ast::Decl.Law(_, _, _):
                         pass
                     Ast::Decl.Invalid:
@@ -143,30 +155,31 @@ extend ElisaProof:
 
         # Only direct siblings count here. A return, control-flow edge, assignment, or even an
         # unrelated statement between the fact and consumer ends this supported live range.
-        def proof_replay_runtime_fact_adjacent_use_scan(report: ProofReport&, trace: ProofFactTrace, source_certificate: ProofGoalCertificate, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, depth: usize, work: mutable usize&, owner_source_work: usize, uses: mutable usize&) -> bool:
+        def proof_replay_runtime_fact_adjacent_use_scan(report: ProofReport&, trace: ProofFactTrace, source_certificate: ProofGoalCertificate, certificate: ProofGoalCertificate, body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, declaration_line: u32, scratch: mutable ProofReport&, depth: usize, work: mutable usize&, owner_source_work: usize, uses: mutable usize&) -> bool:
             return false if depth >= 64
-            for index in 0..<body.count |index, body, report, trace, source_certificate, certificate, depth, work, owner_source_work, uses|:
+            for index in 0..<body.count |index, body, report, trace, source_certificate, certificate, parameters, declaration_line, scratch, depth, work, owner_source_work, uses|:
                 return false if work >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
                 work <- work + 1
-                if proof_replay_runtime_fact_source_statement_matches(report, trace, source_certificate, body[index], work, owner_source_work):
+                if proof_replay_runtime_fact_source_statement_matches(report, trace, source_certificate, body[index], work, owner_source_work, parameters, declaration_line, scratch):
                     if index + 1 < body.count and proof_replay_runtime_fact_use_matches(body[index + 1], certificate):
-                        return false if not proof_replay_runtime_fact_expression_is_stable(report, trace, certificate.goal, work, owner_source_work)
+                        return false if not proof_replay_runtime_fact_expression_operators_safe(certificate.goal, parameters, declaration_line, scratch, work)
+                        return false if not proof_replay_runtime_fact_expression_is_stable(report, trace, certificate.goal, work, owner_source_work, scratch)
                         uses <- uses + 1
                 match body[index]:
                     Ast::Stmt.If(_, yes, no, _):
-                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, yes, depth + 1, work, owner_source_work, uses)
-                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, no, depth + 1, work, owner_source_work, uses)
+                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, yes, parameters, declaration_line, scratch, depth + 1, work, owner_source_work, uses)
+                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, no, parameters, declaration_line, scratch, depth + 1, work, owner_source_work, uses)
                     Ast::Stmt.While(_, inner, _) | Ast::Stmt.For(_, _, _, inner, _):
-                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, inner, depth + 1, work, owner_source_work, uses)
+                        return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, inner, parameters, declaration_line, scratch, depth + 1, work, owner_source_work, uses)
                     Ast::Stmt.Block(kind, _, _, inner, _):
                         # `assert_by` checks its proof body through the ghost checker; nested
                         # proof-step assertions are not executable runtime facts.
-                        return false if kind != "assert_by" and not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, inner, depth + 1, work, owner_source_work, uses)
+                        return false if kind != "assert_by" and not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, inner, parameters, declaration_line, scratch, depth + 1, work, owner_source_work, uses)
                     Ast::Stmt.Match(_, arms, _):
-                        for arm in arms |report, trace, source_certificate, certificate, depth, work, owner_source_work, uses|:
+                        for arm in arms |report, trace, source_certificate, certificate, parameters, declaration_line, scratch, depth, work, owner_source_work, uses|:
                             return false if work >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT
                             work <- work + 1
-                            return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, arm.body, depth + 1, work, owner_source_work, uses)
+                            return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, arm.body, parameters, declaration_line, scratch, depth + 1, work, owner_source_work, uses)
                     _:
                         pass
             return true
@@ -175,16 +188,42 @@ extend ElisaProof:
             work: mutable usize = 0
             return proof_replay_runtime_fact_source_valid_with_work(report, trace, &work)
 
-        def proof_replay_runtime_fact_source_valid_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
-            work: mutable usize = 0
-            valid: bool = proof_replay_runtime_fact_source_valid_unmetered(report, trace, &work)
+        def proof_replay_runtime_fact_work_commit(work: usize, source_work: mutable usize&) -> bool:
             if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
                 source_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                 return false
             source_work <- source_work + work
+            return true
+
+        def proof_replay_runtime_fact_source_valid_with_work(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            proof_replay_runtime_fact_source_valid_with_cache(report, trace, source_work, &cache)
+
+        def proof_replay_runtime_fact_source_valid_with_cache(report: ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            if not cache.analysis_context_attempted:
+                minimum_rows: mutable usize = 0
+                if report.source_declarations.count >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT:
+                    proof_replay_runtime_fact_work_commit(PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT, source_work)
+                    return false
+                minimum_rows <- report.source_declarations.count
+                if report.source_annotations.count >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - minimum_rows:
+                    proof_replay_runtime_fact_work_commit(PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT, source_work)
+                    return false
+                minimum_rows <- minimum_rows + report.source_annotations.count
+                if report.source_generic_param_lines.count >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - minimum_rows:
+                    proof_replay_runtime_fact_work_commit(PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT, source_work)
+                    return false
+                minimum_rows <- minimum_rows + report.source_generic_param_lines.count
+                if report.source_generic_param_names.count >= PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT - minimum_rows:
+                    proof_replay_runtime_fact_work_commit(PROOF_REPLAY_RUNTIME_FACT_WORK_LIMIT, source_work)
+                    return false
+            return false if not proof_replay_deterministic_analysis_context_ensure(report, source_work, cache)
+            work: mutable usize = 0
+            valid: bool = proof_replay_runtime_fact_source_valid_unmetered(report, trace, cache.analysis_scratch, &work)
+            return false if not proof_replay_runtime_fact_work_commit(work, source_work)
             return valid
 
-        def proof_replay_runtime_fact_source_valid_unmetered(report: ProofReport&, trace: ProofFactTrace, work: mutable usize&) -> bool:
+        def proof_replay_runtime_fact_source_valid_unmetered(report: ProofReport&, trace: ProofFactTrace, scratch: mutable ProofReport&, work: mutable usize&) -> bool:
             return false if trace.kind != "runtime-assert" and trace.kind != "runtime-guard"
             return false if trace.name == "" or trace.line == 0 or trace.owner_line != 0 or report.replay_owner_line == 0
             return false if report.trace_consumer_certificate_index == 0 or report.trace_consumer_certificate_index > report.certificates.count
@@ -192,8 +231,9 @@ extend ElisaProof:
             return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
             return false if certificate.rule != "goal" and certificate.rule != "quantifier-forall" and certificate.rule != "quantifier-exists"
             body: mutable darray[Ast::Stmt] = []
+            parameters: mutable darray[Ast::ParamDecl] = []
             owner_matches: mutable usize = 0
-            return false if not proof_replay_runtime_fact_find_owner_body(report.source_declarations, trace.name, report.replay_owner_line, &body, &owner_matches, work, 0) or owner_matches != 1
+            return false if not proof_replay_runtime_fact_find_owner_body(report.source_declarations, trace.name, report.replay_owner_line, &body, &parameters, &owner_matches, work, 0) or owner_matches != 1
             return false if not proof_replay_control_certificate_attempt_unique_with_work(report, certificate, work)
             owner_source_work: mutable usize = 0
             owner_assertions: mutable usize = 0
@@ -204,5 +244,5 @@ extend ElisaProof:
             source_matches: mutable usize = 0
             return false if not proof_replay_control_assertion_scan(body, source_certificate, 0, work, &source_matches) or source_matches != 1
             uses: mutable usize = 0
-            return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, body, 0, work, owner_source_work, &uses)
+            return false if not proof_replay_runtime_fact_adjacent_use_scan(report, trace, source_certificate, certificate, body, parameters, report.replay_owner_line, scratch, 0, work, owner_source_work, &uses)
             uses == 1

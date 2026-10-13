@@ -204,7 +204,7 @@ extend ElisaProof:
             resolved: (complete: bool, row: usize) = proof_module_function_index_for_callee(names, owners, aliases, caller_owner, callee, work, PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT)
             return work <= PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT and resolved.complete and resolved.row == 0
 
-        def proof_replay_deterministic_qualified_declaration(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, selected: mutable Ast::Decl&, matches: mutable usize&, work: mutable usize&) -> bool:
+        def proof_replay_deterministic_qualified_declaration(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, callee: Ast::Expr, caller_owner: sview, aliases: ProofModuleAliasIndex&, selected: mutable Ast::Decl&, selected_owner: mutable sview&, selected_row: mutable usize&, matches: mutable usize&, work: mutable usize&) -> bool:
             return false if wanted == ""
             group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
             return false if not group.complete
@@ -214,20 +214,28 @@ extend ElisaProof:
                 return false if row >= index.entries.count or not proof_replay_deterministic_call_budget_charge(1 + sview_len(index.entries[row].name), work)
                 entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
                 return false if entry.name != wanted
-                if entry.is_function and proof_replay_deterministic_qualified_path_matches_owner(entry.owner, wanted, callee, caller_owner, aliases, work):
+                if entry.is_function and not entry.is_lemma and proof_replay_deterministic_qualified_path_matches_owner(entry.owner, wanted, callee, caller_owner, aliases, work):
                     matches <- matches + 1
                     selected <- entry.declaration
+                    selected_owner <- entry.owner
+                    selected_row <- row
                 row <- entry.next_index
                 return false if row > index.entries.count
             return row == index.entries.count
 
-        def proof_replay_deterministic_body_scan_charge(body: darray[Ast::Stmt]&, repetitions: usize, work: mutable usize&) -> bool:
-            cost: mutable usize = 0
-            return false if not proof_replay_summary_expr_cost_body(body, cost, work, 0)
+        def proof_replay_deterministic_source_scan_charge(body: darray[Ast::Stmt]&, parameters: darray[Ast::ParamDecl]&, body_repetitions: usize, default_repetitions: usize, work: mutable usize&) -> bool:
+            body_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_body(body, body_cost, work, 0)
+            default_cost: mutable usize = 0
+            for parameter in parameters |parameter, default_cost, work|:
+                if parameter.has_default:
+                    return false if not proof_replay_summary_expr_cost(parameter.default_value, default_cost, work, 0)
             return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
-            if repetitions != 0:
-                return false if cost > (PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work) / repetitions
-            work <- work + cost * repetitions
+            remaining: usize = PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+            return false if body_repetitions != 0 and body_cost > remaining / body_repetitions
+            remaining <- remaining - body_cost * body_repetitions
+            return false if default_repetitions != 0 and default_cost > remaining / default_repetitions
+            work <- work + body_cost * body_repetitions + default_cost * default_repetitions
             return true
 
         # Deterministic-call replay must not trust the producer's cached operator/drop facts.
@@ -338,8 +346,19 @@ extend ElisaProof:
                 return false if not proof_replay_source_expression_calls_with_target_index_work(parameters, signature_contracts[index], annotations, &calls, call_index, call_target, work)
             return true
 
-        def proof_replay_deterministic_function_declaration(declarations: darray[Ast::Decl]&, declaration_index: ProofReplayDeterministicDeclarationIndex&, annotations: darray[Ast::EnumAnnotation]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, name: sview, declaration: Ast::Decl, scratch: mutable ProofReport&, active: darray[sview]&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= 32 or name == "" or any current in active where current == name
+        def proof_replay_deterministic_function_declaration(declarations: darray[Ast::Decl]&, declaration_index: mutable ProofReplayDeterministicDeclarationIndex&, aliases: ProofModuleAliasIndex&, annotations: darray[Ast::EnumAnnotation]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, name: sview, owner: sview, declaration: Ast::Decl, declaration_row: usize, scratch: mutable ProofReport&, active: darray[usize]&, work: mutable usize&, depth: usize) -> bool:
+            return false if name == "" or declaration_row >= declaration_index.entries.count
+            return false if not proof_replay_deterministic_call_budget_charge(1, work)
+            return true if declaration_index.entries[declaration_row].validated_deterministic_call
+            return false if depth >= 32
+            return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT
+            return false if active.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+            work <- work + active.count
+            for current_row in active |current_row, declaration_row, work|:
+                # The declaration row is unique even when different nested modules share both
+                # their final module segment and function name.
+                return false if not proof_replay_deterministic_call_budget_charge(1, work)
+                return false if current_row == declaration_row
             match declaration:
                 Ast::Decl.Func(_, parameters, return_type, body, effects, _, position):
                     return false if parameters.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
@@ -353,7 +372,11 @@ extend ElisaProof:
                         work <- work + sview_len(annotation.owner)
                         return false if sview_len(annotation.module) > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
                         work <- work + sview_len(annotation.module)
-                    return false if not proof_replay_deterministic_body_scan_charge(body, annotations.count + 3, work)
+                    global_mutable_markers: mutable usize = 0
+                    for annotation in annotations |annotation, global_mutable_markers, work|:
+                        return false if not proof_replay_deterministic_call_budget_charge(1, work)
+                        global_mutable_markers <- global_mutable_markers + 1 if annotation.name == "__global_mutable"
+                    return false if not proof_replay_deterministic_source_scan_charge(body, parameters, annotations.count + 3, global_mutable_markers, work)
                     return false if effects.count != 0 or not proof_replay_deterministic_body_shape(body, 0)
                     if return_type is scalar_return:
                         return false if not proof_replay_summary_expr_charge_with_work(scalar_return, work)
@@ -373,23 +396,38 @@ extend ElisaProof:
                     return false if not proof_replay_deterministic_source_effects_supported(name, position.line, parameters, body, scratch, work)
                     calls: mutable darray[sview] = []
                     call_target: mutable ProofReplayCallSiteTarget = ProofReplayCallSiteTarget{enabled: false, ignore_unmatched_scoped_edges: false, allow_scoped_target: false, include_nonassert_contract_calls: true, offset: 0, line: 0, name: "", calls_at_offset: 0, matched_calls: 0, track_unresolved_dispatch: true, unresolved_dispatch_found: false, source_annotations: annotations, field_conversion_parameters: parameters, field_conversion_names: scratch.source_effect_index.field_conversion_names, field_conversion_index_valid: scratch.source_effect_index.field_conversion_index_valid, field_conversion_index_hashes: scratch.source_effect_index.field_conversion_index_hashes, field_conversion_index_values: scratch.source_effect_index.field_conversion_index_values, field_conversion_index_counts: scratch.source_effect_index.field_conversion_index_counts, field_conversion_custom_cast_present: scratch.source_effect_index.field_conversion_custom_cast_present, field_conversion_alias_names: scratch.source_effect_index.alias_names, field_conversion_alias_targets: scratch.source_effect_index.alias_targets, field_conversion_alias_lines: scratch.source_effect_index.alias_lines, field_conversion_bare_alias_root_fallback_valid: scratch.source_effect_index.bare_alias_root_fallback_valid, field_conversion_alias_owners: scratch.source_effect_index.alias_owners, field_conversion_alias_has_formals: scratch.source_effect_index.alias_has_formals, field_conversion_alias_scope_index_valid: scratch.source_effect_index.alias_scope_index_valid, field_conversion_alias_scope_index_hashes: scratch.source_effect_index.alias_scope_index_hashes, field_conversion_alias_scope_index_values: scratch.source_effect_index.alias_scope_index_values, field_conversion_alias_scope_index_counts: scratch.source_effect_index.alias_scope_index_counts, field_conversion_alias_index_valid: scratch.source_effect_index.alias_index_valid, field_conversion_alias_index_hashes: scratch.source_effect_index.alias_index_hashes, field_conversion_alias_index_values: scratch.source_effect_index.alias_index_values, field_conversion_alias_index_counts: scratch.source_effect_index.alias_index_counts, field_conversion_generic_params_valid: scratch.source_generic_params_valid and scratch.source_generic_param_lines.count == scratch.source_generic_param_names.count, field_conversion_generic_param_lines: scratch.source_generic_param_lines, field_conversion_generic_param_names: scratch.source_generic_param_names, field_conversion_generic_param_line: position.line, field_conversion_generic_param_index_valid: scratch.source_effect_index.generic_param_line_index_valid, field_conversion_generic_param_index_hashes: scratch.source_effect_index.generic_param_line_index_hashes, field_conversion_generic_param_index_values: scratch.source_effect_index.generic_param_line_index_values, field_conversion_generic_param_index_counts: scratch.source_effect_index.generic_param_line_index_counts, field_conversion_declared_types: scratch.source_effect_index.declared_types, field_conversion_declared_type_owners: scratch.source_effect_index.declared_type_owners, field_conversion_declared_type_scope_index_valid: scratch.source_effect_index.declared_type_scope_index_valid, field_conversion_declared_type_scope_index_hashes: scratch.source_effect_index.declared_type_scope_index_hashes, field_conversion_declared_type_scope_index_values: scratch.source_effect_index.declared_type_scope_index_values, field_conversion_declared_type_scope_index_counts: scratch.source_effect_index.declared_type_scope_index_counts, field_conversion_declared_type_index_valid: scratch.source_effect_index.declared_type_index_valid, field_conversion_declared_type_index_hashes: scratch.source_effect_index.declared_type_index_hashes, field_conversion_declared_type_index_values: scratch.source_effect_index.declared_type_index_values, field_conversion_declared_type_index_counts: scratch.source_effect_index.declared_type_index_counts}
+                    call_target.capture_callee_paths <- true
                     return false if not proof_replay_source_calls_with_target_work(parameters, body, annotations, &calls, call_target, work)
                     return false if not proof_replay_deterministic_signature_calls(signature_lines, signature_kinds, signature_contracts, position.line, parameters, annotations, &calls, call_target, work)
                     return false if call_target.unresolved_dispatch_found
-                    next_active: mutable darray[sview] = []
+                    return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or call_target.captured_callee_paths.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                    work <- work + call_target.captured_callee_paths.count
+                    next_active: mutable darray[usize] = []
+                    return false if work > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT or active.count > PROOF_REPLAY_DETERMINISTIC_CALL_SOURCE_WORK_LIMIT - work
+                    work <- work + active.count
                     next_active.extend(active)
-                    next_active.push(name)
-                    for called in calls |declarations, annotations, next_active, depth|:
-                        return false if not proof_replay_deterministic_function(declarations, declaration_index, annotations, signature_lines, signature_kinds, signature_contracts, called, scratch, next_active, work, depth + 1)
+                    return false if not proof_replay_deterministic_call_budget_charge(1, work)
+                    next_active.push(declaration_row)
+                    for called_callee in call_target.captured_callee_paths |declarations, declaration_index, aliases, annotations, signature_lines, signature_kinds, signature_contracts, next_active, work, depth, owner, scratch, call_target|:
+                        match called_callee:
+                            Ast::Expr.Ident(called_name, _):
+                                selected: (complete: bool, matches: usize, row: usize, declaration: Ast::Decl, owner: sview) = proof_replay_deterministic_bare_declaration(declaration_index, called_name, declaration_row, work)
+                                return false if not selected.complete or selected.matches != 1
+                                return false if not proof_replay_deterministic_function_declaration(declarations, declaration_index, aliases, annotations, signature_lines, signature_kinds, signature_contracts, called_name, selected.owner, selected.declaration, selected.row, scratch, next_active, work, depth + 1)
+                            Ast::Expr.Scope(_, called_name, _):
+                                called_declaration: mutable Ast::Decl = Ast::Decl.Invalid
+                                called_owner: mutable sview = ""
+                                called_row: mutable usize = 0
+                                called_matches: mutable usize = 0
+                                return false if not proof_replay_deterministic_qualified_declaration(declaration_index, called_name, called_callee, owner, aliases, called_declaration, called_owner, called_row, called_matches, work)
+                                return false if called_matches != 1
+                                return false if not proof_replay_deterministic_function_declaration(declarations, declaration_index, aliases, annotations, signature_lines, signature_kinds, signature_contracts, called_name, called_owner, called_declaration, called_row, scratch, next_active, work, depth + 1)
+                            _:
+                                return false
+                    declaration_index.entries[declaration_row].validated_deterministic_call <- true
                     return true
                 _:
                     return false
-
-        def proof_replay_deterministic_function(declarations: darray[Ast::Decl]&, declaration_index: ProofReplayDeterministicDeclarationIndex&, annotations: darray[Ast::EnumAnnotation]&, signature_lines: darray[u32]&, signature_kinds: darray[sview]&, signature_contracts: darray[Ast::Expr]&, name: sview, scratch: mutable ProofReport&, active: darray[sview]&, work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= 32 or name == "" or any current in active where current == name
-            source: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(declaration_index, name, work)
-            return false if not source.complete or source.count != 1 or source.head >= declaration_index.entries.count
-            return proof_replay_deterministic_function_declaration(declarations, declaration_index, annotations, signature_lines, signature_kinds, signature_contracts, name, declaration_index.entries[source.head].declaration, scratch, active, work, depth)
 
         def proof_replay_deterministic_call_valid(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
             work: mutable usize = 0
@@ -403,10 +441,10 @@ extend ElisaProof:
         # source snapshot. Share their one-time, metered construction across deterministic-call
         # facts in the same certificate batch; a failed build is memoized as unusable so partial
         # indexes are never retried or observed as valid.
-        def proof_replay_deterministic_call_declaration_index_ensure(declarations: darray[Ast::Decl]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+        def proof_replay_deterministic_call_declaration_index_ensure(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
             if not cache.declaration_index_attempted:
                 cache.declaration_index_attempted <- true
-                return false if not proof_replay_deterministic_declaration_index_build(declarations, &cache.declaration_index, work)
+                return false if not proof_replay_deterministic_declaration_index_build(declarations, annotations, &cache.declaration_index, work)
             return cache.declaration_index.valid
 
         def proof_replay_deterministic_call_alias_index_ensure(annotations: darray[Ast::EnumAnnotation]&, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
@@ -434,7 +472,7 @@ extend ElisaProof:
             return cache.analysis_context_valid
 
         def proof_replay_deterministic_call_valid_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
-            return false if not proof_replay_deterministic_call_declaration_index_ensure(report.source_declarations, work, cache)
+            return false if not proof_replay_deterministic_call_declaration_index_ensure(report.source_declarations, report.source_annotations, work, cache)
             return false if not proof_replay_deterministic_call_alias_index_ensure(report.source_annotations, work, cache)
             return false if not proof_replay_summary_expr_charge_with_work(trace.expression, work)
             return false if not proof_replay_deterministic_call_alias_imports_ensure(report.source_declarations, report.source_annotations, work, cache)
@@ -445,11 +483,22 @@ extend ElisaProof:
                     match arguments[0]:
                         Ast::Expr.Call(callee_expression, call_arguments, _, _):
                             callee: mutable sview = ""
-                            qualified_declaration: mutable Ast::Decl = Ast::Decl.Invalid
-                            qualified_call: mutable bool = false
+                            resolved_declaration: mutable Ast::Decl = Ast::Decl.Invalid
+                            resolved_owner: mutable sview = ""
+                            resolved_row: mutable usize = 0
+                            resolved_call: mutable bool = false
                             match callee_expression:
                                 Ast::Expr.Ident(name, _):
+                                    caller_line: u32 = proof_replay_trace_owner_source_position_line_for_trace_with_work(report, trace, work)
+                                    caller: (complete: bool, matches: usize, row: usize) = proof_replay_deterministic_candidate_at_callsite(cache.declaration_index, trace.name, caller_line, work)
+                                    return false if caller_line == 0 or not caller.complete or caller.matches != 1
+                                    selected: (complete: bool, matches: usize, row: usize, declaration: Ast::Decl, owner: sview) = proof_replay_deterministic_bare_declaration(cache.declaration_index, name, caller.row, work)
+                                    return false if not selected.complete or selected.matches != 1
                                     callee <- name
+                                    resolved_declaration <- selected.declaration
+                                    resolved_owner <- selected.owner
+                                    resolved_row <- selected.row
+                                    resolved_call <- true
                                 Ast::Expr.Scope(_, name, _):
                                     qualified_matches: mutable usize = 0
                                     caller_line: mutable u32 = 0
@@ -458,10 +507,10 @@ extend ElisaProof:
                                     caller_count: mutable usize = 0
                                     proof_replay_module_at_function_line(report.source_declarations, caller_line, "", &caller_owner, &caller_count, 0)
                                     return false if caller_line == 0 or caller_count != 1
-                                    return false if not proof_replay_deterministic_qualified_declaration(cache.declaration_index, name, callee_expression, caller_owner, cache.alias_index, qualified_declaration, qualified_matches, work)
+                                    return false if not proof_replay_deterministic_qualified_declaration(cache.declaration_index, name, callee_expression, caller_owner, cache.alias_index, resolved_declaration, resolved_owner, resolved_row, qualified_matches, work)
                                     return false if qualified_matches != 1
                                     callee <- name
-                                    qualified_call <- true
+                                    resolved_call <- true
                                 _:
                                     return false
                             for argument in call_arguments:
@@ -473,9 +522,9 @@ extend ElisaProof:
                             return false if not proof_replay_deterministic_call_source_site_with_cache(report, trace, arguments[0], work, cache)
                             return false if not proof_replay_deterministic_signature_table_valid(report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, work)
                             return false if not proof_replay_deterministic_analysis_context_ensure(report, work, cache)
-                            active: mutable darray[sview] = []
-                            return proof_replay_deterministic_function_declaration(report.source_declarations, cache.declaration_index, report.source_annotations, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, callee, qualified_declaration, &cache.analysis_scratch, active, work, 0) if qualified_call
-                            return proof_replay_deterministic_function(report.source_declarations, cache.declaration_index, report.source_annotations, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, callee, &cache.analysis_scratch, active, work, 0)
+                            active: mutable darray[usize] = []
+                            return proof_replay_deterministic_function_declaration(report.source_declarations, cache.declaration_index, cache.alias_index, report.source_annotations, report.source_signature_contract_lines, report.source_signature_contract_kinds, report.source_signature_contracts, callee, resolved_owner, resolved_declaration, resolved_row, &cache.analysis_scratch, active, work, 0) if resolved_call
+                            return false
                         _:
                             return false
                 _:

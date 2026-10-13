@@ -1,0 +1,118 @@
+# Source-faithful bare-call selection for deterministic-call replay. For duplicate names,
+# prefer the caller's scope, then its nearest lexical parent, then a unique root declaration.
+extend ElisaProof:
+    private:
+        def proof_replay_deterministic_path_prefix_equal(index: ProofReplayDeterministicDeclarationIndex&, left_row: usize, right_row: usize, prefix: usize, work: mutable usize&) -> (complete: bool, equal: bool):
+            return (false, false) if left_row >= index.entries.count or right_row >= index.entries.count
+            left: ProofReplayDeterministicDeclarationEntry = index.entries[left_row]
+            right: ProofReplayDeterministicDeclarationEntry = index.entries[right_row]
+            return (false, false) if left.declaration_path_count < prefix or right.declaration_path_count < prefix
+            return (false, false) if left.declaration_path_start > index.declaration_path.count or right.declaration_path_start > index.declaration_path.count
+            return (false, false) if prefix > index.declaration_path.count - left.declaration_path_start or prefix > index.declaration_path.count - right.declaration_path_start
+            for offset in 0..<prefix |offset, index, left, right, work|:
+                return (false, false) if not proof_replay_deterministic_call_budget_charge(1, work)
+                return (true, false) if index.declaration_path[left.declaration_path_start + offset] != index.declaration_path[right.declaration_path_start + offset]
+            return (true, true)
+
+        def proof_replay_deterministic_candidate_at_callsite(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, line: u32, work: mutable usize&) -> (complete: bool, matches: usize, row: usize):
+            result: (complete: bool, matches: usize, row: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
+            return (false, 0, index.entries.count) if not result.complete
+            return (true, 0, index.entries.count) if result.count == 0
+            row: mutable usize = result.head
+            selected: mutable usize = index.entries.count
+            matches: mutable usize = 0
+            for offset in 0..<result.count |offset, result, index, row, line, selected, matches, work|:
+                return (false, 0, index.entries.count) if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, 0, index.entries.count) if not proof_replay_deterministic_call_budget_charge(1 + sview_len(entry.name), work)
+                return (false, 0, index.entries.count) if entry.name != wanted
+                if entry.is_function and not entry.is_lemma:
+                    match entry.declaration:
+                        Ast::Decl.Func(_, _, _, _, _, _, position):
+                            if position.line == line:
+                                matches <- matches + 1
+                                selected <- row
+                        _:
+                            return (false, 0, index.entries.count)
+                row <- entry.next_index
+                return (false, 0, index.entries.count) if row > index.entries.count
+            return (false, 0, index.entries.count) if row != index.entries.count
+            return (true, matches, selected)
+
+        def proof_replay_deterministic_bare_declaration(index: ProofReplayDeterministicDeclarationIndex&, wanted: sview, caller_row: usize, work: mutable usize&) -> (complete: bool, matches: usize, row: usize, declaration: Ast::Decl, owner: sview):
+            missing: usize = index.entries.count
+            return (false, 0, missing, Ast::Decl.Invalid, "") if wanted == "" or caller_row >= index.entries.count
+            caller: ProofReplayDeterministicDeclarationEntry = index.entries[caller_row]
+            return (false, 0, missing, Ast::Decl.Invalid, "") if not caller.is_function or caller.is_lemma
+            group: (complete: bool, count: usize, head: usize) = proof_replay_deterministic_declaration_group(index, wanted, work)
+            return (false, 0, missing, Ast::Decl.Invalid, "") if not group.complete
+            return (true, 0, missing, Ast::Decl.Invalid, "") if group.count == 0
+            function_rows: mutable darray[usize] = []
+            row: mutable usize = group.head
+            for offset in 0..<group.count |offset, group, index, row, wanted, function_rows, work|:
+                return (false, 0, missing, Ast::Decl.Invalid, "") if row >= index.entries.count
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[row]
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not proof_replay_deterministic_call_budget_charge(1 + sview_len(entry.name), work)
+                return (false, 0, missing, Ast::Decl.Invalid, "") if entry.name != wanted
+                if entry.is_function and not entry.is_lemma:
+                    return (false, 0, missing, Ast::Decl.Invalid, "") if not proof_replay_deterministic_call_budget_charge(1, work)
+                    function_rows.push(row)
+                row <- entry.next_index
+                return (false, 0, missing, Ast::Decl.Invalid, "") if row > index.entries.count
+            return (false, 0, missing, Ast::Decl.Invalid, "") if row != index.entries.count
+            if function_rows.count == 1:
+                selected: usize = function_rows[0]
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[selected]
+                return (true, 1, selected, entry.declaration, entry.owner)
+
+            same_selected: mutable usize = missing
+            same_matches: mutable usize = 0
+            for candidate in function_rows |candidate, index, caller, same_selected, same_matches, work|:
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not proof_replay_deterministic_call_budget_charge(1, work)
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[candidate]
+                continue if entry.module_prefix != caller.module_prefix
+                same: (complete: bool, equal: bool) = proof_replay_deterministic_path_prefix_equal(index, candidate, caller_row, caller.module_prefix, work)
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not same.complete
+                if same.equal:
+                    same_matches <- same_matches + 1
+                    same_selected <- candidate
+            if same_matches == 1:
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[same_selected]
+                return (true, 1, same_selected, entry.declaration, entry.owner)
+            return (true, 2, missing, Ast::Decl.Invalid, "") if same_matches > 1
+
+            enclosing_selected: mutable usize = missing
+            enclosing_prefix: mutable usize = 0
+            enclosing_matches: mutable usize = 0
+            for candidate in function_rows |candidate, index, caller, enclosing_selected, enclosing_prefix, enclosing_matches, work|:
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not proof_replay_deterministic_call_budget_charge(1, work)
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[candidate]
+                continue if entry.module_prefix == 0 or entry.module_prefix >= caller.module_prefix
+                enclosing: (complete: bool, equal: bool) = proof_replay_deterministic_path_prefix_equal(index, candidate, caller_row, entry.module_prefix, work)
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not enclosing.complete
+                if enclosing.equal:
+                    if entry.module_prefix > enclosing_prefix:
+                        enclosing_prefix <- entry.module_prefix
+                        enclosing_matches <- 1
+                        enclosing_selected <- candidate
+                    elif entry.module_prefix == enclosing_prefix:
+                        enclosing_matches <- enclosing_matches + 1
+                        enclosing_selected <- candidate
+            if enclosing_matches == 1:
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[enclosing_selected]
+                return (true, 1, enclosing_selected, entry.declaration, entry.owner)
+            return (true, 2, missing, Ast::Decl.Invalid, "") if enclosing_matches > 1
+
+            root_selected: mutable usize = missing
+            root_matches: mutable usize = 0
+            for candidate in function_rows |candidate, index, root_selected, root_matches, work|:
+                return (false, 0, missing, Ast::Decl.Invalid, "") if not proof_replay_deterministic_call_budget_charge(1, work)
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[candidate]
+                if entry.module_prefix == 0:
+                    root_matches <- root_matches + 1
+                    root_selected <- candidate
+            if root_matches == 1:
+                entry: ProofReplayDeterministicDeclarationEntry = index.entries[root_selected]
+                return (true, 1, root_selected, entry.declaration, entry.owner)
+            return (true, 2, missing, Ast::Decl.Invalid, "") if root_matches > 1
+            return (true, 0, missing, Ast::Decl.Invalid, "")

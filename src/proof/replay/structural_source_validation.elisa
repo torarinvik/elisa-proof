@@ -1,20 +1,6 @@
 # Source authority for structural recursion certificates.
 extend ElisaProof:
     private:
-        def proof_replay_structural_text_compare(left: sview, right: sview, work: mutable usize&) -> bool:
-            return false if work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            work <- work + 1
-            return false if sview_len(left) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + sview_len(left)
-            return false if sview_len(right) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + sview_len(right)
-            return true
-
-        def proof_replay_structural_work_charge(work: mutable usize&, amount: usize) -> bool:
-            return false if work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or amount > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - work
-            work <- work + amount
-            return true
-
         def proof_replay_structural_source_graph_empty() -> ProofReplayStructuralSourceGraph:
             return ProofReplayStructuralSourceGraph{declarations: [], node_by_source_entry: [], direct_extern_contract_unsafe: [], reachable_extern_contract_unsafe: [], direct_unresolved_calls: [], reachable_unresolved_calls: [], component_ids: [], out_starts: [], out_counts: [], out_targets: [], reverse_starts: [], reverse_counts: [], reverse_targets: [], edge_sources: [], edge_hashes: [], edge_slots: [], call_site_scan_valid: [], call_site_raw_callers: [], call_site_raw_offsets: [], call_site_raw_names: [], call_site_raw_lines: [], call_site_raw_scoped: [], call_site_hashes: [], call_site_slots: [], call_site_callers: [], call_site_offsets: [], call_site_counts: [], call_site_names: [], call_site_lines: [], call_site_scoped: []}
 
@@ -52,8 +38,12 @@ extend ElisaProof:
                         marker: (complete: bool, found: bool) = proof_replay_structural_lemma_name(lemma_names, lemma_index, name, source_work)
                         return false if not marker.complete
                         lemma <- marker.found
-                    Ast::Decl.Extern(found, _, _, _, _, _, _, _) | Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Enum(found, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _) | Ast::Decl.Import(found, _):
+                    Ast::Decl.Extern(found, _, _, _, _, _, _, _) | Ast::Decl.Const(found, _, _, _, _) | Ast::Decl.Struct(found, _, _, _, _, _, _) | Ast::Decl.Enum(found, _, _, _, _) | Ast::Decl.Alias(found, _, _) | Ast::Decl.Law(found, _, _):
                         name <- found
+                    Ast::Decl.Import(_, _):
+                        # Imports have no selected-callee identity in this report. Their
+                        # declarations may satisfy calls absent from the retained source index.
+                        return false
                     Ast::Decl.Module(found, nested, _):
                         name <- found
                         return false if not proof_replay_structural_collect_source_entries(nested, lemma_names, lemma_index, entries, source_work, depth + 1)
@@ -72,6 +62,8 @@ extend ElisaProof:
             lemma_index: mutable ProofReplayCallNameIndex = ProofReplayCallNameIndex{}
             for annotation in annotations |lemma_names, lemma_index, source_work|:
                 return (false, index) if not proof_replay_structural_work_charge(source_work, 1)
+                import_metadata: (complete: bool, unresolved: bool) = proof_replay_structural_import_annotation_unresolved(annotation, source_work)
+                return (false, index) if not import_metadata.complete or import_metadata.unresolved
                 return (false, index) if not proof_replay_structural_text_compare(annotation.owner, "__lemma", source_work)
                 if annotation.owner == "__lemma":
                     return (false, index) if not proof_replay_call_name_index_add(&lemma_names, &lemma_index, annotation.name, source_work)
@@ -89,11 +81,12 @@ extend ElisaProof:
             for entry_index in 0..<index.entries.count |entry_index, index, capacity, source_work|:
                 entry: ProofReplayStructuralSourceEntry = index.entries[entry_index]
                 return (false, index) if not proof_replay_structural_text_compare(entry.name, entry.name, source_work)
+                return (false, index) if not proof_replay_structural_work_charge(source_work, sview_len(entry.name))
                 hash: u32 = proof_name_hash(entry.name)
                 slot: mutable usize = (hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
                 placed: mutable bool = false
-                while probes < capacity |probes, slot, hash, entry_index, index, capacity, source_work, placed|:
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, entry_index, index, capacity, source_work, placed|:
                     return (false, index) if not proof_replay_structural_work_charge(source_work, 1)
                     current: usize = index.slots[slot]
                     if current == index.entries.count:
@@ -117,10 +110,11 @@ extend ElisaProof:
             capacity: usize = index.slots.count
             return (true, 0, 0, Ast::Decl.Invalid, false) if capacity == 0 or wanted == ""
             return (false, 0, 0, Ast::Decl.Invalid, false) if index.hashes.count != capacity or index.ambiguous.count != capacity
+            return (false, 0, 0, Ast::Decl.Invalid, false) if not proof_replay_structural_work_charge(source_work, sview_len(wanted))
             hash: u32 = proof_name_hash(wanted)
             slot: mutable usize = (hash.i64() % capacity.i64()).usize()
             probes: mutable usize = 0
-            while probes < capacity |probes, slot, hash, wanted, index, capacity, source_work|:
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, wanted, index, capacity, source_work|:
                 return (false, 0, 0, Ast::Decl.Invalid, false) if not proof_replay_structural_work_charge(source_work, 1)
                 current: usize = index.slots[slot]
                 return (true, 0, 0, Ast::Decl.Invalid, false) if current == index.entries.count
@@ -134,7 +128,7 @@ extend ElisaProof:
                         return (true, 1, current, entry.declaration, entry.lemma)
                 slot <- (slot + 1) % capacity
                 probes <- probes + 1
-            return (true, 0, 0, Ast::Decl.Invalid, false)
+            return (false, 0, 0, Ast::Decl.Invalid, false)
 
         def proof_replay_structural_charge_check_preflight(parameters: darray[Ast::ParamDecl]&, body: darray[Ast::Stmt]&, source_work: mutable usize&) -> bool:
             cost: mutable usize = 1
@@ -293,9 +287,11 @@ extend ElisaProof:
                 match entry.declaration:
                     Ast::Decl.Func(_, parameters, _, body, _, _, _):
                         continue if entry.lemma
-                        owner: (complete: bool, matches: usize, entry_index: usize, declaration: Ast::Decl, lemma: bool) = proof_replay_structural_source_lookup(index, entry.name, source_work)
-                        return false if not owner.complete
-                        return false if owner.matches != 1 or owner.entry_index != entry_index
+                        # Graph nodes are keyed by their exact source-entry identity, so
+                        # unrelated overloaded declarations can remain in the graph without
+                        # making an otherwise unique recursive component unreplayable. Bare
+                        # calls to ambiguous names are marked unresolved below, while
+                        # certificate admission still requires a unique owner and callee.
                         metadata: (complete: bool, member: bool, position: usize, type_name: sview) = proof_replay_structural_metadata_with_work(enum_index, parameters, body, source_work)
                         return false if not metadata.complete
                         node_index: usize = graph.declarations.count
@@ -340,12 +336,22 @@ extend ElisaProof:
                         graph.call_site_scan_valid[source_index] <- site_scan_valid
                         return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
                         return false if site_scan_valid and not proof_replay_structural_call_site_events_append(graph, source_index, site_target, source_work)
+                        # The structural graph below resolves leaf names globally. It does
+                        # not reconstruct namespace-qualified callee identity, so a scoped
+                        # call must taint reachability instead of being connected to an
+                        # unrelated declaration with the same leaf name.
+                        graph.direct_unresolved_calls[source_index] <- true if not site_scan_valid or site_target.captured_scope_offsets.count > 0
                         contract_range: (complete: bool, start: usize, count: usize) = proof_structural_signature_contract_range_for_line(signature_lines, signature_kinds, signature_contracts, position.line, source_work)
                         return false if not contract_range.complete or contract_range.start > signature_lines.count or contract_range.count > signature_lines.count - contract_range.start
                         contract_work_start: usize = source_work
                         call_index: mutable ProofReplayCallNameIndex = ProofReplayCallNameIndex{}
                         if contract_range.count > 0:
                             return false if not proof_replay_call_name_index_build(calls, call_index, source_work)
+                        # Capture scoped calls in source contracts as well. Direct names
+                        # still enter `calls`; qualified names are rejected below because
+                        # this graph has no namespace-aware resolver.
+                        target.enabled <- true
+                        target.capture_all_call_sites <- true
                         for contract_offset in 0..<contract_range.count |contract_offset, contract_range, signature_kinds, signature_contracts, parameters, calls, call_index, scratch, source_work|:
                             return false if not proof_replay_structural_work_charge(source_work, 1)
                             signature_index: usize = contract_range.start + contract_offset
@@ -353,6 +359,7 @@ extend ElisaProof:
                             return false if not proof_replay_structural_work_charge(source_work, sview_len(kind))
                             continue if kind != "requires" and kind != "ensure"
                             return false if not proof_replay_source_expression_calls_with_target_index_work(parameters, signature_contracts[signature_index], scratch.source_annotations, &calls, call_index, target, source_work)
+                        graph.direct_unresolved_calls[source_index] <- true if target.captured_scope_offsets.count > 0
                         contract_source_work: usize = source_work - contract_work_start
                         implicit_dispatch_risk: bool = proof_structural_function_has_implicit_dispatch_risk_range(name, position.line, parameters, body, signature_lines, signature_kinds, signature_contracts, contract_range.start, contract_range.count, source_work, scratch)
                         return false if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or scratch.source_effect_index.implicit_effect_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
@@ -412,6 +419,8 @@ extend ElisaProof:
                                         # cannot be connected to a source body, so keep the call
                                         # opaque for structural-recursion validation.
                                         graph.direct_unresolved_calls[source_index] <- true
+                                Ast::Decl.Const(_, _, _, _, _):
+                                    graph.direct_unresolved_calls[source_index] <- true
                                 _:
                                     pass
                     _:
@@ -506,6 +515,7 @@ extend ElisaProof:
             return false if not proof_replay_source_generic_param_line_index_build(&cache.scratch, source_work)
             return false if not proof_source_callable_extern_contract_index_build(cache.scratch.source_declarations, cache.scratch.source_extern_parameters, cache.scratch.source_signature_contract_lines, cache.scratch.source_signature_contract_kinds, cache.scratch.source_signature_contracts, &cache.scratch, source_work)
             return false if not proof_replay_structural_source_graph_build(cache.source_index, cache.scratch.source_signature_contract_lines, cache.scratch.source_signature_contract_kinds, cache.scratch.source_signature_contracts, cache.enum_index, &cache.scratch, source_work, &cache.graph)
+            return false if not proof_structural_name_index_build(&cache.scratch, &source_work)
             return false if not proof_replay_structural_graph_cache_indexes_build(&cache.graph, source_work)
             return false if cache.scratch.structural.component_ids.count != cache.graph.component_ids.count
             for node_index in 0..<cache.graph.component_ids.count |node_index, cache, source_work|:

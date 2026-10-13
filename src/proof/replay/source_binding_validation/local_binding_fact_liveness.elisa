@@ -1,0 +1,130 @@
+# Source-attempt and certificate-context liveness for local-binding facts.
+extend ElisaProof:
+    private:
+        def proof_replay_local_binding_fact_live(report: mutable ProofReport&, trace: ProofFactTrace) -> bool:
+            work: mutable usize = 0
+            return proof_replay_local_binding_fact_live_with_work(report, trace, &work)
+
+        def proof_replay_local_binding_fact_live_with_work(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&) -> bool:
+            cache: mutable ProofReplayDeterministicCallReplayCache = ProofReplayDeterministicCallReplayCache{}
+            return proof_replay_local_binding_fact_live_with_cache(report, trace, source_work, &cache)
+
+        def proof_replay_local_binding_fact_live_with_cache(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            owner_line: mutable u32 = report.replay_owner_line
+            owner_line <- 0 if owner_line == 4294967295
+            source_start: usize = source_work
+            return false if not proof_replay_summary_owner_source_preflight(report, trace.name, owner_line, source_work)
+            repeated_source_work: usize = source_work - source_start
+            repeat_count: mutable usize = 32
+            return false if report.certificates.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.certificates.count
+            return false if report.goal_attempts.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.goal_attempts.count
+            return false if report.source_annotations.count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+            source_work <- source_work + report.source_annotations.count
+            if report.trace_consumer_certificate_index != 0:
+                return false if report.trace_consumer_certificate_index > report.certificates.count
+                certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+                return false if certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + certificate.facts_count
+                return false if repeat_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - repeat_count
+                repeat_count <- repeat_count + certificate.facts_count
+                return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+                for offset in 0..<certificate.facts_count |offset, certificate, source_work|:
+                    return false if not proof_replay_summary_expr_charge_with_work(report.certificate_facts[certificate.facts_start + offset], source_work)
+            elif report.trace_consumer_attempt_index != 0:
+                return false if report.trace_consumer_attempt_index > report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[report.trace_consumer_attempt_index - 1]
+                return false if attempt.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work
+                source_work <- source_work + attempt.facts_count
+                return false if repeat_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or attempt.facts_count + 1 > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - repeat_count
+                repeat_count <- repeat_count + attempt.facts_count + 1
+                return false if attempt.facts_start > report.certificate_facts.count or attempt.facts_count > report.certificate_facts.count - attempt.facts_start
+                for offset in 0..<attempt.facts_count |offset, attempt, report, source_work|:
+                    return false if not proof_replay_summary_expr_charge_with_work(report.certificate_facts[attempt.facts_start + offset], source_work)
+                return false if not proof_replay_summary_expr_charge_with_work(attempt.goal, source_work)
+            return false if not proof_replay_local_binding_trace_work_charge(report, trace.name, source_work, repeat_count)
+            return false if repeated_source_work > (PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work) / repeat_count
+            source_work <- source_work + repeated_source_work * repeat_count
+            return proof_replay_local_binding_fact_live_unmetered(report, trace, source_work, cache)
+
+        def proof_replay_local_binding_fact_live_unmetered(report: mutable ProofReport&, trace: ProofFactTrace, source_work: mutable usize&, cache: mutable ProofReplayDeterministicCallReplayCache&) -> bool:
+            if report.trace_consumer_certificate_index == 0:
+                return false if report.trace_consumer_attempt_index == 0 or report.trace_consumer_attempt_index > report.goal_attempts.count
+                attempt: ProofGoalAttempt = report.goal_attempts[report.trace_consumer_attempt_index - 1]
+                return false if attempt.proven or attempt.has_certificate or attempt.rule != "goal"
+                return false if attempt.name != trace.name or attempt.line != report.trace_owner_line
+                # Without a certificate, accept only immutable bindings whose exact source
+                # declaration and liveness at this admitted attempt goal can be reconstructed.
+                # Loop, mutable, call-result, and other certificate-context witnesses remain
+                # fail-closed until they have an attempt-specific source rule.
+                return proof_replay_local_binding_immutable_declaration_source_with_work(report, trace, source_work)
+            return false if report.trace_consumer_certificate_index > report.certificates.count
+            certificate: ProofGoalCertificate = report.certificates[report.trace_consumer_certificate_index - 1]
+            return false if certificate.name != trace.name or certificate.line != report.trace_owner_line
+            return true if proof_replay_call_result_binding_valid_with_cache(report, trace, source_work, cache)
+            return certificate.line == trace.line if proof_replay_literal_call_argument_binding_valid_with_work(report, trace, source_work)
+            return true if proof_replay_entry_count_binding_with_work(report, trace, source_work)
+            return true if proof_replay_local_binding_immutable_declaration_source_with_work(report, trace, source_work)
+            return true if proof_replay_value_block_capture_write(report, trace, source_work)
+            return true if proof_replay_local_binding_widening_cast_declaration_source(report, trace, source_work)
+            return proof_replay_local_binding_result_symbol_source_with_work(report, trace, source_work) if proof_replay_is_result_symbol_binding(trace)
+            # A typed returned constant is consumed by its own return's certificates.
+            return certificate.line == trace.line if proof_replay_local_binding_typed_return_source_with_work(report, trace, source_work)
+            # A literal-argument definition is consumed by its own call's certificates.
+            return certificate.line == trace.line if proof_replay_local_binding_literal_call_argument_source_with_cache(report, trace, source_work, cache)
+            return true if proof_replay_local_binding_typed_return_constant_source_with_work(report, trace, source_work)
+            return true if proof_replay_captured_loop_entry_source(report, trace)
+            return true if proof_replay_mutable_for_entry_source(report, trace)
+            return true if proof_replay_for_identity_update_source(report, trace)
+            return true if proof_replay_for_alias_update_source(report, trace)
+            return true if proof_replay_field_copy_next_write_source(report, trace)
+            return true if proof_replay_for_decimal_source(report, trace)
+            return true if proof_replay_search_break_source(report, trace)
+            return certificate.line == trace.line if proof_replay_local_binding_literal_call_site_source_with_work(report, trace, source_work)
+            preservation_context: mutable bool = false
+            source_guard_context: mutable bool = false
+            source_invariant_context: mutable bool = false
+            range_context: mutable bool = false
+            return false if certificate.facts_start > report.certificate_facts.count or certificate.facts_count > report.certificate_facts.count - certificate.facts_start
+            return false if certificate.facts_start > report.traces.origin_indices.count or certificate.facts_count > report.traces.origin_indices.count - certificate.facts_start
+            if certificate.facts_count > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - source_work:
+                return proof_replay_mutable_local_work_exhaust(source_work)
+            source_work <- source_work + certificate.facts_count
+            selected_loop_valid: mutable bool = false
+            selected_loop_line: mutable u32 = 0
+            selected_condition: mutable Ast::Expr = Ast::Expr.Invalid
+            selected_invariants: mutable darray[Ast::Expr] = []
+            owner_body: mutable darray[Ast::Stmt] = []
+            return false if not proof_replay_source_owner_body_with_work(report, trace.name, report.replay_owner_line, &owner_body, &source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+            consumer_position: mutable Ast::Pos = Ast::Pos{line: 0, column: 0, offset: 0, end_line: 0, end_column: 0, end_offset: 0}
+            if proof_replay_mutable_local_consumer_position_with_work(report, trace, owner_body, &consumer_position, source_work):
+                selected_loop_valid <- proof_replay_local_binding_context_loop_select(owner_body, consumer_position, report, &selected_loop_line, &selected_condition, &selected_invariants, source_work)
+            for index in 0..<certificate.facts_count |index, certificate, report, trace, source_guard_context, source_invariant_context, range_context, selected_loop_valid, selected_condition, selected_invariants, source_work|:
+                trace_index: usize = report.traces.origin_indices[certificate.facts_start + index]
+                continue if trace_index >= report.traces.records.count
+                candidate: ProofFactTrace = report.traces.records[trace_index]
+                return false if not proof_replay_mutable_local_text_compare_work_charge(candidate.name, trace.name, source_work)
+                if candidate.name == trace.name:
+                    if candidate.kind == "loop-condition" and selected_loop_valid and proof_replay_local_binding_context_fact_matches_selected_loop(report, candidate, selected_loop_line, selected_condition, selected_invariants, source_work):
+                        source_guard_context <- true
+                    if candidate.kind == "loop-invariant" and selected_loop_valid and proof_replay_local_binding_context_fact_matches_selected_loop(report, candidate, selected_loop_line, selected_condition, selected_invariants, source_work):
+                        source_invariant_context <- true
+                    range_context <- true if candidate.kind == "loop-range" and candidate.line == report.trace_owner_line
+            preservation_context <- source_guard_context and source_invariant_context
+            # A `for` iteration binds its binder by a loop-range fact at the header. A pre-loop
+            # binding may be read at the header only by a positively identified entry check
+            # (loop_entry_certificates.elisa), never inside or after the loop.
+            iteration_context: bool = preservation_context or range_context
+            loop_entry: bool = proof_replay_loop_entry_certificate_with_work(report, trace, source_work)
+            return true if proof_replay_local_binding_mutable_local_source_with_work(report, trace, loop_entry, source_work)
+            return true if proof_replay_local_binding_entry_count_source_with_work(report, trace, loop_entry, source_work)
+            return true if proof_replay_local_binding_self_update_source_with_work(report, trace, source_work)
+            return true if proof_replay_local_binding_loop_self_update_source_with_work(report, trace, iteration_context, source_work)
+            match trace.expression:
+                Ast::Expr.Binary(Ast::Expr.Ident(left_name, _), TokenKind.EqEq, right, _):
+                    if proof_internal_name_is_rebind(left_name):
+                        return preservation_context and proof_replay_local_binding_loop_source(report, trace, proof_replay_local_binding_update_target(right), right, report.trace_owner_line, true)
+                    return loop_entry and proof_replay_local_binding_loop_source(report, trace, left_name, right, report.trace_owner_line, false)
+                _:
+                    return false
