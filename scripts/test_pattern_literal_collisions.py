@@ -1,4 +1,4 @@
-"""Reject pattern collisions between strings and fixed-width integer literals."""
+"""Reject pattern facts that collide across distinct source literal spellings."""
 import json
 import os
 from pathlib import Path
@@ -7,9 +7,12 @@ import subprocess
 import sys
 import time
 import tempfile
+from qualified_test_binary import proof_test_binary
+from pattern_literal_fixed_width_cases import FIXED_WIDTH_PATTERN_COLLISIONS
+from pattern_literal_collision_report_checks import check_pattern_collision_reports
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = os.environ.get('ELISA_PROOF_BIN', str(ROOT/'build/elisa-proof'))
+BINARY = proof_test_binary(ROOT)
 PROCESS_TIMEOUT_SECONDS = 120
 PROCESS_OUTPUT_LIMIT = 8 * 1024 * 1024
 
@@ -84,11 +87,22 @@ verify_process_limits()
 
 # Pattern ASTs erase source literal kinds, while the compiler lowers these patterns according to
 # the scrutinee type. Each bad-return arm is reachable after compiler lowering and violates the
-# postcondition. The u8 witnesses exercise well-typed upper-bound literal/range cases; the u64
-# witness exercises the signed host-representation boundary.
+# postcondition. The fixed-width witnesses cover signed and unsigned endpoints across widths,
+# high-bit and range cases, and values beyond the signed host boundary.
 PATTERN_COLLISIONS = {
     'sview_01_vs_1_collision': '''
 def sview_01_vs_1_collision(value: sview) -> i64:
+    ensure result > 0
+    match value:
+        "01":
+            return 1
+        "1":
+            return 0
+        _:
+            return 1
+''',
+    'cstr_01_vs_1_collision': '''
+def cstr_01_vs_1_collision(value: cstr) -> i64:
     ensure result > 0
     match value:
         "01":
@@ -105,6 +119,28 @@ def sview_1_vs_1_2_collision(value: sview) -> i64:
         "1":
             return 1
         "1.2":
+            return 0
+        _:
+            return 1
+''',
+    'sview_hex_string_vs_integer_collision': '''
+def sview_hex_string_vs_integer_collision(value: sview) -> i64:
+    ensure result > 0
+    match value:
+        "0x1":
+            return 1
+        "1":
+            return 0
+        _:
+            return 1
+''',
+    'sview_exponent_string_vs_decimal_collision': '''
+def sview_exponent_string_vs_decimal_collision(value: sview) -> i64:
+    ensure result > 0
+    match value:
+        "1e0":
+            return 1
+        "1.0":
             return 0
         _:
             return 1
@@ -154,11 +190,49 @@ def cstr_or_boolean_spelling_collision(value: cstr) -> i64:
         _:
             return 0
 ''',
+    'char_nul_vs_digit_zero_collision': '''
+def char_nul_vs_digit_zero_collision(value: char) -> i64:
+    ensure result > 0
+    match value:
+        '\\0':
+            return 1
+        '0':
+            return 0
+        _:
+            return 1
+''',
     'u8_literal_boundary_collision': '''
 def u8_literal_boundary_collision(value: u8) -> i64:
     ensure result > 0
     match value:
         255:
+            return 0
+        _:
+            return 1
+''',
+    'u8_high_bit_literal_collision': '''
+def u8_high_bit_literal_collision(value: u8) -> i64:
+    ensure result > 0
+    match value:
+        128:
+            return 0
+        _:
+            return 1
+''',
+    'u16_high_bit_literal_collision': '''
+def u16_high_bit_literal_collision(value: u16) -> i64:
+    ensure result > 0
+    match value:
+        32768:
+            return 0
+        _:
+            return 1
+''',
+    'u32_high_bit_literal_collision': '''
+def u32_high_bit_literal_collision(value: u32) -> i64:
+    ensure result > 0
+    match value:
+        2147483648:
             return 0
         _:
             return 1
@@ -172,6 +246,24 @@ def u8_range_boundary_collision(value: u8) -> i64:
         _:
             return 1
 ''',
+    'i8_signed_lower_boundary_collision': '''
+def i8_signed_lower_boundary_collision(value: i8) -> i64:
+    ensure result > 0
+    match value:
+        -128:
+            return 0
+        _:
+            return 1
+''',
+    'i8_signed_upper_boundary_collision': '''
+def i8_signed_upper_boundary_collision(value: i8) -> i64:
+    ensure result > 0
+    match value:
+        127:
+            return 0
+        _:
+            return 1
+''',
     'u64_high_bit_literal_collision': '''
 def u64_high_bit_literal_collision(value: u64) -> i64:
     ensure result > 0
@@ -181,7 +273,17 @@ def u64_high_bit_literal_collision(value: u64) -> i64:
         _:
             return 1
 ''',
+    'u64_max_literal_collision': '''
+def u64_max_literal_collision(value: u64) -> i64:
+    ensure result > 0
+    match value:
+        18446744073709551615u64:
+            return 0
+        _:
+            return 1
+''',
 }
+PATTERN_COLLISIONS.update(FIXED_WIDTH_PATTERN_COLLISIONS)
 
 # A distinct identifier spelling is inside the checker/replay pair's deliberately narrow string
 # literal subset. The branch assertion depends on the pattern fact, so blanket string-pattern
@@ -210,6 +312,50 @@ def cstr_identifier_pattern_control(value: cstr) -> i64:
             return 0
 '''
 
+PUNCTUATED_STRING_PATTERN_CONTROLS = '''
+def sview_punctuated_string_pattern_control(value: sview) -> i64:
+    ensure result == 0
+    match value:
+        "ready-now?":
+            assert value == "ready-now?" by:
+                assert value == "ready-now?"
+            return 0
+        _:
+            return 0
+
+def cstr_punctuated_string_pattern_control(value: cstr) -> i64:
+    ensure result == 0
+    match value:
+        "ready.now/2":
+            assert value == "ready.now/2" by:
+                assert value == "ready.now/2"
+            return 0
+        _:
+            return 0
+'''
+
+EMPTY_STRING_PATTERN_CONTROLS = '''
+def sview_empty_string_pattern_control(value: sview) -> i64:
+    ensure result == 0
+    match value:
+        "":
+            assert value == "" by:
+                assert value == ""
+            return 0
+        _:
+            return 0
+
+def cstr_empty_string_pattern_control(value: cstr) -> i64:
+    ensure result == 0
+    match value:
+        "":
+            assert value == "" by:
+                assert value == ""
+            return 0
+        _:
+            return 0
+'''
+
 CHAR_PATTERN_CONTROL = '''
 def char_pattern_identifier_control(value: char) -> i64:
     ensure result == 0
@@ -230,6 +376,48 @@ def char_pattern_digit_control(value: char) -> i64:
             return 0
         _:
             return 0
+
+def char_pattern_newline_control(value: char) -> i64:
+    ensure result == 0
+    match value:
+        '\\n':
+            assert value == '\\n' by:
+                assert value == '\\n'
+            return 0
+        _:
+            return 0
+
+def char_pattern_null_control(value: char) -> i64:
+    ensure result == 0
+    match value:
+        '\\0':
+            assert value == '\\0' by:
+                assert value == '\\0'
+            return 0
+        _:
+            return 0
+'''
+
+# The theorem catalog contains lemmas, not ordinary function summaries. Keep one collision
+# witness in that declaration class so the public theorem-output route cannot pass vacuously.
+THEOREM_PATTERN_COLLISION_NAME = 'theorem_sview_01_vs_1_collision'
+THEOREM_PATTERN_COLLISION = '''
+lemma theorem_sview_01_vs_1_collision(value: sview):
+    match value:
+        "01":
+            pass
+        "1":
+            assert false by:
+                pass
+'''
+
+THEOREM_FIXED_WIDTH_PATTERN_COLLISION_NAME = 'theorem_u64_high_bit_pattern_collision'
+THEOREM_FIXED_WIDTH_PATTERN_COLLISION = '''
+lemma theorem_u64_high_bit_pattern_collision(value: u64):
+    match value:
+        9223372036854775808u64:
+            assert false by:
+                pass
 '''
 
 # Generic binders can reuse lowercase names such as `sview`. The spelling alone must not
@@ -290,10 +478,10 @@ def cstr_identifier_or_pattern_control(value: cstr) -> i64:
 
 with tempfile.TemporaryDirectory() as folder:
     path = Path(folder) / 'pattern-collisions.elisa'
-    path.write_text('\n'.join(PATTERN_COLLISIONS.values()))
+    path.write_text('\n'.join(PATTERN_COLLISIONS.values()) + '\n' + THEOREM_PATTERN_COLLISION + '\n' + THEOREM_FIXED_WIDTH_PATTERN_COLLISION)
 
     control_path = Path(folder) / 'string-pattern-control.elisa'
-    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL)
+    control_path.write_text(STRING_PATTERN_CONTROL + '\n' + CSTR_PATTERN_CONTROL + '\n' + PUNCTUATED_STRING_PATTERN_CONTROLS + '\n' + EMPTY_STRING_PATTERN_CONTROLS + '\n' + CHAR_PATTERN_CONTROL + '\n' + GROUPED_STRING_PATTERN_CONTROL)
     control = run([BINARY, '--json', str(control_path)], 'pattern positive controls')
     control_report = json.loads(control.stdout)
     assert control.returncode == 0 and control_report['status'] == 'proved', control_report
@@ -302,14 +490,22 @@ with tempfile.TemporaryDirectory() as folder:
     assert control_report['replay']['gaps'] == 0, control_report['replay']
     assert control_report['replay']['certificates'] == control_report['replay']['replayed'], control_report['replay']
     assert not control_report['trust']['trusted_assumptions'], control_report['trust']
-    for name in ('sview_identifier_pattern_control', 'cstr_identifier_pattern_control'):
+    expected_string_controls = {
+        'sview_identifier_pattern_control': 'ready',
+        'cstr_identifier_pattern_control': 'ready',
+        'sview_punctuated_string_pattern_control': 'ready-now?',
+        'cstr_punctuated_string_pattern_control': 'ready.now/2',
+        'sview_empty_string_pattern_control': '',
+        'cstr_empty_string_pattern_control': '',
+    }
+    for name, expected_text in expected_string_controls.items():
         pattern_goals = [goal for goal in control_report['goals']
                          if goal['name'] == name
                          and goal['goal'].get('kind') == 'binary'
                          and goal['goal'].get('operator') == '=='
                          and goal['goal'].get('left', {}).get('kind') == 'ident'
                          and goal['goal'].get('left', {}).get('name') == 'value'
-                         and goal['goal'].get('right') == {'kind': 'string', 'text': 'ready'}]
+                         and goal['goal'].get('right') == {'kind': 'string', 'text': expected_text}]
         assert len(pattern_goals) == 1 and pattern_goals[0]['proven'] \
             and pattern_goals[0]['replay_status'] == 'replayed', (name, pattern_goals, control_report['goals'])
 
@@ -320,7 +516,8 @@ with tempfile.TemporaryDirectory() as folder:
         assert any(row['name'] == name and row['proved']
                    for row in focused_control_report['functions']), (name, focused_control_report['functions'])
 
-    for name in ('char_pattern_identifier_control', 'char_pattern_digit_control'):
+    for name in ('char_pattern_identifier_control', 'char_pattern_digit_control',
+                 'char_pattern_newline_control', 'char_pattern_null_control'):
         pattern_goals = [goal for goal in control_report['goals']
                          if goal['name'] == name
                          and goal['goal'].get('kind') == 'binary'
@@ -373,60 +570,8 @@ with tempfile.TemporaryDirectory() as folder:
         assert len(generic_pattern_goals) == 1 and not generic_pattern_goals[0]['proven'], (
             name, generic_pattern_goals, generic_report['goals'])
 
-    report_run = run([BINARY, '--json', str(path)], 'pattern collision report')
-    report = json.loads(report_run.stdout)
-    assert report_run.returncode == 1 and report['status'] == 'failed', (
-        report_run.returncode, report.get('status'), report.get('findings'))
-    assert report['source']['admissible'] is True, report['source']
-    assert report['summary']['semantic_errors'] == 0, report['semantic_diagnostics']
-    assert report['replay']['gaps'] == 0, report['replay']
-    assert report['replay']['certificates'] == report['replay']['replayed'], report['replay']
-    assert not report['trust']['trusted_assumptions'], report['trust']
-    for name in PATTERN_COLLISIONS:
-        function = next((row for row in report['functions'] if row['name'] == name), None)
-        assert function is not None and not function['proved'], (name, report['functions'])
-        assert any(goal['name'] == name and not goal['proven'] for goal in report['goals']), (
-            name, report['goals'])
-        assert any(finding['name'] == name and finding['kind'] == 'ensure-unproven'
-                   for finding in report['findings']), (name, report['findings'])
+    check_pattern_collision_reports(run, BINARY, path, PATTERN_COLLISIONS,
+                                    (THEOREM_PATTERN_COLLISION_NAME,
+                                     THEOREM_FIXED_WIDTH_PATTERN_COLLISION_NAME))
 
-    # A collision must stay unproved through theorem discovery and package export too. These
-    # routes consume the same checked-view authority but serialize different projections of it.
-    theorem_run = run([BINARY, '--theorems', str(path)], 'pattern collision theorem output')
-    theorem_report = json.loads(theorem_run.stdout)
-    assert theorem_report['source']['admissible'] is True, theorem_report['source']
-    assert theorem_report['source']['goal_admissions_complete'] is True, theorem_report['source']
-    for theorem in theorem_report['theorems']:
-        if theorem['name'] in PATTERN_COLLISIONS:
-            assert theorem['verified'] is False, theorem
-            assert not any(goal['proven'] for goal in theorem['proof_goals']), theorem
-
-    package_run = run([BINARY, '--package', str(path)], 'pattern collision package output')
-    package_report = json.loads(package_run.stdout)
-    assert package_report['source']['admissible'] is True, package_report['source']
-    assert package_report['source']['goal_status_snapshot_complete'] is True, package_report['source']
-    assert not any(theorem['name'] in PATTERN_COLLISIONS
-                   for theorem in package_report['theorems']), package_report['theorems']
-
-    for name in PATTERN_COLLISIONS:
-        focused = run([BINARY, '--function-json', name, str(path)],
-                      f'focused pattern collision {name}')
-        focused_report = json.loads(focused.stdout)
-        assert focused.returncode == 1 and focused_report['status'] == 'failed', (
-            name, focused.returncode, focused_report.get('status'))
-        assert focused_report['source']['admissible'] is True, (name, focused_report['source'])
-        assert focused_report['summary']['semantic_errors'] == 0, (
-            name, focused_report.get('semantic_diagnostics'))
-        assert focused_report['replay']['gaps'] == 0, (name, focused_report['replay'])
-        assert focused_report['replay']['certificates'] == focused_report['replay']['replayed'], (
-            name, focused_report['replay'])
-        assert not focused_report['trust']['trusted_assumptions'], (
-            name, focused_report['trust'])
-        declaration = next((row for row in focused_report['declaration_details']
-                            if row.get('kind') == 'function' and row.get('name') == name), None)
-        assert declaration is not None and not declaration['verified'], (
-            name, focused_report['declaration_details'])
-        assert any(goal['name'] == name and not goal['proven']
-                   for goal in focused_report['goals']), (name, focused_report['goals'])
-
-print('pattern literals: sview/cstr/char controls prove; generic type-name shadow, ambiguous strings and fixed-width integer witnesses fail closed')
+print('pattern literals: string and char controls prove; string, char-code, and fixed-width collisions fail closed')
