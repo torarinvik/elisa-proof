@@ -63,6 +63,35 @@ assert any(row.get("name") == "rejected_extern_custom_cast_identity"
            and row.get("rule") == "goal" and not row.get("proven")
            for row in external["goals"]), external["goals"]
 
+# The pinned backend's cast-hook lookup scans the shared FnTable without filtering owner paths.
+# A matching hook in a sibling module can therefore override the builtin scalar cast too.
+sibling = check(ROOT / "test/repro/audit_sibling_module_custom_cast_facts.elisa")
+assert sibling["status"] != "proved", sibling
+assert sibling["replay"]["gaps"] == 0, sibling["replay"]
+sibling_function = next(item for item in sibling["declaration_details"]
+                        if item.get("name") == "rejected_sibling_custom_cast_identity")
+assert not sibling_function["verified"], sibling_function
+assert any(row.get("name") == "rejected_sibling_custom_cast_identity"
+           and row.get("rule") == "goal" and not row.get("proven")
+           for row in sibling["goals"]), sibling["goals"]
+
+# Builtin cast syntax wins before ordinary UFCS lookup, even when a function has the target
+# selector's spelling. This should preserve proof coverage while custom __cast__ hooks stay opaque.
+selector = check(ROOT / "test/repro/audit_numeric_cast_selector_name.elisa")
+assert selector["status"] == "proved", selector
+assert selector["replay"]["gaps"] == 0, selector["replay"]
+selector_function = next(item for item in selector["declaration_details"]
+                         if item.get("name") == "ordinary_i64_selector_does_not_shadow_cast")
+assert selector_function["verified"], selector_function
+extern_selector_function = next(item for item in selector["declaration_details"]
+                                if item.get("name") == "extern_u64_selector_does_not_shadow_cast")
+assert extern_selector_function["verified"], extern_selector_function
+for name in ("ordinary_i64_selector_does_not_shadow_cast",
+             "extern_u64_selector_does_not_shadow_cast"):
+    assert any(row.get("name") == name and row.get("rule") == "goal"
+               and row.get("proven") and row.get("replayed")
+               for row in selector["certificates"]), (name, selector["certificates"])
+
 # Builtin control: with no custom hook, normal widening facts still prove and replay.
 builtin = check(ROOT / "examples/widening_cast.elisa")
 assert builtin["status"] in ("proved", "proved_with_replay_gaps"), builtin["status"]
