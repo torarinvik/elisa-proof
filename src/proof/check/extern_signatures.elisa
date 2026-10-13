@@ -63,14 +63,38 @@ extend ElisaProof:
                         contracts_valid <- false
             signatures.push(ProofExternSignature{name: name, line: position.line, callable: callable, variadic: variadic, return_type_name: return_type_name, return_metadata_valid: result.valid, return_reference: result.reference, return_optional: result.optional, return_mutable: result.mutable_return, declared_arity: count, parameters_valid: valid, parameters: parameters, decorators_valid: decorators_valid, decorators: decorators, decorator_arguments: arguments, contracts_valid: contracts_valid, requires_clauses: requirements, ensures_clauses: postconditions, effects_complete: complete, effects: effects})
 
-        # Uniqueness among extern declarations only. Consumers must additionally
-        # reject collisions with executable/erased declarations and lexical binders.
-        # A missing or ambiguous signature never becomes an empty-row guarantee.
-        def proof_extern_signature_index(signatures: darray[ProofExternSignature]&, name: sview) -> usize:
-            selected: mutable usize = signatures.count
-            return selected if name == ""
-            for index in 0..<signatures.count |index, signatures, name, selected|:
-                if signatures[index].name == name:
-                    return signatures.count if selected < signatures.count
-                    selected <- index
-            return selected
+        # Uniqueness among extern declarations only. Consumers must additionally reject
+        # collisions with executable/erased declarations and lexical binders. Use the already
+        # built bounded name index instead of rescanning every extern for each call site.
+        def proof_extern_signature_index_with_work(functions: ProofFunctionTable&, name: sview, source_work: mutable usize&) -> (complete: bool, index: usize):
+            count: usize = functions.externs.extern_signatures.count
+            return (true, count) if name == "" or count == 0
+            capacity: usize = functions.externs.extern_index_values.count
+            return (false, count) if capacity != functions.externs.extern_index_hashes.count or capacity != functions.externs.extern_index_ambiguous.count or capacity != functions.externs.extern_index_callable.count
+            return (false, count) if capacity == 0 or capacity != proof_name_index_capacity(count)
+            return (false, count) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return (false, count) if not proof_report_source_work_charge(1 + sview_len(name), source_work)
+            wanted_hash: u32 = proof_name_hash(name)
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, functions, capacity, count, source_work|:
+                return (false, count) if not proof_report_source_work_charge(1, source_work)
+                current: usize = functions.externs.extern_index_values[slot]
+                return (true, count) if current == count
+                return (false, count) if current > count
+                if functions.externs.extern_index_hashes[slot] == wanted_hash:
+                    candidate: sview = functions.externs.extern_signatures[current].name
+                    return (false, count) if not proof_report_source_work_charge(sview_len(candidate), source_work)
+                    if candidate == name:
+                        return (true, count) if functions.externs.extern_index_ambiguous[slot]
+                        return (true, current)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, count)
+
+        def proof_extern_signature_index_for_report(functions: ProofFunctionTable&, name: sview, report: mutable ProofReport&) -> usize:
+            lookup: (complete: bool, index: usize) = proof_extern_signature_index_with_work(functions, name, &report.source_effect_index.implicit_effect_work)
+            if not lookup.complete:
+                report.source_effect_index.implicit_effect_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                return functions.externs.extern_signatures.count
+            return lookup.index

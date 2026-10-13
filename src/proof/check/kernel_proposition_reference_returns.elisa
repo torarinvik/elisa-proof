@@ -1,0 +1,81 @@
+# Reference-return projection guard for source-neutral proposition typing.
+extend ElisaProof:
+    private:
+        # Reference returns have pointer equality and dereference semantics that the
+        # proposition sort model does not represent. Resolve aliases before deciding whether
+        # the signature can be projected; unknown alias metadata must also remain incomplete.
+        def proof_source_kernel_type_is_reference(type_expression: Ast::Expr, index: ProofSourceKernelTypeIndex, source_work: mutable usize&, depth: usize) -> (known: bool, is_reference: bool) can[Memory.Allocate, Abort.Panic]:
+            return (false, false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_source_kernel_charge_expr_span(type_expression, source_work)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_source_kernel_type_is_reference(inner, index, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    if operator == TokenKind.Ampersand or operator == TokenKind.Lmut:
+                        pointee: (known: bool, is_reference: bool) = proof_source_kernel_type_is_reference(inner, index, source_work, depth + 1)
+                        return (false, false) if not pointee.known or pointee.is_reference
+                        return (true, true)
+                    if operator == TokenKind.Question:
+                        # A nullable direct reference is modeled separately by type_sort,
+                        # but a nested or alias-uncertain reference must not be hidden by
+                        # this wrapper. In particular, reject `T&&?` rather than projecting
+                        # it as the same pointer sort as `T&?`.
+                        nullable_inner: (known: bool, is_reference: bool) = proof_source_kernel_type_is_reference(inner, index, source_work, depth + 1)
+                        return (false, false) if not nullable_inner.known
+                        return (true, false)
+                    if operator == TokenKind.Mutable or operator == TokenKind.Static or operator == TokenKind.Heap or operator == TokenKind.Stack or operator == TokenKind.Tail:
+                        return proof_source_kernel_type_is_reference(inner, index, source_work, depth + 1)
+                    return (true, false)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    name: sview = proof_source_type_spelling(type_expression, 0)
+                    return (false, false) if name == ""
+                    selected: (count: usize, entry: usize) = proof_source_kernel_type_entry_for_type(index, type_expression, name, source_work)
+                    return (false, false) if selected.count > 1
+                    return (true, false) if selected.count == 0
+                    return (false, false) if selected.entry >= index.entries.count
+                    return (true, false) if not index.entries[selected.entry].is_alias
+                    alias: ProofSourceKernelTypeEntry = index.entries[selected.entry]
+                    return (false, false) if not proof_source_kernel_charge_work(index.scope_path.count + alias.owner_path.count, source_work)
+                    saved_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path, index.entries)
+                    index.scope_path.clear()
+                    index.scope_path.extend(alias.owner_path)
+                    result: (known: bool, is_reference: bool) = proof_source_kernel_type_is_reference(alias.target, index, source_work, depth + 1)
+                    index.scope_path.clear()
+                    index.scope_path.extend(saved_scope)
+                    return result
+                Ast::Expr.Absent | Ast::Expr.Invalid:
+                    return (false, false)
+                _:
+                    return (true, false)
+
+        # Preserve the backend's raw-pointer arithmetic class when a reference type carries
+        # the Heap marker, including aliases. Other reference qualifiers keep value arithmetic.
+        def proof_source_kernel_type_is_heap_reference(type_expression: Ast::Expr, index: ProofSourceKernelTypeIndex, source_work: mutable usize&, depth: usize) -> (known: bool, is_heap: bool) can[Memory.Allocate, Abort.Panic]:
+            return (false, false) if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or not proof_source_kernel_charge_expr_span(type_expression, source_work)
+            match type_expression:
+                Ast::Expr.Paren(inner, _) | Ast::Expr.Refinement(inner, _, _):
+                    return proof_source_kernel_type_is_heap_reference(inner, index, source_work, depth + 1)
+                Ast::Expr.Unary(operator, inner, _):
+                    nested: (known: bool, is_heap: bool) = proof_source_kernel_type_is_heap_reference(inner, index, source_work, depth + 1)
+                    return (false, false) if not nested.known
+                    return (true, nested.is_heap or operator == TokenKind.Heap)
+                Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                    name: sview = proof_source_type_spelling(type_expression, 0)
+                    return (false, false) if name == ""
+                    selected: (count: usize, entry: usize) = proof_source_kernel_type_entry_for_type(index, type_expression, name, source_work)
+                    return (false, false) if selected.count > 1
+                    return (true, false) if selected.count == 0
+                    return (false, false) if selected.entry >= index.entries.count
+                    return (true, false) if not index.entries[selected.entry].is_alias
+                    alias: ProofSourceKernelTypeEntry = index.entries[selected.entry]
+                    return (false, false) if not proof_source_kernel_charge_work(index.scope_path.count + alias.owner_path.count, source_work)
+                    saved_scope: darray[sview] = proof_source_kernel_copy_scope(index.scope_path, index.entries)
+                    index.scope_path.clear()
+                    index.scope_path.extend(alias.owner_path)
+                    result: (known: bool, is_heap: bool) = proof_source_kernel_type_is_heap_reference(alias.target, index, source_work, depth + 1)
+                    index.scope_path.clear()
+                    index.scope_path.extend(saved_scope)
+                    return result
+                Ast::Expr.Absent | Ast::Expr.Invalid:
+                    return (false, false)
+                _:
+                    return (true, false)

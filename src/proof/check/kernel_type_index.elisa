@@ -35,6 +35,9 @@ extend ElisaProof:
             bucket_heads: mutable darray[usize]
             next_indices: mutable darray[usize]
             scope_path: mutable darray[sview]
+            container_descriptor_slots: mutable darray[usize]
+            container_descriptor_epochs: mutable darray[usize]
+            container_descriptor_epoch: mutable usize
             complete: mutable bool
 
         def proof_source_kernel_copy_scope[@r](scope: darray[sview]&, entries: darray[ProofSourceKernelTypeEntry]& @r) -> darray[sview] @r:
@@ -82,7 +85,15 @@ extend ElisaProof:
             return true
 
         def proof_source_kernel_build_type_index(entries: darray[ProofSourceKernelTypeEntry], source_work: mutable usize&) -> ProofSourceKernelTypeIndex:
-            index: mutable ProofSourceKernelTypeIndex = ProofSourceKernelTypeIndex{entries: entries, bucket_heads: [], next_indices: [], scope_path: [], complete: false}
+            index: mutable ProofSourceKernelTypeIndex = ProofSourceKernelTypeIndex{entries: entries, bucket_heads: [], next_indices: [], scope_path: [], container_descriptor_slots: [], container_descriptor_epochs: [], container_descriptor_epoch: 1, complete: false}
+            descriptor_capacity: usize = proof_name_index_capacity(PROOF_SOURCE_KERNEL_GLOBAL_BINDING_LIMIT)
+            return index if descriptor_capacity == 0 or not proof_source_kernel_charge_work(descriptor_capacity * 2, source_work)
+            index.container_descriptor_slots.resize(descriptor_capacity)
+            index.container_descriptor_epochs.resize(descriptor_capacity)
+            for slot in 0..<descriptor_capacity |slot, index, source_work|:
+                return index if not proof_source_kernel_charge_work(1, source_work)
+                index.container_descriptor_slots[slot] <- 0
+                index.container_descriptor_epochs[slot] <- 0
             count: usize = entries.count
             capacity: usize = proof_index_capacity(count)
             if capacity == 0:
@@ -109,6 +120,41 @@ extend ElisaProof:
                 index.bucket_heads[slot] <- entry
             index.complete <- true
             return index
+
+        # Container expression identities are source-offset identities. Remember each emitted
+        # descriptor once so repeated tuple-field visits do not rescan all accumulated bindings.
+        def proof_source_kernel_add_container_descriptor(index: ProofSourceKernelTypeIndex, bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]&, name: sview, element_sort: sview, element_type_name: sview, identity: usize, element_identity: usize, source_work: mutable usize&) -> bool:
+            capacity: usize = index.container_descriptor_slots.count
+            return false if capacity == 0 or capacity != index.container_descriptor_epochs.count or index.container_descriptor_epoch == 0 or identity == 0
+            return false if not proof_source_kernel_charge_work(sview_len(name) + sview_len(element_type_name), source_work)
+            wanted_hash: u32 = proof_expr_shape_mix(0, identity.i64())
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, index, bindings, name, element_sort, element_type_name, identity, element_identity, capacity, source_work|:
+                return false if not proof_source_kernel_charge_work(1, source_work)
+                current_epoch: usize = index.container_descriptor_epochs[slot]
+                if current_epoch != index.container_descriptor_epoch:
+                    return false if bindings.count >= PROOF_SOURCE_KERNEL_GLOBAL_BINDING_LIMIT
+                    added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "type", name, "", "container", name, element_sort, element_type_name, identity, 0, element_identity)
+                    return false if not added
+                    index.container_descriptor_slots[slot] <- bindings.count
+                    index.container_descriptor_epochs[slot] <- index.container_descriptor_epoch
+                    return true
+                current: usize = index.container_descriptor_slots[slot]
+                if current == 0:
+                    return false if bindings.count >= PROOF_SOURCE_KERNEL_GLOBAL_BINDING_LIMIT
+                    added: bool = ElisaProofKernelCore::proof_kernel_add_typing_binding_with_identity(bindings, "type", name, "", "container", name, element_sort, element_type_name, identity, 0, element_identity)
+                    return false if not added
+                    index.container_descriptor_slots[slot] <- bindings.count
+                    index.container_descriptor_epochs[slot] <- index.container_descriptor_epoch
+                    return true
+                return false if current > bindings.count
+                if wanted_hash == proof_expr_shape_mix(0, bindings[current - 1].type_identity.i64()) and bindings[current - 1].type_identity == identity:
+                    existing: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[current - 1]
+                    return proof_source_kernel_charge_text_comparison(existing.name, name, source_work) and proof_source_kernel_charge_text_comparison(existing.type_name, name, source_work) and proof_source_kernel_charge_text_comparison(existing.element_sort, element_sort, source_work) and proof_source_kernel_charge_text_comparison(existing.element_type_name, element_type_name, source_work) and existing.kind == "type" and existing.sort == "container" and existing.name == name and existing.type_name == name and existing.element_sort == element_sort and existing.element_type_name == element_type_name and existing.type_identity == identity and existing.element_type_identity == element_identity
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return false
 
         def proof_source_kernel_charge_text_comparison(left: sview, right: sview, source_work: mutable usize&) -> bool:
             left_bytes: usize = sview_len(left)

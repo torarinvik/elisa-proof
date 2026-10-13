@@ -52,25 +52,34 @@ extend ElisaProof:
                 segment_start <- segment_end + (2 if delimiter_is_scope else PROOF_PATTERN_DELIMITER_WIDTH)
             return result
 
-        # Pattern.Literal erases whether source text came from a string or scalar token.
-        # Admit only the spelling subset that cannot collide with Boolean, numeric, or null
-        # literals. Every other payload must wait for token-kind preservation.
-        def proof_pattern_unambiguous_string_literal(text: sview) -> bool:
+        # Pattern.Literal erases token kind; empty uniquely denotes a string, and nonempty text rejects scalar tokens, quotes, escapes, and controls.
+        def proof_pattern_charge_source_type_work(amount: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+            return false if amount > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
+            work <- work + amount
+            true
+        def proof_pattern_unambiguous_string_literal_with_work(text: sview, work: mutable usize&) -> bool:
+            length: usize = sview_len(text)
+            # Refuse oversized literals before comparing or walking their attacker-controlled
+            # contents, then charge every bounded scan against the report-wide pattern budget.
+            return false if length > PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT
+            return false if not proof_pattern_charge_source_type_work(length * 4 + 1, work)
+            return true if length == 0
             reserved_literal_spelling: bool = when text:
                 "true" | "false" | "null" -> true
                 _ -> false
             return false if reserved_literal_spelling
-            length: usize = sview_len(text)
-            # Keep each attacker-controlled literal scan small. Oversized payloads simply lose
-            # this proof fact, independently of the cumulative source-type lookup budget.
-            return false if length == 0 or length > PROOF_PATTERN_STRING_LITERAL_SCAN_LIMIT
+            first: u8 = sview_at(text, 0)
+            first_letter: bool = (first >= PROOF_ASCII_UPPER_A and first <= PROOF_ASCII_UPPER_Z) or (first >= PROOF_ASCII_LOWER_A and first <= PROOF_ASCII_LOWER_Z) or first == PROOF_ASCII_UNDERSCORE
+            return false if not first_letter
             for index in 0..<length |index, text|:
                 character: u8 = sview_at(text, index)
-                letter: bool = (character >= PROOF_ASCII_UPPER_A and character <= PROOF_ASCII_UPPER_Z) or (character >= PROOF_ASCII_LOWER_A and character <= PROOF_ASCII_LOWER_Z)
-                identifier_character: bool = letter or character == PROOF_ASCII_UNDERSCORE or (index > 0 and character >= PROOF_ASCII_DIGIT_ZERO and character <= PROOF_ASCII_DIGIT_NINE)
-                return false if not identifier_character
+                return false if character < 32 or character > 126
+                return false if character == 34 or character == PROOF_ASCII_BACKSLASH
             return true
-
+        def proof_pattern_unambiguous_string_literal(text: sview) -> bool:
+            work: mutable usize = 0
+            proof_pattern_unambiguous_string_literal_with_work(text, &work)
         # Char patterns retain their surrounding quotes in the compiler AST. Keep the proof
         # subset to one printable ASCII byte or one explicitly supported single-byte escape;
         # multi-byte and unknown escapes wait for authenticated compiler literal decoding.
@@ -280,8 +289,8 @@ extend ElisaProof:
         # spelling as representation evidence for a typed string or character pattern fact.
         def proof_pattern_source_generic_type_shadowed(report: ProofReport&, declaration_line: u32, wanted: sview, work: mutable usize&) -> (complete: bool, shadowed: bool):
             return (false, false) if work >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
+            return (false, false) if sview_len(wanted) >= PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT - work
             work <- work + 1 + sview_len(wanted)
-            return (false, false) if work > PROOF_PATTERN_SOURCE_TYPE_WORK_LIMIT
             generic: (complete: bool, count: usize) = proof_source_conversion_generic_name(wanted, declaration_line, report)
             return (false, false) if not generic.complete or generic.count > 1
             return (true, generic.count == 1)
@@ -351,8 +360,8 @@ extend ElisaProof:
         def proof_pattern_is_char_type(type_expression: Ast::Expr) -> bool:
             return proof_pattern_type_name(type_expression) == "char"
 
-        def proof_pattern_typed_literal_expression(text: sview, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
-            if proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text):
+        def proof_pattern_typed_literal_expression(text: sview, position: Ast::Pos, type_expression: Ast::Expr, source_work: mutable usize&) -> Ast::Expr?:
+            if proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal_with_work(text, source_work):
                 return Ast::Expr.StringLit(text, position)
             if proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text):
                 return Ast::Expr.CharLit(string_view_slice(text, 1, (sview_len(text) - 1).i64()), position)
@@ -360,16 +369,24 @@ extend ElisaProof:
 
         def proof_pattern_condition_typed(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
             work: mutable usize = 0
-            return proof_pattern_condition_typed_depth(pattern, scrutinee, position, type_expression, 0, &work)
+            source_work: mutable usize = 0
+            return proof_pattern_condition_typed_depth(pattern, scrutinee, position, type_expression, 0, &work, &source_work)
 
-        def proof_pattern_condition_typed_depth(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, depth: usize, work: mutable usize&) -> Ast::Expr?:
+        def proof_pattern_condition_typed_with_report(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, report: mutable ProofReport&) -> Ast::Expr?:
+            work: mutable usize = 0
+            source_work: mutable usize = report.budgets.pattern_source_type_work
+            condition: Ast::Expr? = proof_pattern_condition_typed_depth(pattern, scrutinee, position, type_expression, 0, &work, &source_work)
+            report.budgets.pattern_source_type_work <- source_work
+            condition
+
+        def proof_pattern_condition_typed_depth(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, depth: usize, work: mutable usize&, source_work: mutable usize&) -> Ast::Expr?:
             return null if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
             work <- work + 1
             match pattern:
                 Ast::Pattern.As(_, inner):
-                    return proof_pattern_condition_typed_depth(inner[0], scrutinee, position, type_expression, depth + 1, work) if inner.count == 1
+                    return proof_pattern_condition_typed_depth(inner[0], scrutinee, position, type_expression, depth + 1, work, source_work) if inner.count == 1
                 Ast::Pattern.Literal(text):
-                    literal: Ast::Expr? = proof_pattern_typed_literal_expression(text, position, type_expression)
+                    literal: Ast::Expr? = proof_pattern_typed_literal_expression(text, position, type_expression, source_work)
                     if literal is value:
                         return Ast::Expr.Binary(scrutinee, TokenKind.EqEq, value, position)
                 Ast::Pattern.Range(_, _, _):
@@ -379,8 +396,8 @@ extend ElisaProof:
                 Ast::Pattern.Or(options):
                     return null if options.count == 0
                     conditions: mutable darray[Ast::Expr] = []
-                    for option in options |conditions, scrutinee, position, type_expression, depth, work|:
-                        condition: Ast::Expr? = proof_pattern_condition_typed_depth(option, scrutinee, position, type_expression, depth + 1, work)
+                    for option in options |conditions, scrutinee, position, type_expression, depth, work, source_work|:
+                        condition: Ast::Expr? = proof_pattern_condition_typed_depth(option, scrutinee, position, type_expression, depth + 1, work, source_work)
                         if condition is known_condition:
                             conditions.push(known_condition)
                         else:
@@ -393,36 +410,44 @@ extend ElisaProof:
                     return proof_pattern_condition_depth(pattern, scrutinee, position, depth, work)
             return null
 
-        def proof_pattern_condition_using_type(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr) -> Ast::Expr?:
+        def proof_pattern_condition_using_type(pattern: Ast::Pattern, scrutinee: Ast::Expr, position: Ast::Pos, type_expression: Ast::Expr, report: mutable ProofReport&) -> Ast::Expr?:
             return proof_pattern_condition(pattern, scrutinee, position) if type_expression is Ast::Expr.Absent
-            return proof_pattern_condition_typed(pattern, scrutinee, position, type_expression)
+            return proof_pattern_condition_typed_with_report(pattern, scrutinee, position, type_expression, report)
 
-        def proof_pattern_condition_exact_using_type(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
+        def proof_pattern_condition_exact_using_type(pattern: Ast::Pattern, type_expression: Ast::Expr, report: mutable ProofReport&) -> bool:
             return proof_pattern_condition_exact(pattern) if type_expression is Ast::Expr.Absent
-            return proof_pattern_condition_exact_typed(pattern, type_expression)
+            return proof_pattern_condition_exact_typed_with_report(pattern, type_expression, report)
 
         def proof_pattern_condition_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, position: Ast::Pos, report: mutable ProofReport&, function_name: sview, names: darray[sview]&) -> Ast::Expr?:
             type_expression: Ast::Expr = proof_pattern_active_formal_type(report, function_name, source_scrutinee, symbolic_scrutinee, names)
             if not (type_expression is Ast::Expr.Absent):
-                return proof_pattern_condition_typed(pattern, symbolic_scrutinee, position, type_expression)
+                return proof_pattern_condition_typed_with_report(pattern, symbolic_scrutinee, position, type_expression, report)
             return proof_pattern_condition(pattern, symbolic_scrutinee, position)
 
         def proof_pattern_condition_exact_with_source(pattern: Ast::Pattern, source_scrutinee: Ast::Expr, symbolic_scrutinee: Ast::Expr, report: mutable ProofReport&, function_name: sview, names: darray[sview]&) -> bool:
             type_expression: Ast::Expr = proof_pattern_active_formal_type(report, function_name, source_scrutinee, symbolic_scrutinee, names)
             if not (type_expression is Ast::Expr.Absent):
-                return proof_pattern_condition_exact_typed(pattern, type_expression)
+                return proof_pattern_condition_exact_typed_with_report(pattern, type_expression, report)
             return proof_pattern_condition_exact(pattern)
 
         def proof_pattern_condition_exact_typed(pattern: Ast::Pattern, type_expression: Ast::Expr) -> bool:
             work: mutable usize = 0
-            return proof_pattern_condition_exact_typed_depth(pattern, type_expression, 0, &work)
+            source_work: mutable usize = 0
+            return proof_pattern_condition_exact_typed_depth(pattern, type_expression, 0, &work, &source_work)
 
-        def proof_pattern_condition_exact_typed_depth(pattern: Ast::Pattern, type_expression: Ast::Expr, depth: usize, work: mutable usize&) -> bool:
+        def proof_pattern_condition_exact_typed_with_report(pattern: Ast::Pattern, type_expression: Ast::Expr, report: mutable ProofReport&) -> bool:
+            work: mutable usize = 0
+            source_work: mutable usize = report.budgets.pattern_source_type_work
+            exact: bool = proof_pattern_condition_exact_typed_depth(pattern, type_expression, 0, &work, &source_work)
+            report.budgets.pattern_source_type_work <- source_work
+            exact
+
+        def proof_pattern_condition_exact_typed_depth(pattern: Ast::Pattern, type_expression: Ast::Expr, depth: usize, work: mutable usize&, source_work: mutable usize&) -> bool:
             return false if depth >= PROOF_PATTERN_WALK_DEPTH_LIMIT or work >= PROOF_PATTERN_WALK_WORK_LIMIT
             work <- work + 1
             match pattern:
                 Ast::Pattern.As(_, inner):
-                    return inner.count == 1 and proof_pattern_condition_exact_typed_depth(inner[0], type_expression, depth + 1, work)
+                    return inner.count == 1 and proof_pattern_condition_exact_typed_depth(inner[0], type_expression, depth + 1, work, source_work)
                 Ast::Pattern.Variant(_, fields):
                     for field in fields |fields, depth, work|:
                         return false if work >= PROOF_PATTERN_WALK_WORK_LIMIT
@@ -430,13 +455,13 @@ extend ElisaProof:
                         return false if not proof_pattern_irrefutable_depth(field, depth + 1, work)
                     return true
                 Ast::Pattern.Literal(text):
-                    return (proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal(text)) or (proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text))
+                    return (proof_pattern_is_string_type(type_expression) and proof_pattern_unambiguous_string_literal_with_work(text, source_work)) or (proof_pattern_is_char_type(type_expression) and proof_pattern_unambiguous_char_literal(text))
                 Ast::Pattern.Range(_, _, _):
                     return false
                 Ast::Pattern.Or(options):
                     return false if options.count == 0
-                    for option in options |options, depth, work|:
-                        return false if not proof_pattern_condition_exact_typed_depth(option, type_expression, depth + 1, work)
+                    for option in options |options, depth, work, source_work|:
+                        return false if not proof_pattern_condition_exact_typed_depth(option, type_expression, depth + 1, work, source_work)
                     return true
                 _:
                     return false

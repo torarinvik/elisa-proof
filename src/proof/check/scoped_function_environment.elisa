@@ -1,101 +1,479 @@
 # Lexically scope source function signatures before kernel proposition typing.
 extend ElisaProof:
     private:
-        # Kernel call nodes carry only a callee leaf. Scope the declaration signature table to
-        # the caller's lexical owner before typing so a sibling module's same-spelled function
-        # cannot make a locally resolved call ambiguous (or be selected accidentally). When
-        # multiple declarations share the name in the same owner, withhold all of them.
-        def proof_source_kernel_owner_path(owner: sview, source_work: mutable usize&) -> darray[sview]:
-            empty: darray[sview] = []
-            return empty if not proof_source_kernel_charge_work(sview_len(owner), source_work)
-            return proof_global_constant_scope_with_module(empty, owner) if owner != ""
-            return empty
+        const PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+        const PROOF_SOURCE_KERNEL_OWNER_PATH_NOT_VISIBLE: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
 
-        def proof_source_kernel_owner_prefix_depth(owner: sview, scope_path: darray[sview]&, source_work: mutable usize&) -> usize:
-            path: darray[sview] = proof_source_kernel_owner_path(owner, source_work)
-            return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-            return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if path.count > scope_path.count
-            for index in 0..<path.count |index, path, scope_path, source_work|:
-                return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if not proof_source_kernel_charge_text_comparison(path[index], scope_path[index], source_work)
-                return PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT if path[index] != scope_path[index]
-            return path.count
+        struct ProofSourceKernelScopedFunctionIndex:
+            build_attempted: mutable bool
+            valid: mutable bool
+            function_count: mutable usize
+            hashes: mutable darray[u32]
+            slots: mutable darray[usize]
+            counts: mutable darray[usize]
+            heads: mutable darray[usize]
+            next_rows: mutable darray[usize]
+            function_slots: mutable darray[usize]
+            owner_hashes: mutable darray[u32]
+            owner_slots: mutable darray[usize]
+            owner_ids: mutable darray[usize]
+            owner_heads: mutable darray[usize]
+            owner_next: mutable darray[usize]
+            owner_counts: mutable darray[usize]
+            owner_expected_counts: mutable darray[usize]
+            owner_scope_depths: mutable darray[usize]
+            owner_scope_depth_computed: mutable darray[bool]
+            selected_owner_epochs: mutable darray[usize]
+            selected_owner_epoch: mutable usize
+            owner_scope_identity: mutable usize
+            owner_scope_identity_valid: mutable bool
+            selected_function_rows: mutable darray[usize]
+            selected_scope_identity: mutable usize
+            selected_scope_identity_valid: mutable bool
+            selected_scope_valid: mutable bool
+            selected_bindings: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding]
+            selected_bindings_names: mutable darray[sview]
+            selected_bindings_scope_identity: mutable usize
+            selected_bindings_source_count: mutable usize
+            selected_bindings_valid: mutable bool
 
-        def proof_source_kernel_scoped_function_bindings(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], names: darray[sview]&, scope_path: darray[sview]&, source_work: mutable usize&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
+        def proof_source_kernel_scoped_function_index_new() -> ProofSourceKernelScopedFunctionIndex:
+            return ProofSourceKernelScopedFunctionIndex{build_attempted: false, valid: false, function_count: 0, hashes: [], slots: [], counts: [], heads: [], next_rows: [], function_slots: [], owner_hashes: [], owner_slots: [], owner_ids: [], owner_heads: [], owner_next: [], owner_counts: [], owner_expected_counts: [], owner_scope_depths: [], owner_scope_depth_computed: [], selected_owner_epochs: [], selected_owner_epoch: 0, owner_scope_identity: 0, owner_scope_identity_valid: false, selected_function_rows: [], selected_scope_identity: 0, selected_scope_identity_valid: false, selected_scope_valid: false, selected_bindings: [], selected_bindings_names: [], selected_bindings_scope_identity: 0, selected_bindings_source_count: 0, selected_bindings_valid: false}
+
+        # Module-owner segment rows use a bounded open-addressed identity table. Each owner
+        # maps to a linked chain containing only its segment rows.
+        def proof_source_kernel_owner_index(owner_identity: usize, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], owner_hashes: darray[u32]&, owner_slots: darray[usize]&, owner_ids: darray[usize]&, source_work: mutable usize&) -> usize:
+            capacity: usize = owner_slots.count
+            return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if capacity == 0 or owner_hashes.count != capacity
+            owner_hash: u32 = proof_expr_shape_mix(0, owner_identity.i64())
+            slot: mutable usize = (owner_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, owner_identity, global_bindings, owner_hash, slot, capacity, owner_hashes, owner_slots, owner_ids, source_work|:
+                return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if not proof_source_kernel_charge_work(1, source_work)
+                current: usize = owner_slots[slot]
+                return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if current == global_bindings.count
+                return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if current >= owner_ids.count
+                if owner_hashes[slot] == owner_hash and owner_ids[current] == owner_identity:
+                    return current
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID
+
+        def proof_source_kernel_owner_path(owner_identity: usize, owner_index: usize, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], owner_heads: darray[usize]&, owner_next: darray[usize]&, owner_counts: darray[usize]&, owner_expected_counts: darray[usize]&, source_work: mutable usize&) -> (known: bool, path: darray[sview]):
+            path: mutable darray[sview] = []
+            return (false, path) if owner_index >= owner_heads.count or owner_index >= owner_counts.count or owner_index >= owner_expected_counts.count
+            segment_count: usize = owner_counts[owner_index]
+            return (false, path) if segment_count == 0 or segment_count > PROOF_SOURCE_KERNEL_OWNER_PATH_SEGMENT_LIMIT or owner_expected_counts[owner_index] != segment_count
+            return (false, path) if not proof_source_kernel_charge_work(segment_count * 3, source_work)
+            path.resize(segment_count)
+            seen: mutable darray[bool] = []
+            seen.resize(segment_count)
+            for index in 0..<segment_count |index, seen|:
+                seen[index] <- false
+            row: mutable usize = owner_heads[owner_index]
+            rows: mutable usize = 0
+            while row != global_bindings.count and rows < segment_count |row, rows, owner_identity, segment_count, owner_next, global_bindings, path, seen, source_work|:
+                return (false, path) if row >= global_bindings.count or row >= owner_next.count
+                return (false, path) if not proof_source_kernel_charge_work(2, source_work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[row]
+                index: usize = binding.parameter_index
+                return (false, path) if binding.kind != "module-owner-segment" or binding.owner_type_identity != owner_identity or binding.parameter_count != segment_count or index >= segment_count or seen[index]
+                return (false, path) if binding.name == "" or not proof_source_kernel_charge_work(sview_len(binding.name), source_work)
+                path[index] <- binding.name
+                seen[index] <- true
+                row <- owner_next[row]
+                rows <- rows + 1
+            return (false, path) if rows != segment_count or row != global_bindings.count
+            for index in 0..<segment_count |index, seen|:
+                return (false, path) if not proof_source_kernel_charge_work(1, source_work)
+                return (false, path) if not seen[index]
+            return (true, path)
+
+        def proof_source_kernel_owner_prefix_depth(owner_identity: usize, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], owner_hashes: darray[u32]&, owner_slots: darray[usize]&, owner_ids: darray[usize]&, owner_heads: darray[usize]&, owner_next: darray[usize]&, owner_counts: darray[usize]&, owner_expected_counts: darray[usize]&, owner_scope_depths: mutable darray[usize]&, owner_scope_depth_computed: mutable darray[bool]&, scope_path: darray[sview]&, source_work: mutable usize&) -> usize:
+            return 0 if owner_identity == 0
+            owner_index: usize = proof_source_kernel_owner_index(owner_identity, global_bindings, owner_hashes, owner_slots, owner_ids, source_work)
+            return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if owner_index == PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID or owner_index >= owner_scope_depths.count or owner_index >= owner_scope_depth_computed.count
+            return owner_scope_depths[owner_index] if owner_scope_depth_computed[owner_index]
+            path: (known: bool, path: darray[sview]) = proof_source_kernel_owner_path(owner_identity, owner_index, global_bindings, owner_heads, owner_next, owner_counts, owner_expected_counts, source_work)
+            return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if not path.known
+            depth: usize = path.path.count
+            if depth > scope_path.count:
+                depth <- PROOF_SOURCE_KERNEL_OWNER_PATH_NOT_VISIBLE
+            else:
+                for index in 0..<depth |index, path, scope_path, source_work|:
+                    return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if not proof_source_kernel_charge_text_comparison(path.path[index], scope_path[index], source_work)
+                    if path.path[index] != scope_path[index]:
+                        depth <- PROOF_SOURCE_KERNEL_OWNER_PATH_NOT_VISIBLE
+                        break
+            return PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID if not proof_source_kernel_charge_work(2, source_work)
+            owner_scope_depths[owner_index] <- depth
+            owner_scope_depth_computed[owner_index] <- true
+            return depth
+
+        def proof_source_kernel_scoped_function_bindings(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], names: darray[sview]&, scope_path: darray[sview]&, scope_identity: usize, scoped_index: mutable ProofSourceKernelScopedFunctionIndex&, source_work: mutable usize&) -> (known: bool, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) can[Memory.Allocate, Abort.Panic]:
             selected_signatures: mutable darray[usize] = []
+            selected_signature_owners: mutable darray[usize] = []
             scoped: mutable darray[ElisaProofKernelCore::ProofKernelTypingBinding] = []
-            for index in 0..<global_bindings.count |index, global_bindings, names, scope_path, selected_signatures, scoped, source_work|:
-                return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[index]
-                continue if binding.kind != "function"
-                return (false, scoped) if not proof_source_kernel_charge_work(names.count, source_work)
-                shadowed: mutable bool = false
-                for local_name in names |local_name, names, binding, shadowed, source_work|:
-                    return (false, scoped) if not proof_source_kernel_charge_text_comparison(local_name, binding.name, source_work)
-                    shadowed <- true if local_name == binding.name
-                continue if shadowed
-                total: mutable usize = 0
-                best_depth: mutable usize = 0
-                owner_matches: mutable usize = 0
-                selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = binding
-                for candidate in global_bindings |candidate, binding, scope_path, total, best_depth, owner_matches, selected, source_work|:
+            if scoped_index.selected_bindings_valid and scoped_index.selected_bindings_scope_identity == scope_identity and scoped_index.selected_bindings_source_count == global_bindings.count and scoped_index.selected_bindings_names.count == names.count:
+                same_names: mutable bool = true
+                for index in 0..<names.count |index, names, scoped_index, same_names, source_work|:
+                    cached_name: sview = scoped_index.selected_bindings_names[index]
+                    current_name: sview = names[index]
+                    return (false, scoped) if not proof_source_kernel_charge_text_comparison(cached_name, current_name, source_work)
+                    if cached_name != current_name:
+                        same_names <- false
+                        break
+                return (true, scoped_index.selected_bindings) if same_names
+            scoped_index.selected_bindings_valid <- false
+            hashes: mutable darray[u32]& = &scoped_index.hashes
+            slots: mutable darray[usize]& = &scoped_index.slots
+            counts: mutable darray[usize]& = &scoped_index.counts
+            heads: mutable darray[usize]& = &scoped_index.heads
+            next_rows: mutable darray[usize]& = &scoped_index.next_rows
+            function_slots: mutable darray[usize]& = &scoped_index.function_slots
+            owner_hashes: mutable darray[u32]& = &scoped_index.owner_hashes
+            owner_slots: mutable darray[usize]& = &scoped_index.owner_slots
+            owner_ids: mutable darray[usize]& = &scoped_index.owner_ids
+            owner_heads: mutable darray[usize]& = &scoped_index.owner_heads
+            owner_next: mutable darray[usize]& = &scoped_index.owner_next
+            owner_counts: mutable darray[usize]& = &scoped_index.owner_counts
+            owner_expected_counts: mutable darray[usize]& = &scoped_index.owner_expected_counts
+            owner_scope_depths: mutable darray[usize]& = &scoped_index.owner_scope_depths
+            owner_scope_depth_computed: mutable darray[bool]& = &scoped_index.owner_scope_depth_computed
+            selected_owner_epochs: mutable darray[usize]& = &scoped_index.selected_owner_epochs
+            function_count: mutable usize = scoped_index.function_count
+            if not scoped_index.build_attempted:
+                scoped_index.build_attempted <- true
+                function_count <- 0
+                for binding in global_bindings |binding, function_count, source_work|:
                     return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
-                    continue if candidate.kind != "function"
-                    return (false, scoped) if not proof_source_kernel_charge_text_comparison(candidate.name, binding.name, source_work)
-                    continue if candidate.name != binding.name
-                    total <- total + 1
-                    candidate_depth: usize = proof_source_kernel_owner_prefix_depth(candidate.owner, scope_path, source_work)
-                    return (false, scoped) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
-                    continue if candidate_depth == PROOF_TYPE_AUDIT_AMBIGUOUS_COUNT
-                    if candidate_depth > best_depth:
-                        best_depth <- candidate_depth
-                        owner_matches <- 1
-                        selected <- candidate
-                    elif candidate_depth == best_depth:
-                        owner_matches <- owner_matches + 1
-                        selected <- candidate
-                owner_matches <- 1 if owner_matches == 0 and total == 1
-                selected <- binding if owner_matches == 1 and total == 1
-                if owner_matches == 1:
-                    if binding.signature_identity == selected.signature_identity:
-                        selected_signatures.push(selected.signature_identity)
-                        scoped.push(selected)
-            for binding in global_bindings |source_work|:
+                    function_count <- function_count + 1 if binding.kind == "function" or binding.kind == "function-incomplete"
+                owner_capacity: usize = proof_name_index_capacity(global_bindings.count)
+                return (false, scoped) if owner_capacity == 0 and global_bindings.count > 0
+                return (false, scoped) if not proof_source_kernel_charge_work(owner_capacity * 2 + global_bindings.count * 6, source_work)
+                owner_hashes.resize(owner_capacity)
+                owner_slots.resize(owner_capacity)
+                owner_next.resize(global_bindings.count)
+                for slot in 0..<owner_capacity |slot, owner_slots, global_bindings, source_work|:
+                    owner_slots[slot] <- global_bindings.count
+                    return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                for row in 0..<global_bindings.count |row, global_bindings, owner_next, owner_hashes, owner_slots, owner_ids, owner_heads, owner_counts, owner_expected_counts, owner_capacity, source_work|:
+                    owner_next[row] <- global_bindings.count
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[row]
+                    continue if binding.kind != "module-owner-segment"
+                    return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                    owner_hash: u32 = proof_expr_shape_mix(0, binding.owner_type_identity.i64())
+                    owner_slot: mutable usize = (owner_hash.i64() % owner_capacity.i64()).usize()
+                    probes: mutable usize = 0
+                    placed: mutable bool = false
+                    while probes < owner_capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, owner_hash, owner_slot, owner_slots, owner_hashes, owner_ids, owner_heads, owner_counts, owner_next, owner_expected_counts, owner_capacity, global_bindings, binding, row, source_work, placed|:
+                        return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                        current: usize = owner_slots[owner_slot]
+                        if current == global_bindings.count:
+                            return (false, scoped) if not proof_source_kernel_charge_work(6, source_work)
+                            owner_slots[owner_slot] <- owner_ids.count
+                            owner_hashes[owner_slot] <- owner_hash
+                            owner_ids.push(binding.owner_type_identity)
+                            owner_heads.push(row)
+                            owner_counts.push(1)
+                            owner_expected_counts.push(binding.parameter_count)
+                            placed <- true
+                            break
+                        return (false, scoped) if current >= owner_ids.count
+                        owner_index: usize = current
+                        if owner_hashes[owner_slot] == owner_hash and owner_ids[owner_index] == binding.owner_type_identity:
+                            return (false, scoped) if not proof_source_kernel_charge_work(3, source_work)
+                            return (false, scoped) if binding.parameter_count == 0 or binding.parameter_count > PROOF_SOURCE_KERNEL_OWNER_PATH_SEGMENT_LIMIT or owner_counts[owner_index] >= binding.parameter_count or owner_expected_counts[owner_index] != binding.parameter_count
+                            owner_next[row] <- owner_heads[owner_index]
+                            owner_heads[owner_index] <- row
+                            owner_counts[owner_index] <- owner_counts[owner_index] + 1
+                            placed <- true
+                            break
+                        owner_slot <- (owner_slot + 1) % owner_capacity
+                        probes <- probes + 1
+                    return (false, scoped) if not placed
+                    return (false, scoped) if binding.parameter_count == 0 or binding.parameter_count > PROOF_SOURCE_KERNEL_OWNER_PATH_SEGMENT_LIMIT
+                for owner_index in 0..<owner_ids.count |owner_index, owner_ids, owner_counts, owner_expected_counts, source_work|:
+                    return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                    return (false, scoped) if owner_index >= owner_counts.count or owner_index >= owner_expected_counts.count or owner_counts[owner_index] != owner_expected_counts[owner_index]
+                return (false, scoped) if not proof_source_kernel_charge_work(owner_ids.count * 2, source_work)
+                return (false, scoped) if not proof_source_kernel_charge_work(owner_ids.count + 1, source_work)
+                owner_scope_depths.resize(owner_ids.count)
+                owner_scope_depth_computed.resize(owner_ids.count)
+                selected_owner_epochs.resize(owner_ids.count + 1)
+                for owner_index in 0..<owner_ids.count |owner_index, owner_scope_depths, owner_scope_depth_computed, source_work|:
+                    owner_scope_depths[owner_index] <- PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID
+                    owner_scope_depth_computed[owner_index] <- false
+                    return (false, scoped) if not proof_source_kernel_charge_work(2, source_work)
+                    selected_owner_epochs[owner_index] <- 0
+                selected_owner_epochs[owner_ids.count] <- 0
+                if function_count > 0:
+                    capacity: usize = proof_name_index_capacity(function_count)
+                    return (false, scoped) if capacity == 0 or not proof_source_kernel_charge_work(capacity * 7 + global_bindings.count * 4, source_work)
+                    hashes.resize(capacity)
+                    slots.resize(capacity)
+                    counts.resize(capacity)
+                    heads.resize(capacity)
+                    next_rows.resize(global_bindings.count)
+                    function_slots.resize(global_bindings.count)
+                    for slot in 0..<capacity |slot, slots, counts, heads, global_bindings|:
+                        slots[slot] <- global_bindings.count
+                        heads[slot] <- global_bindings.count
+                        counts[slot] <- 0
+                    for row in 0..<global_bindings.count |row, global_bindings, next_rows, function_slots, source_work|:
+                        next_rows[row] <- global_bindings.count
+                        function_slots[row] <- global_bindings.count
+                        return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                    for row in 0..<global_bindings.count |row, global_bindings, hashes, slots, counts, heads, next_rows, function_slots, function_count, capacity, source_work|:
+                        binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[row]
+                        continue if binding.kind != "function" and binding.kind != "function-incomplete"
+                        return (false, scoped) if binding.name == "" or not proof_source_kernel_charge_work(sview_len(binding.name), source_work)
+                        hash: u32 = proof_name_hash(binding.name)
+                        slot: mutable usize = (hash.i64() % capacity.i64()).usize()
+                        probes: mutable usize = 0
+                        placed: mutable bool = false
+                        while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, hash, binding, row, hashes, slots, counts, heads, next_rows, function_slots, function_count, capacity, global_bindings, source_work, placed|:
+                            return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                            current: usize = slots[slot]
+                            if current == global_bindings.count:
+                                return (false, scoped) if not proof_source_kernel_charge_work(5, source_work)
+                                slots[slot] <- row
+                                hashes[slot] <- hash
+                                heads[slot] <- row
+                                counts[slot] <- 1
+                                function_slots[row] <- slot
+                                placed <- true
+                                break
+                            return (false, scoped) if current >= global_bindings.count or (global_bindings[current].kind != "function" and global_bindings[current].kind != "function-incomplete")
+                            if hashes[slot] == hash:
+                                return (false, scoped) if not proof_source_kernel_charge_text_comparison(global_bindings[current].name, binding.name, source_work)
+                                if global_bindings[current].name == binding.name:
+                                    return (false, scoped) if not proof_source_kernel_charge_work(4, source_work)
+                                    next_rows[row] <- heads[slot]
+                                    heads[slot] <- row
+                                    counts[slot] <- counts[slot] + 1
+                                    function_slots[row] <- slot
+                                    placed <- true
+                                    break
+                            slot <- (slot + 1) % capacity
+                            probes <- probes + 1
+                        return (false, scoped) if not placed
+                scoped_index.function_count <- function_count
+                scoped_index.owner_scope_identity <- scope_identity
+                scoped_index.owner_scope_identity_valid <- true
+                scoped_index.valid <- true
+            return (false, scoped) if not scoped_index.valid
+            function_count <- scoped_index.function_count
+            if not scoped_index.owner_scope_identity_valid or scoped_index.owner_scope_identity != scope_identity:
+                for owner_index in 0..<owner_ids.count |owner_index, owner_scope_depths, owner_scope_depth_computed, source_work|:
+                    owner_scope_depths[owner_index] <- PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID
+                    owner_scope_depth_computed[owner_index] <- false
+                    return (false, scoped) if not proof_source_kernel_charge_work(2, source_work)
+                scoped_index.owner_scope_identity <- scope_identity
+                scoped_index.owner_scope_identity_valid <- true
+            if not scoped_index.selected_scope_valid or not scoped_index.selected_scope_identity_valid or scoped_index.selected_scope_identity != scope_identity:
+                scoped_index.selected_scope_valid <- false
+                selected_function_rows: mutable darray[usize]& = &scoped_index.selected_function_rows
+                selected_function_rows.clear()
+                return (false, scoped) if not proof_source_kernel_charge_work(global_bindings.count * 2, source_work)
+                selected_function_rows.resize(global_bindings.count)
+                selection_epoch: mutable usize = scoped_index.selected_owner_epoch
+                for row in 0..<global_bindings.count |row, selected_function_rows, global_bindings, slots, counts, heads, next_rows, function_slots, function_count, owner_hashes, owner_slots, owner_ids, owner_heads, owner_next, owner_counts, owner_expected_counts, owner_scope_depths, owner_scope_depth_computed, selected_owner_epochs, selection_epoch, scope_path, source_work|:
+                    selected_function_rows[row] <- global_bindings.count
+                    return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                    binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[row]
+                    continue if binding.kind != "function" and binding.kind != "function-incomplete"
+                    slot: usize = function_slots[row]
+                    return (false, scoped) if slot >= counts.count or slot >= slots.count or slot >= heads.count
+                    continue if slots[slot] != row
+                    return (false, scoped) if counts[slot] == 0
+                    return (false, scoped) if selection_epoch > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 2
+                    selection_epoch <- selection_epoch + 1
+                    selected_index: mutable usize = global_bindings.count
+                    best_depth: mutable usize = 0
+                    owner_matches: mutable usize = 0
+                    candidate_index: mutable usize = heads[slot]
+                    traversed: mutable usize = 0
+                    while candidate_index != global_bindings.count and traversed < counts[slot] |candidate_index, traversed, global_bindings, counts, next_rows, function_slots, scope_path, best_depth, owner_matches, selected_index, owner_hashes, owner_slots, owner_ids, owner_heads, owner_next, owner_counts, owner_expected_counts, owner_scope_depths, owner_scope_depth_computed, selected_owner_epochs, selection_epoch, source_work|:
+                        return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                        return (false, scoped) if candidate_index >= global_bindings.count or candidate_index >= next_rows.count or candidate_index >= function_slots.count
+                        candidate: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[candidate_index]
+                        return (false, scoped) if (candidate.kind != "function" and candidate.kind != "function-incomplete") or function_slots[candidate_index] != slot
+                        candidate_depth: usize = proof_source_kernel_owner_prefix_depth(candidate.owner_type_identity, global_bindings, owner_hashes, owner_slots, owner_ids, owner_heads, owner_next, owner_counts, owner_expected_counts, owner_scope_depths, owner_scope_depth_computed, scope_path, source_work)
+                        return (false, scoped) if candidate_depth == PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID
+                        if candidate_depth != PROOF_SOURCE_KERNEL_OWNER_PATH_NOT_VISIBLE:
+                            if owner_matches == 0 or candidate_depth > best_depth:
+                                best_depth <- candidate_depth
+                                return (false, scoped) if selection_epoch > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - 1
+                                selection_epoch <- selection_epoch + 1
+                                owner_matches <- 0
+                            if candidate_depth == best_depth:
+                                owner_index: usize = proof_source_kernel_owner_index(candidate.owner_type_identity, global_bindings, owner_hashes, owner_slots, owner_ids, source_work) if candidate.owner_type_identity != 0 else 0
+                                return (false, scoped) if owner_index == PROOF_SOURCE_KERNEL_OWNER_PATH_INVALID
+                                owner_slot: usize = owner_index + 1 if candidate.owner_type_identity != 0 else 0
+                                return (false, scoped) if owner_slot >= selected_owner_epochs.count
+                                if selected_owner_epochs[owner_slot] != selection_epoch:
+                                    selected_owner_epochs[owner_slot] <- selection_epoch
+                                    owner_matches <- owner_matches + 1
+                                    selected_index <- candidate_index
+                        candidate_index <- next_rows[candidate_index]
+                        traversed <- traversed + 1
+                    return (false, scoped) if traversed != counts[slot] or candidate_index != global_bindings.count
+                    # A globally unique spelling is already unambiguous; retain its
+                    # source-language fast path even when its declaration is outside the
+                    # current owner prefix. Owner-prefix ranking resolves only collisions.
+                    if counts[slot] == 1:
+                        selected_function_rows[row] <- row
+                    elif owner_matches == 1:
+                        return (false, scoped) if selected_index >= global_bindings.count or not proof_source_kernel_charge_work(1, source_work)
+                        selected_function_rows[row] <- selected_index
+                scoped_index.selected_scope_identity <- scope_identity
+                scoped_index.selected_owner_epoch <- selection_epoch
+                scoped_index.selected_scope_identity_valid <- true
+                scoped_index.selected_scope_valid <- true
+            return (false, scoped) if scoped_index.selected_function_rows.count != global_bindings.count
+            signature_capacity: usize = proof_name_index_capacity(function_count)
+            return (false, scoped) if signature_capacity == 0 and function_count > 0
+            signature_hashes: mutable darray[u32] = []
+            signature_slots: mutable darray[usize] = []
+            return (false, scoped) if not proof_source_kernel_charge_work(signature_capacity * 2, source_work)
+            signature_hashes.resize(signature_capacity)
+            signature_slots.resize(signature_capacity)
+            for signature_slot in 0..<signature_capacity |signature_slot, signature_slots, source_work|:
+                signature_slots[signature_slot] <- 0
                 return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
-                if binding.kind != "function" and binding.kind != "function-parameter":
+            shadow_hashes: mutable darray[u32] = []
+            shadow_slots: mutable darray[usize] = []
+            shadow_capacity: usize = proof_name_index_capacity(names.count)
+            return (false, scoped) if shadow_capacity == 0 and names.count > 0
+            if shadow_capacity > 0:
+                return (false, scoped) if not proof_source_kernel_charge_work(shadow_capacity * 2 + names.count, source_work)
+                shadow_hashes.resize(shadow_capacity)
+                shadow_slots.resize(shadow_capacity)
+                for shadow_slot in 0..<shadow_capacity |shadow_slot, shadow_slots, source_work|:
+                    shadow_slots[shadow_slot] <- 0
+                    return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                for name_row in 0..<names.count |name_row, names, shadow_hashes, shadow_slots, shadow_capacity, source_work|:
+                    local_name: sview = names[name_row]
+                    return (false, scoped) if local_name == "" or not proof_source_kernel_charge_work(sview_len(local_name), source_work)
+                    local_hash: u32 = proof_name_hash(local_name)
+                    shadow_slot: mutable usize = (local_hash.i64() % shadow_capacity.i64()).usize()
+                    shadow_probes: mutable usize = 0
+                    shadow_placed: mutable bool = false
+                    while shadow_probes < shadow_capacity and shadow_probes <= PROOF_NAME_INDEX_MAX_CLUSTER |shadow_probes, local_name, name_row, local_hash, shadow_slot, shadow_capacity, names, shadow_hashes, shadow_slots, source_work, shadow_placed|:
+                        return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                        shadow_value: usize = shadow_slots[shadow_slot]
+                        if shadow_value == 0:
+                            return (false, scoped) if not proof_source_kernel_charge_work(2, source_work)
+                            shadow_slots[shadow_slot] <- name_row + 1
+                            shadow_hashes[shadow_slot] <- local_hash
+                            shadow_placed <- true
+                            break
+                        return (false, scoped) if shadow_value > names.count
+                        prior_name: sview = names[shadow_value - 1]
+                        if shadow_hashes[shadow_slot] == local_hash:
+                            return (false, scoped) if not proof_source_kernel_charge_text_comparison(prior_name, local_name, source_work)
+                            if prior_name == local_name:
+                                shadow_placed <- true
+                                break
+                        shadow_slot <- (shadow_slot + 1) % shadow_capacity
+                        shadow_probes <- shadow_probes + 1
+                    return (false, scoped) if not shadow_placed
+            for index in 0..<global_bindings.count |index, global_bindings, names, selected_signatures, scoped, hashes, slots, counts, function_slots, signature_capacity, signature_hashes, signature_slots, shadow_capacity, shadow_hashes, shadow_slots, source_work|:
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[index]
+                continue if binding.kind != "function" and binding.kind != "function-incomplete"
+                return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                slot: usize = function_slots[index]
+                return (false, scoped) if slot >= counts.count
+                continue if slots[slot] != index
+                shadowed: mutable bool = false
+                if shadow_capacity > 0:
+                    shadow_hash: u32 = hashes[slot]
+                    shadow_slot: mutable usize = (shadow_hash.i64() % shadow_capacity.i64()).usize()
+                    shadow_probes: mutable usize = 0
+                    while shadow_probes < shadow_capacity and shadow_probes <= PROOF_NAME_INDEX_MAX_CLUSTER |shadow_probes, shadow_hash, shadow_slot, shadow_capacity, shadow_slots, shadow_hashes, names, binding, source_work, shadowed|:
+                        return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                        shadow_value: usize = shadow_slots[shadow_slot]
+                        break if shadow_value == 0
+                        return (false, scoped) if shadow_value > names.count
+                        if shadow_hashes[shadow_slot] == shadow_hash:
+                            local_name: sview = names[shadow_value - 1]
+                            return (false, scoped) if not proof_source_kernel_charge_text_comparison(local_name, binding.name, source_work)
+                            if local_name == binding.name:
+                                shadowed <- true
+                                break
+                        shadow_slot <- (shadow_slot + 1) % shadow_capacity
+                        shadow_probes <- shadow_probes + 1
+                if shadowed:
+                    return (false, scoped) if not proof_source_kernel_charge_work(1 + sview_len(binding.name), source_work)
+                    scoped.push(ElisaProofKernelCore::ProofKernelTypingBinding{kind: "local-call-shadow", name: binding.name, owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false})
+                    continue
+                selected_index: usize = scoped_index.selected_function_rows[index]
+                continue if selected_index == global_bindings.count
+                return (false, scoped) if selected_index >= global_bindings.count
+                selected_binding: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[selected_index]
+                candidate_index: mutable usize = heads[slot]
+                candidates_seen: mutable usize = 0
+                while candidate_index != global_bindings.count and candidates_seen < counts[slot] |candidate_index, candidates_seen, global_bindings, next_rows, selected_binding, signature_capacity, signature_hashes, signature_slots, selected_signatures, selected_signature_owners, scoped, source_work|:
+                    return (false, scoped) if candidate_index >= global_bindings.count or candidate_index >= next_rows.count
+                    candidate: ElisaProofKernelCore::ProofKernelTypingBinding = global_bindings[candidate_index]
+                    return (false, scoped) if candidate.kind != "function" and candidate.kind != "function-incomplete"
+                    if candidate.owner_type_identity == selected_binding.owner_type_identity:
+                        signature_hash: u32 = proof_expr_shape_mix(proof_expr_shape_mix(1, candidate.owner_type_identity.i64()).i64(), candidate.signature_identity.i64())
+                        signature_slot: mutable usize = (signature_hash.i64() % signature_capacity.i64()).usize()
+                        signature_probes: mutable usize = 0
+                        signature_recorded: mutable bool = false
+                        while signature_probes < signature_capacity and signature_probes <= PROOF_NAME_INDEX_MAX_CLUSTER |signature_probes, signature_hash, signature_slot, signature_capacity, signature_hashes, signature_slots, candidate, selected_signatures, selected_signature_owners, scoped, source_work, signature_recorded|:
+                            return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                            signature_value: usize = signature_slots[signature_slot]
+                            if signature_value == 0:
+                                return (false, scoped) if not proof_source_kernel_charge_work(4, source_work)
+                                signature_slots[signature_slot] <- selected_signatures.count + 1
+                                signature_hashes[signature_slot] <- signature_hash
+                                selected_signatures.push(candidate.signature_identity)
+                                selected_signature_owners.push(candidate.owner_type_identity)
+                                scoped.push(candidate)
+                                signature_recorded <- true
+                                break
+                            return (false, scoped) if signature_value > selected_signatures.count
+                            signature_index: usize = signature_value - 1
+                            if signature_hashes[signature_slot] == signature_hash and selected_signature_owners[signature_index] == candidate.owner_type_identity and selected_signatures[signature_index] == candidate.signature_identity:
+                                signature_recorded <- true
+                                break
+                            signature_slot <- (signature_slot + 1) % signature_capacity
+                            signature_probes <- signature_probes + 1
+                        return (false, scoped) if not signature_recorded
+                    candidate_index <- next_rows[candidate_index]
+                    candidates_seen <- candidates_seen + 1
+                return (false, scoped) if candidates_seen != counts[slot] or candidate_index != global_bindings.count
+            for binding in global_bindings |source_work, signature_capacity, signature_hashes, signature_slots, selected_signatures, selected_signature_owners|:
+                return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                if binding.kind != "function" and binding.kind != "function-incomplete" and binding.kind != "function-parameter":
                     scoped.push(binding)
                 elif binding.kind == "function-parameter":
-                    return (false, scoped) if not proof_source_kernel_charge_work(selected_signatures.count, source_work)
-                    include_parameter: bool = any signature in selected_signatures where signature == binding.signature_identity
+                    include_parameter: mutable bool = false
+                    if signature_capacity > 0:
+                        signature_hash: u32 = proof_expr_shape_mix(proof_expr_shape_mix(1, binding.owner_type_identity.i64()).i64(), binding.signature_identity.i64())
+                        signature_slot: mutable usize = (signature_hash.i64() % signature_capacity.i64()).usize()
+                        signature_probes: mutable usize = 0
+                        while signature_probes < signature_capacity and signature_probes <= PROOF_NAME_INDEX_MAX_CLUSTER |signature_probes, signature_hash, signature_slot, signature_capacity, signature_hashes, signature_slots, selected_signatures, selected_signature_owners, binding, include_parameter, source_work|:
+                            return (false, scoped) if not proof_source_kernel_charge_work(1, source_work)
+                            signature_value: usize = signature_slots[signature_slot]
+                            break if signature_value == 0
+                            return (false, scoped) if signature_value > selected_signatures.count
+                            signature_index: usize = signature_value - 1
+                            if signature_hashes[signature_slot] == signature_hash and selected_signature_owners[signature_index] == binding.owner_type_identity and selected_signatures[signature_index] == binding.signature_identity:
+                                include_parameter <- true
+                                break
+                            signature_slot <- (signature_slot + 1) % signature_capacity
+                            signature_probes <- signature_probes + 1
                     scoped.push(binding) if include_parameter
+            scoped_index.selected_bindings_names.clear()
+            for name in names |name, scoped_index, source_work|:
+                return (false, scoped) if not proof_source_kernel_charge_work(1 + sview_len(name), source_work)
+                scoped_index.selected_bindings_names.push(name)
+            scoped_index.selected_bindings <- scoped
+            scoped_index.selected_bindings_scope_identity <- scope_identity
+            scoped_index.selected_bindings_source_count <- global_bindings.count
+            scoped_index.selected_bindings_valid <- true
             return (true, scoped)
-
-        def proof_source_kernel_symbol_leaf(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> sview:
-            return "" if depth >= PROOF_TYPE_AUDIT_DEPTH_LIMIT or root >= nodes.count
-            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-            return node.name if node.kind == "ident" or node.kind == "scope"
-            return proof_source_kernel_symbol_leaf(nodes, node.left, depth + 1) if node.kind == "paren"
-            return ""
-
-        # Qualified calls to repeated leaves lose their owner in the kernel call node. Inspect
-        # the encoded arena itself (including nested calls), and refuse these instead of typing
-        # them against the caller's local same-named signature.
-        def proof_source_kernel_has_ambiguous_qualified_call(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding]) -> bool:
-            for node in nodes:
-                continue if node.kind != "call" or node.left >= nodes.count
-                callee: mutable ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
-                qualified: mutable bool = callee.kind == "scope"
-                if callee.kind == "paren" and callee.left < nodes.count:
-                    callee <- nodes[callee.left]
-                    qualified <- callee.kind == "scope"
-                continue if not qualified
-                name: sview = proof_source_kernel_symbol_leaf(nodes, node.left, 0)
-                qualifier: mutable sview = ""
-                if callee.left < nodes.count:
-                    qualifier <- proof_source_kernel_symbol_leaf(nodes, callee.left, 0)
-                count: mutable usize = 0
-                owned_count: mutable usize = 0
-                for binding in bindings |binding, name, count|:
-                    count <- count + 1 if binding.kind == "function" and binding.name == name
-                    owned_count <- owned_count + 1 if binding.kind == "function" and binding.name == name and binding.owner == qualifier
-                return true if count > 1 and (qualifier == "" or owned_count != 1)
-            return false

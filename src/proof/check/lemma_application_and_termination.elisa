@@ -207,16 +207,13 @@ extend ElisaProof:
 
         # Resolve a declaration by name and declaration line, for rows whose bare name repeats.
         def proof_function_index_at_line(functions: ProofFunctionTable&, name: sview, line: u32) -> usize:
-            direct: usize = proof_function_index(functions, name)
-            return direct if direct < functions.lookup.names.count
-            return functions.lookup.names.count if not proof_function_name_may_repeat(functions, name)
-            found: mutable usize = functions.lookup.names.count
-            for index in 0..<functions.lookup.names.count |index, functions, name, line, found|:
-                continue if index >= functions.lookup.lines.count
-                if functions.lookup.names[index] == name and functions.lookup.lines[index] == line:
-                    return functions.lookup.names.count if found < functions.lookup.names.count
-                    found <- index
-            return found
+            return functions.lookup.names.count if functions.lookup.module_resolution_work_exhausted
+            resolved: (complete: bool, row: usize) = proof_function_index_at_line_with_work(functions, name, line, &functions.lookup.module_resolution_work_used)
+            if not resolved.complete:
+                functions.lookup.module_resolution_work_used <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                functions.lookup.module_resolution_work_exhausted <- true
+                return functions.lookup.names.count
+            return resolved.row
 
         def proof_function_index(functions: ProofFunctionTable&, name: sview) -> usize:
             if functions.lookup.index_values.count > 0 and functions.lookup.index_values.count == functions.lookup.index_hashes.count and functions.lookup.index_values.count == functions.lookup.index_ambiguous.count:
@@ -224,7 +221,7 @@ extend ElisaProof:
                 capacity: usize = functions.lookup.index_values.count
                 slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
                 probes: mutable usize = 0
-                while probes < capacity |probes, slot, wanted_hash, name, functions, capacity|:
+                while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, wanted_hash, name, functions, capacity|:
                     current: usize = functions.lookup.index_values[slot]
                     return functions.lookup.names.count if current == functions.lookup.names.count
                     return functions.lookup.names.count if current >= functions.lookup.names.count
@@ -245,177 +242,20 @@ extend ElisaProof:
                 index <- index + 1
             return found
 
-        def proof_structural_name_in(names: darray[sview]&, wanted: sview) -> bool:
-            return wanted != "" and (any candidate in names where candidate == wanted)
-
-        # A value block may capture mutable loop state that is unrelated to the
-        # structural subject. Such a capture does not affect termination evidence unless
-        # it is itself one of the strict-subterm binders used by a recursive edge. Keep
-        # the conservative rejection for captures that overlap those binders, but do not
-        # let an accumulator or parser cursor hide an otherwise checked descent.
-        def proof_structural_captures_overlap(captures: darray[sview]&, smaller: darray[ProofStructuralSmaller]&) -> bool:
-            for capture in captures |smaller|:
-                return true if any candidate in smaller where candidate.name == capture
-            return false
-
-        # Structural termination environments are name-based because the compiler AST does not
-        # expose stable binding identities. Remove every outer fact shadowed by a nested binder;
-        # retaining the spelling would let an unrelated local masquerade as a strict subterm.
-        def proof_structural_without(source: darray[sview]&, blocked: darray[sview]&) -> darray[sview]:
-            result: mutable darray[sview] = []
-            for candidate in source |result, blocked|:
-                result.push(candidate) if not proof_structural_name_in(blocked, candidate)
-            return result
-
-        # After a branch or loop, a structural binding remains usable only if both the incoming
-        # state and every normal path preserve it. Newly introduced arm/block locals are never
-        # merged because they are outside the enclosing lexical scope.
-        def proof_structural_intersect(left: darray[sview]&, right: darray[sview]&) -> darray[sview]:
-            result: mutable darray[sview] = []
-            for candidate in left |result, right|:
-                result.push(candidate) if proof_structural_name_in(right, candidate)
-            return result
-
-        def proof_structural_smaller_without(source: darray[ProofStructuralSmaller]&, blocked: darray[sview]&) -> darray[ProofStructuralSmaller]:
-            result: mutable darray[ProofStructuralSmaller] = []
-            for candidate in source |result, blocked|:
-                result.push(candidate) if not proof_structural_name_in(blocked, candidate.name)
-            return result
-
-        # Branch joins retain a mapped subterm only when both paths preserve the same origin
-        # subject. Matching names with different subjects would recreate the product-ranking bug
-        # this provenance exists to prevent.
-        def proof_structural_smaller_intersect(left: darray[ProofStructuralSmaller]&, right: darray[ProofStructuralSmaller]&) -> darray[ProofStructuralSmaller]:
-            result: mutable darray[ProofStructuralSmaller] = []
-            for candidate in left |result, right|:
-                result.push(candidate) if any other in right where other.name == candidate.name and other.subject == candidate.subject and other.identity == candidate.identity and other.subject_identity == candidate.subject_identity
-            return result
-
-        # A recursive AST walker often reaches a child through a compiler-owned side table:
-        # `for argument in arguments: visit(argument)`. The loop variable is a strict subterm of
-        # the matched enum value when the iterable itself is a matched subterm. Direct projections
-        # from that element (for example `field.value`) are strict as well. The compiler has
-        # already type-checked the recursive call; this helper recognizes only the structural
-        # shape and never infers a type from a spelling.
-        def proof_structural_argument_root(expression: Ast::Expr) -> sview:
-            match expression:
-                Ast::Expr.Ident(name, _):
-                    return name
-                Ast::Expr.Paren(inner, _):
-                    return proof_structural_argument_root(inner)
-                Ast::Expr.Field(object, _, _):
-                    return proof_structural_argument_root(object)
-                Ast::Expr.Index(object, _, _):
-                    return proof_structural_argument_root(object)
-                Ast::Expr.IndexN(object, _, _):
-                    return proof_structural_argument_root(object)
-                _:
-                    return ""
-
-        def proof_structural_argument_is_smaller(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> bool:
-            root: sview = proof_structural_argument_root(expression)
-            return root != "" and any candidate in smaller where candidate.name == root
-
-        def proof_structural_argument_is_smaller_for_subject(expression: Ast::Expr, subject: sview, smaller: darray[ProofStructuralSmaller]&) -> bool:
-            root: sview = proof_structural_argument_root(expression)
-            return root != "" and any candidate in smaller where candidate.name == root and candidate.subject == subject
-
-        def proof_structural_argument_subject(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> sview:
-            root: sview = proof_structural_argument_root(expression)
-            for candidate in smaller |root|:
-                return candidate.subject if candidate.name == root
-            return ""
-
-        def proof_structural_argument_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> usize:
-            root: sview = proof_structural_argument_root(expression)
-            for candidate in smaller |root|:
-                return candidate.identity if candidate.name == root
-            return 0
-
-        def proof_structural_argument_subject_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&) -> usize:
-            root: sview = proof_structural_argument_root(expression)
-            for candidate in smaller |root|:
-                return candidate.subject_identity if candidate.name == root
-            return 0
-
-        def proof_structural_binding_identity(expression: Ast::Expr, smaller: darray[ProofStructuralSmaller]&, parameters: darray[Ast::ParamDecl]&) -> usize:
-            identity: usize = proof_structural_argument_identity(expression, smaller)
-            return identity if identity != 0
-            return proof_structural_parameter_identity(parameters, proof_structural_argument_root(expression))
-
-        def proof_structural_call_argument(arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, parameters: darray[Ast::ParamDecl]&, position: usize) -> Ast::Expr:
-            return Ast::Expr.Invalid if position >= parameters.count
-            if argument_names.count == 0:
-                if position < arguments.count:
-                    return arguments[position]
-                return Ast::Expr.Invalid
-            return Ast::Expr.Invalid if argument_names.count != arguments.count
-            has_named: bool = any label in argument_names where label != ""
-            return Ast::Expr.Invalid if has_named and (any label in argument_names where label == "")
-            if not has_named:
-                if position < arguments.count:
-                    return arguments[position]
-            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, parameters, position|:
-                return arguments[argument_index] if argument_names[argument_index] == parameters[position].name
-            return Ast::Expr.Invalid
-
-        def proof_parameter_position(parameters: darray[Ast::ParamDecl]&, wanted: sview) -> usize:
-            for index in 0..<parameters.count |index, parameters, wanted|:
-                return index if parameters[index].name == wanted
-            return parameters.count
-
-        # The structural walker receives the currently live destructurable names. At the entry
-        # of an inferred multi-subject function those names are exactly its enum parameters; a
-        # shadowing declaration or pattern removes the name before any recursive edge is
-        # inspected. Explicitly annotated single-subject functions do not use this helper.
-        def proof_enum_parameter_names_from_parameters(parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&) -> darray[sview]:
-            result: mutable darray[sview] = []
-            for parameter in parameters |result, destructurable|:
-                result.push(parameter.name) if proof_structural_name_in(destructurable, parameter.name)
-            return result
-
-        def proof_structural_report_index(report: ProofReport&, wanted: sview) -> usize:
-            for index in 0..<report.structural.names.count |index, report, wanted|:
-                return index if report.structural.names[index] == wanted
-            return report.structural.names.count
-
-        # A local/formal with the same spelling as any source function can shadow a direct
-        # callable leaf. The structural checker has no owner-aware local callable resolver, so
-        # such functions fail closed instead of treating a callback as recursion.
-        def proof_structural_name_shadows_function(report: ProofReport&, wanted: sview) -> bool:
-            return wanted != "" and proof_structural_report_index(report, wanted) < report.structural.names.count
-
-        def proof_structural_report_same_component(report: ProofReport&, left: usize, right: usize) -> bool:
-            return false if left >= report.structural.component_ids.count or right >= report.structural.component_ids.count
-            return report.structural.component_ids[left] == report.structural.component_ids[right]
-
-        def proof_structural_termination_finding(report: mutable ProofReport&, line: u32, name: sview, message: sview) -> void:
-            report.proof_obligation(false)
-            proof_add_finding(report, "structural-decreases-unproven", line, name, message)
-
-        # Once a structural function has a termination finding, arithmetic fallback on the same
-        # recursive edge only creates duplicate diagnostics. It is still rejected by the
-        # recorded structural obligation; this helper merely keeps the report focused and does
-        # not authorize the edge as a summary.
-        def proof_structural_report_failed(report: ProofReport&, wanted: sview) -> bool:
-            for finding in report.findings:
-                return true if finding.kind == "structural-decreases-unproven" and finding.name == wanted
-            return false
-
-        # Check every recursive edge in one structural function with its lexical match
-        # environment. The environment is copied for each arm, so a binder from one branch can
-        # never justify a call in a sibling or after the match. Mutual structural edges use the
-        # callee's own decreasing-parameter position, but still require the same enum subject
-        # type and a binder from the caller's matched strict subterms.
         def proof_structural_check_expression(expression: Ast::Expr, own_name: sview, subject_position: usize, parameters: darray[Ast::ParamDecl]&, destructurable: darray[sview]&, smaller: darray[ProofStructuralSmaller]&, report: mutable ProofReport&, name: sview) -> void:
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     called_name: sview = proof_callable_name(callee)
                     if proof_callable_is_scoped(callee):
                         proof_structural_termination_finding(report, position.line, name, "scoped calls are not structurally certified without source-resolved callee identity")
-                    own_index: usize = proof_structural_report_index(report, own_name)
-                    called_index: usize = proof_structural_report_index(report, called_name)
+                    own_lookup: (complete: bool, found: bool, row: usize) = proof_structural_name_lookup(report, own_name)
+                    called_lookup: (complete: bool, found: bool, row: usize) = proof_structural_name_lookup(report, called_name)
+                    own_index: usize = own_lookup.row if own_lookup.complete and own_lookup.found else report.structural.names.count
+                    called_index: usize = called_lookup.row if called_lookup.complete and called_lookup.found else report.structural.names.count
                     direct_recursive: bool = called_name == own_name
+                    lookup_failed: bool = not own_lookup.complete or not own_lookup.found or not called_lookup.complete or direct_recursive and not called_lookup.found
+                    proof_structural_termination_finding(report, position.line, name, "source callable name lookup exceeded its validated bound") if lookup_failed
+                    direct_recursive <- false if lookup_failed
                     mutual_recursive: bool = not direct_recursive and own_index < report.structural.names.count and called_index < report.structural.names.count and proof_structural_report_same_component(report, own_index, called_index) and own_index < report.structural.subject_types.count and called_index < report.structural.subject_types.count and report.structural.subject_types[own_index] != "" and report.structural.subject_types[own_index] == report.structural.subject_types[called_index]
                     if direct_recursive or mutual_recursive:
                         # The caller's formal list cannot interpret named arguments for a
@@ -467,9 +307,15 @@ extend ElisaProof:
                                 proof_add_structural_edge_attempt(report, own_name, called_name, witnesses, position.line, position.offset.usize())
                             else:
                                 proof_structural_termination_finding(report, position.line, name, "recursive call does not pass a binder from a matched strict subterm")
-                    proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                    match callee:
+                        Ast::Expr.Ident(_, _) | Ast::Expr.Scope(_, _, _):
+                            pass
+                        _:
+                            proof_structural_check_expression(callee, own_name, subject_position, parameters, destructurable, smaller, report, name)
                     for argument in arguments |own_name, subject_position, parameters, destructurable, smaller, report, name|:
                         proof_structural_check_expression(argument, own_name, subject_position, parameters, destructurable, smaller, report, name)
+                Ast::Expr.Ident(value_name, position):
+                    proof_structural_termination_finding(report, position.line, name, "a source callable value may escape structural call-graph checking") if proof_structural_name_shadows_function(report, value_name)
                 Ast::Expr.Paren(inner, _):
                     proof_structural_check_expression(inner, own_name, subject_position, parameters, destructurable, smaller, report, name)
                 Ast::Expr.Unary(_, operand, _):
@@ -479,7 +325,8 @@ extend ElisaProof:
                     proof_structural_check_expression(right, own_name, subject_position, parameters, destructurable, smaller, report, name)
                 Ast::Expr.Field(object, _, _):
                     proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
-                Ast::Expr.Scope(base, _, _):
+                Ast::Expr.Scope(base, scoped_name, position):
+                    proof_structural_termination_finding(report, position.line, name, "a scoped callable value may escape structural call-graph checking") if proof_structural_name_shadows_function(report, scoped_name)
                     proof_structural_check_expression(base, own_name, subject_position, parameters, destructurable, smaller, report, name)
                 Ast::Expr.Index(object, index, _):
                     proof_structural_check_expression(object, own_name, subject_position, parameters, destructurable, smaller, report, name)
