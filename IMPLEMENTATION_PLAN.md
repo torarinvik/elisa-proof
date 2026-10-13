@@ -1,10 +1,39 @@
 # Elisa-Proof implementation plan
 
-Status refreshed 2026-10-12. **Current integration checkpoint: land the newest Core fixes, then restore exact proof-toolchain provenance.** Proof `main` and `origin/main` are clean at `9d432424`; Elisa-compiler `main` and `origin/main` are clean at `ef0c3fdf`; Core `main` and `origin/main` are clean at `5818e320`. The Core commit adds borrowed-nursery TaskGroup proof ordering/invalidation, parser/backend regression coverage, and source-identity hardening. Its focused Go parser/backend/semantic/unparse suites, source-identity regressions, and `go build ./src` pass. Proof pins are still `ELISA_COMPILER_REV=b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and `ELISA_STAGE0_REV=fa65ef625c4217cf54486821a6aa9348f5f04ec6`; they have not yet been advanced. The checked-in proof product manifest is stale: it names proof HEAD `5fd8a73b` with dirty source and Stage1 revision `7e125178`, so that binary cannot certify the current proof tree or compiler pin. No provenance-matched Stage1 has yet been produced for compiler `ef0c3fdf` against Core `5818e320`. A separate Stage1 seed is currently using the host-wide seed lock; do not start another seed until it exits. Performance timing remains skipped. Highest-return order: seed the exact current compiler with Core `5818e320`, fix only demonstrated seed blockers without weakening lifetime or effect checks, then update proof pins and rebuild from the resulting provenance-matched Stage1; run targeted source/replay gates on the exact current proof tree, followed by strict O2 and independent replay qualification. Preserve active dirty work and provenance-bearing worktrees; merge only correctness-qualified source changes.
+Status refreshed 2026-10-13. **Current checkpoint: qualify the dirty proof changes against an exact, current Elisa toolchain before merging.** Proof `main` is `d47b0e92` with an uncommitted working tree; Elisa-compiler `main` is `cce6b6afc` with 331 dirty paths; Core `main` is `55fb293d` with 16 dirty paths. Proof pins remain `ELISA_COMPILER_REV=b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and `ELISA_STAGE0_REV=fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The installed Stage1 remains from compiler revision `5cda9b4e69ff937f00ea43f0e7e4713d5ad3403b` (provenance schema v1), which does not match the proof pin. The installed Stage0 is a clean build of Core `55fb293de91cc0263972b1d87a1aa0702938ad7a`, but does not match the Stage0 pin. In the latest stable combined check, Stage0 AST parsed all 34 changed `src/**/*.elisa` modules at fingerprint `c9433dc77aaeb813e0e80713463359286f099440d62c0c610f88e3468b02d4c4`; the full entry-point attempt on that exact snapshot exited with 583 non-warning parser diagnostics across 33 imported files because this Stage0 predates syntax used by the proof source. A Stage0 AST pass returned zero parser errors over 35 changed proof modules at stable fingerprint `9589bc633ad8a8a6c7f79954cb85523a6b151204099cd7d0c22f3b62ba60e7ba`; this run was outside the inherited static-only constraint and is excluded from qualification. Do not run further Elisa parser/build/test/replay checks until that constraint is lifted. The latest 2026-10-13 static snapshot covers 219 changed paths (45 Python, 31 shell, 140 Elisa, plus README, schema, and this plan). Python AST parsing of 45 changed scripts, `bash -n` on 31 changed shell files, whitespace, source-length, uniqueness of all 490 three-part numbered plan headings, and `git diff --check` pass; the changed-content fingerprint excluding this plan covers 218 paths and is `a99475b63c872d2923004621ed4074efed26a93cde7c12c2d0750cc30b6cf0c5` (SHA-256 over sorted paths, NUL, file contents, NUL). Pattern literal admission now supports the empty string (whose preserved token text uniquely identifies a string) and safe printable-ASCII punctuation after an identifier-start byte. The `sview` and `cstr` positive controls cover both forms across aggregate and focused report routes; they remain unrun. Python AST, source-length, and whitespace checks pass for this edit. No Elisa parser/build/test/replay was run. A work-aware linear-reader scan confirms there are no remaining calls to the legacy unmetered parenthesis or peer-nameability helpers inside `*_with_work` bodies. Static review found both a missing `fact_scan_cost_valid` argument and a dropped unsigned increment-equality witness path in the work-aware subtraction helper; both are now repaired with bounded readers, but `examples/counting_loop_measure.elisa` remains unrun against a current compiler, so runtime parity is unqualified. Each candidate increment equality still rescans order facts to validate its strict peer; the work budget bounds this product-shaped search, and a batched peer index is a follow-up after correctness qualification. The Stage1 product is pin-mismatched and its direct CLI invocation does not provide a valid proof-project semantic run. Current compiler-source inspection confirms a default-on Global.Read/Write authority checker with direct CLI, authority, transitive-call, alias, shadowing, indexed-target, and mutable-field regression coverage; the current compiler candidate has not rerun those suites. A static alias audit exposed a Global.Read/Write bypass through reference-bearing match, loop, and comprehension binders. The compiler candidate carries structural binder TypeIds into those scopes and unwraps references to iterable containers. A follow-up static audit found two unresolved cases: nested Ref fields projected from reference-bearing aggregate items may lose their alias origin, creating a potential grant bypass, while blanket `UNKNOWN_ALIAS` assignment can reject references known to point only to local storage. The eight paired regressions cover missing-grant/granted cases for loops, comprehensions, and enum payloads, but not these nested and no-grant-local controls. Close both cases and add those controls before treating the pass as qualified; scalar binders remain untracked. The edits pass static Python and whitespace checks only. Structural termination replay now binds the recursive call graph and complete owner-certificate set to parser-origin declarations; an independent static review found no counterexample, but runtime remains pending. The dirty candidate now routes source-bound tactics through an opaque `ProofCheckedView`, checks source validation and per-goal source admissibility, and keeps the report-taking helper private; static call-site inspection finds the CLI and repair paths using the view, but compile compatibility remains unverified. Open-attempt fact provenance now has an immutable per-attempt status snapshot in the opaque receipt, computed within the source-bound transaction using the selected attempt’s parser-origin owner context and shared bounded replay caches. Source-bound tactic execution, final tactic-result admission, and repair search consult these statuses; contexts the validator cannot authenticate fail closed. Structural certificate replay rebuilds source call edges, binds exact call sites and declarations, reruns termination checking, and compares the owner’s complete certificate set. Certificate-root owner selection now uses a bounded reverse index from certificate IDs to proven attempts, avoiding a full attempt scan for each certificate while retaining exact identity checks. These changes pass static checks only and remain compile/runtime-unqualified; open attempts now accept immutable declaration facts only when source-anchored liveness is reconstructed; mutable, loop, and call-result witnesses without attempt-specific rules remain fail-closed, and the replay index has not been benchmarked. A focused open-attempt end-to-end regression now checks source local-binding admission and refusal of a caller-injected initial-state fact; it remains unrun under the toolchain hold. Do not run mutating trace validators through the read-only checked view. Highest-ROI order: (1) establish a schema-v5 Stage1 whose provenance matches the exact selected compiler/Core source pair; (2) close nested aggregate alias propagation and known-local precision, then qualify the Global.Read/Write pass through focused CLI and proof-API negative and positive controls; (3) qualify the source-bound fact-origin receipt, structural certificate-source checks, and pattern-collision controls with focused replay and end-to-end gates; (4) broaden qualification only where focused results expose risk; (5) after correctness gates pass, measure candidate compiler changes with paired local Mac A/B runs using retired-instruction counts, recording exact source/product/runtime/target identities and host load. Label Mac results exploratory and non-qualifying; wall-clock time is not the primary metric and timing cannot replace correctness or provenance evidence. Preserve dirty worktrees and branches because the cleanup audit found no safe removal target. Seven additional proof worktrees are dirty and contain no commits ahead of `main`; both feature branch refs are checked out in dirty worktrees, so preserve the worktrees and branches until their changes are qualified or captured.
+
+Read-only toolchain inventory (2026-10-13): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-qualification`; the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core snapshots are also available: `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` at `4d17e30f443b2433eee2959869df11b9bbf630bc` with its matching Stage0 product, and `/private/tmp/elisa-core-stage0-snapshot-20261013` at `7696bdfa458a42fe2f2b848123bcb53f27488774`; their commits are not in canonical Core `main`’s object database. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
+
+Read-only cleanup audit (refreshed 2026-10-13): proof has eight worktrees including `main`; all eight are dirty, and its three merged branch refs are checked out in dirty trees. Elisa-compiler has 122 worktrees including `main`, 42 dirty; five clean non-root worktrees point to commits already on `main` and retain Stage1 seed/source, proof-compiler, or profiler baseline state. The other clean compiler trees point to candidate commits not merged to `main`. Of 102 compiler branch refs, eight are merged and all eight are checked out in dirty worktrees; the remaining 94 are unmerged. There are no clean merged compiler branches outside the retained baselines and no uncommitted-free proof worktrees. No branch or worktree is safe to remove without discarding live changes, unmerged candidate history, or bootstrap/profiler evidence.
 
 Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
 
-The clean validation checkout `/private/tmp/elisa-proof-f2d37570` records proof HEAD `f2d37570`, Stage1 source revision `6b475d894331f0a81c3112167ef7fcf5c642a424`, product SHA-256 `65a9308c53b510365aa69644a0bcaa9a071ea2006683dad6bf2ec12fc394f6b3`, and runtime SHA-256 `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`; the proof source was clean when built. The full-suite run from that immutable checkout is active; its log is `build/full-test-f2d37570.log` in that checkout. A pinned Stage0 candidate at revision `370110bc2913831f59fc190f266491efcf3ccabe` is available, but some proof modules currently fail to compile under it with optional-AST-field diagnostics. Do not call this a Stage0 bug or a valid source rejection until reduced differential examples establish which interpretation is correct. Keep the Stage1 identity/freshness evidence separate from semantic qualification.
+Static-audit delta (2026-10-13): the dirty proof tree now extracts qualified module-path segments once under the type-work budget and reuses them for owner and type-scope matching. This removes repeated recursive prefix counting and rejects paths whose base is not an identifier; each segment must also pass canonical arena-shape validation. A well-shaped arena with a call expression as a nested scope base now has an owner-path rejection control in `examples/kernel_proposition_owner_path_tests.elisa`; it remains unrun. Static invariants, `git diff --check`, and the source-length gate pass; runtime behavior remains unqualified under the hold above. After a provenance-matched compiler is available, add malformed-segment replay coverage, run the focused owner/type-scope suite, and add direct scalar/indexed write-only self-update controls to the compiler grant suite before merging.
+
+Toolchain recheck (2026-10-13): the newest additional Stage1 artifact found is `../Elisa-compiler/build/goal-compiler-latest-b11e/bin/elisac-stage1`, stamped to compiler commit `b11e9121` from 2026-10-09 with provenance schema v1. It predates current compiler `main` (`d4338ced`) and is not a qualification candidate; no schema-v5 or `d4338ced`-matched provenance artifact was found.
+
+Toolchain recheck (2026-10-13, local benchmark worktree): `/Users/torarinvikbjarko/.codex/worktrees/v5-local-bench-bootstrap/Elisa-compiler/bin/elisac-stage1` has SHA-256 `948a525c3f46dc34b9f4146245e7b9d9d7e13ef4dedae38a981bde4ffa633c8f`; its provenance schema-v5 freshness check passes and records source revision `b77499d4f`. That detached worktree has 77 dirty paths, and its HEAD is not a descendant of current compiler `main` (`cce6b6afc`), so this artifact does not qualify the current Global.Read/Write candidate or proof pin. This check ran only the read-only freshness verifier, not the compiler, tests, or proof replay.
+
+Compiler handoff (2026-10-13): the compiler owner confirmed current `main` is `d4338ced` with
+147 dirty paths and the retained candidate remains `b11e9121`/schema v1. Stage1 provenance v5
+hashes exact source and build-recipe contents, but the proof grant gate also requires a clean
+Stage1 source tree. The requested qualification setup is an isolated clean snapshot commit of the
+current compiler candidate, a Stage1 seeded from that snapshot and checked with `check-exact`, then
+a disposable proof validation copy pinned to that snapshot. Shared compiler `main` and canonical
+proof pins stay untouched until the result is reviewed; timing remains skipped.
+
+Static performance audit (2026-10-13): qualified module-owner lookup repeatedly scanned the entire
+typing environment to validate each candidate identity and retrieve each path segment. The replay
+typing index now builds a bounded owner-identity table with validated contiguous path spans and
+reuses direct span reads for exact and context-relative matching; candidate search remains
+O(owner-count × path-depth), while the repeated O(owner-count × binding-count) validation scans are
+removed. Scoped indexes advance the validated source count only across checked value-only overlays,
+and stale/malformed spans fail closed. `git diff --check` and the source-length gate pass; runtime
+behavior and throughput remain unqualified under the compiler hold. Once an exact Stage1 is
+available, run the existing owner-path admission cases (including malformed base, duplicate identity,
+extra-segment, and context controls) and a large-owner scaling workload before merging this change.
+
+The clean validation checkout `/private/tmp/elisa-proof-f2d37570` records proof HEAD `f2d37570`, Stage1 source revision `6b475d894331f0a81c3112167ef7fcf5c642a424`, product SHA-256 `65a9308c53b510365aa69644a0bcaa9a071ea2006683dad6bf2ec12fc394f6b3`, and runtime SHA-256 `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`; the proof source was clean when built. The last recorded status for its full-suite run was active, but the checkout and `build/full-test-f2d37570.log` are now missing and no matching process is running, so the final result is unknown and provides no current qualification evidence. A pinned Stage0 candidate at revision `370110bc2913831f59fc190f266491efcf3ccabe` is available, but some proof modules currently fail to compile under it with optional-AST-field diagnostics. Do not call this a Stage0 bug or a valid source rejection until reduced differential examples establish which interpretation is correct. Keep the Stage1 identity/freshness evidence separate from semantic qualification.
 
 Previously recorded cache, package, signed-integer, profiler-contract, and typed-local gains remain scoped to their exact tests. None is a general package-codec proof, full fixed-width semantics, complete obligation inventory, or measured speedup. The dirty main checkout currently contains marker-audit, call/replay, loop, arithmetic, and inventory edits; do not describe them as landed or use them to certify the immutable `f2d37570` test run.
 
@@ -6095,10 +6124,11 @@ Do these before adding broad proof features or optimizing the affected proof pat
 save the smallest source, exact command, stderr/stdout, report, build manifest, and expected/actual
 result. Keep the failure reason stable and machine-readable.
 
-1. **P0.1 — Finish the immutable `f2d37570` full-suite run.** Capture final exit code, complete log,
-    test inventory, and source/product/runtime hashes. Rerun only failing cases individually after
-    the full run, from a fresh process, to distinguish shared-state contamination from a deterministic
-    defect. Publish pass/fail/skip/unverified separately.
+1. **P0.1 — Reconcile the immutable `f2d37570` full-suite record.** The previously active checkout
+    and log are missing and no matching process remains, so no final result is available. Recover a
+    retained complete log and test inventory if they exist; otherwise keep this run unverified and
+    rerun only after the exact-toolchain validation hold is lifted. Preserve source/product/runtime
+    identities and report pass/fail/skip/unverified separately.
 2. **P0.2 — Classify every failing assertion, not just test names.** For each failed harness assertion,
     record expected status, actual status, certificate count, replay count, gaps, findings, and the
     first differing semantic field. Decide whether the defect is in source semantics, producer,
@@ -11051,12 +11081,44 @@ witness admission. This keeps the main witness implementation below the reposito
 source limit without changing lookup semantics. `git diff --check` and
 `scripts/check_source_length.py` pass; no build or tests were run.
 
+### 23.27.245 Scope proposition signatures by recorded module paths (2026-10-12)
+
+Proposition function scoping now derives full owner paths from the kernel environment's
+`module-owner-segment` rows. Nested modules with repeated leaf names are distinguished correctly,
+and owner-depth results are cached per identity during environment construction so repeated
+functions in one module do not rebuild the same path. Unique bare declarations retain the
+source resolver's existing global-uniqueness behavior. Static whitespace and source-length
+checks pass; no build or tests were run.
+
+### 23.27.246 Remove obsolete leaf-only qualified-call guard (2026-10-12)
+
+The unused qualified-call ambiguity helper compared only the final qualifier leaf, which is
+insufficient for repeated nested module names. Kernel proposition typing now resolves qualified
+calls through exact recorded module-owner segments, so the dead guard and its symbol-leaf helper
+were removed. Static whitespace and source-length checks pass; no build or tests were run.
+
+### 23.27.243 Restrict runtime-guard production to assert contracts (2026-10-12)
+
+The assert-by runtime-guard producer now recognizes only `Contract("assert", ...)` as the
+declared first contract, matching replay validation and the source inventory. Other contract
+kinds in that position no longer produce runtime-guard evidence that replay must reject.
+`git diff --check` and `scripts/check_source_length.py` pass; no build or tests were run.
+
+### 23.27.244 Validate proposition bare-call owner identities (2026-10-12)
+
+When a proposition actually uses a non-root `bare-call-owner` marker, kernel replay now requires
+its owner identity to refer to a structurally recorded module-owner path before selecting a
+signature. Root owner identity zero remains valid for root-level functions. Validation happens at
+lookup rather than once per marker during environment setup, avoiding repeated whole-environment
+path scans. Static whitespace and source-length checks pass; no build or tests were run.
+
 ### 23.27.141 Metered source-kernel scalar-reference classification (2026-10-12)
 
 Source-kernel typing now classifies a reference pointee with the shared source-work-aware scalar
 type helper. This removes a separate declaration-count precharge and prevents nested alias and
 const-enum lookup from bypassing the cumulative budget. Static whitespace and source-length
 checks pass; no build or tests were run.
+
 
 ### 23.27.136 Stage1 provenance dependency closure and strict shape validation (2026-10-12)
 
@@ -11258,7 +11320,7 @@ budget finding left the overall report incomplete. Per-goal proof status remains
 queryable, but overall report actions now fail closed on incomplete source admission or obligations.
 Static whitespace and source-length checks pass; no Elisa build, CLI run, or tests were run.
 
-### 23.27.155 Module-local source conversion alias RHS resolution (2026-10-12)
+### 23.27.267 Module-local source conversion alias RHS resolution (2026-10-12)
 
 Source conversion alias expansion now resolves bare alias names in a non-root alias RHS against
 the exact owner/name pair recorded for declarations in that module. Producer and replay use the
@@ -11440,7 +11502,7 @@ qualifier was also moved into its own source module to keep `qualified_calls.eli
 repository's 600-line limit. Python syntax compilation, `git diff --check`, and
 `scripts/check_source_length.py` pass. No tests, build, or replay were run.
 
-### 23.27.172 Extend const-enum qualification through scoped proof expressions (2026-10-12)
+### 23.27.268 Extend const-enum qualification through scoped proof expressions (2026-10-12)
 
 Const-enum member qualification now follows common call, index, collection, refinement, and
 record-value expression forms, plus statement and expression matches, catches, comprehensions,
@@ -11803,3 +11865,2418 @@ join path. This is an unresolved semantic-flow mismatch, not a qualified compile
 compiler owner is isolating a minimal regression on a separate Core checkout; keep the proof pins
 unchanged and do not use this smoke to certify the current Core commit until the early-return case
 passes with the focused semantic/backend suites.
+
+### 23.27.209 Reuse bounded safety-analysis context scans (2026-10-12)
+
+Unsigned expression safety now computes the fact/bound AST size once at each top-level context and
+reuses it through recursive expression checks and across premise filtering. The plain-closure
+fallback recomputes the size only after the staged bounds change. Safety-context construction and
+conditional-arm analysis now build scalar witness indexes through a work-aware constructor that
+charges marker parsing, hashing, collision probes, and the exact-sort fallback before returning a
+usable index. Bare-name unsigned widths reuse that indexed marker data during recursive safety
+checks rather than rescanning every premise. Signed marker parsing and difference/plain-closure
+marker construction also use explicit work accounting. `git diff --check` and the 600-line source
+gate pass. The shared 32x legacy-reader reserve remains conservative; audit the remaining query
+helpers before changing it. No parser, build, tests, or replay were run; static-only verification
+remains in force.
+
+### 23.27.210 Meter exact-place and indexed-element unsigned width queries (2026-10-12)
+
+The work-aware unsigned-width reader now consumes exact-place and indexed-element markers from
+the already-built scalar-witness index. This removes its remaining per-expression fact-list scans
+and marker reparsing. Marker AST sizing, candidate traversal, and exact structural equality are
+charged to the shared analysis budget; malformed parallel marker arrays fail closed. The signed
+type-bound reader also reserves work for marker decoding after its syntax-size walk. `git diff
+--check` and `scripts/check_source_length.py` pass. No build, tests, or replay were run; source
+qualification remains open.
+
+### 23.27.211 Cache signed safety shape totals while filtering premises (2026-10-12)
+
+Premise filtering now measures the stable fact-list and signed-bound AST totals once, then passes
+those totals to the existing work-aware signed checker for each premise. This removes repeated
+shape traversals from the filtering loop while preserving per-expression charging and fail-closed
+exhaustion. `git diff --check` and `scripts/check_source_length.py` pass. The 32x reserve for
+remaining legacy readers is still conservative and needs a query-by-query audit. No parser, build,
+tests, or replay were run; static-only verification remains in force.
+
+### 23.27.212 Reuse witnesses in guarded unsigned conditional checks (2026-10-12)
+
+The metered unsigned-safety path now checks guarded conditional subtraction using its existing
+scalar-witness index. It no longer rebuilds the index or rescans the premise list for identifier
+widths at each nested conditional. Width lookups and exact guard-to-operand comparisons consume
+the shared work budget. The established conditional rule and operand ordering are preserved.
+`git diff --check` and `scripts/check_source_length.py` pass. No build, tests, or replay were run.
+
+### 23.27.219 Meter constant folds in work-aware bound recognition (2026-10-12)
+
+The work-aware integer-term recognizer and comparison-bound collector now use the shared-budget
+constant folder for their literal and arithmetic checks, returning incomplete immediately on
+exhaustion. The non-metered comparison collector retains its original pure folder. `git diff
+--check` and `scripts/check_source_length.py` pass. No build, tests, or replay were run, so runtime
+equivalence remains unqualified.
+
+### 23.27.213 Meter conditional scalar checks and negative-bit-pattern scans (2026-10-12)
+
+The work-aware conditional-difference rule now meters primitive-comparison witness checks using
+the shared marker-scale reservation, in addition to its width lookups and exact operand ordering.
+The unsigned safety path's machine-word negative-literal scan now charges each visited AST node
+and stops on exhaustion. The broad 32x reserve remains in place because other legacy readers are
+not yet fully accounted for. `git diff --check` and `scripts/check_source_length.py` pass. No
+build, tests, or replay were run.
+
+### 23.27.214 Meter unsigned modulo constant-fit analysis (2026-10-12)
+
+The metered unsigned-safety path now uses a work-aware constant folder and constant-fit traversal
+for unsigned remainder divisors. It reuses the already-folded divisor value instead of folding the
+same root twice, charges repeated subtree folds and bit-pattern checks, and propagates exhaustion
+as an inconclusive safety result. Constant-folding operators and accepted literal forms mirror the
+existing helper. `git diff --check` and the source-length gate pass. No build, tests, or replay
+were run; runtime equivalence remains to be qualified.
+
+### 23.27.215 Reserve unsigned environment scans at legacy-reader branches (2026-10-12)
+
+Recursive unsigned safety now charges expression traversal at every visited node, but reserves the
+fact/bound cross-scan only immediately before branches that still call legacy fact or interval
+readers. Marker-index lookups, work-aware comparisons, and constant-fit analysis keep their direct
+charges. Conditional-arm setup retains its environment reserve because bound collection there
+still uses a legacy reader. The 32x factor remains unchanged for these legacy reads. `git diff
+--check` and `scripts/check_source_length.py` pass. No parser, build, tests, or replay were run;
+static-only verification remains in force.
+
+### 23.27.216 Meter short-circuit constant-boolean reads (2026-10-12)
+
+The work-aware unsigned-safety path now uses a budgeted constant-boolean reader for short-circuit
+left operands. It charges each visited parenthesis or negation node and preserves the existing
+unknown result for unsupported or over-deep forms. This removes that pure recursive read from the
+expression reserve's unmeasured remainder. `git diff --check` and the source-length gate pass. No
+build, tests, or replay were run.
+
+### 23.27.217 Meter interval inference in unsigned safety (2026-10-12)
+
+Recursive unsigned safety now uses a work-aware interval reader for its unary and arithmetic
+fallbacks. Constant folding, term-bound structural comparisons, identifier-bound lookup, and
+recursive interval cases charge the shared safety budget directly; exhaustion refuses the safety
+claim. The implementation mirrors the existing interval rules while leaving non-metered clients
+unchanged. `git diff --check` and `scripts/check_source_length.py` pass. No build, tests, or replay
+were run, so runtime equivalence remains unqualified.
+
+### 23.27.218 Meter unsigned unit-increment constant checks (2026-10-12)
+
+The recursive unsigned-safety path now folds the two operands of a possible unit increment with
+the shared work budget, stopping immediately if either fold exhausts it. The metered path no
+longer relies on the pure `proof_constant_int` traversal for this rule. Bound-name comparison
+length arithmetic in the work-aware interval lookup also rejects overflow before charging.
+`git diff --check` and `scripts/check_source_length.py` pass. No build, tests, or replay were run.
+
+### 23.27.220 Meter unsigned scaled-product witness reads (2026-10-12)
+
+Recursive unsigned-safety checks now use a work-aware scaled-product witness reader. It reuses the
+existing scalar marker index and charges constant folds, width checks, exact term comparisons,
+conjunct traversal, and positive or negated readable-order checks to the shared budget. The pure
+reader remains for non-metered clients. Conjunction flattening retains the existing structural
+depth cutoff. `git diff --check` and `scripts/check_source_length.py` pass. No build, tests, or replay
+were run, so source/runtime parity remains unqualified.
+
+### 23.27.221 Meter unsigned unit-increment peer checks (2026-10-12)
+
+The recursive unsigned-safety plus rule now checks strict-peer witnesses through a work-aware
+reader that reuses the existing unsigned-width marker index. It meters fact traversal, exact term
+comparisons, peer-shape checks, width resolution, and the `base <= middle < peer` two-step case.
+The 32x environment reserve now surrounds only the still-legacy sum-upper-witness fallback, not
+the unit-increment path. `git diff --check` and `scripts/check_source_length.py` pass. No build,
+tests, or replay were run; runtime parity remains unqualified.
+
+### 23.27.222 Reuse scalar witnesses in signed increment checks (2026-10-12)
+
+Signed overflow safety now carries the existing scalar-witness index through recursive checks and
+signed equality closure. The strict-peer increment rule checks candidate orders against that index
+instead of rebuilding marker indexes for each fact; the pure entry point also builds one index per
+query and reuses it. The legacy negated-integer reader and other signed width/interval readers still
+need a query-by-query work-accounting audit. `git diff --check` and the source-length gate pass. No
+parser, build, tests, or replay were run; static-only verification remains in force.
+
+### 23.27.223 Meter unsigned sum-upper-witness reads (2026-10-12)
+
+The recursive unsigned-safety plus rule now uses a work-aware sum-upper-witness search rather than
+the legacy helper under a fixed environment reserve. It reuses indexed scalar markers, meters
+candidate and nested readable-order scans, and preserves the legacy forward/reverse operand order,
+conjunction depth cutoff, subtraction-bound shape, and strictness rules. The resulting peer shape
+and width checks are also budgeted. `git diff --check` and `scripts/check_source_length.py` pass. No
+build, tests, or replay were run; runtime parity remains unqualified.
+
+### 23.27.224 Meter unsigned subtraction-order collection (2026-10-12)
+
+The recursive unsigned-safety minus rule now meters conjunction flattening, order-fact extraction,
+type-marker copying, peer-increment checks, and the direct order and alias queries. It reuses a
+decoded marker index and charges repeated comparisons instead of relying on the 32x environment
+reserve. Shape predicates preserve the legacy short-circuit order so skipped marker and operand
+checks do not consume budget. The source-side structural and strictness rules are retained.
+`git diff --check` and
+`scripts/check_source_length.py` pass. No build, tests, or replay were run; runtime parity remains
+unqualified.
+
+### 23.27.226 Remove dead unsigned increment-equality scan (2026-10-12)
+
+The metered unsigned subtraction fallback no longer scans equalities of the form `name == base + 1`
+to append them to the candidate order facts. Its direct order reader accepts only comparison
+operators, and the final metered goal fallback only recognizes bare-name aliases, so these
+arithmetic equalities could not influence either result. Removing the scan avoids repeated
+strict-peer checks and cannot remove a proof witness from those consumers. The recursive unsigned
+expression checker also reuses the width it already computed for the current expression instead
+of traversing the same AST and marker index a second time. `git diff --check` and
+`scripts/check_source_length.py` pass. No build or tests were run.
+
+### 23.27.225 Meter signed interval and constant reads (2026-10-12)
+
+Recursive signed-overflow checks now use the shared work-aware interval reader for unary and
+binary interval proofs, and the work-aware constant folder for the untyped constant fallback.
+Both stop with an unsafe result when the shared budget or recursion limit is exhausted. Legacy
+signed-width, guarded-subtraction, nonnegative-sum, and scalar-witness readers remain protected
+by the existing AST-size cross-scan reserve. The source conversion and replay generic-name
+queries were also inspected: source lookup is line-keyed, while replay requires the active call
+function line and uses the line-keyed index. `git diff --check` and `scripts/check_source_length.py`
+pass. No build, tests, or replay were run; runtime parity remains unqualified.
+
+### 23.27.227 Avoid double-charging work-aware signed intervals (2026-10-12)
+
+Removed the legacy cross-scan reserve immediately before signed interval reads. Those reads now
+charge constant folding, bound lookup, and recursive interval traversal directly through the
+shared budget, so the extra AST-size reserve duplicated accounting and rejected otherwise
+budget-completable checks. Cross-scan reserves remain before the still-legacy signed-width and
+other helper scans. `git diff --check` and `scripts/check_source_length.py` pass; no build or tests
+were run.
+
+### 23.27.228 Reuse scalar marker index in signed fallback (2026-10-12)
+
+The signed overflow fallback now asks the already-built `ProofScalarWitnesses` index whether an
+expression is scalar, instead of rebuilding the full marker index for the same fact list. The
+existing cross-scan reserve still bounds this legacy indexed traversal. This preserves the exact
+scalar-witness rules while avoiding repeated index construction during recursive safety checks.
+`git diff --check` and `scripts/check_source_length.py` pass; no build or tests were run.
+
+### 23.27.229 Reuse signed increment width (2026-10-12)
+
+The signed increment strict-peer reader now receives the width already resolved for the increment
+expression. For a recognized unit increment, that width is the width of its non-constant base;
+the reader no longer rescans every fact to derive the same value. Both metered and pure safety
+entry points pass the resolved width, preserving the candidate order and peer-width checks.
+`git diff --check` and `scripts/check_source_length.py` pass. No build or tests were run.
+
+### 23.27.230 Meter signed strict-peer order scans (2026-10-12)
+
+The recursive signed increment fallback now meters candidate fact traversal, indexed scalar
+witness checks, negated-order integer checks, and structural peer comparison. It reserves a
+bounded fact/bound cross-scan only around the remaining legacy signed peer-width lookup. The
+reader preserves direct and negated strict-order forms and stops on work exhaustion. Static
+whitespace and source-length checks pass; no build or tests were run, so source parity is not yet
+verified by execution.
+
+### 23.27.231 Linearize unsigned conjunction flattening cost (2026-10-12)
+
+Unsigned subtraction fact collection no longer recalculates each recursive conjunction subtree's
+full AST cost. It charges each descent and parenthesis strip once, keeps the structural scan cutoff,
+and leaves order extraction to meter any residual subtree at the cutoff. This removes quadratic
+budget consumption on skewed conjunction chains without changing which conjuncts are collected.
+`git diff --check` and `scripts/check_source_length.py` pass; no build or tests were run.
+
+### 23.27.232 Reuse signed expression width in arithmetic witnesses (2026-10-12)
+
+The signed guarded-subtraction and nonnegative-sum witnesses now receive the width already
+resolved by the caller instead of rescanning the full expression against all facts. Operand and
+sum-bound width checks remain intact, preserving the same signed-width conditions. Static
+whitespace and source-length checks pass; no build or tests were run.
+
+### 23.27.233 Skip signed witness-width scan when no witness exists (2026-10-12)
+
+The signed nonnegative-sum fallback now returns immediately when the upper-bound witness search
+fails, rather than attempting a signed-width lookup on the witness's invalid placeholder term.
+This avoids a full fact scan on the common unsuccessful path without changing the proof result.
+`git diff --check` and `scripts/check_source_length.py` pass; no build or tests were run.
+
+### 23.27.234 Charge signed peer-width scans by source cost (2026-10-12)
+
+The signed strict-peer reader now estimates the legacy peer-width lookup from measured expression
+cost and total measured fact cost, including payload text, rather than AST node counts alone. It
+charges that cross-scan before invoking the legacy reader and fails closed if it exceeds budget.
+Static whitespace and source-length checks pass; no build or tests were run.
+
+### 23.27.235 Measure signed fact cost lazily (2026-10-12)
+
+Signed strict-peer checks now compute and cache the full fact scan cost only when a negated-order
+integer check or a peer-width scan needs that estimate. Ordinary positive-order candidates no
+longer pay for a preliminary pass over every fact. Each cost walk remains budgeted, and the
+cached cost is reused within the query. `git diff --check` and `scripts/check_source_length.py`
+pass; no build or tests were run.
+
+### 23.27.236 Index signed widths for recursive safety checks (2026-10-12)
+
+The scalar-witness context now retains ordered signed type-bound and signed place-bound marker
+terms. Work-aware signed-width queries compare against those rows with exact expression equality,
+and preserve the legacy recursive combination rules and first matching marker. Recursive safety
+and strict-peer width checks use this reader instead of rescanning all arithmetic facts, removing
+their coarse cross-scan reservations. Marker-array corruption and work exhaustion fail closed.
+`git diff --check` and `scripts/check_source_length.py` pass; no build or tests were run, so runtime
+parity remains unqualified.
+
+### 23.27.237 Meter remaining signed arithmetic witnesses (2026-10-12)
+
+The recursive signed-safety path now uses budgeted width, interval, guarded-subtraction order,
+and nonnegative-sum witness readers. The equality-closure caller also uses the signed marker index
+and work-aware interval lookup. This removes its fact-by-expression cross-scan reserve and avoids
+recomputing whole fact/bound shapes at each signed-safety entry; conjunction order queries retain
+the legacy depth cutoff and left-to-right witness order. `git diff --check` and
+`scripts/check_source_length.py` pass; no build or tests were run, so runtime parity remains
+unqualified.
+
+### 23.27.238 Measure unsigned witness fact cost lazily (2026-10-12)
+
+Unsigned scaled-product and sum-bound witness searches now defer the full fact-cost pass until a
+negated-order integer-denial check needs it. The measurement is cached across conjunction and
+sum-witness scans, and remains charged to the shared work budget. Positive direct-order candidates
+avoid the preliminary all-facts traversal. `git diff --check` and `scripts/check_source_length.py`
+pass; no build or tests were run, so runtime parity remains unqualified.
+
+### 23.27.239 Meter scalar fallback in signed safety (2026-10-12)
+
+The signed work-aware safety walker no longer calls the pure scalar-witness traversal without
+accounting for marker comparisons when signed width is absent. It computes the marker scale once
+for each safety batch and threads it through recursive expression checks, equality closure, and
+fact filtering; the scalar fallback now uses the metered reader and propagates exhaustion. Static
+whitespace and source-length checks pass. No build or tests were run, so runtime parity remains
+unqualified.
+
+### 23.27.240 Reuse and validate scalar witness marker indexes (2026-10-12)
+
+Signed-safety width recursion now accepts the marker scale already computed by its caller, so
+tuple-width checks do not rebuild that scale at each nested query. The shared work-aware scale
+reader also rejects inconsistent parallel marker arrays and out-of-range hash/sorted-index slots
+before scalar witness traversal can dereference them. It accepts the intentionally absent sorted
+fallback on the ordinary hash fast path. `git diff --check` and `scripts/check_source_length.py`
+pass; no build or runtime tests were run.
+
+### 23.27.241 Reject overloaded operators in runtime facts (2026-10-12)
+
+Runtime assertion and `assert_by` replay now uses a bounded source-analysis context to rebuild the
+operator/type indexes needed by the type-directed operator guard. It checks the assertion,
+consumed goal, and nested pure scalar helper bodies, rejecting actual overloads for known receiver
+types without letting an unrelated type's operator implementation suppress a valid runtime fact.
+Unknown or ambiguous receiver types retain the guard's conservative global fallback. Index
+construction is shared with deterministic-call replay through its existing analysis-context cache;
+typed operator walks remain charged per trace, including failed and over-budget paths. Replay also
+rejects snapshots whose declaration, annotation, or generic-row count alone reaches the per-fact
+limit before constructing indexes, while already-built shared contexts remain reusable for larger
+snapshots without repeating the setup work.
+Static whitespace and source-length checks pass; no build or tests were run, so runtime parity
+remains unqualified.
+
+### 23.27.242 Admit declared `assert_by` goal contracts in replay (2026-10-12)
+
+Replay previously rejected `Contract("assert", ...)` as the first statement in an `assert_by`
+block, even though the producer and source inventory identify that exact node as the block's
+runtime goal. The assert-by certificate matcher and runtime-guard source matcher now require this
+first contract kind and preserve the exact line/expression checks. This restores valid runtime-guard
+fact replay without admitting later proof-step assertions. `git diff --check` and
+`scripts/check_source_length.py` pass; no build or tests were run.
+
+### 23.27.269 Meter structural replay name hashing (2026-10-12)
+
+The structural certificate-owner and structural source-declaration indexes charged text
+validation and collision comparisons but did not charge the byte traversal in `proof_name_hash`.
+Construction and lookup now charge each name's length before hashing. The structural lemma-name
+lookup already charged this traversal; the source-declaration lookup now does too. Long names
+therefore consume the replay work budget at the hash step, and exhaustion makes the relevant
+index or lookup incomplete. `git diff --check` and `scripts/check_source_length.py` pass; no build
+or tests were run.
+
+### 23.27.270 Remove repeated unsigned-safety environment scans (2026-10-12)
+
+The recursive unsigned-expression checker now threads its work-aware scalar-witness context and
+charges expression visits at each recursive reader. Removed the repeated facts/bounds shape walks
+before recursive safety checks and after plain-bound closure; arms that still call the legacy
+`proof_collect_bounds_marked` retain their pre-scan reserve. Stage0 AST parsing passed for all 34
+changed source modules at fingerprint `c9433dc77aaeb813e0e80713463359286f099440d62c0c610f88e3468b02d4c4`;
+the full Stage0 entry-point attempt on that snapshot reported the old-frontend parser diagnostics
+recorded above. Python AST for four changed scripts, the source-length gate, and `git diff --check`
+passed at the last static-check snapshot. No current-toolchain build, semantic/replay suite, or
+instruction-count comparison ran, so runtime parity and speedup remain unqualified.
+
+### 23.27.271 Index scoped kernel function and owner rows (2026-10-12)
+
+Kernel proposition environments now group function declarations by exact name and module-owner
+segment rows by owner identity. Repeated function leaves are resolved against the nearest visible
+full owner path, with equal-depth ambiguity and malformed segment groups failing closed. Selected
+signature identities use a bounded hash set for parameter filtering instead of rescanning every
+selected signature for every parameter row. The deterministic-call replay scan reservation also
+includes repeated scans of parameter defaults for each `__global_mutable` annotation. Static
+whitespace and source-length checks pass. Compilation could not be attempted because the configured
+Stage1 provenance schema is stale and the available Stage0 compiler does not match this repository's
+pinned revision; the build guard correctly rejected both. Runtime behavior is unverified.
+
+### 23.27.272 Cache selected owner depths and emit the resolved function row (2026-10-12)
+
+Static review found that repeated-name lookup could resolve a later row in the name group but emit
+only the representative row. It now emits the uniquely nearest visible declaration and its
+signature parameters. Owner visibility depth is cached directly by the hashed owner-index row,
+removing the remaining per-candidate linear cache scan. Owner table precharges now include all
+capacity arrays, the row chain, and the four per-owner arrays; row insertion, signature-set and
+owner-depth cache writes, and path validation are explicitly charged. The deterministic-call scan
+meter now takes the actual `Ast::ParamDecl`
+type and measures body and defaults in separate single passes. `git diff --check`,
+`scripts/check_source_length.py`, and targeted source assertions pass. Compilation remains blocked
+by the local stale Stage1 provenance and unavailable pinned Stage0 compiler, so runtime behavior
+has not been verified.
+
+### 23.27.247 Reuse proposition indexes and restore metered unsigned peer facts (2026-10-12)
+
+The proposition-formation workspace now owns a lazily built scoped function/owner index and reuses it across propositions in one file; owner-path depth caches are reset when the exact module-owner identity changes. Per-proposition local shadow names use a bounded hash set, and resolved repeated function names emit the nearest visible declaration row. Generic conversion checks in source formation and replay are scoped to the active declaration line, and generic aliases with formals remain conservatively unexpanded. The work-aware unsigned subtraction reader again imports strict-peer increment equalities, using metered readers for the equality and non-wrapping peer check. `git diff --check` and `scripts/check_source_length.py` pass. The exact pinned Go Core commit `fa65ef625c4217cf54486821a6aa9348f5f04ec6` exists in local history, but the installed Stage0 embeds `55fb293de91cc0263972b1d87a1aa0702938ad7a`; the live Core checkout also has unrelated dirty edits. A static-only task constraint forbids bootstrapping or running Elisa parser/build/test/replay checks, so behavior remains unverified. A bounded selected-function-row cache is now built per exact module-owner identity, with work accounting and cache invalidation on scope changes. Proposition emission still scans global rows to retain non-function bindings and filter selected signature parameters. Overloads remain unsupported in kernel proposition typing: `proof_kernel_replay_call_result_sort_remaining` marks duplicate same-name functions in one owner ambiguous before checking argument compatibility; supporting overloads requires coordinated producer and replay changes.
+
+
+### 23.27.248 Cache scoped selections and preserve unique-name resolution (2026-10-12)
+
+The selected function row for each name is cached per module-owner identity and reused across propositions in that scope. Unique-name resolution retains the existing global-name fast path; repeated names use owner-prefix ranking and require one uniquely nearest visible declaration. The cache is bounded by global binding count, validates its shape, charges initialization/selection writes and candidate probes, and rebuilds when owner identity changes. Replay now recomputes the expected marker set from function rows and module context, rejecting forged owners, duplicate markers, and markers for tied or invisible duplicate names. Owner identity `0` remains valid for root functions and the global unique-name rule. Static source review, `git diff --check`, and `scripts/check_source_length.py` pass. Elisa build/parser/test/replay checks remain prohibited here; the installed Stage0 revision remains mismatched.
+
+Static review reconciled replay with the shared source resolver: duplicate-name fallback prioritizes same-module declarations, then the nearest enclosing module, then one unique root declaration. Replay's marker validator mirrors this order before accepting a source-owned marker.
+
+### 23.27.249 Revalidate qualification boundary and local cleanup (2026-10-12)
+
+The proof checkout remains on `main` at `d47b0e92` with broad uncommitted source changes. Static
+whitespace/source-length checks and changed-script Python AST/shell syntax checks pass; no Elisa
+parser, build, test, replay, or timing result qualifies this tree. The compiler task's attempted
+disposable seed was terminated with status 143 under the inherited static-only constraint; its
+temporary source snapshot was removed, and the compiler checkout's 51 working-tree changes were
+preserved. Every additional proof worktree still contains uncommitted changes and has no commits
+ahead of `main`, so none is safe to remove while preserving the requested gains. The local compiler
+source audit confirms default-on `Global.Read`/`Global.Write` enforcement for mutable-global access
+and transitive calls, with direct, alias, shadow, and wrong-grant regressions present; those tests
+were not run and the behavior remains unqualified. Qualification and integration remain the next
+gates; retain timing as a separate, skipped measurement.
+
+### 23.27.250 Validate bare-call owner markers against the selector (2026-10-12)
+
+Replay validation now rebuilds bounded function-name groups and checks the exact marker set
+against the scoped proposition selector, including unique-name global resolution, deepest visible
+owner-prefix ranking, depth-zero root candidates, and ambiguity omission. It rejects duplicate or
+forged markers and marker rows without corresponding function candidates before modulo operations.
+Cross-row validation runs on the full environment for ordinary replay and on the cached combined
+global-plus-local environment; the local-only index collector validates marker shape but does not
+resolve markers without their cached global function rows. Marker rows are stored in a parallel
+array at the function table's matched slots; each marker must resolve through the function-name
+hash table, which rejects names absent from the table, and each name group checks marker presence
+even when selection is ambiguous. Root candidates all count at depth zero, so duplicate roots
+cannot be hidden by a forged single marker. The selector's probe work is metered. Targeted source
+assertions, `git diff --check`, and `scripts/check_source_length.py` pass. The active checkpoint
+prohibits Elisa parsing, building, testing, and replay until the compiler coordinator releases the
+toolchain slot; the installed Stage0/Stage1 provenance still does not match the pinned pair.
+
+### 23.27.251 Fail closed on partially encoded call signatures (2026-10-12)
+
+Source signature import now omits the entire callable signature when any formal parameter sort is
+unsupported or unresolved. Previously it retained the declared arity on the function row but
+silently skipped the unknown formal row, allowing replay to mistake an incomplete signature for a
+shorter callable. The supported path still records every parameter's exact index, default, name,
+and reference metadata. Static review and source-length/whitespace checks pass; execution remains
+blocked by the compiler coordinator gate. Next expressivity improvement: resolve same-owner
+overloads by argument/formal compatibility only after every candidate signature is complete, and
+bind the selected exact signature in replay evidence.
+
+The complete formal-sort list is collected once and reused to emit parameter rows, avoiding a
+second type-resolution traversal. Replay's argument checker requires each declared formal index,
+so an omitted row cannot be treated as an optional shorter signature. Exact overload selection is
+still unsupported and remains a coordinated producer/replay feature.
+
+The existing replay argument matcher is not sufficient to choose overloads by first match: it
+accepts any numeric-family conversion, as well as string-literal and container-literal adaptations,
+so multiple declarations can be compatible under this conservative relation. Producer projection
+must carry the compiler-selected signature identity (with actual-to-formal mapping and conversion
+rank where applicable), and replay must verify that identity and mapping against the complete
+candidate set. Until then, same-owner overload groups remain ambiguous.
+
+### 23.27.252 Close work-metering and global-cache validation gaps (2026-10-12)
+
+Legacy marker decoders used by work-aware unsigned-safety, scalar-witness, and difference-constraint
+paths now reserve bounded AST-proportional work before each extra traversal. Global typing-cache
+preparation skips bare-call marker cross-validation because proposition-local markers are not yet
+available; full-environment and cached combined global-plus-local validation still perform the
+cross-row check. Source conversion and replay generic-name queries are scoped to the active
+declaration line. `git diff --check` and the source-length gate pass. Elisa parsing/build/test/replay
+remain prohibited by the active checkpoint, so these changes still require runtime qualification.
+
+### 23.27.253 Exercise bare-call marker validation directly (2026-10-12)
+
+The kernel admission fixture now covers a unique root call whose name-table bucket collides with
+an ambiguous duplicate-root group, plus missing, forged-owner, duplicate, orphan, and ambiguous-root
+markers. The validator's final capacity scan now charges every slot, including empty slots, so the
+work budget reflects the full table walk. The fixture is wired into the existing native admission
+harness. Diff/source-length checks, Python AST, shell syntax, and untracked-source whitespace checks
+pass; the Elisa harness remains unrun under the static-only constraint.
+
+### 23.27.254 Reject local owner markers in the global cache (2026-10-12)
+
+Public global typing-cache preparation now rejects `bare-call-owner` rows while charging the
+preflight scan. This keeps proposition-local cross-row checks deferred until combined context is
+available without allowing caller-supplied marker rows into the cached global snapshot. The
+cache's remaining shape and type checks still run through the normal workspace builder. Static
+whitespace and source-length gates pass; the Elisa harness remains prohibited by the current
+static-only checkpoint.
+
+### 23.27.255 Preserve incomplete overload candidates in replay (2026-10-12)
+
+Source projection now emits a validated `function-incomplete` row when a function's return or
+formal sort cannot be represented. The source owner/name index includes these rows when resolving
+the nearest visible declaration and emits the corresponding owner marker, including when the
+selected declaration is the only incomplete candidate. The replay owner selector includes these
+rows, and call-result inference refuses the selected name/owner when one is present, preventing an
+encodable sibling overload from appearing uniquely callable after another candidate was omitted. An incomplete
+`__cast__` row also blocks the enum built-in-cast fallback because its target and source signature
+cannot be established. Source-work exhaustion still aborts projection rather than being encoded as
+an unsupported type. `git diff --check` and source-length checks pass; Elisa execution remains
+prohibited by the active static-only checkpoint.
+
+### 23.27.256 Localize ambiguity in structural source replay (2026-10-12)
+
+Structural replay now retains executable declarations by source-entry identity instead of
+aborting graph construction when any function name is duplicated. Ambiguous bare-call targets
+still mark their callers unresolved, and source certificate admission still requires unique owner
+and callee names. A mutation regression adds an unrelated duplicate name and expects the unique
+sibling-module recursive certificates to replay on all three API routes. `git diff --check`, the
+source-length check, changed-script Python AST parsing, and shell syntax checks pass; no Elisa
+parser, build, test, or replay was run under the static-only restriction.
+
+### 23.27.257 Restrict bare-call validation to each name's candidates (2026-10-12)
+
+The kernel validator now links complete and incomplete function rows through the bounded
+name-group table. Duplicate-name owner selection follows that chain rather than rescanning every
+binding for each group, and the active context path length is computed once. Row-chain storage is
+charged to the kernel work budget. Existing admission fixtures cover marker acceptance and
+rejection cases; the Elisa harness remains unrun under the static-only restriction, so runtime and
+work-budget effects still require qualification.
+
+### 23.27.258 Validate every selected function owner path (2026-10-12)
+
+Bare-call owner validation now checks each complete or incomplete function row's non-root owner
+identity during the initial bounded environment scan, including unique-name groups that do not
+enter duplicate-owner ranking. This closes the case where a caller repeats an unrecorded owner id
+in a marker and the unique-name fast path accepts it. Root owner identity zero remains valid.
+`git diff --check` and `scripts/check_source_length.py` pass; Elisa runtime qualification remains
+blocked by the active static-only checkpoint.
+
+### 23.27.259 Index owner paths and meter cast-hook names (2026-10-12)
+
+Bare-call validation now builds a bounded owner-path index, validates each contiguous path once,
+and checks function owners and nearest-prefix candidates through that index. This removes repeated
+full-environment owner scans from unique-name validation and duplicate overload groups; path
+segment comparisons remain charged to replay work. Enum built-in-cast refusal now charges the
+bytes of complete and incomplete `__cast__` hook names before comparing them, so long serialized
+names cannot evade the work budget. The admission fixture now includes both a valid owned marker
+and a function whose forged owner has no path. Static source-size and whitespace checks pass; Elisa
+parsing, build, and replay remain unrun under the static-only restriction.
+
+### 23.27.260 Index local shadow names during bare-call validation (2026-10-12)
+
+Replay marker validation previously rescanned all local bindings for every bare-call owner
+marker, multiplying local-value comparisons by the number of distinct called function names. It
+now builds one bounded exact-name hash set from local shadow, value, reference-value, proposition,
+and function-parameter rows, then
+probes that set for each present marker. Hash collisions are resolved with exact string comparison;
+table allocation, initialization, insertion, and lookup probes are charged to the type-work budget.
+Static whitespace and source-length checks pass. Elisa parser/build/test/replay remain unavailable
+under the active static-only checkpoint. Same-owner function overload resolution remains a known
+expressiveness gap: the call-signature importer retains formals, but source overload ranking and
+conversion rules are not yet mirrored in the proof kernel.
+
+### 23.27.261 Size the shadow-name index from local rows (2026-10-12)
+
+The local-name table now counts only `environment.bindings`; global constants no longer inflate
+its capacity or consume the local-shadow work allowance. The marker fixture adds a forged-owner
+row for a locally shadowed function name. `git diff --check` and the source-length gate pass; the
+Elisa admission harness remains unrun under the active static-only restriction.
+
+### 23.27.262 Preserve root fallback with unrelated module candidates (2026-10-12)
+
+The bare-call admission fixture now checks that an unrelated module’s same-name function does not
+make a unique root declaration ambiguous when the caller is in a different module. This protects
+the selector order already used by source replay. The fixture is wired through the existing native
+admission harness, but it remains unexecuted under the static-only restriction; the broad dirty
+source tree is not qualified for merge, and dirty worktrees remain preserved.
+
+### 23.27.263 Separate overload rows from competing owners (2026-10-12)
+
+Scoped proposition formation and replay owner-marker validation now count distinct visible owner
+identities instead of counting each declaration row. This lets overload signatures declared under
+one owner share a single source-selected owner marker, including root-owned overload groups, while
+same-name declarations from competing owners remain ambiguous. The producer retains all candidate
+rows at the selected owner and emits one marker per name. Local value/shadow names suppress the
+expected marker, and replay rejects forged markers for those names. Same-owner overload result
+inference remains fail-closed: the existing argument matcher can reject conversions accepted by the
+source compiler, so candidate filtering could hide a different-return overload and infer an
+unsound result. Supporting overload calls requires replay-verifiable compiler selection evidence
+and actual-to-formal argument mapping. `git diff --check`, source-length, Python syntax, and shell
+syntax checks pass; Elisa parser/build/test/replay remain blocked by the static-only checkpoint.
+
+### 23.27.264 Reuse a per-proposition bare-call lookup index (2026-10-12)
+
+Bare-call typing no longer rescans every proposition-local binding at each call site to find an
+owner marker or local shadow. Typing-index construction now builds one bounded open-addressed
+table for marker and lexical-binding names, retaining exact collision checks and marker
+multiplicity. Ordinary, nested-scope, and cached-global formation paths carry this table with the
+typing index; each bare call probes it once. The full type-index builder now runs cross-row owner
+marker validation as well, covering direct APIs that do not use a reusable workspace. Nested
+lexical scopes may retain a valid outer marker beneath a new local shadow; it remains inert because
+the call lookup checks the local shadow first. Table allocation, initialization, insertion,
+hashing, collision comparisons, lookup probes, and validation are charged to the replay type-work
+budget. Static whitespace, source-length, Python syntax, and shell syntax checks pass. Elisa
+parsing/build/test/replay remain unrun under the static-only checkpoint.
+
+### 23.27.273 Keep variadic source functions out of fixed-arity replay typing (2026-10-12)
+
+Proposition signature collection now inspects the function's attached decorators and emits an
+incomplete candidate for `c_variadic` declarations. Replay therefore declines to type calls through
+that owner/name group rather than modeling a variadic declaration as a fixed-arity sibling that
+could conceal the source compiler's selected target. Decorator scanning is charged to source
+formation work. Full C variadic support requires explicit variadic metadata and replay semantics.
+`git diff --check`, source-length, Python syntax, and shell syntax checks pass; Elisa
+parsing/build/test/replay remain prohibited by the active static-only checkpoint.
+
+### 23.27.274 Meter wrapper and width reads in work-aware linear paths (2026-10-12)
+
+The work-aware unsigned witness and guarded-difference readers now unwrap expressions, operands,
+and nested order facts through the shared-budget parenthesis reader. Guarded subtraction now gets
+unsigned widths from the already-built scalar-witness index instead of reparsing every fact for
+each operand pair. These changes close repeated-AST and marker reads that had remained outside
+explicit work accounting after the primary marker scans were metered. Static gates pass:
+`git diff --check`, source length, Python AST, shell syntax,
+changed-Elisa whitespace, and the targeted scan for legacy unmetered parenthesis/nameability calls
+inside `*_with_work` bodies. Elisa parsing, builds, tests, replay, and timing remain unrun under the
+static-only checkpoint, so runtime equivalence and performance are not qualified.
+
+### 23.27.275 Meter constant folding in difference safety (2026-10-12)
+
+Work-aware guarded-difference import and disequality tightening now use the shared-budget
+integer constant folder. Both branches propagate budget exhaustion as an inconclusive result
+instead of running the legacy recursive fold after the surrounding comparison checks. Static
+verification covers source length, whitespace, Python and shell syntax, `git diff --check`, and a
+scan confirming these `*_with_work` paths no longer call the legacy integer folder. No Elisa
+parser, build, tests, replay, or timing ran under the static-only checkpoint.
+
+### 23.27.276 Meter negated-order classification in plain difference closure (2026-10-12)
+
+The work-aware plain-difference closure now classifies integer operands through the indexed,
+budgeted denial reader. It measures fact scan cost once and shares that cost and marker scale
+through conjunction recursion; non-integer comparisons retain the existing behavior of being
+skipped, while work exhaustion fails closed. Static source and syntax gates pass, including a
+targeted scan confirming no legacy integer or constant readers remain in work-aware linear
+functions. Elisa parser/build/test/replay and timing remain unrun under the static-only checkpoint.
+
+### 23.27.277 Index replay function groups by name and owner (2026-10-12)
+
+Call result typing now probes a bounded `(name, owner identity)` index instead of rescanning all
+function bindings. Complete candidates are all inspected; a result sort is inferred only when every
+declaration in the selected group agrees and at least one candidate passes replay's argument
+well-typedness check. Incomplete signatures block inference; extern declarations, including non-callable
+function-value externs, are represented as owner-scoped blockers until their signatures are
+modeled. Nested
+quantifier scopes reuse the validated global function, value, and parameter indexes and extend only
+the local value overlay; local call-owner markers are rebuilt for each scope. The source function
+scope projection is cached by immutable scope identity and global binding count. Paired quantifiers
+reject identical binder names.
+Generic alias conversion checks now use the active function's declaration line in replay, while
+source conversion retains declaration-line keyed generic lookup. Static whitespace and source-size
+gates pass. Elisa parsing, builds, tests, and replay remain held by the active static-only
+checkpoint. Include pending source-bound proof additions `05-04k`, `05-04l`, `05-04m`, `05-04n`, `05-04o`, `05-04p`, and `05-04q` in the next
+qualified replay once that hold is lifted.
+
+### 23.27.278 Specify project whitespace trim scans (2026-10-13)
+
+The compiler's `ProjectSystem::bytes_trim_start` and `bytes_trim_end` now state ordered
+in-bounds endpoints, the whitespace-only skipped prefix/suffix, and the adjacent non-whitespace
+boundary. Their loops carry decreasing measures and quantified scan invariants. The source-linked
+project whitespace proof candidate covers interval bounds, exact boundary behavior, copied-span
+length/content, and six false claims; its static checker now pins every rejection control and the
+production contracts/invariants. Python syntax, shell syntax, source length, whitespace checks, and
+the source/proof static gate pass. The gate was stopped before product provenance or prover
+invocation. Elisa parsing, builds, tests, and replay remain held by the static-only checkpoint, so
+these contracts and proof claims are not yet replay-qualified.
+
+### 23.27.279 Preserve lexical shadowing in the quantifier value overlay (2026-10-13)
+
+Static review caught that checking same-name evidence across the cumulative nested-quantifier
+overlay would reject valid inner binders when their type differs from an outer binder. Lookup now
+scans newest-to-oldest and returns the nearest matching binder; paired binders with identical names
+are rejected before extending the overlay. The scoped-index constructor admits only one or two newly
+appended value rows and charges validation work for each. `git diff --check`, the 600-line source
+gate, and targeted source assertions pass. No Elisa parser, build, runtime test, replay, or benchmark
+was run; the documented static-only checkpoint remains in force.
+
+### 23.27.280 Reuse call-owner indexes across quantifier scopes (2026-10-13)
+
+Nested quantifier extensions now keep the original call-owner index and its empty-slot sentinel,
+tracking the current local binding count separately. The scoped builder accepts only one or two
+validated `value` rows, so marker rows in the indexed prefix are immutable. Bare-call resolution
+checks the appended value overlay first and suppresses owner resolution when a quantified binder
+shadows that name, then probes the cached prefix table. This removes a full local-binding scan and
+index rebuild at every quantifier while retaining metered work for each overlay comparison.
+`git diff --check`, the 600-line source gate, typing-index initializer checks, and targeted source
+invariants pass. Elisa parsing/build/tests/replay remain unrun under the static-only checkpoint.
+
+### 23.27.281 Fail closed while reusing quantifier call-owner prefix (2026-10-13)
+
+The cached call-owner lookup now validates the cached arrays' dimensions and requires the tracked
+current local binding count to match the environment before taking the quantifier overlay shortcut.
+The overlay still suppresses a same-named bare-call owner before probing the immutable prefix
+index. Static gates (`git diff --check`, source length, all typing-index constructor fields, and
+focused source assertions) pass. Elisa parsing, build, runtime tests, replay, and benchmarks remain
+unrun under the static-only checkpoint.
+
+### 23.27.282 Key scoped function projection cache by lexical context (2026-10-13)
+
+Static review found that the projected global binding list also depends on the current lexical
+`names` set: it emits local-call-shadow rows and selects formal parameter rows only for visible
+function signatures. Reusing that list by module scope alone could leak a prior function's shadow
+set into another function in the same module. Cache hits now require exact, metered element-wise
+equality of the lexical-name list. On a miss, the cache is invalidated; the new name list is copied
+under source-work accounting and the binding projection is published only after the copy completes.
+`git diff --check`, source-size, and targeted cache-key/publication invariants pass. Runtime replay
+remains unrun under the static-only checkpoint.
+
+
+### 23.27.283 Index const-enum cast hook parameters (2026-10-13)
+
+Const-enum cast-hook replay previously rescanned the full typing environment for the first
+parameter of each matching `__cast__` declaration, making many hook candidates quadratic in the
+environment size. It now queries the existing signature-identity parameter index. Missing or
+ambiguous parameter rows still refuse the cast proof. `git diff --check`, the 600-line source gate,
+and a source scan confirming the nested full-environment parameter loop is gone pass. No Elisa
+parser, build, runtime test, replay, or benchmark was run under the active profiling checkpoint.
+
+### 23.27.284 Include owner identity in indexed function parameter lookup (2026-10-13)
+
+Indexed parameter selection now requires the declaring function's `owner_type_identity` in addition
+to its name and signature identity. Source adaptation records that owner identity on each formal, and
+the environment validator permits the metadata; this prevents an internal environment with reused
+signature IDs from borrowing a parameter row across distinct owners. The legacy source-neutral helper
+still writes owner identity zero. Static source-length, whitespace, `git diff --check`, and focused
+lookup/constructor assertions pass. Elisa parsing, build, tests, replay, and benchmarks remain held
+by the static-only checkpoint.
+
+### 23.27.285 Key scoped formal projection by owner and signature (2026-10-13)
+
+The scoped source binding projection now deduplicates selected declarations and includes formal rows
+using the composite `(owner_type_identity, signature_identity)` key, matching replay's owner-aware
+parameter lookup. This prevents colliding internal signature IDs from causing another module owner's
+formals to enter the scoped environment. Static review then caught and fixed an indentation error and missing mutable capture entries for
+the parallel owner-ID array. Focused indentation/capture/projection/replay assertions, whitespace,
+and source-size checks pass. No parser, build, tests, replay, or benchmark ran under the static-only
+checkpoint.
+
+### 23.27.286 Avoid discarded positional lookup for named call arguments (2026-10-13)
+
+Replay argument checking previously performed an indexed positional-formal lookup for every argument,
+then discarded it and repeated lookup by name when the argument was named. The positional probe now
+runs only in the positional branch; named arguments perform the authoritative name lookup once, while
+duplicate-name, type, and default checks remain intact. Focused source assertions, `git diff --check`,
+and the 600-line source gate pass. Elisa parsing, builds, tests, replay, and benchmarks remain
+unrun under the static-only checkpoint.
+
+### 23.27.287 Mix signature IDs before parameter-index bucketing (2026-10-13)
+
+Formal parameter bucket selection previously used raw `signature_identity % parameter_count`, making
+source-offset IDs easy to concentrate into one chain with padded declarations. Index construction and
+both lookup paths now use the existing mixed name/owner hash with the signature ID as its owner-key
+input, while retaining exact owner, name, and signature comparisons at selection. Focused source
+assertions, `git diff --check`, and source-size checks pass. Runtime scaling remains unmeasured
+because the static-only checkpoint bars compiler and benchmark execution.
+
+### 23.27.288 Hash formal rows by the complete signature key (2026-10-13)
+
+The parameter index now mixes function name and owner identity with signature identity at both build
+and lookup, so rows from distinct owners or names do not share a bucket solely because they reuse a
+signature ID. Replay still compares all three identity fields exactly before selecting a formal.
+Focused constructor/lookup consistency assertions, `git diff --check`, and source-size checks pass.
+No parser, build, tests, replay, or benchmark ran under the static-only checkpoint.
+
+### 23.27.289 Propagate kernel text-comparison budget exhaustion (2026-10-13)
+
+The shared kernel text comparator previously returned `false` when it could not afford a full byte
+comparison, leaving callers unable to distinguish “different” from “not checked.” It now marks the
+shared work counter exhausted. The function-group index explicitly rejects exhaustion before treating
+a same-hash row as a separate overload; bare-call-owner and type-scope validators also reject a
+saturated counter at completion (the enum-underlying validator already did so). Typed proposition
+state entry points also reject an exhausted shared counter after traversing the goal and each fact.
+Focused source assertions, `git diff --check`, and source-size gates pass. Elisa parsing, builds,
+tests, replay, and benchmarks remain unrun under the static-only checkpoint.
+
+### 23.27.290 Meter composite formal-index hashing (2026-10-13)
+
+The owner/name component of the formal-parameter index hash traverses untrusted function-name bytes.
+All three index-construction paths and both lookup paths now charge that name length before hashing,
+so repeated lookup and index build cost is covered by the replay type-work budget. Static assertions
+confirm all five call sites are charged; `git diff --check` and source-size gates pass. The pending
+source-bound replay batch now includes `05-04q-project-json-unicode-scalar.sh`, present in this tree.
+No parser, build, tests, replay, or benchmark ran under the static-only checkpoint.
+
+### 23.27.291 Mix source-derived identities before hash-table placement (2026-10-13)
+
+Module-owner, selected-owner, enum-underlying, and type-scope identity tables no longer place raw
+source-derived IDs with `identity % capacity`. They choose initial slots from the existing FNV-based
+identity hash, while retaining exact ID checks, existing probe limits, and work metering. This removes direct alignment between source offsets and table capacity without changing lookup
+semantics.
+Focused source assertions, `git diff --check`, and source-size checks pass. Runtime scaling remains
+unmeasured under the static-only checkpoint.
+
+### 23.27.292 Cap identity-table probe clusters (2026-10-13)
+
+Enum-underlying group insertion/lookup and type-scope identity insertion now use the same bounded
+probe rule as the rest of the replay indexes (`probes <= 64`), rather than walking up to the full
+table capacity on crafted collisions. The shared limit is renamed from a name-specific constant to
+`PROOF_KERNEL_REPLAY_INDEX_MAX_CLUSTER`; existing indexes retain their prior limit. A cluster that
+exceeds the cap causes validation or lookup to fail closed. Focused static assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior is unqualified under the static-only
+checkpoint.
+
+### 23.27.293 Propagate Global rows through deferred generic effect calls (2026-10-13)
+
+Static review found that the Global authority walker treated `Expr.StaticEffectCall` as only
+its captures and arguments, while backend lowering dispatches it to generated handler operation
+functions. That can omit the handler's inferred `Global.Read`/`Global.Write` rows and mutable
+reference effects from a generic caller. A draft compiler-source fix resolves each candidate
+handler function from its recorded owner, applies overload selection with captures and operation
+arguments, propagates candidate rows and call edges, and fails closed when a candidate cannot be
+resolved. Four smoke cases cover ungranted callers and locally granted callers for both reads and
+writes; twelve additional cases cover module-qualified, `using`-alias, and selective-import
+mutable-global reads and writes with and without grants. Static Python AST validation and
+`git diff --check` pass. A fresh Stage1 seed was refused before
+compilation because the Core Stage0 checkout has uncommitted source changes; the active static-only
+checkpoint still bars Elisa builds and tests. This draft remains unqualified and unmerged. After the hold is lifted,
+rebuild from a provenance-matched compiler/Core pair and run the focused Global grant and generic
+effect-handler gates before promotion.
+
+### 23.27.294 Specify EASM trimming as a maximal source span (2026-10-13)
+
+The shared EASM trim scanner now returns a bounded half-open range and specifies its whitespace-only
+prefix/suffix plus non-whitespace endpoints. Empty results are canonicalized to the input end, so
+all-whitespace inputs have an exact source span. Both loops carry decreasing measures and
+prefix/suffix invariants; production `easm_trim` delegates to the scanner, and the source-linked
+proof covers exact span selection, preserved interior whitespace, blank/clean inputs, and four
+false claims, including an empty span at the wrong offset. The EASM
+static source gate now preserves whitespace inside string literals when binding examples and checks
+that the production wrapper imports and delegates to the proof source. Python/shell syntax, static
+source binding, source-size, and `git diff --check` pass. Add `05-04r-easm-trim-bounds.sh` to the
+pending qualification batch with `05-04k` through `05-04q`. Elisa parsing, builds, tests, and replay
+remain prohibited by the current static-only checkpoint, so this candidate is unqualified.
+
+### 23.27.295 Fail closed when structural certificate owner lookup hits its probe cap (2026-10-13)
+
+Static review found that the structural certificate owner lookup reported a successful absence after
+stopping at the collision cap, even when it had not encountered an empty slot. An existing owner
+could therefore sit later in the chain and be mistaken for a missing owner during certificate-set
+comparison. The capped-exhaustion path now returns incomplete, matching the fail-closed behavior of
+the bounded indexes. A focused source assertion, `git diff --check`, and source-size check pass.
+Runtime collision behavior is unqualified under the static-only checkpoint.
+
+### 23.27.296 Bound structural source-name index construction (2026-10-13)
+
+The structural source declaration index previously inserted with a capacity-wide probe loop even though
+its lookup path and sibling name indexes are bounded. Crafted declaration names could force quadratic
+index construction before replay's global work ceiling. Insertion now observes the shared name-index
+cluster cap and rejects placement when the chain is too long, so the index cannot be marked usable
+with rows its bounded lookup would not reach. Focused source assertions, `git diff --check`, and
+source-size checks pass. Collision behavior remains runtime-unqualified under the static-only
+checkpoint.
+
+### 23.27.297 Fail closed on structural source lookup probe exhaustion (2026-10-13)
+
+Structural source-name lookup now observes the same probe cap as insertion. Static review also found
+its old terminal path reported successful absence after exhausting the bounded search without seeing
+an empty bucket. It now returns incomplete in that case; only an actual empty bucket establishes
+absence. Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision
+behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.298 Use checked-view status in CLI repair and tactic summaries (2026-10-13)
+
+The `--repair-all` CLI route previously skipped every producer-marked proven goal even when its
+certificate replay or per-goal source admission had failed. It now keeps such goals unresolved,
+matching the checked-view repair queue. The tactic result's `previously_proven` field also now comes
+from `proof_checked_view_attempt_is_proven`, so producer status alone cannot populate a public
+proof-status field. `git diff --check` and source-size checks pass. Elisa parsing, builds, tests,
+replay, and runtime qualification remain unrun under the static-only checkpoint.
+
+### 23.27.299 Bound deterministic-call lemma index probes (2026-10-13)
+
+The deterministic-call lemma index performed capacity-wide insertion and lookup probes, despite
+validating the cluster only after construction. Insertion and lookup now stop at the shared name-index
+cluster cap; failed placement rejects construction, and lookup exhaustion returns incomplete rather
+than claiming absence. A focused source assertion, `git diff --check`, and source-size check pass.
+Collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.300 Bound fact-trace index collision work (2026-10-13)
+
+The fact-trace index used capacity-wide open-addressing loops for owner and expression keys during
+both construction and lookup. Although a global work budget eventually aborted hostile builds, a
+collision-heavy trace set could spend quadratic work first. All four loops now stop at the shared
+name-index cluster cap, and owner-index construction aborts the whole optimization when placement
+exceeds it. Lookups retain their sentinel failure behavior. Focused source assertions,
+`git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under
+the static-only checkpoint.
+
+### 23.27.301 Bound generic-binder index construction probes (2026-10-13)
+
+The source generic-parameter line index already validated its final cluster and used bounded lookups,
+but insertion still traversed up to the full capacity before rejecting an overlong cluster. Its
+insertion loop now observes the shared cluster cap; the existing failed-placement and final cluster
+checks leave the index invalid on collision overflow. Focused source assertions, `git diff --check`,
+and source-size checks pass. Runtime collision behavior remains unqualified under the static-only
+checkpoint.
+
+### 23.27.302 Bound source declaration and dependency index probes (2026-10-13)
+
+Deterministic declaration-index insertion and dependency row-index insertion/lookup used capacity-wide
+probe loops. Their global work counters bounded total work only after potentially long collision
+chains. These loops now stop at the shared name-index cluster cap; failed placement and lookup
+exhaustion remain incomplete, while the declaration index retains its final cluster validation.
+Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior
+remains unqualified under the static-only checkpoint.
+
+### 23.27.303 Bound structural call-graph edge index probes (2026-10-13)
+
+The cached source-call-graph pair index used capacity-wide insertion and edge lookup loops. Since
+source declaration identities select these hash buckets, a collision-heavy graph could consume
+quadratic work despite the enclosing source-work ceiling. Both loops now stop at the shared
+name-index cluster cap; the builder rejects an unplaced edge and lookup returns false on exhaustion,
+so structural validation cannot rely on a partially reachable index. Focused source assertions,
+`git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under
+the static-only checkpoint.
+
+### 23.27.304 Bound checker field-conversion index probes (2026-10-13)
+
+The checker-side field-conversion index already rejected overlong clusters after construction, but
+its insertion and field-conversion/callable lookup paths still scanned up to the full table capacity.
+They now stop at the shared name-index cluster cap; insertion fails closed and lookup exhaustion is
+incomplete. This bounds source-derived hashing work consistently across checking and replay.
+Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior
+remains unqualified under the static-only checkpoint.
+
+### 23.27.305 Bound parser annotation index probes (2026-10-13)
+
+Frame-owner and lemma-name annotation indexes performed capacity-wide insertion and lookup probes,
+then validated clusters only after construction. All four paths now stop at the shared name-index
+cluster cap. Placement failure and post-build cluster checks continue to reject the index, while
+lookups return the existing negative sentinel after bounded exhaustion. Focused source assertions,
+`git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under
+the static-only checkpoint.
+
+### 23.27.306 Specify EASM prefix and byte equality (2026-10-13)
+
+The source-linked EASM scanner now contracts exact prefix matching, including rejection of longer
+prefixes and equality of every matched byte. Its equality helper specifies equal view lengths and
+pointwise byte equality, using the prefix scan; production `easm_starts` and `easm_equal` delegate
+with matching postconditions. Positive examples cover exact, empty, and differing views, while false
+claims challenge non-prefixes, length mismatches, and late-byte differences. The existing scanner
+runner now checks these alongside its search, whitespace, and trim obligations. Static source
+binding, Python/shell syntax, source-size, and `git diff --check` pass. Elisa parsing, builds, tests,
+and replay remain prohibited by the current static-only checkpoint; these new obligations are
+unqualified.
+
+### 23.27.307 Bound report-owned postcondition index collisions (2026-10-13)
+
+Postcondition count, literal-ensure admission, and AST indexes used full-capacity insertion/lookup
+loops despite source-work metering. Builders and lookups now stop at the shared name-index cluster
+cap. Both builders reject exhausted placement, and capped lookups return incomplete; only a genuine
+empty slot proves absence. Focused source assertions, `git diff --check`, and source-size checks pass.
+Runtime collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.308 Validate postcondition index parallel-array shapes (2026-10-13)
+
+The report-owned postcondition count-index add/find paths trusted the `valid` bit and could index
+parallel arrays using a malformed occupied slot. They now validate bucket and row-array lengths and
+reject out-of-range row IDs before access. Literal-ensure lookup also validates the bucket-hash and
+row-array shapes before probing. Focused source assertions, `git diff --check`, and source-size checks
+pass. Elisa runtime behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.309 Bound checked-view source admission indexes (2026-10-13)
+
+The checked-view theorem declaration-multiplicity and theorem-line indexes, plus the per-report goal
+attempt name index, used capacity-wide collision probes. They now stop at the shared cluster cap;
+builders reject capped-out placement, and lookup exhaustion returns incomplete. This bounds
+source-admission lookup work without treating an unexamined bucket as proof of absence. The
+per-name goal-attempt chain also enforces strictly descending attempt IDs, matching construction
+order and rejecting forward links or cycles before they consume the full source-work allowance.
+Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior
+remains unqualified under the static-only checkpoint.
+
+### 23.27.311 Bound source-function multiplicity index probes (2026-10-13)
+
+The source-function multiplicity index used for literal-ensure admission had full-capacity insertion
+and lookup loops. Both now stop at the shared name-index cluster cap; insertion rejects a capped-out
+cluster and uniqueness lookup conservatively returns false. This prevents collision-heavy source
+names from multiplying admission work. Focused source assertions, `git diff --check`, and source-size
+checks pass. Runtime collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.312 Bound transparent source-conversion index construction probes (2026-10-13)
+
+The transparent source-conversion builders for names, generic binders, scoped aliases, and alias
+formals performed capacity-wide insertion before a post-build cluster check. Their four insertion
+loops now stop at the shared name-index cluster cap; existing placement and cluster checks reject
+incomplete tables. Focused source assertions, `git diff --check`, and source-size checks pass. Runtime
+collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.313 Validate theorem declaration multiplicity lookup shape (2026-10-13)
+
+The checked-view declaration-multiplicity lookup trusted its `valid` bit before reading parallel
+hash/name/count arrays. It now validates those array lengths and bounds the occupied row before any
+row access, returning false on malformed state. Focused source assertions, `git diff --check`, and
+source-size checks pass. Elisa runtime behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.314 Bound extern-contract effect index probes (2026-10-13)
+
+The checker-side extern-contract effect index used capacity-wide insertion and lookup loops. Both now
+stop at the shared name-index cluster cap; failed placement rejects construction, and lookup
+exhaustion returns incomplete rather than claiming an extern name is absent. This protects effect and
+termination admission from collision-heavy declaration names. Focused source assertions,
+`git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under
+the static-only checkpoint.
+
+### 23.27.315 Bound lemma and function declaration index construction (2026-10-13)
+
+Lemma and function declaration-name indexes charged each probe and validated cluster length after
+construction, but insertion still traversed the full table on crafted collisions. Both builders now
+stop at the shared name-index cluster cap; existing failed-placement and final cluster checks reject
+incomplete indexes. Focused source assertions, `git diff --check`, and source-size checks pass. Runtime
+collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.316 Bound opportunistic kernel-term interning probes (2026-10-13)
+
+Producer-side kernel-term interning used full-capacity open-addressing scans for both lookup and
+insertion. Since interning only reduces report size, either path can stop after a bounded cluster:
+lookup may conservatively retain a duplicate node, and insertion may leave a node unindexed, while
+the encoded arena and replay semantics remain unchanged. Both paths now use a 64-entry cluster
+limit. Candidate hashing first bounds the total text bytes and child references at 4,096 before
+walking those fields; oversized or malformed candidates simply skip optional sharing. Static review
+confirms the cutoff affects only lookup/insertion and not node admission or equality evidence. This
+source-only edit has not been parsed, built, replayed, or runtime-qualified under the static-only
+checkpoint.
+
+### 23.27.317 Bound implicit-effect callable index insertion (2026-10-13)
+
+The implicit-effect callable-name index already validated its final cluster and failed on placement
+errors, but insertion could traverse the full table first. It now stops at the shared name-index
+cluster cap, preserving the existing failed-build behavior and effect-analysis fallback. Focused source
+assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior remains
+unqualified under the static-only checkpoint.
+
+### 23.27.318 Bound module alias and function index construction (2026-10-13)
+
+Module-local alias, global alias, and owner-qualified function lookup indexes performed capacity-wide
+insertion probes before their cluster checks. The three builders now stop at the shared name-index
+cluster cap; their existing failed-placement and post-build cluster checks reject incomplete tables.
+Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior
+remains unqualified under the static-only checkpoint.
+
+### 23.27.319 Bound function and extern shadow lookups (2026-10-13)
+
+Compiler-conversion shadow checks queried function and extern name indexes with capacity-wide probes.
+Both now stop at the shared name-index cluster cap. Exhaustion already maps to an incomplete result
+(and therefore a conservative shadow), which is preserved so an unexamined declaration cannot be
+mistaken for absence. Focused source assertions, `git diff --check`, and source-size checks pass.
+Runtime collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.320 Bound function and fact-call shape lookups (2026-10-13)
+
+Shared function-name repeat detection, live extern-name shadow lookup, and fact-call snapshot
+function/extern indexes used capacity-wide probes. They now stop at the shared name-index cluster
+cap. Their existing conservative miss or incomplete results are preserved on exhaustion; extern index
+construction also rejects unplaced rows before the post-build cluster check. Focused source assertions,
+`git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under
+the static-only checkpoint.
+
+### 23.27.321 Bound lemma-setup function identity probes (2026-10-13)
+
+The ordinary function-index lookup and the source-work-accounted function-identity lookup in lemma setup could probe the entire open-addressed table. Both now stop at the shared name-index cluster cap. The ordinary lookup retains its conservative missing sentinel, while the accounted lookup returns incomplete on exhaustion so a partially searched index cannot certify absence. Focused source assertions, `git diff --check`, and source-size checks pass. Runtime collision behavior remains unqualified under the static-only checkpoint.
+
+### 23.27.322 Bound optional kernel-term hash work (2026-10-13)
+
+Kernel-term interning now preflights the combined text length and child-reference count before
+hashing a candidate, with a 4,096-unit per-candidate limit. Oversized or malformed candidates skip
+the optional index lookup/insertion, preserving encoded terms and replay semantics while bounding
+producer-side hashing. A report-wide 16,000,000-unit ceiling now also charges suffix scans, hashes,
+collision probes, equality checks, and table rehashes. Once exhausted, the current encoded suffix is
+retained and interning stops for that arena. Child-reference hashing charges those references on
+every rehash as well as on fresh suffix scans; equality precharges each side separately to avoid
+overflow in the combined child-count calculation. The report-wide charge validates its accumulated
+counter before subtracting the remaining budget. The executable boundary fixture now forces budget
+exhaustion during table growth and checks that the encoded node survives unchanged. Static source
+checks also confirm reserve rejects an inconsistent occupied-slot count before sizing arithmetic,
+with a fixture that keeps the encoded node unchanged. No Elisa parser, build, tests, replay, or
+runtime qualification were run under the static-only checkpoint.
+
+### 23.27.323 Require canonical function-group chain termination (2026-10-13)
+
+The kernel's indexed call-result lookup now requires a function-group chain to end at exactly the
+source-binding sentinel after visiting its declared row count. It also rechecks each chained row's
+exact function name, so a malformed chain cannot skip past the sentinel or smuggle in another
+same-owner name. `git diff --check` and source-size checks pass; runtime behavior remains unqualified
+under the static-only checkpoint.
+
+### 23.27.324 Meter typed pattern string scans across a report (2026-10-13)
+
+Typed string-pattern lowering already refused payloads over 16,384 bytes, but repeated literals
+could each consume that full scan without using the report-wide pattern source-work budget. The
+producer now charges the bounded reserved-word comparisons and character walk to that shared
+budget in both condition construction and exactness checks. Exhaustion drops only the optional
+pattern fact. Replay keeps its existing separate repeated-source precharge. Static source-length
+and whitespace checks pass; runtime qualification remains under the active static-only hold.
+
+### 23.27.325 Match replay overload candidates using backend-compatible argument rules (2026-10-13)
+
+Proposition replay previously treated any integer/floating pair, string-family adaptation, or
+array/set literal as sufficient to make a function overload applicable. The backend selector
+requires exact modeled argument types (apart from implicit borrowing into a reference formal),
+and only bare integer and float literals are context-typed across their respective numeric
+families; the backend represents `char` as a signed integer for the integer-literal case. Replay
+now follows that rule: it keeps exact sort equality and the two bare-literal cases (including
+integer literals for `char` formals), while rejecting unsupported conversions and contextual
+container-literal guesses. This
+prevents a broad matcher from treating a non-selected overload as evidence that a call is
+well-typed. Focused source assertions, `git diff --check`, and source-length checks pass; Elisa
+build and replay remain unqualified under the compiler-coordinator hold. Selecting between
+different-return overloads still requires authenticated signature-selection evidence.
+
+### 23.27.327 Preserve source declaration order in replay function groups (2026-10-13)
+
+The backend overload selector walks registered declarations in source order, while replay's
+per-name function-group index prepended rows and therefore exposed them in reverse order. The
+index now keeps a tail per occupied group and appends each source binding, charging the added
+capacity to the existing type-work budget. Slot validation checks the tails array shape and both
+endpoints; linked rows still terminate at the source-binding sentinel. This prepares the index
+for source-order overload selection without changing current result-sort policy. Focused static
+assertions, `git diff --check`, and source-length checks pass; runtime qualification remains held.
+
+### 23.27.326 Exercise a real theorem row in pattern-collision output checks (2026-10-13)
+
+The pattern-collision regression's theorem-catalog loop previously used function names, but that
+catalog contains lemma summaries, so the collision assertion could pass without checking any
+theorem row. The fixture now includes a lemma whose second same-scope string-pattern arm asserts
+false, and the catalog check requires its row, unverified status, and unproven proof goals. The
+catalog assertions also require its source claim and all goals to be admitted from the assert-by
+inventory. The package assertion excludes that lemma's goal name. Python syntax, source length, and
+whitespace checks pass; the end-to-end run remains unqualified under the active static-only hold.
+
+### 23.27.328 Bound fact-call shadow-cache collision probes (2026-10-13)
+
+The lazily allocated local-shadow query cache used an 8,192-slot linear probe on every lookup.
+The lookup now stops after the shared 64-entry name-index cluster limit and its terminating empty
+slot. If the cache is still saturated, the existing `available` check treats the name as shadowed,
+which fails closed instead of claiming a global call is unshadowed. Static source inspection confirms
+the cap reaches that conservative return; `git diff --check` and source-length checks pass. Elisa
+runtime behavior remains unqualified under the active static-only hold.
+
+### 23.27.329 Preserve backend primitive representation in overload replay (2026-10-13)
+
+Static comparison with the current compiler found a remaining call-typing gap. The backend's
+`value_type_identity_equal` compares lowered kind/width, and `scalar_type_of_name` maps `char` and
+`i64` to signed 64-bit values; on a 64-bit target it also maps `int` and `isize` to that same
+representation. Kernel proposition replay currently compares source sort family, name, and nominal
+identity exactly. This can under-approximate backend-applicable overloads and reject valid proof
+replay. Do not weaken general source sort equality: add authenticated selected-signature and target
+representation evidence to call replay, with positive/ambiguous controls for these scalar pairs.
+This remains unqualified under the static-only hold.
+
+### 23.27.330 Bound the complete mutable-global authority walk (2026-10-13)
+
+Static review of the compiler's mutable-global grant analyzer found that its new depth-limit
+proposal must cover the entire recursive walk, not only match arms. Its main recursive component
+includes expressions, statements, bodies, calls, defaults, match arms, assignment targets, and
+mutable-reference places. Separate recursive AST helpers include declaration collection, module
+resolution, callable-slot and callback-type resolution, condition-origin lookup, trusted-scope
+processing, function collection, and export-row collection. An expression-only guard would leave
+stack-exhaustion paths; a place or statement path that silently truncates would risk omitting an
+access. Every truncated inference path must conservatively propagate both `Global.Read` and
+`Global.Write`, and reporting must emit the existing `ExpressionAnalysisDepthExceeded` diagnostic.
+Add positive/negative deep-input controls for expression, assignment target, statement nesting, and
+helper/prepass recursion before qualification. No compiler tests were run under the proof
+repository's static-only hold; the fix remains unqualified until the complete recursive graph is
+bounded and its regressions pass on a provenance-matched newest compiler.
+
+### 23.27.331 Recompute unique overload selection in proposition replay (2026-10-13)
+
+The source-neutral call-result adapter now mirrors the pinned selector's two stages over the
+validated function group: count typed argument matches (including defaulted formals and named or
+mixed argument mapping), then use a source call-shape fallback only when exactly one declaration
+accepts the labels, arity, and defaults. Missing labels and duplicate assignments are candidate
+mismatches; malformed parameter metadata remains unknown. Named-slot resolution uses the shared
+unique parameter-name lookup so duplicate formal names cannot silently select the last binding.
+Contextual string adaptation is applied only after unique shape selection. This replaces the
+earlier proposed need for a separate selected-signature certificate field for this bounded adapter;
+parity is derived by replaying the selector
+from checked environment rows. Fixed representation matching currently handles `char`/`i64` and
+keeps target-width aliases unknown. Reference-aware typed matching distinguishes reference formals,
+and local reference tags now cover non-scalar pointees; uncertain local reference metadata makes
+the environment incomplete. Unique-shape applicability follows the emitter's implicit
+dereference rule, while unknown reference-returning functions are projected as
+`function-incomplete` after following aliases. Nested reference layers or mismatched source
+reference markers also make formal signatures incomplete; nullable-reference sorts retain their
+separate null-comparison handling. Nested borrow expressions remain unresolved. Bare integer/float
+and unique-shape string literal
+adaptations are applied before ordinary sort comparison, matching the backend's unmodeled-literal
+path. Static comparison is against compiler pin `b8ebc0a6`; `git diff --check` and source-length
+checks pass. No parser/build/replay qualification or selector regression run was performed under
+the static-only hold; target ABI representation parity and positive/ambiguous runtime controls
+remain open.
+
+### 23.27.332 Reject reference-valued container element projection (2026-10-13)
+
+The source adapter recursively projected container element types through the same scalar/named
+sort model used for ordinary values. Since `&T` and `&mut T` are erased to their pointee sort in
+that projection, a container holding references could acquire a misleading element sort even
+though replay has no reference-valued element semantics. Container projection now resolves the
+element's reference shape first and returns unknown for direct or alias-hidden reference elements;
+unknown alias shape also fails closed. The nullable `T&?` sort remains separately representable. `git diff --check` and source-length
+checks pass. The active static-only hold still prohibits Elisa parser/build/replay qualification,
+so this source guard remains unqualified.
+
+### 23.27.333 Preserve nested-reference uncertainty under nullable wrappers (2026-10-13)
+
+The alias-aware reference-shape helper treated every `?` wrapper as a known non-reference. That
+allowed a nested reference such as `T&&?` to bypass its existing nested-layer rejection and reach
+the nullable-reference projection as though it were a direct `T&?`. Nullable classification now
+checks the wrapped shape first: an ordinary direct reference remains representable as the nullable
+sort, while nested or unresolved aliases stay unknown. `git diff --check` and source-length checks
+pass. This remains unqualified under the active static-only hold.
+
+### 23.27.334 Exclude reference-valued record and tuple fields from scalar projection (2026-10-13)
+
+After guarding container elements, the same erasure remained on field-table construction: record
+and tuple field types passed directly through the generic type sorter, which strips reference
+wrappers. Source projection now omits field descriptors when the field is a known reference or its
+reference shape is unresolved. Nested tuple-field collection stops at the same boundary, preserving
+nullable direct-reference sorts while preventing field equality from comparing pointees in place
+of references. `git diff --check` and source-length checks pass; runtime qualification remains held.
+
+### 23.27.335 Guard shared value and field binding construction (2026-10-13)
+
+A final call-site audit found that module constants and the shared binding constructor could still
+project reference types through the generic sorter. The constructor now checks alias-resolved
+reference shape before emitting any binding. When only a fallback type spelling exists, it probes
+that spelling through the same scoped type index, preserving primitive and resolved nominal
+bindings while excluding reference aliases. Unresolved shapes are omitted so later typed replay
+cannot use a pointee sort as the original reference sort. Static hygiene and source-length checks
+pass; no runtime qualification was performed under the static-only hold.
+
+### 23.27.336 Remove unreachable unmetered linear-certificate replay (2026-10-13)
+
+The kernel source retained a private legacy linear-certificate verifier with no callers, alongside
+the active goal-work-metered implementation. Removed its unreferenced term collection, constraint,
+multiplier, and certificate-selection helpers while preserving the shared premise/multiplier limits.
+A later call-graph audit also removed its now-unreferenced marker decoder. Static call-site inspection
+confirms the only active certificate entry point is
+`proof_kernel_replay_linear_certificate_goal_with_goal_work` from `resource_model.elisa`.
+`git diff --check` and source-length checks pass. Elisa runtime qualification remains under the
+static-only hold.
+
+### 23.27.337 Keep reference identity out of scalar equality replay (2026-10-13)
+
+Typed local reference bindings retain their pointee sort so the source backend's implicit dereference
+for arithmetic and unique-shape call fallback remains available. Proposition equality and disequality
+refuse two operands identified as reference values, and explicit borrow expressions no longer inherit
+their pointee sort as general terms. A single reference against a value retains the backend's
+implicit-dereference comparison behavior. Call argument matching uses a separate bounded projection
+to compare the authenticated pointee sort against the formal, preserving by-reference calls without
+allowing pointer identity tests into scalar equality, congruence, or linear replay.
+Static hygiene and source-length checks pass; runtime qualification remains under the static-only
+hold.
+
+### 23.27.338 Remove unreachable unmetered order-replay copies (2026-10-13)
+
+Static call-graph review found private legacy order, chain, unsigned-bound, scaled-product, remainder,
+strict-shift, and congruence helpers with no callers. Their active equivalents are goal-work-metered
+and are reached through resource_model.elisa. Removed those unreferenced helpers and the dead
+strict-order consequence/validator pair, while retaining shared utilities that still have call sites.
+All remaining definitions in the affected modules are reachable from proof-source call sites.
+git diff --check and source-length checks pass; runtime qualification remains under the static-only
+hold.
+
+
+### 23.27.339 Remove unreachable unmetered linear-arithmetic replay (2026-10-13)
+
+The legacy linear arithmetic, certificate, and pruning implementations had no path from the active
+replay dispatcher; `resource_model.elisa` reaches their goal-work-metered counterparts instead.
+Removed 15 dead private verifier and pruning helpers plus the marker decoder whose only caller was
+inside that dead code. Preserved the term-span type, shared work limits, and three small operator/OR
+helpers that still have callers. Static call-graph and deleted-symbol checks, `git diff --check`, and
+source-length checks pass. No Elisa runtime qualification ran under the static-only hold.
+
+### 23.27.340 Prevent reference erasure inside proposition collection terms (2026-10-13)
+
+The scalar-equality guard also needs to preserve reference identity through compound terms. Array,
+tuple, set, and dictionary literal sort inference now checks every element, key, and value for
+reference shape before projecting the collection sort; an unresolved reference shape makes the
+sort unknown. Conditional `if` terms classify their two result branches recursively and preserve
+reference status only when both branches agree. This prevents a reference hidden in a compound
+operand from acquiring its pointee sort in equality or disequality replay. `git diff --check` and
+source-length checks pass; Elisa runtime qualification remains under the static-only hold.
+
+### 23.27.341 Keep pointer ordering and byte-pointer arithmetic out of scalar replay (2026-10-13)
+
+Static comparison with the pinned backend found that relational operators on two references compare
+their addresses, while ordinary scalar-reference arithmetic auto-dereferences. Proposition typing
+now rejects relational comparison when both operands are identified references, preventing address
+ordering from being reinterpreted as pointee ordering. Its arithmetic sorter also refuses to project
+`u8&`/`byte&` plus or minus into integer arithmetic, matching the backend's raw-byte pointer path.
+`git diff --check` and source-length checks pass; runtime regression qualification remains held, and
+an adversarial `i64&` address-order versus pointee-difference regression should be run when the hold
+lifts.
+
+### 23.27.342 Preserve heap-reference provenance in typed replay (2026-10-13)
+
+The byte-pointer guard did not cover the backend's separate `heap T& +/- n` raw-GEP path. Source
+formation now preserves alias-resolved heap-reference provenance in a distinct local binding kind,
+and replay carries it through identifiers, parentheses, moves, and matching conditional branches.
+Arithmetic with that raw-pointer class remains unknown, while ordinary scalar-reference value
+arithmetic stays available. For calls, fields, and qualified values, the raw-pointer classifier now
+accepts only a known typed result; source reference returns and fields are already excluded from
+that projection. Static whitespace and source-length checks pass; heap, byte-pointer, and scalar-call
+controls still need runtime qualification after the static-only hold lifts.
+
+### 23.27.343 Keep reference-aware argument typing modular (2026-10-13)
+
+The new source-compatible call-argument matcher and its reference/value sort helpers pushed
+`proposition_typing.elisa` past the 600-line source boundary. Moved the three related private
+helpers into the already-included `scalar_reference_typing.elisa`; behavior and call sites are
+unchanged, and the files are now 521 and 103 lines. `git diff --check` and source-length checks pass;
+Elisa runtime qualification remains under the static-only hold.
+
+### 23.27.344 Retain typed value calls in reference-shape checks (2026-10-13)
+
+The reference classifier marked every call, field, and qualified path unknown, which made the
+source-compatible overload matcher reject otherwise supported value-returning calls as arguments.
+It now asks the typed term sorter for these shapes and classifies them as values only when that
+projection is complete. Reference-returning calls and reference-valued fields remain absent from the
+source adapter, so they stay unknown. Static whitespace and source-length checks pass; overload and
+reference-return controls remain for runtime qualification after the static-only hold.
+
+### 23.27.345 Cover read authority on write-granted read-modify-write (2026-10-13)
+
+The mutable-global grant matrix already checked that a read-only grant cannot update a global, but
+did not check the inverse failure: `Global.Write` alone must not authorize the RHS read in a
+read-modify-write assignment. Added `write_only_update` and require exactly the missing `Global.Read`
+diagnostic in both function and module report routes; the inverse update case likewise requires only
+`Global.Write`. An indexed self-update now separately checks that reading the RHS array element
+requires `Global.Read` on the array root even when `Global.Write` is granted. These controls catch
+accidental rejection of the grant already present. Python syntax, fixture/test correspondence, and
+static gates pass; runtime qualification remains under the source-matched compiler hold.
+
+### 23.27.346 Preserve mixed reference/value equality after reference identity checks (2026-10-13)
+
+The pinned backend performs address identity for equality only when both operands are references;
+with one reference and one value it auto-dereferences and compares values. Typed replay now rejects
+equality/disequality only when both operands are known references, retaining well-typed mixed
+reference/value scalar comparisons while keeping pointer identity out of scalar reasoning. Static
+whitespace and source-size checks pass; mixed and two-reference controls remain for runtime
+qualification after the static-only hold.
+
+### 23.27.347 Admit identity comparisons for matching nullable references (2026-10-13)
+
+The pinned backend compares two pointer-like optional references by their pointer values, but
+proposition typing admitted nullable references only when compared with `null`. Typed comparison
+formation now also accepts nullable-reference equality/disequality when both sides have the same
+complete sort identity, including the opaque `void&?` form. Different pointee identities and
+nullable/non-nullable combinations remain rejected. Static hygiene and source-size checks pass;
+nullable pointer identity controls remain for runtime qualification after the static-only hold.
+
+### 23.27.348 Meter global-mutable-array owner replay without double reservation (2026-10-13)
+
+The global-mutable-array validator used a depth-limited but unmetered owner search and charged two
+additional copies of `preflight_work` on top of a generic owner preflight that reserved three future
+scans. Replaced that wrapper with its direct, complete exact-span source walk, then metered the later
+owner lookup by declaration and function-name comparison. Each scan now consumes source-work at its
+call site and fails closed at the work/depth limits; the downstream helper name reflects its
+preflight contract. Static whitespace and source-length checks pass; runtime qualification remains
+held.
+
+### 23.27.349 Check nominal identity in container membership typing (2026-10-13)
+
+Membership typing previously compared a value's family and spelling against a container's element
+descriptor but ignored the nominal identity stored on both sides. It now requires matching element
+identity for named, tuple, and nested-container elements, while retaining the pinned backend's
+contextual numeric conversions for numeric membership. Static whitespace and source-size checks pass;
+nominal collision and numeric conversion controls remain for runtime qualification after the hold.
+
+### 23.27.350 Scope remaining declaration marker queries to their owner (2026-10-13)
+
+The final two marker-summary callers with known declaration owners still selected the ownerless,
+file-wide generic-name fallback: old-parameter witnesses and qualified-constant witnesses. Both now
+pass the active function declaration line and use the existing line-indexed binder lookup, so an
+unrelated same-named generic no longer shadows the queried type. Ownerless fallback remains available
+only for genuinely ownerless callers. `git diff --check` and source-length checks pass; Elisa runtime
+qualification remains under the static-only hold.
+
+### 23.27.351 Preserve typed-term recursion bounds across reference classification (2026-10-13)
+
+Reference and raw-pointer classifiers used the top-level term-sort wrapper when they encountered a
+call, field, or scope. That wrapper reset both depth and remaining recursion allowance to the root
+budget. Typed term sorting calls back into those classifiers for call arguments and compound values,
+so a deeply nested serialized term could repeatedly restart the per-path stack bound. The classifiers
+now accept the active depth, pass it through recursive branches, and call the remaining-budget sorter
+instead of resetting through the wrapper. Cross-classifier descent also stops when no child budget
+remains, preserving the sorter's positive-remaining precondition. The serialized-node validity
+predicate only checks the root index, so node construction provides no stronger depth invariant.
+Static source inspection, `git diff --check`, and source-length checks pass; parser/build/replay
+remain held.
+
+### 23.27.352 Index reference-parameter annotations by declaration line and name (2026-10-13)
+
+Kernel signature construction previously rescanned every `__typestate_ref_param` annotation for each
+function and then linearly searched that function's names for each formal. Added one report-local,
+open-addressed `(line, parameter-name)` index with exact collision checks and the shared cluster cap.
+Index construction is linear in the annotation count; each formal now uses a bounded lookup. Duplicate
+annotations retain their previous Boolean-membership behavior. Index build or probe exhaustion fails
+closed. `git diff --check` and source-length checks pass; runtime qualification remains under the
+static-only hold.
+
+### 23.27.353 Deduplicate tuple container descriptors by bounded identity index (2026-10-13)
+
+The tuple-field source walk searched the entire accumulated typing-binding array for each inferred
+container descriptor, producing quadratic work as container types accumulated. The source type index
+now owns a fixed-capacity open-addressed descriptor-identity table sized from the global binding cap.
+Each container expression identity is inserted once; repeated identities compare the full descriptor
+sort before reuse. Epoch tags separate global bindings from each proposition's fresh local binding
+array, so a hit never reuses a row offset from another array; advancing the epoch avoids clearing the
+fixed table for every proposition. Descriptor insertion and exact comparisons consume source-work,
+and cluster, shape, or binding-cap exhaustion fails closed. `git diff --check` and source-length
+checks pass; parser, build, and replay remain under the static-only hold.
+
+### 23.27.354 Keep cast-shaped scalar witnesses opaque until dispatch is verified (2026-10-13)
+
+Typed proposition replay now admits method-shaped numeric and const-enum casts only when the
+environment has no visible matching `__cast__` hook. Ordinary functions with a cast-selector name
+do not shadow method-shaped cast syntax in the pinned compiler. The scalar witness path
+previously trusted an exact primitive-scalar marker before inspecting cast syntax, and the unsigned
+widening rewrite erased a cast call into its receiver. Both paths now refuse to treat integer cast
+selectors as ordinary scalar witnesses or strip them during either active metered or compatibility
+widening. This is conservative and may reduce cast-related proof automation until dispatch evidence
+is threaded through those APIs. Static diff and source-length checks pass; runtime qualification
+remains under the static-only hold.
+
+### 23.27.355 Preserve compiler-wide cast-hook lookup (2026-10-13)
+
+Kernel typed-term replay scans a declaration-wide environment, which includes functions from
+nested modules. Pinned compiler inspection confirmed that the cast-hook index scans its shared
+function table without filtering module owners, so an exact sibling-module hook can win dispatch.
+The attempted module-prefix filter was removed; replay checks every complete hook for an exact
+source/target pair and fails closed for any incomplete `__cast__` metadata. Separate source-boundary
+cast checks remain file-wide because their trace metadata does not yet preserve a reliable module
+owner; they remain conservative and can suppress proofs in files containing unrelated hooks.
+Static checks pass; runtime qualification remains held.
+
+### 23.27.356 Do not treat cast-selector function names as method dispatch (2026-10-13)
+
+Typed local-initializer replay and fact-call snapshots rejected builtin cast proofs when any source
+function or extern had the same name as the numeric cast selector. The pinned compiler gives scalar
+cast syntax precedence over ordinary UFCS selectors, so these name checks and the producer's
+numeric-selector shadow table were unnecessary false refusals and are removed. Type-bound replay
+also no longer looks up an ordinary function by selector name. The broader `__cast__` refusal
+remains wherever replay lacks exact pair or module-visibility evidence. A positive ordinary/extern
+selector fixture is registered in the cast-dispatch gate. Static checks pass; runtime qualification
+remains under the hold.
+
+### 23.27.357 Fail closed on unresolved imports in structural source graphs (2026-10-13)
+
+Structural call-graph reconstruction treated a source call with no retained declaration match as
+non-recursive and did not account for `Decl.Import` or import/using annotation metadata. An
+imported callable could therefore be omitted from reachability. Structural graph construction now
+refuses declaration imports and unresolved import/using markers before building the graph; those
+walks charge the source-work budget. This is deliberately conservative until reports carry
+resolved import targets and selected-callee identities. Direct-API mutation coverage now injects
+both an import declaration and `__using` metadata after source checking, and requires structural
+replay to retain a gap. `git diff --check` and source-length checks pass; parser/build/replay remain
+under the static-only hold.
+
+### 23.27.358 Reuse the bounded callable-name index in structural checking (2026-10-13)
+
+Structural termination repeatedly scanned every function name while checking whether parameters,
+pattern binders, or expression identifiers could shadow callable names. The checker now snapshots
+the already-built bounded function-name hash table into structural metadata once, and uses exact-name
+lookups with the existing cluster cap and source-work meter. An unavailable or malformed index and
+any exhausted lookup fail closed. This removes a repeated full-name scan from each shadow check;
+no throughput improvement has been measured. `git diff --check` and source-length checks pass;
+parser/build/replay qualification remains held until the proof source and compiler product match.
+
+### 23.27.359 Reuse precomputed SCC labels in structural termination (2026-10-13)
+
+Structural initialization rebuilt component labels by comparing each function with all earlier
+functions, despite the function pass already producing `recursive_component_ids`. It also ran a
+per-function scan to populate a mutual-member flag that had no readers. Structural initialization
+now validates and copies the existing row-aligned SCC labels once, charging validation and copy
+work; malformed arrays or labels leave the component table empty, and structural checking refuses
+that shape. This changes SCC metadata transfer from quadratic comparisons to a linear pass and
+removes the dead scan. `git diff --check` and the source-length gate pass. Elisa runtime behavior
+remains unqualified under the static-only hold.
+
+### 23.27.360 Recheck checked-view proof-status boundaries (2026-10-13)
+
+Static inspection confirms `ProofCheckedView` keeps its report, receipt, and parser-origin source
+analysis private; its constructor is private, and `proof_checked_view_attempt_is_proven` requires
+both replay status and per-goal source admission. Standalone `proof_replay_certificates` returns
+an unbound receipt; its `kernel_*` accessors are diagnostic, while source-authorized accessors
+require a source-bound validated receipt. CLI and output serializers consume the checked view and
+report replay and source admission separately. No mutable-report admission bypass was found in
+these routes. This does not authenticate direct inspection of the legacy raw report API and is
+static inspection only; runtime qualification remains under the static-only hold.
+
+### 23.27.361 Index repeated function declarations by name and line (2026-10-13)
+
+`proof_function_index_at_line` previously scanned all function rows whenever a bare name was
+ambiguous, making repeated declaration checks potentially quadratic. Function-index construction
+now builds a secondary open-addressed `(name, declaration line)` index containing only rows with a
+repeated bare name and an aligned line. Hash matches still require exact name and line equality;
+unique pairs resolve to their row, while absent pairs and duplicate exact pairs preserve the old
+`names.count` sentinel behavior. Build, lookup, and cluster work use the shared source-work bound;
+incomplete lookup state marks module-resolution work exhausted so callers fail closed. Static diff
+and source-length checks pass. Runtime behavior and throughput remain unqualified under the
+static-only hold.
+
+### 23.27.362 Clarify raw report completion versus source admission (2026-10-13)
+
+`proof_report_source_has_unresolved_checks` accepts a raw mutable `ProofReport` and has no replay
+receipt or parser-origin source capability. Its false result therefore describes report invariants
+and producer-marked obligation closure only. Added this distinction at the public helper and in the
+README; source-positive decisions use `ProofCheckedView` and its `proof_checked_view_source_admissible`
+accessor with replay status. This is a documentation boundary clarification, not a change to raw
+report behavior or a new runtime qualification.
+
+### 23.27.363 Reuse the bounded extern-signature index in proof analysis (2026-10-13)
+
+Effect containment, operator-witness analysis, and resource-call classification repeatedly scanned
+all extern signatures to resolve a name. They now probe the already-built extern name index with
+exact string equality after hash matches; missing and duplicate extern names retain the count
+sentinel. Probe and comparison work is charged to the shared implicit-effect budget, and malformed
+index state or exhaustion refuses the analysis. Static diff and source-length checks pass; runtime
+behavior and throughput remain unqualified under the static-only hold.
+
+### 23.27.364 Index expected source-call sets during replay matching (2026-10-13)
+
+The production source-call collector already deduplicates names with a bounded, collision-safe
+index, but its call-set matcher compared every collected name against every expected name and then
+rescanned the expected prefix to detect duplicates. Replay now indexes expected names once and uses
+exact string comparison after hash matches; duplicate expected names and malformed, over-clustered,
+or over-budget indexes fail closed. Final effect-trace validation calls the production work-aware
+matcher with source annotations and the shared source-work counter. The older unmetered
+`source_call_walk` remains example-only. Static diff and source-length checks pass; runtime behavior
+remains unqualified under the static-only hold.
+
+### 23.27.365 Share the source-work budget across effect containment (2026-10-13)
+
+Effect containment's extern identity, producer row/set work, and final trace validation consume the
+same report-level source-work counter. Final validation performs the caller and callee source
+lookups, call coverage, and effect-row binding once, avoiding duplicate preflight scans. Extern
+metadata uses a metered identity variant. The producer uses bounded indexes to deduplicate declared
+effects, callee rows, and call sets; cross-row comparisons receive checked work charges before
+running. Budget exhaustion records a resource-analysis budget finding and a failed proof obligation,
+while source mismatches retain opaque refusals. The replay call-work charge marks the shared counter
+exhausted when a charge fails, so callers can distinguish exhaustion from a semantic mismatch.
+Static diff and source-length checks pass; runtime behavior remains unqualified under the
+static-only hold.
+
+### 23.27.366 Keep effect-containment callee metadata aligned (2026-10-13)
+
+The new bounded callee-name index appends each previously unseen name to `callee_names` during
+insertion. Effect-containment production then appended the same name again after building its row,
+while adding only one start/count entry. Trace construction iterates by `callee_names.count`, so even
+one callee could index beyond the row metadata. Removed the second append; the name, row start, and
+row count now each receive exactly one entry per unique callee. Static diff and source-length checks
+pass; runtime qualification remains held.
+
+### 23.27.367 Reuse typed-match call shape during overload selection (2026-10-13)
+
+Each overload candidate that passed typed argument matching also passed the exact call-shape
+matcher, but selection immediately scanned its labels, arity, and defaulted parameters a second
+time. Typed matches now contribute to both the typed-match and shape-match counts directly;
+type-mismatching candidates still run the shape-only fallback. This removes one redundant shape
+scan per applicable candidate while retaining unique-shape fallback behavior. Static diff and
+source-length checks pass; measured throughput and runtime parity remain unqualified under the
+static-only hold.
+
+### 23.27.368 Do not infer reference arguments from untyped numeric literals (2026-10-13)
+
+The pinned backend's typed overload matcher contextually matches only direct untyped integer and
+float literal AST nodes. `Paren` and `Move` preserve the unmodeled expression type but do not enter
+that typed literal branch; only a unique call shape may then provide contextual typing during
+emission. Replay previously unwrapped those forms to default `i64`/`f64` sorts and could count one
+candidate in an otherwise ambiguous overload set. A bounded parenthesis/move-aware detector now
+keeps wrapped literals out of typed ranking, preserves contextual typing in a unique-shape
+fallback, and refuses untyped numeric literals for reference formals. Typed place arguments retain
+their reference path subject to the source-shape guard recorded in 23.27.369. `git diff --check` and
+source-length checks pass; replay qualification remains under the static-only hold.
+
+### 23.27.369 Match unary literal overload fallback and reject literal borrows (2026-10-13)
+
+Pinned compiler inspection confirmed that expression typing unwraps unary `+`, `-`, and `~`,
+while typed overload matching still accepts contextual typing only for direct integer/float literal
+AST nodes. Replay's bounded literal classifier now carries those unary forms out of typed candidate
+ranking. A unique-shape fallback may contextualize unary `+`/`-` to numeric formals and `~` only to
+integral formals. Explicit `&` is rejected for by-value formals and accepted for by-reference
+formals only when a bounded, metered source-shape walk verifies an identifier, field, index,
+parenthesized place, or a named struct call whose address is materialized by the pinned backend.
+This excludes literals, arithmetic/call rvalues with scalar results, and nested borrows while
+retaining ordinary ident/field/index places and backend-supported CStr index places.
+`git diff --check` and source-length checks pass; runtime qualification remains under the
+static-only hold.
+
+### 23.27.370 Harden structural source-graph replay gaps (2026-10-13)
+
+The structural source binding added in 23.27.130 is now hardened against source forms the replay
+graph cannot resolve exactly. Graph construction fails closed on imports and unresolved
+import/using annotations; name-index insertion and lookup stop at the shared cluster cap, and
+lookup exhaustion no longer claims absence. Graph nodes remain keyed by exact source-entry
+identity so unrelated overloads can coexist, while certificate owner/callee admission still
+requires unique source declarations. Scoped, indirect, unresolved-dispatch, and non-callable
+constant calls taint reachability instead of connecting to a same-leaf declaration. Structural
+replay also requires the proof structural name index before graph-cache construction. These changes
+are statically present in `structural_source_validation.elisa` and its import guard; no parser,
+build, test, or replay qualification is available under the active hold.
+
+### 23.27.371 Keep mutable-reference callables incomplete in proposition typing (2026-10-13)
+
+`ProofKernelTypingBinding` records whether a formal is by-reference but not whether that
+reference is mutable. Source proposition typing now resolves reference mutability through type
+aliases and emits an incomplete callable signature whenever a formal is a mutable reference.
+This prevents overload selection from treating `mutable T&` as `T&` while retaining shared
+reference calls and mutable by-value parameters. The same bounded alias walk also supplies the
+formal's by-reference bit for signature emission, avoiding repeated reference-classification scans.
+Reference-parameter annotations are now validated in that preflight pass too. Every formal's
+lookup-completeness and reference-versus-nullable-sort compatibility is checked and cached before
+the checker emits either a complete signature or an incomplete-candidate marker, so a later bad
+formal cannot leave a partial callable behind.
+The source-level regression matrix in `scripts/test_mutable_reference_proposition_signatures.py`
+rejects direct and aliased mutable-reference calls during proposition formation while keeping
+shared-reference and mutable-by-value calls eligible. The matrix is registered in the Python suite
+but has not run; runtime qualification remains under the hold. It does not synthesize malformed
+internal `__typestate_ref_param` metadata. The new direct AST harness in
+`scripts/test_mutable_reference_annotation_preflight.py` injects a mismatched marker on a later
+formal and checks that projection emits only an incomplete signature, with no function or parameter
+rows. It also checks a nullable-reference compatibility control and malformed reference-index
+lookups that must publish no rows. Reserved `__typestate_ref_param` rows with an empty owner now
+make index construction incomplete instead of silently disappearing. The harness is registered but
+unrun under the hold. It now also projects successive `Left::Ref`, `Right::Ref`, and caller-local
+`Node` formals and requires three distinct nominal identities, preserving the caller scope across
+both alias walks. This scope-restoration control remains unrun under the hold. A future extension
+can carry reference mutability through source typing and validate actual-place capabilities.
+
+### 23.27.372 Check pattern-work capacity before adding source-name length (2026-10-13)
+
+Pattern source lookup charged a type name by adding `1 + sview_len(name)` before checking the
+work limit. The bound now compares the name length against remaining capacity first, so the
+meter arithmetic cannot wrap before the refusal check. `git diff --check` and the source-length
+gate pass; pattern regressions remain unrun under the exact-toolchain qualification hold.
+
+### 23.27.373 Require exact pinned toolchain inputs in replay harnesses (2026-10-13)
+
+The shared source-binding harness compared the compiler snapshot revision and standard library,
+then checked only that the installed Stage1 matched its current checkout. That could still run
+replay against a dirty or differently pinned compiler source tree. It now validates the Stage1
+product, complete snapshot source tree, build recipe, and Stage0 seed chain against both checked-in
+pins before compiling. Both replay harnesses compare every file in the canonical standard library
+they actually use against the validated snapshot, so qualification covers the input consumed by
+replay. The mutable-reference annotation harness now uses the same preflight, and its freshness
+check cannot be bypassed with `ELISA_ALLOW_STALE_STAGE1=1`. This is a qualification guard only; the
+current mismatched toolchain still prevents compiler or replay runs.
+
+### 23.27.374 Fuse formal sort and reference-marker classification (2026-10-13)
+
+Each formal parameter previously traversed its type AST and alias chain once for the replay sort,
+then again to discover shared/mutable-reference markers. The sort walker now also returns
+independent reference-marker fields, and formal preflight consumes both results from that single
+walk. Sort-only callers keep their projection wrapper and do not request marker collection; formal
+preflight requests both results. Alias lookup still recurses under the alias owner path and restores
+the caller path; marker completeness remains separate from sort completeness, and annotation lookup
+still runs for every formal before any callable rows are published. This removes duplicate span
+charging and alias resolution on the signature hot path. Diff/whitespace and source-length checks
+pass. The direct/shared/mutable/nullable/alias regression harnesses remain unrun under the
+exact-toolchain static-only hold, so semantics and budget parity are not yet runtime-qualified.
+Container element admission still performs a separate reference-shape check before its recursive
+sort. Return signatures now use a demand-aware fused classifier as recorded in 23.27.380; its budget
+and semantic parity remain unqualified under the exact-toolchain hold.
+
+### 23.27.375 Cover additional numeric-looking string pattern spellings (2026-10-13)
+
+The pattern-collision regression already exercised leading-zero decimal strings, Boolean/null
+spellings, and fixed-width integer boundaries. It now also includes hexadecimal-looking and
+exponent-looking string pairs (`"0x1"`/`"1"` and `"1e0"`/`"1.0"`) in the same report, theorem,
+package, and focused CLI checks. These source forms are valid string patterns, but their punctuation
+keeps them outside the prover's exact string-fact subset. Python syntax, `git diff --check`, and the
+source-length gate pass; runtime assertions remain unqualified under the exact-toolchain hold.
+
+### 23.27.376 Exercise additional unsigned pattern widths (2026-10-13)
+
+The fixed-width pattern collision matrix now exercises the high bit for `u16` and `u32` in
+addition to the existing `u8` and `u64` cases, and the maximum `u64` literal separately from its
+high bit. This checks that width-specific literal handling cannot create a false postcondition
+proof at intermediate unsigned widths or at the unsigned maximum. The cases use the same report,
+theorem, package, and focused CLI assertions as the other collisions. Python syntax,
+`git diff --check`, and the source-length gate pass; runtime assertions remain unqualified under
+the exact-toolchain hold.
+
+### 23.27.377 Fail closed on unresolved formal marker lookup and precharge publication (2026-10-13)
+
+The fused formal type classifier now marks reference-shape completeness false when a named-type
+lookup has anything other than exactly one declaration, including an unresolved name. Before
+publishing a supported function signature, source typing also verifies capacity for the signature
+and every formal row and precharges the corresponding source work. This keeps budget or binding
+capacity exhaustion from leaving a partially published callable. These are static fail-closed and
+resource-accounting changes; the type-alias and signature regression harnesses remain unrun under
+the active exact-toolchain hold.
+
+### 23.27.378 Preserve early refusal when considering return-classifier fusion (2026-10-13)
+
+The initial static review found that a wholesale replacement of the reference-first return path
+could continue into sort resolution for an aliased reference return, exhaust shared source-work
+budget, and change an incomplete-candidate result. This constraint shaped the demand-aware design
+recorded in 23.27.380: reference returns stop after bounded marker classification, while by-value
+returns retain sort evidence. This entry records the original hazard; it no longer describes the
+current classifier call path. Runtime qualification remains under the exact-toolchain hold.
+
+### 23.27.379 Keep owner-generic builtin spellings out of kernel source typing (2026-10-13)
+
+The proposition type projector could classify a generic parameter named like a builtin (for
+example, `[i64]`) as the primitive sort because generic binders are retained in parser side tables,
+not in the declaration AST. Kernel typing now checks those owner-scoped rows before publishing
+local value bindings or callable signatures. A matching generic type is omitted from the local
+typing environment, and a callable whose signature mentions that owner generic remains explicitly
+incomplete. Unsupported AST forms in the generic-name walk now fail closed; only known leaf
+literals and absent annotations are treated as containing no generic. Added a
+direct-API regression fixture that asks proposition formation to type an integer comparison on a
+generic `i64` parameter. Static whitespace, source-length, and Python syntax checks pass. The Elisa
+parser/build/replay regression remains unrun under the active exact-toolchain hold.
+
+### 23.27.380 Fuse return sort and reference-marker classification with demand-aware traversal (2026-10-13)
+
+Return signatures now collect sort and reference markers in the shared AST/alias classifier. The
+classifier switches to marker-only recursion for direct reference wrappers, preserving early
+incomplete-candidate admission without charging alias sort work. Exact nullable `T&?` results first
+validate the reference shape, then retain a pointee sort because the nullable pointer is represented
+as a proposition value. Ordinary by-value results collect marker and sort information in the same
+walk. Alias owner-path restoration and source-work charging remain active on both paths. Static
+review supports preserving mutable nullable results as value sorts: the replay proposition subset
+has no writes through call results, and the inspected compiler source erases `mutable` from
+`Optional(Ref(T))` semantic identity while allowing a mutable nullable source for a shared nullable
+target. This source snapshot is dirty and does not establish pinned compiler behavior. The return
+mutability marker is collected but does not affect the value-sort projection. Formal
+mutable references remain incomplete because their writable capability cannot be represented in
+the kernel binding. `git diff --check` and the source-length gate pass; parser, build, test, and replay
+checks remain prohibited until the exact-toolchain hold is lifted, so budget and semantic parity are
+not runtime-qualified.
+
+### 23.27.381 Refuse field projection through nullable receivers without a null refinement (2026-10-13)
+
+Static replay review found that proposition typing looked up a field from the pointee type identity
+even when the receiver sort was `nullable-reference`. The type environment carries no path-sensitive
+null refinement, so a condition such as `p != null` cannot currently justify a later projection.
+Replay now returns an unknown sort for field projection through nullable and nullable-opaque
+receivers, before field lookup. The pinned compiler source's structural field path unwraps `Ref` but
+does not unwrap `Optional(Ref)` (`resolve_types_infer.elisa`); this supports refusing the projection
+in the proof kernel until null refinement is represented and replayed. A qualified-enum fast path
+also ran before receiver typing, so a bare `E.V` could bypass the guard when a local nullable value
+named `E` shadowed enum `E`. Replay now checks the visible value binding before interpreting a
+single-segment field owner as an enum. Both a visible binding and an ambiguous lookup candidate
+block that fallback, while an absent value name still permits enum resolution; explicitly scoped
+enum paths remain available. Static
+whitespace, source-length, and diff checks pass. No runtime or regression test was run under the
+exact-toolchain hold.
+
+### 23.27.382 Mark counter-only completion helper as non-authoritative (2026-10-13)
+
+The public `proof_report_all_obligations_proven` helper compares mutable report counters and does
+not carry replay or parser-origin source authority. Its API comment and README now state that a
+positive result is diagnostic only; admission decisions require `ProofCheckedView` source admission
+and the relevant replay status. Static documentation/API review only; the exact-toolchain hold
+continues to prohibit Elisa parser, build, test, and replay qualification.
+
+### 23.27.383 Recheck static gates on the current shared proof snapshot (2026-10-13)
+
+The current proof worktree has 168 changed paths, including untracked files. A single source
+snapshot pass found no trailing whitespace, Python syntax errors in 22 changed scripts, shell syntax
+errors in 13 changed scripts, `git diff --check` errors, or source-length violations. These are
+static hygiene results only; no Elisa parser, build, test, replay, or semantic qualification was
+performed. The compiler checkout remains at `d4338ced5d23777991f64057e0a76f10451cb8b5` with 286
+changed paths, so the exact-toolchain hold is still in force.
+
+### 23.27.384 Check value shadowing before every enum-member resolution path (2026-10-13)
+
+Further static review found that the one-segment `E.V` shadow check ran only after the specialized
+enum type-path resolver returned a known owner. When that resolver returned unknown, the helper
+could continue to its bare type-binding fallback. The metered value lookup now runs before both
+resolution paths, so visible or ambiguous value bindings cannot reach either enum interpretation;
+an absent value name still can. This also skips the owner-type lookup for ordinary shadowed field
+receivers. All enum-helper callers continue to pass the existing typing index. `git diff --check`
+and the source-length gate pass; a full shared-tree static pass also found no whitespace or Python
+and shell syntax errors across 168 changed paths (22 Python files and 13 shell files). No Elisa
+parser, build, test, or replay qualification was run under the exact-toolchain hold.
+
+### 23.27.385 Refuse stale fallback binaries in source-admission regressions (2026-10-13)
+
+The standalone pattern-collision and source-admission regressions previously fell back to mutable
+`build/elisa-proof` when `ELISA_PROOF_BIN` was absent, allowing a stale executable to produce a
+misleading result. They now share `qualified_test_binary.py`, which resolves the current
+proof/replay generation through the strict prebuilt qualification gate and rejects an explicitly
+supplied binary if it differs from that qualified path. The full test driver passes its already
+qualified path through to avoid repeating resolution for each Python regression. The current
+static-only toolchain hold prevents running the Elisa regressions; qualification itself was not
+run. Five pure-Python unit cases pass for standalone resolution, stale-path refusal, qualification
+failure, and exact matrix-marker matching without launching compiler or proof tools.
+
+### 23.27.386 Bind replay harnesses to the checked-in Stage0 pin (2026-10-13)
+
+Static review found that the shared source-binding and mutable-reference preflight harnesses let an
+`ELISA_STAGE0_REV` environment value replace the proof repository's pin before Stage1 provenance
+validation. The validator checks the supplied revision, so a Stage1 seeded from a different Stage0
+could otherwise pass those harnesses while disagreeing with the checked-in proof pin. Both harnesses
+now read the pin through one shared helper, reject a conflicting environment value, and remove that
+override from child environments. This matches the canonical build and prebuilt-qualification
+paths. Python AST parsing of both touched modules, `git diff --check`, and the source-length gate
+pass. A stable static pass of the current 172-path shared snapshot also passed whitespace, Python AST
+(24 scripts), and shell syntax (15 scripts) gates. No parser, build, test, or replay qualification
+was performed under the exact-toolchain hold.
+
+
+### 23.27.387 Refresh static gates after shared qualification changes (2026-10-13)
+
+The current stable shared snapshot contains 174 changed paths, including 26 Python files, 15 shell
+scripts, and 130 Elisa files. A read-only gate passed Python AST parsing, `bash -n`, trailing
+whitespace scans, `git diff --check`, and the source-length check. The before/after content
+fingerprint was `3f7053485fd55ec8aa8df4dc0001700e71e57f658249285107724fb112514448`. This is static
+hygiene only; no Elisa parser, build, test, replay, or semantic qualification was performed.
+
+### 23.27.388 Keep replay-harness Stage0 pin binding under regression (2026-10-13)
+
+Added a Python-only regression for the checked-in Stage0 selector used by source-binding and
+mutable-reference harnesses. It accepts an absent or matching `ELISA_STAGE0_REV` override and
+rejects a conflicting one. The test is included in the ordered test matrix and does not invoke Elisa
+or compiler binaries. Its three unit cases pass, as do the five qualification-helper cases, Python
+syntax, shell syntax, `git diff --check`, and source-length validation. The exact Elisa toolchain
+remains unqualified.
+
+
+### 23.27.393 Recheck source limits after qualification regressions landed (2026-10-13)
+
+A new regression invocation briefly raised `scripts/test.d/01-setup-and-python-suites.sh` to 601
+lines. The Stage0 pin regression was moved into the ordered continuation part, and the shared
+static gate now passes with that first part at or below the 600-line cap. The resulting stable
+snapshot has 177 changed paths (28 Python, 16 shell, and 130 Elisa files); Python AST, shell
+syntax, whitespace, `git diff --check`, and source-length gates all pass. Its content fingerprint,
+excluding this plan log, is
+`0d5fdf6233e992617e5db78dfee7200b0cd262e164f256ace697c6e173d9b818`. No Elisa parser, build, test,
+replay, or semantic qualification was performed.
+
+
+### 23.27.389 Refresh static snapshot after shared regression additions (2026-10-13)
+
+The latest stable shared snapshot contains 179 changed paths: 29 Python files, 17 shell scripts,
+and 130 Elisa files. Python AST, shell syntax, trailing whitespace, `git diff --check`, and source
+length gates all pass. The content fingerprint excluding this plan log is
+`cf2973298e6fc235349b3ff9278f4b25bc171ebd831a056e45efff8f4610e4ea`. This is static hygiene
+only. The exact-toolchain hold remains active; no Elisa parser, build, test, replay, or semantic
+qualification was performed.
+
+### 23.27.390 Expand fixed-width pattern-collision boundaries (2026-10-13)
+
+The pattern-literal end-to-end matrix now covers `u16`/`u32` maximum values, a `u32` maximum-edge
+range, signed `i16` and `i32` minima and maxima, and signed `i64` endpoints, alongside its existing
+`u8`/`u16`/`u32`/`u64` high-bit cases and string spelling collisions. All function witnesses flow
+through report and focused-function assertions. Representative source lemmas cover both a string
+collision and a `u64` high-bit collision through theorem and package output. Python syntax and diff
+whitespace checks pass. Positive `char` controls cover the admitted `\\n` and `\\0` escape forms;
+the negative matrix distinguishes the NUL character from ASCII `'0'`.
+Elisa execution remains unqualified under the exact-toolchain hold.
+
+
+### 23.27.394 Audit exactness and fail-closed behavior in replay lookup indexes (2026-10-13)
+
+Static review covered the new module-owner path, function-group, call-owner, and structural-name
+indexes. Hash matches are confirmed with exact text and owner identities; duplicate/ambiguous owner
+paths and name markers fail closed, and each query/build charges bounded work. No soundness issue
+was found in these paths. A refreshed stable snapshot of 182 changed paths (31 Python, 18 shell,
+130 Elisa) passed Python AST, shell syntax, trailing whitespace, `git diff --check`, and source-length
+gates. Content fingerprint excluding this plan log: `79e682d2c23e767ed7741bbb843aab3c85f6572357f90f45c5a6a075141b4160`. This is a static review only; no Elisa parser, build, test, or replay was run.
+
+
+### 23.27.391 Avoid redundant relative owner-path work after an exact match (2026-10-13)
+
+The indexed module-owner resolver evaluated both the direct canonical path and the context-relative
+path for every candidate, even when the direct path had already matched. The relative-prefix check
+now runs only after a direct miss. This preserves the match set and ambiguity handling while avoiding
+extra segment comparisons and work-budget use for exact paths. The stable 183-path snapshot passed
+Python AST, shell syntax, whitespace, `git diff --check`, and source-length gates. Content
+fingerprint excluding this plan log: `f8a832f4fb3ddf39828428b2eb11deb67ba2f420719981bb336ab977f8b148b2`. No Elisa runtime or replay check was run under the hold.
+
+
+### 23.27.392 Refresh static gates after lookup-index optimization and shared regressions (2026-10-13)
+
+The latest stable snapshot covers 187 changed paths (34 Python, 20 shell, 130 Elisa). Python AST, shell syntax, trailing whitespace, `git diff --check`, and source-length gates all pass. Content fingerprint excluding this plan log: `733e219833c380e87b0cc1315a38b2c8e980bdfd5919fda153c92caee4115aa7`. The owner-path query skips relative matching after an exact path match, preserving results while avoiding redundant work. No Elisa parser, build, test, or replay was run.
+
+
+### 23.27.395 Fail closed on ambiguous structural declaration names (2026-10-13)
+
+Static call-flow review found that structural checking selected the first SCC row for a duplicate
+leaf spelling, while source replay requires a unique declaration identity for both the certificate
+owner and callee. This could create producer certificates that replay cannot validate. Structural
+name lookup now reports an exact duplicate spelling as incomplete, so the source checker refuses
+the affected structural certificate until the index carries declaration identity end to end. The
+current stable static gate passed across 191 changed paths (36 Python, 22 shell, 130 Elisa): Python AST,
+bash -n, trailing-whitespace scans, unique plan section IDs, source-length validation, and
+git diff --check. Its content fingerprint excluding this plan log is
+e27dd5916c21eb52d47040449d82eb6f8cbaea51a1cfdd834d182be3cb5659c5. No Elisa parser, build, test,
+or replay qualification was run under the active toolchain hold.
+
+### 23.27.396 Require offset evidence for borrowed C-string elements (2026-10-13)
+
+Static replay review found that explicit by-reference call checking admitted every integral
+`cstr[index]` as a borrowable place. The backend forms this borrow with a raw pointer GEP, while
+ordinary string reads use a bounds-checked helper; the proposition environment carries no string
+length. Replay now admits only literal index zero, the first-byte offset guaranteed by a valid
+non-null C string, and returns unknown for other offsets until length evidence is represented.
+This applies to both direct-call and overload argument matching through their shared place helper.
+No parser, build, test, or replay was run under the toolchain hold.
+
+### 23.27.397 Refresh static snapshot after borrowed C-string offset guard (2026-10-13)
+
+The stable shared snapshot contains 193 changed paths (37 Python, 23 shell, 130 Elisa). Python AST parsing, `bash -n`, trailing-whitespace and `git diff --check` scans, the source-length gate, and uniqueness of all 463 plan section IDs passed. The changed-content fingerprint excluding this plan log is `5c6a0064ea5547c123253c7e5485139153ff9e213045aa553b5c404d8a10be20` (SHA-256 over sorted changed paths, NUL, file contents, NUL). No Elisa parser, build, test, or replay was run under the active toolchain hold.
+
+### 23.27.398 Match replay calls structurally inside parenthesized goals (2026-10-13)
+
+Static review traced the multiline disjunction gap to preserved `Ast::Expr.Paren` nodes: the parser stores the opening-parenthesis token position, but replay treated that position as the entire goal extent and rejected a call nested after the opener. Replay now requires a unique exact call span in both the source expression and the consumer goal AST, then checks the source-call argument mapping at each occurrence. This keeps malformed or ambiguous sites fail-closed while allowing parenthesized multiline goals. The existing positive multiline control and its false-claim/package controls remain the qualification gate; they were not run because the exact-toolchain hold is active.
+
+The latest static snapshot has 204 changed paths (41 Python, 27 shell, 133 Elisa, plus README, schema, and this plan). Python AST parsing of 41 scripts, `bash -n` on 27 shell files, Elisa source-length checks, uniqueness of all 499 numbered plan IDs, and `git diff --check` pass. Its changed-content fingerprint excluding this plan log covers 203 paths and is `c32f46877e6bb0b08a8ea8f4286f79ff58ad2ca4d7c0af20e01d43211352b639`. No Elisa parser, build, test, or replay was run under the active toolchain hold.
+
+### 23.27.399 Recheck exact toolchain availability and replay change (2026-10-13)
+
+The live proof HEAD remains `d47b0e92`. The adjacent Elisa-compiler `main` has moved to `772fc093f7f072e6145ff7af9bb40cf58b266b07` with 312 dirty paths; Core `main` remains `55fb293de91cc0263972b1d87a1aa0702938ad7a` with 16 dirty paths. The clean detached compiler source checkout at `/private/tmp/b8eb-stage1-seed-wt` matches the pinned Stage1 source commit, and the pinned Stage0 commit is present in the Core object database. Installed products remain mismatched: the Stage1 snapshot records source revision `5cda9b4e69ff937f00ea43f0e7e4713d5ad3403b`, and installed Stage0 embeds `55fb293de91cc0263972b1d87a1aa0702938ad7a` with `vcs.modified=false`; proof pins are `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The static-only hold therefore remains active.
+
+The existing replay auditor independently reviewed the parenthesized-goal source-site change and found no concrete counterexample. It confirmed the exact-span searches share the source-work counter, have a recursion limit, and fail closed on unsupported shapes or budget exhaustion. No Elisa parser, build, test, or replay was run.
+
+### 23.27.400 Close implicit C-string element borrows in replay (2026-10-13)
+
+The follow-up type-scope audit found that the C-string place guard covered explicit `&cstr[index]`,
+but a bare or parenthesized `cstr[index]` could reach a by-reference formal through ordinary sort
+matching. Review of the pinned backend confirmed that this shape becomes a raw pointer GEP. It also
+confirmed that `cstr` is nullable, so the earlier literal-zero allowance lacked non-null evidence.
+Replay now fails closed for every borrowed C-string element offset, detects direct, parenthesized,
+and moved implicit index places in both direct-call and overload matching, and finds explicit borrows
+through parenthesis or `move` wrappers before validating their place. The pinned backend erases
+`move` while emitting its operand, so it cannot be treated as a protective rvalue materialization.
+Other implicit arguments retain their existing handling. No Elisa parser, build, test, or replay was
+run under the active toolchain hold.
+
+### 23.27.402 Refresh static snapshot after nullable C-string borrow guard (2026-10-13)
+
+The live shared snapshot contains 200 changed paths. Python AST parsing passed for 483 script files,
+`bash -n` passed for 97 shell scripts, and source-size, trailing-whitespace, `git diff --check`, and
+uniqueness checks for all 498 numbered plan headings passed. The changed-content fingerprint,
+excluding this plan, covers 199 paths and is
+`c4372c3ea4c9056920971a18527ede47aae131c85375ee3bd73d8d14dfea623d`. These are static checks only;
+no Elisa parser, build, test, or replay was run under the active toolchain hold.
+
+### 23.27.401 Record alias-binder risk and cleanup audit (2026-10-13)
+
+Static review found that match-pattern, `for`, and comprehension binders are seeded without inferred types or global-reference origins. Treat reference-capable unresolved binders as a Global.Read/Write merge blocker until the checker recovers their type/origin or fails closed and focused positive/negative regressions pass on a provenance-matched compiler. This remains unconfirmed at runtime under the toolchain hold. The latest static-only snapshot covers 198 changed paths and passes Python AST, shell syntax, Elisa source-length, and whitespace gates. The branch/worktree audit found no safe cleanup target: proof worktrees are all dirty, compiler candidates are unmerged or preserve seed/profile context, and merged compiler refs are checked out in dirty trees. No parser, build, test, or replay was run.
+
+### 23.27.403 Add subject and binder identity mutation controls (2026-10-13)
+
+The direct-API structural replay matrix now forges only the subject name or strict-subterm binder name of an otherwise structurally valid witness. These cases preserve the witness shape and rank fields, so the source-derived witness validator must reject the identity mismatch independently of kernel shape replay. Static Python AST, shell syntax, source-length, plan-ID uniqueness, and whitespace gates pass on the 200-path snapshot. The Elisa harness and replay tests remain unrun under the current toolchain hold.
+
+### 23.27.404 Preserve target-bound admission with unrelated open goals (2026-10-13)
+
+The checked-view API now has a target-admission base gate requiring source validation, complete admission snapshots, admissible existing source claims, and report-level semantic/replay admissibility while allowing unrelated goals to remain open. Target-bound tactic output uses this gate; portable tactic output still requires whole-source completion. The existing regression expects the selected target to be proved with `source.complete=false` and `source.admissible=true`. Static Python AST, shell syntax, source-length, plan-ID uniqueness, and whitespace gates pass on the 204-path snapshot. No Elisa test/build/replay was run under the toolchain hold.
+
+### 23.27.405 Confirm Global.Write bypass through reference-bearing binders (2026-10-13)
+
+Static audit of the pinned compiler authority pass confirmed an authorization gap, not just
+missing descriptive metadata. A minimal candidate is a mutable global `box`, a helper that writes
+through `mutable Box&`, and `for p in [&box]: set(p)` inside a function granted `Global.Read` only.
+The pass walks the `&box` iterable as a read, seeds `p` with null type and no origin, recognizes
+the helper's mutable formal, then calls `ga_write_place(p)`. Its local-name resolution returns no
+global slot for `p`, so the caller can miss the required `Global.Write`; the callee sees only a
+parameter and also cannot attribute the write to the global. The same origin loss occurs in match
+arms and comprehension binders. These source paths were statically inspected in the pinned clean
+compiler checkout; the candidate was not run because the Stage1/Stage0 provenance hold remains.
+
+Repair should carry binder type and storage origin through `for`, comprehension, and match
+projection. Retain exact global roots when derivable, merge origin sets across alternatives, and
+fail closed for unresolved reference-capable aliases when a mutating call or place write uses them.
+Scalar binders should remain untracked. Add paired granted/missing-write cases and qualify through
+both CLI and proof API on a provenance-matched compiler before removing the merge blocker.
+This documentation update passes `git diff --check`, the source-length gate, and plan-section
+uniqueness (486 numbered sections); no source parser, compiler build, test, or replay was run.
+
+### 23.27.406 Relate EASM call invalidation to the preserved return register (2026-10-13)
+
+The EASM register-mask contract now states that adding the architectural result-register bit to
+the live-invalidation mask recovers the full call-clobber mask. The positive proof fixture checks
+this relation and a false control claims both masks are identical. The compiler proof checker and
+ordered test matrix now include this obligation. Python AST parsing, shell syntax, source-size, and
+`git diff --check` pass. Replay is unavailable under the active pinned-toolchain hold, so this
+theorem is not yet replay-qualified.
+
+### 23.27.407 Prove out-of-range EASM register slots have no call effect (2026-10-13)
+
+The finite EASM call-liveness model now proves that every negative or 16-and-above register index
+is neither preserved nor invalidated. A false control attempts to classify the first slot above
+R15 as invalidated. The checker requires the exact boundary theorem and the proof is now registered
+in the ordered matrix. Python AST parsing, shell syntax, source-size, unique plan headings, and
+`git diff --check` pass. The installed proof product records compiler revision
+`7e1251785276c539c98dbe33a12e610e2338cbf4`, while the checked-in pin is
+`b8ebc0a6f211f41471d6a42f3b12a2e4482a766a`; replay remains held.
+
+### 23.27.408 Prove EASM terminator and conditional-branch classes are disjoint (2026-10-13)
+
+The control-flow proof suite now checks both directions of class separation for arbitrary opcodes:
+conditional branches are not terminators, and terminators are not conditional branches. A negative
+control claims an arbitrary terminator can be conditional. The checker binds both claims to the
+production predicates, and the suite is registered in the ordered proof matrix. Its source-only
+binding check, Python AST, shell syntax, source-size, and `git diff --check` pass. Elisa-Proof replay
+remains held by the installed compiler revision mismatch recorded above.
+
+### 23.27.409 Refresh call-liveness source binding after XCHG transfer change (2026-10-13)
+
+The call-liveness checker had a stale expectation for `easm_written_mask`: production now handles
+`xchg` by marking both substituted operands written. The checker is updated to bind that exact
+transfer and offers a `--source-only` path for the active product hold. Its source-only run passes
+with 13 positive theorems and 5 false controls; the control-flow source-only checker also passes
+with 6 positive theorems and 6 false controls. Python AST, shell syntax, source-size, unique plan
+headings, and `git diff --check` pass. Neither proof suite was replayed.
+
+### 23.27.410 Prove EASM label lookup refuses unrepresentable collection counts (2026-10-13)
+
+The label-lookup proof now covers the resolver's fail-closed count conversion: when a darray count
+cannot round-trip through `i64`, lookup returns the missing-label sentinel. A false control claims
+such a count can produce a found label. The source-only checker passes with 9 positive theorems and
+8 false controls, binding both claims to the production count guard. Python AST, shell syntax,
+source-size, and `git diff --check` pass. Proof replay remains unqualified under the pinned-product
+mismatch.
+
+### 23.27.411 Review live mutable-global binder remediation (2026-10-13)
+
+The pinned compiler baseline still contains the Global.Write binder-origin gap recorded in
+§23.27.405. A static review of the current dirty compiler candidate now finds inferred item types
+and `UNKNOWN_ALIAS` origins for reference-capable `for` and comprehension binders; match arms
+carry the subject through binder metadata, derive whole-value origins, and use consistent helper
+signatures at their call sites. This appears to close the audited source paths, but remains
+uncompiled and untested under the active exact-toolchain hold. The compiler lane was asked to retain
+positive and negative loop, comprehension, and match regressions. Mutable-reference function
+formals remain initialized without a global origin; their call sites appear covered separately by
+the conservative mutable-argument summary and `ga_write_place`, so this is not currently counted
+as a confirmed gap. Do not remove the merge blocker until provenance-matched CLI and proof-API
+controls pass. No compiler or proof tests were run for this review.
+
+### 23.27.412 Extend Global binder metadata to borrowed iterables and enum payloads (2026-10-13)
+
+The compiler working tree now derives match-payload and iteration binder types from structural
+TypeIds, including references to iterable containers, and preserves unknown-alias origins for
+known reference values when the exact global root is unavailable. This makes access through those
+binders require the matching global grants while keeping known scalar binders untracked. Eight
+paired positive/negative fixtures cover local and borrowed-container loops, comprehensions, and
+enum payload matches. Static Python AST and targeted whitespace checks pass; the Elisa suite has
+not run. Compiler `main` includes the Stage1 provenance determinism fix `cce6b6afc`, but a fresh
+schema-v5 Stage1 matching the current dirty source and focused CLI/proof-API qualification are
+still required before this candidate can merge. Paired local Mac A/B timing is permitted as exploratory evidence, using retired-instruction counts rather than wall-clock time; record provenance and host load, and do not treat it as qualification.
+
+### 23.27.413 Specify and bind the Global-authority binder-origin policy (2026-10-13)
+
+The semantic pass now calls a small production policy for assigning origins to reference binders:
+nonreferences receive no origin, whole-value references retain a known source root, and every
+other reference becomes an unknown alias. It also calls a policy to select Global.Write for writes
+through unknown aliases and Global.Read for reads. Nine positive proof declarations target both
+exact rules and their boundary cases; six false-control declarations claim unsafe origin
+classifications or permission mappings. A source-bound checker ties the policies to match, loop, and comprehension
+binders, unknown-alias access routing, and the corresponding Global.Read / Global.Write accounting.
+The source-only checker confirms those declaration inventories and reports a three-file source
+closure. The wrapper and ordered proof-matrix entry are registered. This is source-only validation:
+no Elisa proof replay or compiler test ran because the installed proof product does not match the
+pinned compiler revision. Replay qualification still requires a provenance-matched build.
+
+### 23.27.414 Preserve known-local origins for reference binders (2026-10-13)
+
+Static review of the current compiler candidate found a remaining expressivity cost in the
+fail-closed origin policy. `pattern_binding_origin` preserves a root only for whole-value
+references; projected reference payloads become `UNKNOWN_ALIAS`. Loop and comprehension
+reference items also become `UNKNOWN_ALIAS` when no exact global root is supplied. The access
+checker requires `Global.Read` or `Global.Write` for every such alias. As a result, references
+known to point only to local storage can receive global-permission diagnostics through a loop,
+comprehension, or projected match binder. The eight grant fixtures cover rejected missing-grant
+cases and accepted granted cases, but do not establish no-grant acceptance for known-local
+references. Preserve known-local provenance when it can be derived from container elements or
+match payloads, while retaining fail-closed behavior for external or unresolved aliases; add
+no-grant local-reference controls. This is a static inference, not a compiler-confirmed report.
+The exact Stage1 provenance check still fails on schema v1, so no compiler or proof test was run.
+
+### 23.27.415 Preserve alias provenance through nested reference-bearing aggregates (2026-10-13)
+
+Static review of the current candidate found a concrete potential Global.Write bypass for nominal
+aggregates: `Holder { pointer: mutable i64&, step: usize }`, an array item initialized with
+`pointer: &hot`, and a mutating call `set_one(item.pointer)` inside a `Global.Read`-only scope.
+`ga_reference_origin` sees `hot`, but `ga_type_id_contains_reference` does not recurse through
+`SemTypeKind.Named`, so `pattern_binding_origin(false, hot)` drops the origin. The mutating-call
+path then descends through `ga_write_place_inner` to local `item` without checking the final Ref
+projection. Add missing-Global.Write and both-grants controls for this shape, plus nested nominal
+fields and match binders. Direct expression reads may already recover the Ref type from the source
+type annotation; verify them separately. The same joined-origin representation may over-reject
+writes to scalar siblings such as `item.step`, so add a no-grant scalar-sibling control.
+
+Local-only precision also remains open: `ga_reference_origin` does not traverse enum-constructor
+`Expr.Call` arguments, and a local payload reference can therefore become `UNKNOWN_ALIAS`. Add
+no-grant local enum-payload controls alongside local nominal-aggregate controls. Preserve known
+local provenance, fail closed for opaque/external aliases, and avoid tainting unrelated scalar
+fields. These are static findings only; the installed Stage1 still has schema-v1 provenance, so
+compiler and proof tests remain held.
+### 23.27.416 Preserve local origins through tuple and nominal reference-bearing binders (2026-10-13)
+
+The Global-authority origin lattice distinguishes `LOCAL_ALIAS` from no origin and unknown
+aliases. Its join preserves identical origins, treats no-origin as the identity, and maps mixed
+origins to `UNKNOWN_ALIAS`. The semantic walk summarizes origins across arrays, tuples, sets,
+dictionaries, struct constructions, and record updates. For/comprehension and match binders use
+both interned structural types and source type expressions, so named structs with nested reference
+fields are recognized even though `SemTypeKind.Named` is not recursively expanded by the interned
+type helper. Iteration retains source tuple types, and named tuple field annotations preserve the
+type of projections such as `item.pointer`.
+
+Opaque calls, conditionals, matches, and reference projections use a proved policy: missing type
+evidence or a reference-bearing result maps to unknown; known reference-free results contribute no
+origin. Struct construction retains its joined summary only when every reference-bearing field is
+represented explicitly; omitted or positional reference fields become unknown. The proof source has
+23 positive declarations and 13 false controls for the origin policy, join algebra, opaque-value
+fallback, constructor field coverage, and permission mapping. Thirteen parity fixtures cover local
+references through tuple iteration, comprehension, and match binders; local nominal references
+through iteration and match binders; missing/granted Global.Write for named tuple and nominal
+fields; an omitted default reference field; and a scalar-sibling non-taint control. The source-only
+checker binds these fixtures and production paths. It reports 23 positive claims, 13 false controls,
+and a three-file proof closure. Python AST checks,
+proof-wrapper shell syntax, source-length validation, and diff whitespace checks pass. No Elisa
+elaboration, compiler/parity test, or proof replay ran because the
+installed Stage1 records compiler source `7e125178…` while the proof repository pins
+`b8ebc0a6…`. Enum constructor payloads and cross-module nominal fields remain conservative/unknown;
+they are the next precision boundary. The entire compiler remains far from replay-qualified
+verification.
+
+### 23.27.417 Preserve local origins through enum variant constructors (2026-10-13)
+
+The origin pass now records enum variant identity, lexical scope, payload arity, labels, and
+declared payload types during declaration collection. It recognizes only a resolved
+`Enum.Variant(...)` constructor, rejects shadowed owners and malformed payload layouts, and joins
+the origins of every explicit argument through the proved origin lattice. Calls to ordinary
+functions remain opaque and fail closed. Enum type classification recursively inspects all
+declared payload types in the defining module; cross-module layouts stay unknown when scope
+provenance cannot be interpreted locally. This allows a locally constructed enum carrying `&local`
+to retain local provenance while mixed local/global payloads become unknown.
+
+The existing 23 positive claims and 13 false controls cover the lattice, unknown-expression
+fallback, and constructor summary rule. Four additional source-bound parity fixtures cover a named
+local enum payload, unknown external enum parameters with missing and accepted grants, and a mixed
+local/global payload that must require Global.Write. The Global-authority source-only checker
+binds variant collection, exact owner/variant matching, argument arity and label checks, origin
+joining, and recursive enum payload type classification. No Elisa parser, compiler, parity, or
+proof replay was run; the Stage1 compiler source (`7e125178…`) still differs from the proof pin
+(`b8ebc0a6…`).
+
+### 23.27.418 Prove unknown origin is absorbing under joins (2026-10-13)
+
+The source-linked Global-authority policy proof now includes a universally quantified theorem that
+joining `UNKNOWN_ALIAS` with any origin preserves `UNKNOWN_ALIAS` on either side. A rejected false
+control attempts to replace an unknown left operand with the arbitrary joined value. The
+source-only binding checker requires both declarations and their exact claims, bringing this
+policy suite to 24 positive declarations and 14 false controls. Source-only validation passes;
+proof replay remains gated by the Stage1 compiler/proof pin mismatch recorded above.
+
+### 23.27.419 Run checked-decimal source bindings without a proof binary (2026-10-13)
+
+The checked-decimal proof checker now supports `--source-only`, which validates the production
+parser, arithmetic guard formulas, proof claims, and downstream EASM consumers without attempting
+Elisa-Proof execution. It also rejects untracked additions or removals in the positive and false
+control theorem inventories. The current source-only run reports 16 parser theorems, 8 parser false
+controls, 9 arithmetic theorems, and 2 arithmetic false controls. This gives a repeatable source
+binding check for the `text.length` / `text[0]` guard change despite the installed product mismatch;
+it does not certify those theorems or substitute for replay.
+
+### 23.27.420 Prove checked multiplication operand symmetry (2026-10-13)
+
+The signed arithmetic suite now states that `linear_mul_safe(left, right)` and
+`linear_mul_safe(right, left)` agree on both acceptance and returned value for all signed inputs.
+A negative control claims there is an input pair accepted in only one operand order. The source
+checker binds both theorem bodies to the production helper, enforces the exact positive and
+negative declaration inventories, and supports `--source-only`. Its source-only run reports 22
+positive declarations, 12 false controls, and a four-file include closure. The theorem and false
+control have not been elaborated or replayed because the installed Stage1 revision does not match
+the proof repository's compiler pin.
+
+### 23.27.421 Prove checked arithmetic's commutative laws and subtraction counterexample (2026-10-13)
+
+The checked-arithmetic suite now proves that safe addition, like safe multiplication, has the same
+acceptance and value in either operand order. It also proves a concrete successful subtraction pair
+(`9 - 4` and `4 - 9`) with opposite results, and includes a rejected claim that checked subtraction
+is commutative for every pair. The source-only checker binds these declarations to their production
+helpers and reports 24 positive declarations, 13 false controls, and a four-file include closure.
+Elisa-Proof replay is still pending a Stage1 compiler whose source revision matches the proof pin.
+
+### 23.27.422 Prove checked arithmetic identity laws (2026-10-13)
+
+The checked-arithmetic suite now states production-wrapper identities for addition by zero,
+subtraction by zero, multiplication by zero, multiplication by one on either side, and negation of
+zero. Each theorem requires the helper to report success as well as return the expected value, so
+the claims cover both the result and acceptance path. The source-only checker binds every theorem
+to the corresponding `Semantic::proof_linear_*_safe` call and reports 30 positive declarations,
+13 false controls, and a four-file include closure. These claims still require Elisa-Proof replay.
+
+### 23.27.423 Relate checked multiplication by negative one to negation (2026-10-13)
+
+The signed arithmetic proof now states that multiplying any signed input by `-1` through
+`linear_mul_safe` yields exactly the same success flag and value as `linear_neg_safe`, including
+rejection of `i64` minimum. A false control claims the two helpers always disagree. The
+source-only checker binds both calls to the production wrappers and reports 31 positive
+declarations and 14 false controls over the four-file proof closure. Elisa-Proof replay remains
+pending a Stage1 compiler matching the repository pin.
+
+### 23.27.424 State signed-decimal parser refinement against its independent fold (2026-10-13)
+
+The decimal parser proof now directly compares the production result's validity and value with
+`decimal_parse_reference`, the ghost recursive byte fold that does not call production digit
+helpers. A rejected false control claims the results always disagree. The source-only checker binds
+both theorem bodies to these two functions and now reports 17 parser positives and 9 parser false
+controls (alongside 9 arithmetic positives and 2 arithmetic false controls). This refinement claim
+still needs Elisa-Proof elaboration and certificate replay.
+
+### 23.27.425 Bind guarded StringView syntax to the qualified decimal sign check (2026-10-13)
+
+The StringView index proof checker now binds the checked-decimal implementation and its independent
+recursive reference to the same qualified `text.length` / `text[0]` minus-sign guard. This fixes a
+source-only checker mismatch that expected an unqualified constant even though both production
+branches use `EasmCheckedDecimal::ASCII_MINUS`. The StringView index and checked-decimal
+source-only checkers pass, reporting 8 positive StringView claims and 17 parser positives. The
+installed Stage1 compiler source revision (`7e125178…`) still differs from the proof repository pin
+(`b8ebc0a6…`), so no proof replay was claimed.
+
+### 23.27.426 Admit same-sort typed bitwise constants and cover all EASM masks (2026-10-13)
+
+The closed typed-constant evaluator now handles `&`, `|`, and `^` for two explicit integer
+literals of the same sort and width. Its source proof and goal-work path share one operation helper;
+the evaluator refuses different sorts and noncanonical literals. The `bitwise_kernel` example now
+checks high `i64` operands for all three operators, with a rejected overlap control. The EASM mask
+proof now states all 120 pairwise disjointness claims over the 16 production register masks, and
+rejects an R14/R15 overlap claim. Its source-only checker binds the exact mask assignments, all
+pairwise claims, and both proof inventories; it reports 11 positive claims, 9 false controls, and
+120 register pairs. The typed theorem still needs source elaboration and independent replay; the
+installed Stage1 source revision (`7e125178…`) does not match the proof pin (`b8ebc0a6…`).
+
+### 23.27.427 Prove the EASM `xchg` write-mask transfer (2026-10-13)
+
+The EASM call-liveness proof now constructs a production `xchgq %rax, %rcx` instruction and
+proves that `easm_written_mask` includes both operand registers. A second theorem sends the same
+instruction and an arbitrary `FlowState` through `easm_flow_transfer`, asserting that both written
+registers are added while flags and stack state are preserved. Rejected controls claim the source
+write may be omitted and that the transfer may leave the live mask unchanged. The checker binds
+the concrete proof inputs to the production mask and flow-transfer implementations. Its
+source-only run passes with 15 positive theorems, 7 false controls, and a three-file closure;
+Python syntax, source-length, and whitespace checks pass. Proof replay remains blocked: the
+installed proof product has a dirty, mismatched source identity, and the pinned Stage0 cannot seed
+the pinned compiler because four `Global` grant diagnostics remain in that revision. A clean later
+Stage0 reproduces the same seed failure. No replay qualification is claimed.
+
+### 23.27.428 Keep proven-attempt facts behind strict source-trace admission (2026-10-13)
+
+Static review found that certificate replay may omit a premise whose kernel root is not traced and
+still prove the goal from the remaining facts. Therefore `attempt_proven_statuses[i]` does not
+establish source provenance for every hypothesis attached to that attempt. The fact-source status
+snapshot now runs the strict source-trace validator for certificate-backed attempts as well as open
+attempts, preserving the checked-view rule that tactic hypotheses need their own source admission.
+For proven attempts, it first binds the exact attempt to its certificate and supplies that consumer
+context to source-bound validators; open attempts remain without certificate context and fail closed
+on facts that require it. Any future cache optimization must store the all-facts source-admission
+result, not infer it from certificate success. No parser, build, test, or replay check was run
+because the current checkpoint prohibits those checks until the constraint is lifted; this change
+is statically reviewed only.
+
+### 23.27.429 Keep EASM liveness evidence source-bound under the current execution hold (2026-10-13)
+
+The EASM `xchg` source-only checker remains green at 15 positive claims and 7 rejected controls.
+During a toolchain investigation, a full current-tree snapshot could not seed from the pinned
+Stage0 because it predates syntax in the current compiler sources. A narrower temporary snapshot
+used the current `easm_model.elisa` and `easm_register_masks.elisa` bytes plus the local effect
+grant already present in the shared compiler tree; its source identity was recorded as
+`61340c1d13d7174a13283974798849a6af289725`. The pinned Stage0 still rejected that build on
+ownership-flow contracts, value-block mutation, and `semantic_parallel` diagnostics. This custom
+snapshot and all seed attempts are diagnostic only; they do not qualify the pinned compiler or
+the proof claims. The current checkpoint remains static-only: do not run further Elisa
+parser/build/test/replay checks until the project hold is explicitly lifted.
+
+### 23.27.430 Prove `xchg` invalidates stack knowledge when it writes RSP (2026-10-13)
+
+The EASM call-liveness proof now covers `xchgq %rsp, %rax` through the production
+`easm_flow_transfer`: the theorem checks both live-register writes, unknown stack state, the zero
+alignment sentinel, and preservation of unrelated flow fields for arbitrary incoming states. A
+false control claims the previously known stack state survives. The source checker binds both
+proof bodies to the concrete instruction, verifies that the stack-pointer resolver checks either
+`xchg` operand, and pins the flow transfer's fail-closed invalidation branch. Its source-only run
+passes with 16 positive theorems and 8 false controls over three files. Python syntax, source
+length, and whitespace checks pass. The project remains under the static-only execution hold, so
+no Elisa elaboration or certificate replay was run.
+
+### 23.27.431 Cover destination-operand RSP in the EASM `xchg` stack proof (2026-10-13)
+
+The EASM call-liveness proof now checks both operand orders that write RSP: the existing
+`xchgq %rsp, %rax` case and a new `xchgq %rax, %rsp` case. The destination-operand theorem proves
+that both registers become live, stack knowledge is cleared, the alignment sentinel resets to zero,
+and the unrelated flow fields remain unchanged for arbitrary incoming states. A matched false
+control claims that known stack state survives. The source checker binds both new declarations to
+the destination-operand instruction and production transfer. This source-only extension has not
+been replayed because the static-only toolchain hold remains active.
+
+### 23.27.432 Prove EASM push and register-pop stack transfers (2026-10-13)
+
+The EASM flow-transfer proof now covers `pushq` and `popq %rax` directly through the production
+`easm_flow_transfer`. Under representable stack-delta preconditions and a canonical known alignment,
+the push theorem checks the eight-byte decrement, modulo-16 update, and preservation of other flow
+facts. The register-pop theorem checks the eight-byte increment, RAX liveness, alignment update, and
+preservation of flags, validity, and knownness. False controls claim that push leaves the delta
+unchanged and that register-pop invalidates known alignment. The source-only checker binds the
+instructions and exact production branches; it reports 19 positive theorems and 11 false controls
+across the three-file source closure. Python syntax, source-length, and whitespace checks pass.
+Elisa elaboration and replay remain unavailable under the current toolchain hold.
+
+### 23.27.433 Prove the EASM fixed-point state equality relation (2026-10-13)
+
+The control-flow merge proof now calls the production `easm_flow_equal` directly and proves it is
+reflexive, symmetric, and transitive, with a separate theorem that equality entails agreement on
+all six `FlowState` fields. A rejected control constructs states differing only in live flags and
+claims they compare equal. The proof checker now supports `--source-only`, binds these declarations
+to the production equality function, and checks the fixed-point traversal against current source,
+including substituted branch targets. Static-only admission reports 23 positive theorems, 2 false
+controls, and a six-file include closure. No Elisa elaboration or replay was run under the toolchain
+hold.
+
+### 23.27.434 Prove production EASM predecessor propagation (2026-10-13)
+
+The flow-join suite now calls production `easm_propagate_flow` directly. With an empty flow table,
+it proves every target is rejected without changing any table. With one valid current state and a
+second valid incoming state, it checks the all-predecessor register meet, live-flag conjunction,
+alignment-knownness condition and sentinel, stack-delta merge, incoming count, and change result.
+A rejected control supplies predecessors with opposite flag facts and claims the merged state keeps
+the one-sided live flag. The source-only checker reports 25 positive theorems and 3 false controls
+over the six-file include closure. Elisa elaboration and replay remain held.
+
+### 23.27.435 Prove first-predecessor EASM state installation (2026-10-13)
+
+The flow-join suite now also exercises the production first-predecessor branch: a valid incoming
+state is installed into an invalid entry, its register set initializes the meet, the predecessor
+count becomes one, and propagation reports a change. A false control claims the invalid entry can
+survive that propagation. Source-only admission reports 26 positive theorems and 4 false controls
+across the six-file closure. Elisa elaboration and replay remain held.
+
+### 23.27.436 Prove EASM predecessor-order independence (2026-10-13)
+
+The flow-join suite now executes the production second-predecessor merge in both orders for
+arbitrary valid states. It proves the resulting flow states are equal, both register meets are the
+same intersection, predecessor counts agree, and each transfer's change bit matches the actual
+state difference. A rejected control uses concrete register, stack-depth, alignment, and flag facts
+and claims reversing the inputs changes the result. Source-only admission reports 27 positive
+theorems and 5 false controls across the six-file source closure. No Elisa elaboration or replay was
+run under the current hold.
+
+At the 23.27.436 snapshot, the repository-wide source-length check reported
+`src/proof/replay/source_binding_validation.elisa` at 616 lines, above the 600-line limit. A later
+current-tree run, recorded at 23.27.438, passes the source-length gate; that file is now 489 lines.
+
+### 23.27.437 Prove associativity of three production EASM predecessor merges (2026-10-13)
+
+The flow-join suite now compares two groupings of three predecessor inputs by calling production
+`easm_propagate_flow`: sequentially merge first, second, and third, or first merge second with third
+and then merge that result with first. It checks the final state, register meet, live flags, stack
+alignment, stack-delta rule, predecessor counts, and change bits. A concrete rejected control
+claims the two groupings produce different states. The source-only checker reports 28 positive
+theorems and 6 false controls over the six-file include closure. The checked-decimal reference and
+implementation also retain the guarded `text.length` and `text[0]` syntax; the StringView bounds
+source binding now expects the qualified `EasmCheckedDecimal::ASCII_MINUS` spelling. Static-only
+source checks pass. Elisa elaboration and replay remain held under the active toolchain checkpoint.
+
+### 23.27.438 Prove duplicate EASM predecessor propagation is state-idempotent (2026-10-13)
+
+The flow-join suite now proves directly through `easm_propagate_flow` that propagating the same
+valid predecessor twice preserves the `FlowState`, preserves the live-register meet, increments
+the predecessor count, and reports no state change. The theorem requires canonical unknown-stack
+alignment (`stack_mod16 == 0` when alignment is unknown), matching the production state sentinel.
+A concrete rejected control claims that repeating an aligned predecessor changes the state. The
+source-only checker reports 29 positive theorems and 7 false controls over the six-file include
+closure. Both StringView source-only checkers also pass (8 positive claims with 6 and 5 rejected
+controls respectively), Python syntax and whitespace checks pass, and the proof repository's
+global source-length check passes with every checked file under 600 lines. Elisa elaboration and
+replay remain held by the active toolchain checkpoint.
+
+### 23.27.439 Prove out-of-range EASM flow targets are rejected without mutation (2026-10-13)
+
+The flow-join suite now calls production `easm_propagate_flow` with an arbitrary target outside a
+one-entry flow table. It proves that the operation reports no change and preserves the flow entry,
+register meet, predecessor count, and lengths of all three parallel arrays. Two concrete false
+controls challenge the negative target `-1` and the upper-bound target equal to the entry count
+`1`. The source-only checker reports 30 positive theorems and 9 false controls over the six-file
+closure. Python syntax and whitespace checks pass. Elisa elaboration and replay remain held by the
+active toolchain checkpoint.
+
+### 23.27.440 Specify the EASM merge change flag over both abstract outputs (2026-10-13)
+
+The production merge proof now covers arbitrary prior register-meet metadata in addition to the
+current and incoming valid states. It proves that `changed` is exactly the disjunction of a new
+register meet and a changed `FlowState`, while checking the joined fields and predecessor count.
+A rejected control starts with the same current and incoming state but stale extra meet bits; it
+shows that `changed` can be true even when the `FlowState` remains equal. This pins down the
+worklist signal's full contract and prevents simplifying it to state equality alone. Source-only
+admission reports 31 positive theorems and 10 false controls across the six-file closure. Python
+syntax and whitespace checks pass. Elisa elaboration and replay remain held by the active toolchain
+checkpoint.
+
+Static-audit delta (2026-10-13, continued): source-bound fact admission now supports a bounded subset of open attempts that have no certificate. The attempt must already pass source-goal admission; local-binding facts still require AST/kernel identity, parser-origin trace validation, a unique exact source-goal position, and declaration/liveness checks at that consumer. Only the immutable-declaration validator's supported forms use this route; mutable, loop, and call-result witnesses remain fail-closed until their attempt-specific context is authenticated. The open-attempt regression checks a genuine local binding and rejects a forged portable `initial` state. The liveness helpers were moved to `src/proof/replay/source_binding_validation/local_binding_fact_liveness.elisa`, reducing `source_binding_validation.elisa` from 616 to 489 lines; the repository source-length check is green again. Python AST, `bash -n`, source-length, and `git diff --check` pass. No Elisa parser, build, replay, or functional test ran under the exact-toolchain hold.
+
+
+### 23.27.441 Prove EASM provenance joins across every register slot (2026-10-13)
+
+The EASM flow-join suite now calls production `easm_provenance_flow_propagate` with two 16-slot
+states and an arbitrary selected register slot. It proves that equal carrier types stay precise,
+disagreeing types become empty and ambiguous, incoming ambiguity is preserved, and the change bit
+matches production flow equality. A rejected control supplies distinct carriers at RAX and claims
+the joined provenance remains precise. The source checker binds the theorem to the exact production
+propagation body. Source-only admission reports 32 positive theorems and 11 false controls across
+the six-file closure. Python syntax and whitespace checks pass; Elisa elaboration and replay remain
+held by the active toolchain checkpoint.
+
+
+### 23.27.442 Prove first EASM provenance predecessor installation (2026-10-13)
+
+The flow-join suite now exercises the production first-predecessor branch of
+`easm_provenance_flow_propagate`. For any valid 16-slot incoming provenance state, it proves that
+an empty production sentinel is replaced exactly, the predecessor count becomes one, and
+propagation reports a change. A false control constructs a typed incoming carrier and claims the
+empty entry survives. The source checker now also binds the empty-state constructor and provenance
+equality used by these claims. Source-only admission reports 33 positive theorems and 12 false
+controls across the six-file closure. Python syntax and whitespace checks pass; Elisa elaboration
+and replay remain held by the active toolchain checkpoint.
+
+
+### 23.27.443 Prove EASM provenance predecessor merge idempotence (2026-10-13)
+
+The flow-join suite now proves that propagating the same valid 16-slot provenance state twice leaves
+all provenance fields equal and reports no state change, while incrementing the predecessor count.
+A matched false control claims the duplicate can change the provenance state. The source checker
+binds both claims to production `easm_provenance_flow_propagate` and its full-state equality helper.
+Source-only admission reports 34 positive theorems and 13 false controls across the six-file
+closure. Python syntax and whitespace checks pass. Elisa elaboration and replay remain held by the
+active toolchain checkpoint.
+
+
+### 23.27.444 Prove EASM xchg provenance transfer swaps both fields (2026-10-13)
+
+The flow-join suite now calls production `easm_provenance_flow_transfer` on `xchgq %rax, %rcx`
+with arbitrary carrier types and ambiguity flags at the two operand slots. It proves that both
+carrier types and their ambiguity bits swap, while all other register slots remain unchanged. A
+concrete rejected control claims the old RAX and RCX carriers stay in place. The source checker
+binds the theorem to the production xchg snapshot, swap, and early-return branch. Source-only
+admission reports 35 positive theorems and 14 false controls across the six-file closure. Python
+syntax and whitespace checks pass; Elisa elaboration and replay remain held by the active toolchain
+checkpoint.
+
+
+### 23.27.445 Recheck the exact pinned compiler seed pair (2026-10-13)
+
+An isolated Stage1 seed attempt used the exact compiler pin `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` and Stage0 pin `fa65ef625c4217cf54486821a6aa9348f5f04ec6`, with the product and generated files confined to `/private/tmp/elisa-stage1-b8eb-qualification`. The source worktree remains clean and the global seed lock was released. Stage0 rejected the compiler source before producing a Stage1 binary: `bam_remember_local_callable` calls helpers requiring `Global{Read,Write}` but declares only `Memory.Allocate, Abort.Panic`, yielding four missing-grant diagnostics. The current dirty Elisa-compiler `main` already grants `Global{Read,Write}` on that helper. This confirms the pinned compiler/Core pair cannot produce the provenance-matched qualification binary as pinned. Freeze a compiler commit that includes the grant, update the proof compiler pin to that exact revision, then seed and check schema-v5 provenance before resuming proof qualification. No proof parser, proof build, test, or replay was run.
