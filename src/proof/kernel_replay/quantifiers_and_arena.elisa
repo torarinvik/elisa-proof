@@ -376,22 +376,26 @@ extend ElisaProofKernelReplay:
         # The serialized dictionary keeps every literal pair, while runtime dictionary
         # construction overwrites earlier values for an equal key. Existential replay over
         # the raw pairs is sound only when the keys are known and pairwise distinct. Accept
-        # only direct, untagged, nonnegative integer literals. Arithmetic keys could wrap at
-        # their source width and collide despite distinct mathematical values; metering every
-        # repeated key read also prevents long forged labels from escaping the arena budget.
-        def proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&, work_limit: usize) -> ProofKernelReplayInt:
-            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+        # only direct integer literals. Arithmetic keys could wrap at their source width and
+        # collide despite distinct mathematical values. For tagged integer literals, require
+        # identical validated sorts before comparing their payload bits. Meter every repeated
+        # key read so long forged labels cannot escape the arena budget.
+        def proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, work_used: mutable usize&, work_limit: usize) -> (known: bool, bits: u64, typed: bool, unsigned: bool, width: i64):
+            empty: (known: bool, bits: u64, typed: bool, unsigned: bool, width: i64) = (false, 0, false, false, 0)
             return empty if root >= nodes.count
             before: usize = work_used
             return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].kind), &work_used, before, work_limit)
-            return empty if nodes[root].kind != "int"
             before <- work_used
             return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].operator), &work_used, before, work_limit)
             return empty if nodes[root].operator != ""
             before <- work_used
             return empty if not proof_kernel_replay_arena_shape_text_work_charge(sview_len(nodes[root].name), &work_used, before, work_limit)
-            return empty if nodes[root].name != "" or nodes[root].value < 0
-            return ProofKernelReplayInt{known: true, value: nodes[root].value}
+            if nodes[root].kind == "typed-int":
+                literal: (known: bool, bits: u64, unsigned: bool, width: i64) = ElisaProofKernelCore::typed_literal_value(nodes[root])
+                return empty if not literal.known
+                return (true, literal.bits, true, literal.unsigned, literal.width)
+            return empty if nodes[root].kind != "int" or nodes[root].name != "" or nodes[root].value < 0
+            return (true, nodes[root].value.u64(), false, false, 0)
 
         def proof_kernel_replay_existential_dictionary_keys_unique_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, range: ElisaProofKernelCore::ProofKernelNode, work_used: mutable usize&, work_limit: usize) -> bool:
             return false if:
@@ -406,7 +410,7 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, left_scan_before, work_limit)
                 left_entry_root: usize = children[range.children_start + left_index]
                 return false if left_entry_root >= nodes.count or nodes[left_entry_root].kind != "dict_entry"
-                left_key: ProofKernelReplayInt = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, nodes[left_entry_root].left, work_used, work_limit)
+                left_key: (known: bool, bits: u64, typed: bool, unsigned: bool, width: i64) = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, nodes[left_entry_root].left, work_used, work_limit)
                 return false if not left_key.known
                 right_start: usize = left_index + 1
                 for right_index in right_start..<range.children_count |right_index, left_index, right_start, range, children, nodes, left_key, work_used, work_limit|:
@@ -414,8 +418,11 @@ extend ElisaProofKernelReplay:
                     return false if not proof_kernel_replay_arena_shape_text_work_charge(1, &work_used, pair_scan_before, work_limit)
                     right_entry_root: usize = children[range.children_start + right_index]
                     return false if right_entry_root >= nodes.count or nodes[right_entry_root].kind != "dict_entry"
-                    right_key: ProofKernelReplayInt = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, nodes[right_entry_root].left, work_used, work_limit)
-                    return false if not right_key.known or left_key.value == right_key.value
+                    right_key: (known: bool, bits: u64, typed: bool, unsigned: bool, width: i64) = proof_kernel_replay_existential_dictionary_key_literal_with_work(nodes, nodes[right_entry_root].left, work_used, work_limit)
+                    return false if:
+                        not right_key.known or left_key.typed != right_key.typed
+                        left_key.typed and (left_key.unsigned != right_key.unsigned or left_key.width != right_key.width)
+                        left_key.bits == right_key.bits
             return true
 
         def proof_kernel_replay_arena_children_valid_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, node: ElisaProofKernelCore::ProofKernelNode, children: darray[usize]&, validity: darray[bool]&, parent: usize, require_prior_children: bool, work_used: mutable usize&, work_limit: usize) -> bool:
