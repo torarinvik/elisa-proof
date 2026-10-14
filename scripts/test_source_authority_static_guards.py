@@ -96,15 +96,16 @@ for gate in (
     assert gate in attempt_proven, gate
 
 replay_api = ROOT / "src/proof/replay/api.elisa"
-kernel_only = function_body(replay_api, "proof_replay_receipt_kernel_attempt_status")
+receipt_status = ROOT / "src/proof/replay/receipt_status.elisa"
+kernel_only = function_body(receipt_status, "proof_replay_receipt_kernel_attempt_status")
 assert "not receipt.source_bound" not in kernel_only
-assert "Low-trust standalone replay diagnostic" in replay_api.read_text(encoding="utf-8")
-source_proven = function_body(replay_api, "proof_replay_receipt_attempt_is_proven")
+assert "Low-trust standalone replay diagnostic" in receipt_status.read_text(encoding="utf-8")
+source_proven = function_body(receipt_status, "proof_replay_receipt_attempt_is_proven")
 for gate in ("receipt.source_bound", "receipt.source_validated", "attempt_index >= receipt.attempt_proven_statuses.count"):
     assert gate in source_proven, gate
 standalone_replay = function_body(replay_api, "proof_replay_certificates")
 assert "proof_replay_receipt_from_report(report, false)" in standalone_replay
-receipt_complete = function_body(replay_api, "proof_replay_receipt_is_complete")
+receipt_complete = function_body(receipt_status, "proof_replay_receipt_is_complete")
 for gate in ("receipt.issued", "receipt.source_bound", "receipt.source_validated", "receipt.complete"):
     assert gate in receipt_complete, gate
 assert visibility_before(replay_api, "proof_replay_receipt_from_report") == "private"
