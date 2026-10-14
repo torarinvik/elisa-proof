@@ -7,48 +7,188 @@ module ElisaProofTheoremOutput:
                 replay_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
                 return false
             true
-        def proof_declaration_name_is_unique(report: ProofReport&, name: sview, replay_work: mutable usize&) -> bool:
-            matching_declarations: mutable usize = 0
-            for declaration in report.analysis_1.declaration_details |report, name, matching_declarations, replay_work|:
-                return false if not proof_replay_source_work_charge(1, replay_work)
-                continue if declaration.kind != "function" and declaration.kind != "lemma"
-                same_name: (complete: bool, equal: bool) = proof_output_text_equal_with_work(declaration.name, name, replay_work)
-                return false if not same_name.complete
-                matching_declarations <- matching_declarations + 1 if same_name.equal
-                return false if matching_declarations > 1
-            matching_declarations == 1
-        def proof_declaration_gaps[@view](checked_view: ProofCheckedView[view]& @view, report: ProofReport&, name: sview, declaration_identity_unambiguous: bool, replay_work: mutable usize&) -> (complete: bool, replay_gap: bool, source_gap: bool):
-            # Attempts currently carry a simple name, so ownership must be uniquely established.
-            # Fail closed on duplicates or when the bounded lookup cannot finish.
-            return (true, true, false) if not declaration_identity_unambiguous
-            replay_gap: mutable bool = false
-            source_gap: mutable bool = false
-            for goal_id in 0..<report.results.goal_attempts.count |goal_id, checked_view, report, name, replay_gap, source_gap, replay_work|:
+        const PROOF_DECLARATION_GAP_INDEX_MAX_CLUSTER: usize = 128
+        struct ProofDeclarationGapIndex:
+            slot_values: mutable darray[usize] = []
+            names: mutable darray[sview] = []
+            hashes: mutable darray[u32] = []
+            owner_lines: mutable darray[u32] = []
+            owner_offsets: mutable darray[u32] = []
+            replay_gaps: mutable darray[bool] = []
+            source_gaps: mutable darray[bool] = []
+            valid: bool = false
+        def proof_declaration_gap_key_hash(name: sview, owner_line: u32, owner_offset: u32, work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_output_reserve_status_snapshot_work(work, sview_len(name))
+            return (false, 0) if not proof_output_reserve_status_snapshot_work(work, 2)
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            for offset in 0..<sview_len(name) |offset, name, hash|:
+                hash <- ((hash ^ sview_at(name, offset).i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ owner_line.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            hash <- ((hash ^ owner_offset.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            (true, hash.u32())
+        def proof_declaration_gap_index_record(index: mutable ProofDeclarationGapIndex&, name: sview, owner_line: u32, owner_offset: u32, replay_gap: bool, source_gap: bool, work: mutable usize&) -> bool:
+            capacity: usize = index.slot_values.count
+            return false if capacity == 0
+            key: (complete: bool, hash: u32) = proof_declaration_gap_key_hash(name, owner_line, owner_offset, work)
+            return false if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            placed: mutable bool = false
+            while probes < capacity and probes < PROOF_DECLARATION_GAP_INDEX_MAX_CLUSTER |probes, key, name, owner_line, owner_offset, index, capacity, replay_gap, source_gap, work, placed|:
+                return false if not proof_output_reserve_status_snapshot_work(work, 1)
+                current: usize = index.slot_values[slot]
+                if current == capacity:
+                    return false if not proof_output_reserve_status_snapshot_work(work, 6)
+                    row: usize = index.names.count
+                    index.slot_values[slot] <- row
+                    index.names.push(name)
+                    index.hashes.push(key.hash)
+                    index.owner_lines.push(owner_line)
+                    index.owner_offsets.push(owner_offset)
+                    index.replay_gaps.push(replay_gap)
+                    index.source_gaps.push(source_gap)
+                    placed <- true
+                    break
+                return false if current >= index.names.count or current >= index.hashes.count or current >= index.owner_lines.count or current >= index.owner_offsets.count or current >= index.replay_gaps.count or current >= index.source_gaps.count
+                if index.hashes[current] == key.hash:
+                    equal: (complete: bool, equal: bool) = proof_output_text_equal_with_work(index.names[current], name, work)
+                    return false if not equal.complete
+                    if equal.equal and index.owner_lines[current] == owner_line and index.owner_offsets[current] == owner_offset:
+                        index.replay_gaps[current] <- index.replay_gaps[current] or replay_gap
+                        index.source_gaps[current] <- index.source_gaps[current] or source_gap
+                        placed <- true
+                        break
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return placed
+        def proof_declaration_gap_canonical_owner_line(report: ProofReport&, name: sview, owner_offset: u32, work: mutable usize&) -> (complete: bool, found: bool, line: u32):
+            low: mutable usize = 0
+            high: mutable usize = report.analysis_1.declaration_details.count
+            while low < high |low, high, report, owner_offset, work|:
+                return (false, false, 0) if not proof_output_reserve_status_snapshot_work(work, 1)
+                middle: usize = low + (high - low) / 2
+                if report.analysis_1.declaration_details[middle].source_offset < owner_offset:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            matches: mutable usize = 0
+            line: mutable u32 = 0
+            while low < report.analysis_1.declaration_details.count |low, report, name, owner_offset, work, matches, line|:
+                declaration: ProofDeclarationSummary = report.analysis_1.declaration_details[low]
+                return (true, false, 0) if declaration.source_offset != owner_offset
+                return (false, false, 0) if not proof_output_reserve_status_snapshot_work(work, 1 + sview_len(declaration.name))
+                if declaration.kind in {"function", "lemma"} and declaration.name == name:
+                    matches <- matches + 1
+                    line <- declaration.line
+                low <- low + 1
+            return (true, matches == 1, line)
+        def proof_declaration_gap_index_build[@view](checked_view: ProofCheckedView[view]& @view, report: ProofReport&, work: mutable usize&) -> ProofDeclarationGapIndex can[Memory.Allocate]:
+            limit: usize = PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            attempt_count: usize = report.results.goal_attempts.count
+            theorem_count: usize = report.analysis_1.theorems.summaries.count
+            declaration_count: usize = report.analysis_1.declaration_details.count
+            index: mutable ProofDeclarationGapIndex = ProofDeclarationGapIndex{valid: true}
+            if attempt_count > limit or theorem_count > limit - attempt_count or declaration_count > limit - attempt_count - theorem_count:
+                work <- limit + 1
+                return ProofDeclarationGapIndex{}
+            indexed_rows: usize = attempt_count + theorem_count + declaration_count
+            if indexed_rows > limit / 4:
+                work <- limit + 1
+                return ProofDeclarationGapIndex{}
+            target_capacity: usize = indexed_rows * 2
+            capacity: mutable usize = 1
+            while capacity < target_capacity |capacity, target_capacity, limit|:
+                if capacity > limit / 2:
+                    work <- limit + 1
+                    return ProofDeclarationGapIndex{}
+                capacity <- capacity * 2
+            if capacity > limit / 2:
+                work <- limit + 1
+                return ProofDeclarationGapIndex{}
+            return ProofDeclarationGapIndex{} if not proof_output_reserve_status_snapshot_work(work, capacity * 2)
+            index.slot_values.resize(capacity)
+            for slot in 0..<capacity |slot, index, capacity|:
+                index.slot_values[slot] <- capacity
+            for declaration in report.analysis_1.declaration_details |declaration, index, work|:
+                return ProofDeclarationGapIndex{} if not proof_output_reserve_status_snapshot_work(work, 1 + sview_len(declaration.name))
+                if not proof_declaration_gap_index_record(index, declaration.name, declaration.line, declaration.source_offset, false, false, work):
+                    work <- limit + 1
+                    return ProofDeclarationGapIndex{}
+            for goal_id in 0..<attempt_count |goal_id, report, checked_view, index, work|:
                 attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
-                return (false, true, true) if not proof_output_reserve_status_snapshot_work(replay_work, 1)
-                if attempt.proven:
-                    same_name: (complete: bool, equal: bool) = proof_output_text_equal_with_work(attempt.name, name, replay_work)
-                    return (false, true, true) if not same_name.complete
-                    if same_name.equal:
-                        # Match the two checked-view receipt reads to the reservation made by the
-                        # bulk status snapshot, without rebuilding that per-goal snapshot here.
-                        return (false, true, true) if not proof_output_reserve_status_snapshot_work(replay_work, 2)
-                        replay_gap <- true if not proof_checked_view_attempt_status(checked_view, goal_id)
-                        source_gap <- true if not proof_checked_view_goal_source_admissible(checked_view, goal_id)
-            (true, replay_gap, source_gap)
-        def proof_theorem_has_replay_gap(report: ProofReport&, theorem: ProofTheoremSummary, replayed_goals: darray[bool]&, source_admitted_goals: darray[bool]&, replay_work: mutable usize&) -> bool:
+                return ProofDeclarationGapIndex{} if not proof_output_reserve_status_snapshot_work(work, 4 + sview_len(attempt.name))
+                replayed: bool = proof_checked_view_attempt_status(checked_view, goal_id)
+                replay_gap: bool = not proof_checked_view_attempt_had_producer_claim(checked_view, goal_id) or not replayed
+                source_gap: bool = not proof_checked_view_goal_source_admissible(checked_view, goal_id) or not proof_checked_view_goal_facts_source_admissible(checked_view, goal_id)
+                selected_event: (found: bool, entry: ProofObligationEntry) = proof_report_obligation_event_for_goal(report, goal_id, work)
+                return ProofDeclarationGapIndex{} if not selected_event.found
+                selected: ProofObligationEntry = selected_event.entry
+                return ProofDeclarationGapIndex{} if selected.owner_function_line == 0 or attempt.owner_function_line != selected.owner_function_line or attempt.owner_function_offset != selected.owner_function_offset
+                owner_name: mutable sview = attempt.name
+                owner_line: mutable u32 = selected.owner_function_line
+                owner_offset: mutable u32 = selected.owner_function_offset
+                if selected.source_kind == "postcondition":
+                    owner_name <- selected.source_name
+                    owner_line <- selected.source_line
+                    owner_offset <- selected.source_function_offset
+                if selected.source_kind == "":
+                    assert_by_owner: (complete: bool, found: bool, function_offset: u32) = proof_source_assert_by_goal_owner_offset(proof_checked_view_assert_by_inventory(checked_view), attempt.goal, work)
+                    return ProofDeclarationGapIndex{} if not assert_by_owner.complete or not assert_by_owner.found or assert_by_owner.function_offset != selected.owner_function_offset
+                    canonical_line: (complete: bool, found: bool, line: u32) = proof_declaration_gap_canonical_owner_line(report, attempt.name, assert_by_owner.function_offset, work)
+                    return ProofDeclarationGapIndex{} if not canonical_line.complete or not canonical_line.found
+                    owner_line <- canonical_line.line
+                    owner_offset <- assert_by_owner.function_offset
+                owner_row: (complete: bool, found: bool, replay_gap: bool, source_gap: bool) = proof_declaration_gap_index_find(index, owner_name, owner_line, owner_offset, work)
+                return ProofDeclarationGapIndex{} if not owner_row.complete or not owner_row.found
+                return ProofDeclarationGapIndex{} if attempt.name == ""
+                if not proof_declaration_gap_index_record(index, owner_name, owner_line, owner_offset, replay_gap, source_gap, work):
+                    work <- limit + 1
+                    return ProofDeclarationGapIndex{}
+            return ProofDeclarationGapIndex{} if not proof_checked_view_theorem_source_admissions_complete(checked_view)
+            for theorem_index in 0..<theorem_count |theorem_index, report, checked_view, index, work|:
+                theorem: ProofTheoremSummary = report.analysis_1.theorems.summaries[theorem_index]
+                return ProofDeclarationGapIndex{} if not proof_output_reserve_status_snapshot_work(work, 1 + sview_len(theorem.name))
+                theorem_status: (source_admissible: bool, declaration_identity_unambiguous: bool) = proof_checked_view_theorem_source_admission(checked_view, theorem_index)
+                if not theorem_status.source_admissible:
+                    if not proof_declaration_gap_index_record(index, theorem.name, theorem.line, theorem.source_offset, false, true, work):
+                        work <- limit + 1
+                        return ProofDeclarationGapIndex{}
+            index
+        def proof_declaration_gap_index_find(index: ProofDeclarationGapIndex&, name: sview, owner_line: u32, owner_offset: u32, work: mutable usize&) -> (complete: bool, found: bool, replay_gap: bool, source_gap: bool):
+            capacity: usize = index.slot_values.count
+            return (false, false, true, true) if not index.valid or index.names.count != index.hashes.count or index.names.count != index.owner_lines.count or index.names.count != index.owner_offsets.count or index.names.count != index.replay_gaps.count or index.names.count != index.source_gaps.count
+            return (true, false, false, false) if capacity == 0
+            key: (complete: bool, hash: u32) = proof_declaration_gap_key_hash(name, owner_line, owner_offset, work)
+            return (false, false, true, true) if not key.complete
+            slot: mutable usize = (key.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes < PROOF_DECLARATION_GAP_INDEX_MAX_CLUSTER |probes, slot, key, name, index, capacity, work|:
+                return (false, false, true, true) if not proof_output_reserve_status_snapshot_work(work, 1)
+                current: usize = index.slot_values[slot]
+                return (true, false, false, false) if current == capacity
+                return (false, false, true, true) if current >= index.names.count or current >= index.hashes.count or current >= index.owner_lines.count or current >= index.owner_offsets.count or current >= index.replay_gaps.count or current >= index.source_gaps.count
+                if index.hashes[current] == key.hash:
+                    equal: (complete: bool, equal: bool) = proof_output_text_equal_with_work(index.names[current], name, work)
+                    return (false, false, true, true) if not equal.complete
+                    return (true, true, index.replay_gaps[current], index.source_gaps[current]) if equal.equal and index.owner_lines[current] == owner_line and index.owner_offsets[current] == owner_offset
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+            return (false, false, true, true)
+        def proof_theorem_has_replay_gap[@view](checked_view: ProofCheckedView[view]& @view, report: ProofReport&, theorem: ProofTheoremSummary, replayed_goals: darray[bool]&, source_admitted_goals: darray[bool]&, replay_work: mutable usize&) -> bool:
             return true if theorem.proof_goals_count == 0 or theorem.proof_goals_start > report.analysis_1.theorems.proof_goal_ids.count or theorem.proof_goals_count > report.analysis_1.theorems.proof_goal_ids.count - theorem.proof_goals_start
             for index in 0..<theorem.proof_goals_count |index, theorem, report, replayed_goals, source_admitted_goals, replay_work|:
-                return true if not proof_replay_source_work_charge(1, replay_work)
+                return true if not proof_replay_source_work_charge(2, replay_work)
                 goal_id: usize = report.analysis_1.theorems.proof_goal_ids[theorem.proof_goals_start + index]
                 return true if goal_id >= report.results.goal_attempts.count
                 attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+                return true if attempt.owner_function_line != theorem.line or attempt.owner_function_offset != theorem.source_offset
                 same_name: (complete: bool, equal: bool) = proof_output_text_equal_with_work(attempt.name, theorem.name, replay_work)
                 return true if:
                     not same_name.complete or not same_name.equal
-                    attempt.proven and (not proof_output_cached_replay_status(replayed_goals, goal_id) or not proof_output_cached_source_admission_status(source_admitted_goals, goal_id))
+                    proof_checked_view_attempt_had_producer_claim(checked_view, goal_id) and (not proof_output_cached_replay_status(replayed_goals, goal_id) or not proof_output_cached_source_admission_status(source_admitted_goals, goal_id))
             return false
-        def proof_push_json_declaration[@view](buffer: mutable darray[u8]&, checked_view: ProofCheckedView[view]& @view, report: ProofReport&, declaration: ProofDeclarationSummary, source_clean: bool, declaration_identity_unambiguous: bool, source_admissions_complete: bool, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
+        def proof_push_json_declaration[@view](buffer: mutable darray[u8]&, checked_view: ProofCheckedView[view]& @view, report: ProofReport&, declaration: ProofDeclarationSummary, source_clean: bool, declaration_identity_unambiguous: bool, source_admissions_complete: bool, gap_index: mutable ProofDeclarationGapIndex&, gap_index_built: mutable bool&, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
             proof_push(buffer, "{\"kind\":")
             proof_push_json_string(buffer, declaration.kind)
             proof_push(buffer, ",\"name\":")
@@ -90,12 +230,32 @@ module ElisaProofTheoremOutput:
             proof_push(buffer, "true" if declaration.pure else "false")
             proof_push(buffer, ",\"verified\":")
             source_refused: bool = declaration.verified and not source_clean
-            declaration_gaps: (complete: bool, replay_gap: bool, source_gap: bool) = proof_declaration_gaps(checked_view, report, declaration.name, declaration_identity_unambiguous, replay_work)
+            declaration_gaps: mutable (complete: bool, found: bool, replay_gap: bool, source_gap: bool) = (true, false, false, false)
+            if declaration.verified and source_clean and source_admissions_complete and (not declaration.lemma or declaration_identity_unambiguous):
+                if not gap_index_built:
+                    gap_index <- proof_declaration_gap_index_build(checked_view, report, replay_work)
+                    gap_index_built <- true
+                declaration_gaps <- proof_declaration_gap_index_find(gap_index, declaration.name, declaration.line, declaration.source_offset, replay_work)
             replay_gap: bool = declaration.verified and source_clean and declaration_gaps.replay_gap
             source_gap: bool = declaration.verified and source_clean and declaration_gaps.source_gap
-            proof_push(buffer, "true" if declaration.verified and source_clean and source_admissions_complete and declaration_gaps.complete and not replay_gap and not source_gap else "false")
+            proof_push(buffer, "true" if declaration.verified and source_clean and source_admissions_complete and (not declaration.lemma or declaration_identity_unambiguous) and declaration_gaps.complete and declaration_gaps.found and not replay_gap and not source_gap else "false")
             proof_push(buffer, ",\"verification_reason\":")
-            proof_push_json_string(buffer, "source-error" if source_refused else ("source-admission-incomplete" if declaration.verified and source_clean and not source_admissions_complete else ("output-work-limit" if declaration.verified and source_clean and not declaration_gaps.complete else ("source-unbound" if source_gap else ("replay-gap" if replay_gap else declaration.verification_reason)))))
+            verification_reason: mutable sview = declaration.verification_reason
+            if source_refused:
+                verification_reason <- "source-error"
+            elif declaration.verified and source_clean and not source_admissions_complete:
+                verification_reason <- "source-admission-incomplete"
+            elif declaration.verified and source_clean and source_admissions_complete and not declaration_gaps.complete:
+                verification_reason <- "output-work-limit" if replay_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT else "declaration-gap-index-incomplete"
+            elif declaration.verified and declaration.lemma and source_clean and source_admissions_complete and not declaration_identity_unambiguous:
+                verification_reason <- "declaration-identity-unavailable"
+            elif declaration.verified and source_clean and source_admissions_complete and declaration_identity_unambiguous and declaration_gaps.complete and not declaration_gaps.found:
+                verification_reason <- "declaration-source-identity-unavailable"
+            elif source_gap:
+                verification_reason <- "source-unbound"
+            elif replay_gap:
+                verification_reason <- "replay-gap"
+            proof_push_json_string(buffer, verification_reason)
             proof_push(buffer, ",\"structural\":")
             proof_push(buffer, "true" if declaration.structural else "false")
             proof_push(buffer, "}")
@@ -110,15 +270,15 @@ module ElisaProofTheoremOutput:
             proof_replay_complete: mutable bool = theorem.verified and valid_proof_goals and theorem.proof_goals_count > 0
             theorem_replayed_goals: mutable darray[bool] = []
             if valid_proof_goals:
-                for index in 0..<theorem.proof_goals_count |index, theorem, report, proof_replay_complete, theorem_replayed_goals, replayed_goals, source_admitted_goals, replay_work|:
+                for index in 0..<theorem.proof_goals_count |__theorem_replay_loop_unit = false, index, theorem, report, proof_replay_complete, theorem_replayed_goals, replayed_goals, source_admitted_goals, replay_work| -> __theorem_replay_loop_unit:
                     goal_id: usize = report.analysis_1.theorems.proof_goal_ids[theorem.proof_goals_start + index]
                     if goal_id >= report.results.goal_attempts.count:
                         proof_replay_complete <- false
                         theorem_replayed_goals.push(false)
                     else:
                         attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
-                        lookup_within_budget: bool = proof_replay_source_work_charge(1, replay_work)
-                        replayed: bool = attempt.proven and lookup_within_budget and proof_output_cached_replay_status(replayed_goals, goal_id)
+                        lookup_within_budget: bool = proof_replay_source_work_charge(2, replay_work)
+                        replayed: bool = lookup_within_budget and proof_checked_view_attempt_had_producer_claim(checked_view, goal_id) and proof_output_cached_replay_status(replayed_goals, goal_id)
                         theorem_replayed_goals.push(replayed)
                         proof_replay_complete <- false if not replayed
             proof_push(buffer, "{\"name\":")
@@ -154,12 +314,12 @@ module ElisaProofTheoremOutput:
             proof_push(buffer, "true" if valid_proof_goals else "false")
             proof_push(buffer, ",\"parameters\":[")
             if valid_parameters:
-                for index in 0..<theorem.parameters_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.parameters_count |__theorem_json_parameters_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_parameters_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     proof_push_json_string(buffer, report.analysis_1.theorems.parameters[theorem.parameters_start + index])
             proof_push(buffer, "],\"parameter_defaults\":[")
             if valid_parameters:
-                for index in 0..<theorem.parameters_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.parameters_count |__theorem_json_defaults_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_defaults_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     parameter_index: usize = theorem.parameters_start + index
                     if report.analysis_1.theorems.parameter_has_defaults[parameter_index]:
@@ -168,27 +328,27 @@ module ElisaProofTheoremOutput:
                         proof_push(buffer, "null")
             proof_push(buffer, "],\"parameter_types\":[")
             if valid_parameters:
-                for index in 0..<theorem.parameters_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.parameters_count |__theorem_json_types_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_types_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     proof_push_json_expr(buffer, report.analysis_1.theorems.parameter_types[theorem.parameters_start + index])
             proof_push(buffer, "],\"requires\":[")
             if valid_requires:
-                for index in 0..<theorem.requires_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.requires_count |__theorem_json_requires_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_requires_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     proof_push_json_expr(buffer, report.analysis_1.theorems.requires[theorem.requires_start + index])
             proof_push(buffer, "],\"ensures\":[")
             if valid_ensures:
-                for index in 0..<theorem.ensures_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.ensures_count |__theorem_json_ensures_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_ensures_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     proof_push_json_expr(buffer, report.analysis_1.theorems.ensures[theorem.ensures_start + index])
             proof_push(buffer, "],\"decreases\":[")
             if valid_decreases:
-                for index in 0..<theorem.decreases_count |index, theorem, report, buffer|:
+                for index in 0..<theorem.decreases_count |__theorem_json_decreases_loop_unit = false, index, theorem, report, buffer| -> __theorem_json_decreases_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     proof_push_json_expr(buffer, report.analysis_1.theorems.decreases[theorem.decreases_start + index])
             proof_push(buffer, "],\"proof_goals\":[")
             if valid_proof_goals:
-                for index in 0..<theorem.proof_goals_count |index, theorem, report, buffer, theorem_replayed_goals, source_admitted_goals, source_admissions_complete|:
+                for index in 0..<theorem.proof_goals_count |__theorem_json_goals_loop_unit = false, index, theorem, report, buffer, theorem_replayed_goals, source_admitted_goals, source_admissions_complete| -> __theorem_json_goals_loop_unit:
                     proof_push(buffer, ",") if index > 0
                     goal_id: usize = report.analysis_1.theorems.proof_goal_ids[theorem.proof_goals_start + index]
                     proof_push(buffer, "{\"goal_id\":")
@@ -199,7 +359,7 @@ module ElisaProofTheoremOutput:
                         proof_push(buffer, ",\"rule\":")
                         proof_push_json_string(buffer, attempt.rule)
                         proof_push(buffer, ",\"proven\":")
-                        proof_push(buffer, "true" if attempt.proven and replayed and proof_output_cached_source_admission_status(source_admitted_goals, goal_id) else "false")
+                        proof_push(buffer, "true" if replayed and proof_output_cached_source_admission_status(source_admitted_goals, goal_id) else "false")
                         proof_push(buffer, ",\"certificate_id\":")
                         proof_push_number(buffer, attempt.certificate_index.u32()) if attempt.has_certificate and attempt.certificate_index < report.analysis_1.certificates.count else proof_push(buffer, "null")
                         proof_push(buffer, ",\"replayed\":")
@@ -212,22 +372,24 @@ module ElisaProofTheoremOutput:
         # Declaration details have one checked-view entrypoint. It derives replay and
         # source status from the capability and keeps raw report emitters private.
         def proof_push_json_declaration_details_with_replayed[@view](buffer: mutable darray[u8]&, checked_view: ProofCheckedView[view]& @view, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
-            report: ProofReport& = proof_checked_view_report(checked_view)
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
             source_clean: bool = not proof_checked_view_import_failed(checked_view) and proof_checked_view_semantic_errors(checked_view) == 0
             identity_snapshot: (complete: bool, statuses: darray[bool]) = proof_report_declaration_identity_statuses(report, replay_work)
             source_admissions_complete: bool = proof_checked_view_source_admissions_complete(checked_view) and identity_snapshot.complete
             declaration_identity_statuses: darray[bool] = identity_snapshot.statuses
             declaration_details_complete: mutable bool = identity_snapshot.complete
+            declaration_gap_index: mutable ProofDeclarationGapIndex = ProofDeclarationGapIndex{}
+            declaration_gap_index_built: mutable bool = false
             proof_push(buffer, "[")
-            for index in 0..<report.analysis_1.declaration_details.count |index, checked_view, report, buffer, source_clean, source_admissions_complete, declaration_identity_statuses, declaration_details_complete, replay_work|:
+            for index in 0..<report.analysis_1.declaration_details.count |index, checked_view, report, buffer, source_clean, source_admissions_complete, declaration_identity_statuses, declaration_details_complete, declaration_gap_index, declaration_gap_index_built, replay_work|:
                 proof_push(buffer, ",") if index > 0
                 declaration_identity_unambiguous: bool = index < declaration_identity_statuses.count and declaration_identity_statuses[index]
-                details_complete: bool = proof_push_json_declaration(buffer, checked_view, report, report.analysis_1.declaration_details[index], source_clean, declaration_identity_unambiguous, source_admissions_complete, replay_work)
+                details_complete: bool = proof_push_json_declaration(buffer, checked_view, report, report.analysis_1.declaration_details[index], source_clean, declaration_identity_unambiguous, source_admissions_complete, declaration_gap_index, declaration_gap_index_built, replay_work)
                 declaration_details_complete <- false if not details_complete
             proof_push(buffer, "]")
             return declaration_details_complete
         def proof_push_json_theorem_catalog_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic]:
-            report: ProofReport& = proof_checked_view_report(checked_view)
+            report: ProofReport& = proof_checked_view_diagnostic_report(checked_view)
             source_bytes: usize = proof_checked_view_source_bytes(checked_view)
             source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
             source_complete: bool = proof_checked_view_source_complete(checked_view)
@@ -239,6 +401,7 @@ module ElisaProofTheoremOutput:
             source_input_error: bool = proof_checked_view_import_failed(checked_view) or proof_checked_view_semantic_errors(checked_view) != 0
             fingerprint_source_work: mutable usize = 0
             fingerprint_identity_work: mutable usize = 0
+            catalog_complete: mutable bool = true
             proof_push(buffer, "{\"format\":\"elisa-proof-theorems-v1\",\"source\":{\"bytes\":")
             proof_push_number(buffer, source_bytes.u32())
             proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
@@ -250,21 +413,26 @@ module ElisaProofTheoremOutput:
             proof_push(buffer, ",\"admissible\":")
             proof_push(buffer, "true" if source_admissible and source_admissions_complete else "false")
             proof_push(buffer, "},\"theorems\":[")
-            for index in 0..<report.analysis_1.theorems.summaries.count |index, report, checked_view, buffer, replayed_goals, source_goal_statuses, source_admissions_complete, source_input_error, replay_work, fingerprint_source_work, fingerprint_identity_work|:
-                proof_push(buffer, ",") if index > 0
+            for index in 0..<report.analysis_1.theorems.summaries.count |__theorem_catalog_loop_unit = false, index, report, checked_view, buffer, replayed_goals, source_goal_statuses, source_admissions_complete, source_input_error, replay_work, fingerprint_source_work, fingerprint_identity_work, catalog_complete| -> __theorem_catalog_loop_unit:
                 theorem: ProofTheoremSummary = report.analysis_1.theorems.summaries[index]
+                if not proof_suggestion_theorem_catalog_output_reserve(report, theorem, replay_work):
+                    catalog_complete <- false
+                    break
+                proof_push(buffer, ",") if index > 0
                 theorem_source_status: (source_admissible: bool, declaration_identity_unambiguous: bool) = proof_checked_view_theorem_source_admission(checked_view, index)
                 declaration_identity_unambiguous: bool = theorem_source_status.declaration_identity_unambiguous
                 theorem_source_admissible: bool = theorem_source_status.source_admissible
                 proof_push_json_theorem(buffer, report, theorem, declaration_identity_unambiguous, theorem_source_admissible, source_input_error, replayed_goals, source_goal_statuses, source_admissions_complete, replay_work, fingerprint_source_work, fingerprint_identity_work)
-            proof_push(buffer, "]}\n")
-            return goal_status_snapshot.complete
+            proof_push(buffer, "],\"theorems_complete\":")
+            proof_push(buffer, "true" if catalog_complete else "false")
+            proof_push(buffer, "}\n")
+            return goal_status_snapshot.complete and catalog_complete
     private:
         # First-order conclusion matching for theorem discovery. Only declared theorem parameters are
         # metavariables; every other identifier remains rigid. This is deliberately an advisory search
         # operation, not a kernel rule, and therefore favors a small auditable matching language.
         def proof_suggestion_parameter_index(report: ProofReport&, theorem: ProofTheoremSummary, name: sview, replay_work: mutable usize&) -> usize:
-            for index in 0..<theorem.parameters_count |index, theorem, report, name, replay_work|:
+            for index in 0..<theorem.parameters_count |__theorem_parameter_loop_unit = false, index, theorem, report, name, replay_work| -> __theorem_parameter_loop_unit:
                 return theorem.parameters_count if not proof_suggestion_work_charge(&replay_work, 1 + sview_len(name) + sview_len(report.analysis_1.theorems.parameters[theorem.parameters_start + index]))
                 return index if report.analysis_1.theorems.parameters[theorem.parameters_start + index] == name
             return theorem.parameters_count
@@ -275,7 +443,9 @@ module ElisaProofTheoremOutput:
                 return false if index >= right.count
                 left_bytes: usize = sview_len(left[index])
                 right_bytes: usize = sview_len(right[index])
-                return false if left_bytes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - replay_work or right_bytes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - replay_work - left_bytes
+                if left_bytes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - replay_work or right_bytes > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - replay_work - left_bytes:
+                    replay_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT + 1
+                    return false
                 return false if not proof_suggestion_work_charge(&replay_work, 1 + left_bytes + right_bytes)
                 return false if left[index] != right[index]
             return true
@@ -318,281 +488,42 @@ module ElisaProofTheoremOutput:
             result: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(expression, work)
             return false if not result.complete
             return proof_suggestion_output_expr_cost_reserve(expression, result.cost, work)
-        def proof_suggestion_match(pattern: Ast::Expr, target: Ast::Expr, report: ProofReport&, theorem: ProofTheoremSummary, bound: mutable darray[bool]&, values: mutable darray[Ast::Expr]&, replay_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-            requires depth <= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT
-            decreases PROOF_THEOREM_OUTPUT_DEPTH_LIMIT - depth
-            return false if depth >= PROOF_THEOREM_OUTPUT_DEPTH_LIMIT
-            return false if not proof_suggestion_work_charge(&replay_work, 1)
-            match pattern:
-                Ast::Expr.Paren(inner, _):
-                    return proof_suggestion_match(inner, target, report, theorem, bound, values, replay_work, depth + 1)
-                Ast::Expr.Ident(name, _):
-                    parameter_index: usize = proof_suggestion_parameter_index(report, theorem, name, &replay_work)
-                    if parameter_index < theorem.parameters_count:
-                        return false if parameter_index >= bound.count or parameter_index >= values.count
-                        if bound[parameter_index]:
-                            return proof_replay_summary_expr_proof_equal_with_limit(values[parameter_index], target, &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                        bound[parameter_index] <- true
-                        values[parameter_index] <- target
-                        return true
-                _:
-                    pass
-            match target:
-                Ast::Expr.Paren(inner, _):
-                    return proof_suggestion_match(pattern, inner, report, theorem, bound, values, replay_work, depth + 1)
-                _:
-                    pass
-            match pattern:
-                Ast::Expr.Unary(operator, operand, _):
-                    match target:
-                        Ast::Expr.Unary(other_operator, other_operand, _):
-                            return operator == other_operator and proof_suggestion_match(operand, other_operand, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Binary(left, operator, right, _):
-                    match target:
-                        Ast::Expr.Binary(other_left, other_operator, other_right, _):
-                            return operator == other_operator and proof_suggestion_match(left, other_left, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(right, other_right, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Field(object, field, _):
-                    match target:
-                        Ast::Expr.Field(other_object, other_field, _):
-                            return false if not proof_suggestion_work_charge(&replay_work, sview_len(field) + sview_len(other_field))
-                            return field == other_field and proof_suggestion_match(object, other_object, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Scope(base, name, _):
-                    match target:
-                        Ast::Expr.Scope(other_base, other_name, _):
-                            return false if not proof_suggestion_work_charge(&replay_work, sview_len(name) + sview_len(other_name))
-                            return name == other_name and proof_suggestion_match(base, other_base, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Index(object, index, _):
-                    match target:
-                        Ast::Expr.Index(other_object, other_index, _):
-                            return proof_suggestion_match(object, other_object, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(index, other_index, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Slice(object, low, high, _):
-                    match target:
-                        Ast::Expr.Slice(other_object, other_low, other_high, _):
-                            return proof_suggestion_match(object, other_object, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(low, other_low, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(high, other_high, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                Ast::Expr.Call(callee, arguments, argument_names, _):
-                    match target:
-                        Ast::Expr.Call(other_callee, other_arguments, other_argument_names, _):
-                            return false if:
-                                arguments.count != other_arguments.count or not proof_suggestion_text_array_equal(argument_names, other_argument_names, replay_work)
-                                not proof_suggestion_match(callee, other_callee, report, theorem, bound, values, replay_work, depth + 1)
-                            for index in 0..<arguments.count |index, arguments, other_arguments, report, theorem, bound, values, replay_work, depth|:
-                                return false if not proof_suggestion_match(arguments[index], other_arguments[index], report, theorem, bound, values, replay_work, depth + 1)
-                            return true
-                        _:
-                            return false
-                Ast::Expr.IndexN(object, arguments, _):
-                    match target:
-                        Ast::Expr.IndexN(other_object, other_arguments, _):
-                            return false if:
-                                arguments.count != other_arguments.count
-                                not proof_suggestion_match(object, other_object, report, theorem, bound, values, replay_work, depth + 1)
-                            for index in 0..<arguments.count |index, arguments, other_arguments, report, theorem, bound, values, replay_work, depth|:
-                                return false if not proof_suggestion_match(arguments[index], other_arguments[index], report, theorem, bound, values, replay_work, depth + 1)
-                            return true
-                        _:
-                            return false
-                Ast::Expr.Array(elements, _):
-                    match target:
-                        Ast::Expr.Array(other_elements, _):
-                            return false if elements.count != other_elements.count
-                            for index in 0..<elements.count |index, elements, other_elements, report, theorem, bound, values, replay_work, depth|:
-                                return false if not proof_suggestion_match(elements[index], other_elements[index], report, theorem, bound, values, replay_work, depth + 1)
-                            return true
-                        _:
-                            return false
-                Ast::Expr.Tuple(elements, _):
-                    match target:
-                        Ast::Expr.Tuple(other_elements, _):
-                            return false if elements.count != other_elements.count
-                            for index in 0..<elements.count |index, elements, other_elements, report, theorem, bound, values, replay_work, depth|:
-                                return false if not proof_suggestion_match(elements[index], other_elements[index], report, theorem, bound, values, replay_work, depth + 1)
-                            return true
-                        _:
-                            return false
-                Ast::Expr.SetLit(elements, _):
-                    match target:
-                        Ast::Expr.SetLit(other_elements, _):
-                            return false if elements.count != other_elements.count
-                            for index in 0..<elements.count |index, elements, other_elements, report, theorem, bound, values, replay_work, depth|:
-                                return false if not proof_suggestion_match(elements[index], other_elements[index], report, theorem, bound, values, replay_work, depth + 1)
-                            return true
-                        _:
-                            return false
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    match target:
-                        Ast::Expr.If(other_condition, other_then, other_else, _):
-                            return proof_suggestion_match(condition, other_condition, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(then_expression, other_then, report, theorem, bound, values, replay_work, depth + 1) and proof_suggestion_match(else_expression, other_else, report, theorem, bound, values, replay_work, depth + 1)
-                        _:
-                            return false
-                _:
-                    return proof_replay_summary_expr_proof_equal_with_limit(pattern, target, &replay_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-    public:
-        def proof_push_json_suggestions_with_replayed[@view, @buffer](buffer: mutable darray[u8]& @buffer, checked_view: ProofCheckedView[view]& @view, goal_id: usize, replay_work: mutable usize&) -> bool can[Memory.Allocate, Abort.Panic, Global.Read, Global.Write]:
-            report: ProofReport& = proof_checked_view_report(checked_view)
-            annotations: darray[Ast::EnumAnnotation]& = proof_checked_view_enum_annotations(checked_view)
-            source_bytes: usize = proof_checked_view_source_bytes(checked_view)
-            source_fingerprint: u32 = proof_checked_view_source_fingerprint(checked_view)
-            source_complete: bool = proof_checked_view_source_complete(checked_view)
-            source_admissible: bool = proof_checked_view_source_admissible(checked_view)
-            snapshot: (complete: bool, replayed_goals: darray[bool], source_admitted_goals: darray[bool]) = proof_output_checked_view_goal_statuses_with_work(checked_view, replay_work)
-            replayed_goals: darray[bool] = snapshot.replayed_goals
-            source_admitted_goals: darray[bool] = snapshot.source_admitted_goals
-            goal_source_admissible: bool = goal_id < report.results.goal_attempts.count and proof_output_cached_source_admission_status(source_admitted_goals, goal_id)
-            proof_push(buffer, "{\"format\":\"elisa-proof-suggestions-v1\",\"status\":")
-            proof_push_json_string(buffer, "incomplete" if not snapshot.complete else ("ok" if goal_id < report.results.goal_attempts.count else "not_found"))
-            proof_push(buffer, ",\"goal_status_snapshot_complete\":")
-            proof_push(buffer, "true" if snapshot.complete else "false")
-            proof_push(buffer, ",\"source\":{\"bytes\":")
-            proof_push_number(buffer, source_bytes.u32())
-            proof_push(buffer, ",\"fingerprint\":{\"algorithm\":\"fnv1a32\",\"value\":")
-            proof_push_number(buffer, source_fingerprint)
-            proof_push(buffer, "},\"complete\":")
-            proof_push(buffer, "true" if source_complete else "false")
-            proof_push(buffer, ",\"admissible\":")
-            proof_push(buffer, "true" if source_admissible else "false")
-            proof_push(buffer, "},\"goal_id\":")
-            proof_push_number(buffer, goal_id.u32())
-            proof_push(buffer, ",\"goal_admissible\":")
-            proof_push(buffer, "true" if goal_source_admissible else "false")
-            proof_push(buffer, ",\"goal_fingerprint\":")
-            if snapshot.complete and goal_id < report.results.goal_attempts.count:
-                fingerprint: (valid: bool, value: u32) = proof_goal_fingerprint(report, report.results.goal_attempts[goal_id])
-                if fingerprint.valid:
-                    proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-goal-v2\",\"value\":")
-                    proof_push_number(buffer, fingerprint.value)
-                    proof_push(buffer, "}")
-                else:
-                    proof_push(buffer, "null")
-            else:
-                proof_push(buffer, "null")
-            proof_push(buffer, ",\"candidates\":[")
-            emitted: mutable usize = 0
-            suggestions_complete: mutable bool = true
-            solver_work: mutable usize = 0
-            solver_preflight_work: mutable usize = 0
-            operator_mask_result: (complete: bool, mask: usize) = proof_source_primitive_operator_mask_with_work(annotations, &replay_work)
-            suggestions_complete <- operator_mask_result.complete
-            fingerprint_source_work: mutable usize = 0
-            fingerprint_identity_work: mutable usize = 0
-            if goal_id < report.results.goal_attempts.count:
-                attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
-                valid_facts: bool = attempt.facts_start <= report.analysis_1.certificate_facts.count and attempt.facts_count <= report.analysis_1.certificate_facts.count - attempt.facts_start
-                for theorem in report.analysis_1.theorems.summaries |report, annotations, attempt, valid_facts, buffer, emitted, replayed_goals, source_admitted_goals, replay_work, fingerprint_source_work, fingerprint_identity_work, suggestions_complete|:
-                    if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT: suggestions_complete <- false; break
-                    valid_parameters: bool = theorem.parameters_start <= report.analysis_1.theorems.parameters.count and theorem.parameters_count <= report.analysis_1.theorems.parameters.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_types.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_has_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_defaults.count - theorem.parameters_start
-                    valid_requires: bool = theorem.requires_start <= report.analysis_1.theorems.requires.count and theorem.requires_count <= report.analysis_1.theorems.requires.count - theorem.requires_start
-                    valid_ensures: bool = theorem.ensures_start <= report.analysis_1.theorems.ensures.count and theorem.ensures_count <= report.analysis_1.theorems.ensures.count - theorem.ensures_start
-                    if theorem.verified and proof_declaration_name_is_unique(report, theorem.name, replay_work) and not proof_theorem_has_replay_gap(report, theorem, replayed_goals, source_admitted_goals, replay_work) and valid_parameters and valid_requires and valid_ensures and valid_facts:
-                        fingerprint_cached: mutable bool = false
-                        fingerprint_valid: mutable bool = false
-                        fingerprint_value: mutable u32 = 0
-                        for ensure_index in 0..<theorem.ensures_count |ensure_index, theorem, report, annotations, attempt, buffer, emitted, fingerprint_source_work, fingerprint_identity_work, fingerprint_cached, fingerprint_valid, fingerprint_value, suggestions_complete, replay_work|:
-                            if not proof_suggestion_work_charge(&replay_work, 1 + theorem.parameters_count * 3): suggestions_complete <- false; break
-                            bound: mutable darray[bool] = []; values: mutable darray[Ast::Expr] = []; names: mutable darray[sview] = []
-                            for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, bound, values, names|:
-                                bound.push(false); values.push(Ast::Expr.Absent); names.push(report.analysis_1.theorems.parameters[theorem.parameters_start + parameter_index])
-                            conclusion: Ast::Expr = report.analysis_1.theorems.ensures[theorem.ensures_start + ensure_index]
-                            conclusion_cost: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(conclusion, &replay_work)
-                            target_cost: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(attempt.goal, &replay_work)
-                            if not conclusion_cost.complete or not target_cost.complete: suggestions_complete <- false; break
-                            matched: bool = proof_suggestion_match(conclusion, attempt.goal, report, theorem, &bound, &values, &replay_work, 0)
-                            if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT: suggestions_complete <- false; break
-                            all_bound: mutable bool = matched
-                            for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, bound, values, names, all_bound|:
-                                if not bound[parameter_index] and report.analysis_1.theorems.parameter_has_defaults[theorem.parameters_start + parameter_index]:
-                                    # Match checked-call argument mapping: reject executable defaults and unresolved formals.
-                                    default_expression: Ast::Expr = report.analysis_1.theorems.parameter_defaults[theorem.parameters_start + parameter_index]
-                                    parameter_name_bytes: mutable usize = 0
-                                    for formal_name in names |formal_name, parameter_name_bytes, replay_work, suggestions_complete|:
-                                        if sview_len(formal_name) > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT - parameter_name_bytes:
-                                            suggestions_complete <- false; replay_work <- PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT; break
-                                        parameter_name_bytes <- parameter_name_bytes + sview_len(formal_name)
-                                    default_safe: mutable bool = suggestions_complete and proof_suggestion_default_work_reserve(default_expression, target_cost.cost, theorem.parameters_count, parameter_name_bytes, replay_work)
-                                    if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT: suggestions_complete <- false; break
-                                    default_safe <- not proof_expr_has_call(default_expression) and not proof_expr_has_old(default_expression) if default_safe
-                                    if parameter_index + 1 < theorem.parameters_count:
-                                        for later_index in parameter_index + 1..<theorem.parameters_count |later_index, theorem, report, default_expression, default_safe|:
-                                            if not proof_suggestion_work_charge(&replay_work, 1 + sview_len(report.analysis_1.theorems.parameters[theorem.parameters_start + later_index])):
-                                                suggestions_complete <- false; default_safe <- false; break
-                                            default_safe <- false if proof_expr_mentions_name(default_expression, report.analysis_1.theorems.parameters[theorem.parameters_start + later_index])
-                                    if default_safe:
-                                        resolved_default: Ast::Expr = proof_substitute(default_expression, names, values)
-                                        default_safe <- false if proof_expr_has_call(resolved_default) or proof_expr_has_old(resolved_default)
-                                        for formal_name in names |formal_name, resolved_default, default_safe|:
-                                            default_safe <- false if proof_expr_mentions_name(resolved_default, formal_name)
-                                        if default_safe:
-                                            values[parameter_index] <- resolved_default
-                                            bound[parameter_index] <- true
-                                all_bound <- false if not bound[parameter_index]
-                            if matched and all_bound:
-                                if not proof_suggestion_output_text_reserve(theorem.name, &replay_work): suggestions_complete <- false; break
-                                for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, values, replay_work, suggestions_complete|:
-                                    if not proof_suggestion_output_text_reserve(report.analysis_1.theorems.parameters[theorem.parameters_start + parameter_index], &replay_work) or not proof_suggestion_output_expr_reserve(values[parameter_index], &replay_work): suggestions_complete <- false; break
-                                if not suggestions_complete: break
-                                premises: mutable darray[Ast::Expr] = []; premise_results: mutable darray[bool] = []; facts: mutable darray[Ast::Expr] = []; if not proof_suggestion_work_charge(&replay_work, attempt.facts_count): suggestions_complete <- false; break
-                                for fact_index in 0..<attempt.facts_count |fact_index, attempt, report, facts, replay_work, suggestions_complete|:
-                                    fact: Ast::Expr = report.analysis_1.certificate_facts[attempt.facts_start + fact_index]
-                                    fact_cost: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(fact, &replay_work)
-                                    if not fact_cost.complete or fact_cost.cost > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS: suggestions_complete <- false; break
-                                    facts.push(fact)
-                                if not suggestions_complete: break; applicable: mutable bool = true
-                                for require_index in 0..<theorem.requires_count |require_index, theorem, report, names, values, facts, annotations, replay_work, solver_work, solver_preflight_work, operator_mask_result, premises, premise_results, applicable, suggestions_complete|:
-                                    original_premise: Ast::Expr = report.analysis_1.theorems.requires[theorem.requires_start + require_index]
-                                    require_cost: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(original_premise, &replay_work); if not require_cost.complete or not proof_suggestion_product_charge(&replay_work, require_cost.cost, target_cost.cost, 5 + theorem.parameters_count): suggestions_complete <- false; break
-                                    premise: Ast::Expr = proof_substitute(original_premise, names, values); premise_output: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(premise, &replay_work)
-                                    if not premise_output.complete or premise_output.cost > PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or not proof_suggestion_output_expr_cost_reserve(premise, premise_output.cost, &replay_work): suggestions_complete <- false; break; satisfied: bool = (proof_goal_with_shared_work(facts, premise, annotations, operator_mask_result.mask, &solver_work, &solver_preflight_work) can Global{Read,Write})
-                                    if solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT: suggestions_complete <- false; break; premises.push(premise); premise_results.push(satisfied); applicable <- false if not satisfied
-                                if not suggestions_complete or not proof_suggestion_product_charge(&replay_work, theorem.parameters_count, 1, 32) or not proof_suggestion_product_charge(&replay_work, premises.count, 1, 48) or not proof_suggestion_work_charge(&replay_work, 256):
-                                    suggestions_complete <- false
-                                    break
-                                if not fingerprint_cached:
-                                    theorem_fingerprint: (valid: bool, value: u32) = proof_theorem_fingerprint_with_work(report, theorem, &fingerprint_source_work, &fingerprint_identity_work)
-                                    fingerprint_valid <- theorem_fingerprint.valid
-                                    fingerprint_value <- theorem_fingerprint.value
-                                    fingerprint_cached <- true
-                                if not fingerprint_valid: suggestions_complete <- false; break
-                                proof_push(buffer, ",") if emitted > 0
-                                emitted <- emitted + 1
-                                proof_push(buffer, "{\"theorem\":"); proof_push_json_string(buffer, theorem.name)
-                                proof_push(buffer, ",\"theorem_fingerprint\":")
-                                proof_push(buffer, "{\"algorithm\":\"fnv1a32-kernel-theorem-v2\",\"value\":")
-                                proof_push_number(buffer, fingerprint_value)
-                                proof_push(buffer, "}")
-                                proof_push(buffer, ",\"line\":"); proof_push_number(buffer, theorem.line)
-                                proof_push(buffer, ",\"ensure_index\":")
-                                proof_push_number(buffer, ensure_index.u32())
-                                proof_push(buffer, ",\"bindings\":[")
-                                for parameter_index in 0..<theorem.parameters_count |parameter_index, theorem, report, values, buffer|:
-                                    proof_push(buffer, ",") if parameter_index > 0
-                                    proof_push(buffer, "{\"parameter\":"); proof_push_json_string(buffer, report.analysis_1.theorems.parameters[theorem.parameters_start + parameter_index])
-                                    proof_push(buffer, ",\"value\":"); proof_push_json_expr(buffer, values[parameter_index])
-                                    proof_push(buffer, "}")
-                                proof_push(buffer, "],\"premises\":[")
-                                for require_index in 0..<premises.count |require_index, premises, premise_results, buffer|:
-                                    proof_push(buffer, ",") if require_index > 0
-                                    premise: Ast::Expr = premises[require_index]
-                                    satisfied: bool = premise_results[require_index]
-                                    proof_push(buffer, "{\"proposition\":"); proof_push_json_expr(buffer, premise)
-                                    proof_push(buffer, ",\"satisfied\":"); proof_push(buffer, "true" if satisfied else "false")
-                                    proof_push(buffer, "}")
-                                proof_push(buffer, "],\"premises_satisfied\":"); proof_push(buffer, "true" if applicable else "false")
-                                proof_push(buffer, ",\"applicable\":")
-                                proof_push(buffer, "true" if applicable and source_admissible and goal_source_admissible else "false")
-                                proof_push(buffer, "}")
-            suggestions_complete <- false if replay_work >= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT or solver_work >= PROOF_LINEAR_MAX_ENUMERATED_ELEMENTS or solver_preflight_work >= PROOF_LINEAR_TACTIC_PREFLIGHT_WORK_LIMIT
-            proof_push(buffer, "],\"suggestions_complete\":")
-            proof_push(buffer, "true" if suggestions_complete else "false")
-            proof_push(buffer, "}\n")
-            return snapshot.complete and suggestions_complete
+        # Theorem fingerprinting performs a source census, kernel support/encoding passes,
+        # and a bounded identity serialization pass. Reserve those passes on the catalog meter
+        # as well as JSON rendering; the identity-specific meter remains defense in depth.
+        def proof_suggestion_theorem_catalog_expr_reserve(expression: Ast::Expr, work: mutable usize&) -> bool:
+            result: (complete: bool, cost: usize) = proof_suggestion_expr_cost_charge(expression, work)
+            return false if not result.complete
+            units: usize = proof_suggestion_json_expr_units(expression, 0)
+            return false if units > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+            return proof_suggestion_product_charge(&work, units, 1, 320) and proof_suggestion_product_charge(&work, result.cost, 1, 32)
+        def proof_suggestion_theorem_catalog_output_reserve(report: ProofReport&, theorem: ProofTheoremSummary, work: mutable usize&) -> bool:
+            return false if not proof_suggestion_work_charge(&work, 512)
+            return false if not proof_suggestion_output_text_reserve(theorem.name, work) or not proof_suggestion_output_text_reserve(theorem.verification_reason, work)
+            return false if not proof_suggestion_product_charge(&work, sview_len(theorem.name), 1, 26)
+            valid_parameters: bool = theorem.parameters_start <= report.analysis_1.theorems.parameters.count and theorem.parameters_count <= report.analysis_1.theorems.parameters.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_types.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_types.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_has_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_has_defaults.count - theorem.parameters_start and theorem.parameters_start <= report.analysis_1.theorems.parameter_defaults.count and theorem.parameters_count <= report.analysis_1.theorems.parameter_defaults.count - theorem.parameters_start
+            if valid_parameters:
+                for index in 0..<theorem.parameters_count |__theorem_output_parameters_loop_unit = false, index, theorem, report, work| -> __theorem_output_parameters_loop_unit:
+                    parameter_index: usize = theorem.parameters_start + index
+                    return false if not proof_suggestion_work_charge(&work, 8) or not proof_suggestion_output_text_reserve(report.analysis_1.theorems.parameters[parameter_index], work) or not proof_suggestion_product_charge(&work, sview_len(report.analysis_1.theorems.parameters[parameter_index]), 1, 26) or not proof_suggestion_theorem_catalog_expr_reserve(report.analysis_1.theorems.parameter_types[parameter_index], work)
+                    if report.analysis_1.theorems.parameter_has_defaults[parameter_index]:
+                        return false if not proof_suggestion_theorem_catalog_expr_reserve(report.analysis_1.theorems.parameter_defaults[parameter_index], work)
+            if theorem.requires_start <= report.analysis_1.theorems.requires.count and theorem.requires_count <= report.analysis_1.theorems.requires.count - theorem.requires_start:
+                for index in 0..<theorem.requires_count |__theorem_output_requires_loop_unit = false, index, theorem, report, work| -> __theorem_output_requires_loop_unit:
+                    return false if not proof_suggestion_theorem_catalog_expr_reserve(report.analysis_1.theorems.requires[theorem.requires_start + index], work)
+            if theorem.ensures_start <= report.analysis_1.theorems.ensures.count and theorem.ensures_count <= report.analysis_1.theorems.ensures.count - theorem.ensures_start:
+                for index in 0..<theorem.ensures_count |__theorem_output_ensures_loop_unit = false, index, theorem, report, work| -> __theorem_output_ensures_loop_unit:
+                    return false if not proof_suggestion_theorem_catalog_expr_reserve(report.analysis_1.theorems.ensures[theorem.ensures_start + index], work)
+            if theorem.decreases_start <= report.analysis_1.theorems.decreases.count and theorem.decreases_count <= report.analysis_1.theorems.decreases.count - theorem.decreases_start:
+                for index in 0..<theorem.decreases_count |__theorem_output_decreases_loop_unit = false, index, theorem, report, work| -> __theorem_output_decreases_loop_unit:
+                    return false if not proof_suggestion_theorem_catalog_expr_reserve(report.analysis_1.theorems.decreases[theorem.decreases_start + index], work)
+            valid_proof_goals: bool = theorem.proof_goals_start <= report.analysis_1.theorems.proof_goal_ids.count and theorem.proof_goals_count <= report.analysis_1.theorems.proof_goal_ids.count - theorem.proof_goals_start
+            if valid_proof_goals:
+                for index in 0..<theorem.proof_goals_count |__theorem_output_goals_loop_unit = false, index, theorem, report, work| -> __theorem_output_goals_loop_unit:
+                    if not proof_suggestion_work_charge(&work, 128):
+                        return false
+                    goal_id: usize = report.analysis_1.theorems.proof_goal_ids[theorem.proof_goals_start + index]
+                    if goal_id < report.results.goal_attempts.count:
+                        attempt: ProofGoalAttempt = report.results.goal_attempts[goal_id]
+                        return false if not proof_suggestion_work_charge(&work, sview_len(attempt.name)) or not proof_suggestion_work_charge(&work, sview_len(theorem.name)) or not proof_suggestion_output_text_reserve(attempt.rule, work)
+            return true
