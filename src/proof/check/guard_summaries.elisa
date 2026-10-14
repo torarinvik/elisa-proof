@@ -8,6 +8,10 @@ extend ElisaProof:
             work <- work + amount
             true
 
+        def proof_guard_call_summary_exhaust(work: mutable usize&) -> bool:
+            work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+            false
+
         def proof_guard_call_summary_measure_expression(expression: Ast::Expr, cost: mutable usize&, work: mutable usize&) -> bool:
             return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
             if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT):
@@ -31,39 +35,49 @@ extend ElisaProof:
             cost: mutable usize = 0
             return false if not proof_guard_call_summary_measure_expression(expression, &cost, work)
             multiplier: usize = sview_len(target) + 2
-            return false if multiplier == 0 or work > PROOF_MATCH_LOWERING_WORK_LIMIT or cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return proof_guard_call_summary_exhaust(work) if multiplier == 0 or cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
             proof_guard_call_summary_work_charge(cost * multiplier, work)
 
-        # Purity traversal resolves each call against the function table. Charge the
-        # expression traversal multiplied by the maximum linear callee lookup cost.
-        def proof_guard_call_summary_charge_purity(expression: Ast::Expr, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
+        # Purity traversal resolves calls through the indexed function resolver. Reserve
+        # bounded AST passes here, then charge the resolver's actual probe work at the call site.
+        def proof_guard_call_summary_charge_purity(expression: Ast::Expr, work: mutable usize&) -> bool:
             cost: mutable usize = 0
             return false if not proof_guard_call_summary_measure_expression(expression, &cost, work)
-            multiplier: usize = functions.lookup.names.count + 4
-            return false if multiplier < functions.lookup.names.count or work > PROOF_MATCH_LOWERING_WORK_LIMIT or cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
+            multiplier: usize = 4
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return proof_guard_call_summary_exhaust(work) if cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
             proof_guard_call_summary_work_charge(cost * multiplier, work)
 
         # `proof_add_function_summary_fact` repeats freshness, call-purity, and kernel-support
-        # scans after summary construction. Reserve their AST and callee-lookup work before
-        # entering that shared helper, which has callers outside this guard-local meter.
-        def proof_guard_call_summary_charge_fact_admission(expression: Ast::Expr, parameter_names: darray[sview]&, arguments: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, report: ProofReport&, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
+        # scans after summary construction. Reserve those AST passes before entering the shared
+        # helper; charge exact indexed callee-resolution probes from its shared resolver meter.
+        def proof_guard_call_summary_charge_fact_admission(expression: Ast::Expr, arguments: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, report: ProofReport&, work: mutable usize&) -> bool:
             expression_cost: mutable usize = 0
             return false if not proof_guard_call_summary_measure_expression(expression, &expression_cost, work)
-            lookup_count: usize = functions.lookup.names.count
-            return false if lookup_count > (PROOF_MATCH_LOWERING_WORK_LIMIT - 6) / 2
-            expression_multiplier: usize = lookup_count * 2 + 6
-            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT or expression_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / expression_multiplier
+            # The ensure also serves as the result value: reserve its freshness, purity,
+            # result, and kernel-support traversals, plus the cost-measurement pass.
+            expression_multiplier: usize = 8
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            return proof_guard_call_summary_exhaust(work) if expression_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / expression_multiplier
             return false if not proof_guard_call_summary_work_charge(expression_cost * expression_multiplier, work)
-            argument_multiplier: usize = lookup_count + 2
-            return false if argument_multiplier < lookup_count
+            # Mapped argument freshness follows a separate `has_call` scan.
+            argument_multiplier: usize = 3
             for argument in arguments |argument, work|:
                 argument_cost: mutable usize = 0
                 return false if not proof_guard_call_summary_measure_expression(argument, &argument_cost, work)
-                return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT or argument_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / argument_multiplier
+                return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+                return proof_guard_call_summary_exhaust(work) if argument_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / argument_multiplier
                 return false if not proof_guard_call_summary_work_charge(argument_cost * argument_multiplier, work)
-            return false if arguments.count > PROOF_MATCH_LOWERING_WORK_LIMIT / 2
-            row_work: usize = arguments.count * 2 + parameter_names.count + require_goal_ids.count + report.threading.summary_threaded_symbols.count + 8
-            return false if row_work < arguments.count or not proof_guard_call_summary_work_charge(row_work, work)
+            row_work: mutable usize = 8
+            return proof_guard_call_summary_exhaust(work) if arguments.count > (PROOF_MATCH_LOWERING_WORK_LIMIT - row_work) / 2
+            row_work <- row_work + arguments.count * 2
+            return proof_guard_call_summary_exhaust(work) if require_goal_ids.count > PROOF_MATCH_LOWERING_WORK_LIMIT - row_work
+            row_work <- row_work + require_goal_ids.count
+            threaded_count: usize = report.threading.summary_threaded_symbols.count
+            return proof_guard_call_summary_exhaust(work) if threaded_count > (PROOF_MATCH_LOWERING_WORK_LIMIT - row_work) / 2
+            row_work <- row_work + threaded_count * 2
+            return false if not proof_guard_call_summary_work_charge(row_work, work)
             true
 
         def proof_guard_call_summary_map_arguments(parameters: darray[sview]&, has_defaults: darray[bool]&, defaults: darray[Ast::Expr]&, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
@@ -123,8 +137,12 @@ extend ElisaProof:
                     return false if proof_expr_has_old(resolved_default)
                     has_call: bool = proof_expr_has_call(resolved_default)
                     if has_call:
-                        return false if not proof_guard_call_summary_charge_purity(resolved_default, functions, work)
-                        return false if not proof_contract_calls_are_pure(resolved_default, functions)
+                        return false if not proof_guard_call_summary_charge_purity(resolved_default, work)
+                        lookup_work_before: usize = functions.lookup.module_resolution_work_used
+                        pure_calls: bool = proof_contract_calls_are_pure(resolved_default, functions)
+                        lookup_work_after: usize = functions.lookup.module_resolution_work_used
+                        return false if lookup_work_after < lookup_work_before or not proof_guard_call_summary_work_charge(lookup_work_after - lookup_work_before, work)
+                        return false if not pure_calls
                     mapped[parameter_index] <- resolved_default
                     used[parameter_index] <- true
             true
@@ -135,7 +153,7 @@ extend ElisaProof:
         # records that summary only after the whole expression, which is too late for the operand.
         # Only calls on the guard's unconditional path qualify: the right operand of a nested
         # `and`/`or`/`else` may not run, and neither may its callee's postcondition.
-        def proof_add_guard_call_summaries(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, line: u32, depth: usize) -> void can[Global.Read, Global.Write]:
+        def proof_add_guard_call_summaries(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, line: u32, depth: usize) -> bool can[Global.Read, Global.Write]:
             # Share one ceiling across all guards in this report. Otherwise many small guard
             # expressions could each spend the full substitution and summary budget.
             work: mutable usize = report.analysis_1.budgets.guard_call_summary_source_work
@@ -144,6 +162,7 @@ extend ElisaProof:
             if work > PROOF_MATCH_LOWERING_WORK_LIMIT and not report.analysis_1.budgets.guard_call_summary_reported:
                 report.analysis_1.budgets.guard_call_summary_reported <- true
                 proof_add_budget_finding(report, "resource-analysis-budget", line, owner, "guard call-summary expansion exceeded its shared source-work budget", "guard-call-summary-source-work", work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+            work <= PROOF_MATCH_LOWERING_WORK_LIMIT
 
         def proof_add_guard_call_summaries_with_work(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, depth: usize, work: mutable usize&) -> void can[Global.Read, Global.Write]:
             return if depth >= 16 or not proof_guard_call_summary_work_charge(1, work)
@@ -227,8 +246,11 @@ extend ElisaProof:
                         seen: (complete: bool, duplicate: bool) = proof_guard_call_summary_seen(instantiated, summary_facts, work)
                         return if not seen.complete
                         continue if seen.duplicate
-                        return if not proof_guard_call_summary_charge_fact_admission(instantiated, parameter_names, mapped_arguments, require_goal_ids, report, functions, work)
+                        return if not proof_guard_call_summary_charge_fact_admission(instantiated, mapped_arguments, require_goal_ids, report, work)
                         return if not proof_guard_call_summary_work_charge(1, work)
+                        lookup_work_before: usize = functions.lookup.module_resolution_work_used
                         proof_add_function_summary_fact(summary_facts, report, functions, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index, false, Ast::Expr.Absent, functions.lookup.lines[function_index] if function_index < functions.lookup.lines.count else 0, position)
+                        lookup_work_after: usize = functions.lookup.module_resolution_work_used
+                        return if lookup_work_after < lookup_work_before or not proof_guard_call_summary_work_charge(lookup_work_after - lookup_work_before, work)
                 _:
                     pass
