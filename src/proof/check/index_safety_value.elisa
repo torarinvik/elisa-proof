@@ -4,11 +4,12 @@ extend ElisaProof:
             report.analysis_1.budgets.index_safety_source_work <- PROOF_LINEAR_SAFETY_WORK_LIMIT
             if not report.analysis_1.budgets.index_safety_reported:
                 report.analysis_1.budgets.index_safety_reported <- true
+                report.proof_obligation(false)
                 proof_add_budget_finding(report, "resource-analysis-budget", line, name, "index-safety guard classification exceeded its per-function source-work bound", "index-safety-source-work", PROOF_LINEAR_SAFETY_WORK_LIMIT, PROOF_LINEAR_SAFETY_WORK_LIMIT)
 
         def proof_index_safety_take_source_work(report: mutable ProofReport&, name: sview, line: u32, amount: usize) -> bool:
             work: usize = report.analysis_1.budgets.index_safety_source_work
-            if work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or amount > PROOF_LINEAR_SAFETY_WORK_LIMIT - work:
+            if work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or (amount > 0 and amount >= PROOF_LINEAR_SAFETY_WORK_LIMIT - work):
                 proof_index_safety_report_work_exhausted(report, name, line)
                 return false
             report.analysis_1.budgets.index_safety_source_work <- work + amount
@@ -21,10 +22,85 @@ extend ElisaProof:
             complete: mutable bool = cost.complete
             if complete and passes > 1:
                 complete <- proof_linear_safety_work_charge_scaled(&work, &exhausted, cost.cost, passes - 1)
+            complete <- false if complete and work >= PROOF_LINEAR_SAFETY_WORK_LIMIT
             report.analysis_1.budgets.index_safety_source_work <- work
             if not complete:
                 proof_index_safety_report_work_exhausted(report, name, line)
             complete
+
+        # Only a direct call (possibly parenthesized) reaches proof_index_call_result's
+        # requires loop. Count those goals before the access checker starts, so each gets
+        # its own charged pass over the caller's fact context.
+        def proof_index_safety_call_requires(expression: Ast::Expr, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, line: u32) -> (complete: bool, count: usize):
+            current: mutable Ast::Expr = expression
+            depth: mutable usize = 0
+            while depth < PROOF_INDEX_SAFETY_SCAN_LIMIT |current, depth, functions, report, name, line|:
+                return (false, 0) if not proof_index_safety_take_source_work(report, name, line, 1)
+                match current:
+                    Ast::Expr.Paren(inner, _):
+                        current <- inner
+                        depth <- depth + 1
+                    Ast::Expr.Call(callee, arguments, _, _):
+                        return (true, 0) if proof_callable_name(callee) == ""
+                        function_index: usize = proof_function_index_for_callee(functions, callee)
+                        return (true, 0) if functions.lookup.module_resolution_work_exhausted
+                        return (true, 0) if:
+                            function_index >= functions.lookup.names.count
+                            function_index >= functions.summaries.pure.count or not functions.summaries.pure[function_index]
+                            function_index >= functions.summaries.verified.count or not functions.summaries.verified[function_index]
+                            function_index >= functions.parameters.metadata.param_counts.count
+                            arguments.count > functions.parameters.metadata.param_counts[function_index]
+                        requires_start: usize = functions.contracts.obligations.requires_starts[function_index] if function_index < functions.contracts.obligations.requires_starts.count else functions.contracts.obligations.all_requires.count
+                        requires_count: usize = functions.contracts.obligations.requires_counts[function_index] if function_index < functions.contracts.obligations.requires_counts.count else 0
+                        return (true, 0) if requires_start > functions.contracts.obligations.all_requires.count or requires_count > functions.contracts.obligations.all_requires.count - requires_start
+                        return (true, requires_count)
+                    _:
+                        return (true, 0)
+            proof_index_safety_report_work_exhausted(report, name, line)
+            (false, 0)
+
+        def proof_index_safety_add_call_requires(expression: Ast::Expr, functions: mutable ProofFunctionTable&, report: mutable ProofReport&, name: sview, line: u32, attempts: mutable usize&) -> bool:
+            required: (complete: bool, count: usize) = proof_index_safety_call_requires(expression, functions, report, name, line)
+            return false if not required.complete
+            if attempts > PROOF_LINEAR_SAFETY_WORK_LIMIT or required.count > PROOF_LINEAR_SAFETY_WORK_LIMIT - attempts:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            attempts <- attempts + required.count
+            true
+
+        # Reserve the extra fact-context passes for callee requires goals. The index-checker
+        # certificates reserve their own fact contexts at their call sites.
+        def proof_index_safety_preflight_fact_work(facts: darray[Ast::Expr]&, attempts: usize, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return true if attempts == 0
+            work: mutable usize = report.analysis_1.budgets.index_safety_source_work
+            exhausted: mutable bool = false
+            fact_cost: mutable usize = facts.count
+            if fact_cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            if not proof_linear_safety_work_charge(&work, &exhausted, facts.count):
+                report.analysis_1.budgets.index_safety_source_work <- work
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            for fact in facts |work, exhausted, fact_cost|:
+                cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &work, &exhausted)
+                if not cost.complete or exhausted or cost.cost >= PROOF_LINEAR_SAFETY_WORK_LIMIT - fact_cost:
+                    report.analysis_1.budgets.index_safety_source_work <- work
+                    proof_index_safety_report_work_exhausted(report, name, line)
+                    return false
+                fact_cost <- fact_cost + cost.cost
+            if attempts > 1:
+                complete: bool = proof_linear_safety_work_charge_scaled(&work, &exhausted, fact_cost, attempts - 1)
+                if not complete or exhausted:
+                    report.analysis_1.budgets.index_safety_source_work <- work
+                    proof_index_safety_report_work_exhausted(report, name, line)
+                    return false
+            complete: bool = proof_linear_safety_work_charge(&work, &exhausted, attempts)
+            report.analysis_1.budgets.index_safety_source_work <- work
+            if not complete or exhausted or work >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            true
 
         # The support walk also charges its nested conversion/call scans and Match lowering
         # into the same `work` reference. Offset that counter so its existing 1 Mi ceiling
@@ -43,7 +119,7 @@ extend ElisaProof:
                 proof_index_safety_report_work_exhausted(report, name, line)
                 return false
             support_cost: usize = support_work - support_work_start
-            if support_cost > remaining:
+            if support_cost >= remaining:
                 proof_index_safety_report_work_exhausted(report, name, line)
                 return false
             report.analysis_1.budgets.index_safety_source_work <- work_before + support_cost
@@ -58,12 +134,30 @@ extend ElisaProof:
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     return if proof_is_type_cast_index(object)
                     (proof_check_index_safety_value(index, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
+                    # Single-index admission can recheck calls, moves, conversions, invalidity,
+                    # and storage shape on both operands. Reserve twelve source-sized passes;
+                    # transitive call-summary work has its own shared runtime-call meter.
+                    return if not proof_index_safety_preflight_expr_work(object, 12, report, name, line)
+                    return if not proof_index_safety_preflight_expr_work(index, 12, report, name, line)
+                    attempts: mutable usize = 0
+                    conversion: (known: bool, receiver: Ast::Expr) = proof_index_unsigned_conversion(index, functions)
+                    return if not conversion.known and not proof_index_safety_add_call_requires(index, functions, report, name, line, &attempts)
+                    return if not proof_index_safety_preflight_fact_work(facts, attempts, report, name, line)
                     (proof_check_index_access(object, index, position, facts, fixed_names, fixed_extents, report, name, annotations, functions) can Global{Read,Write})
                 Ast::Expr.IndexN(object, arguments, position):
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     for argument in arguments |facts, fixed_names, fixed_extents, report, name, annotations, line|:
                         return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(argument, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
+                    # Multi-index checks admit the receiver once and each position separately.
+                    # Eight passes cover call-result, move, invalidity, and shape checks.
+                    return if not proof_index_safety_preflight_expr_work(object, 8, report, name, line)
+                    for argument in arguments |report, name, line|:
+                        return if not proof_index_safety_preflight_expr_work(argument, 8, report, name, line)
+                    attempts: mutable usize = 0
+                    for argument in arguments |attempts, functions, report, name, line|:
+                        return if not proof_index_safety_add_call_requires(argument, functions, report, name, line, &attempts)
+                    return if not proof_index_safety_preflight_fact_work(facts, attempts, report, name, line)
                     (proof_check_indexn_access(object, arguments, position, facts, fixed_names, fixed_extents, report, name, annotations, functions) can Global{Read,Write})
                 Ast::Expr.Paren(inner, _):
                     (proof_check_index_safety_value(inner, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -76,6 +170,8 @@ extend ElisaProof:
                     # accesses in the receiver or index remain ordinary obligations.
                     match guarded:
                         Ast::Expr.Index(checked_object, checked_index_position, _):
+                            return if not proof_index_safety_preflight_expr_work(expression, 2, report, name, line)
+                            return if not proof_index_safety_take_source_work(report, name, line, 1)
                             proof_certify_checked_get(expression, report, name, getelse_position.line)
                             (proof_check_index_safety_value(checked_object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                             (proof_check_index_safety_value(checked_index_position, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -91,6 +187,8 @@ extend ElisaProof:
                 Ast::Expr.Binary(checked_index, TokenKind.Else, checked_fallback, checked_position):
                     match checked_index:
                         Ast::Expr.Index(checked_object, checked_index_position, _):
+                            return if not proof_index_safety_preflight_expr_work(expression, 2, report, name, line)
+                            return if not proof_index_safety_take_source_work(report, name, line, 1)
                             proof_certify_checked_index(expression, report, name, checked_position.line)
                             (proof_check_index_safety_value(checked_object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                             (proof_check_index_safety_value(checked_index_position, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -117,13 +215,14 @@ extend ElisaProof:
                     # as its `if` spelling does.
                     short_circuit: bool = binary_operator == TokenKind.And or binary_operator == TokenKind.Or
                     # Classify both sides before reusing guard facts. Either side can mutate
-                    # state before an indexed access in the right operand. The freshness
-                    # classifier walks twice; reserve those passes and all other scans.
+                    # state before an indexed access in the right operand. Reserve the cost walk,
+                    # overloaded-operator scan, both freshness scans, and move scan. Call presence
+                    # uses the shared runtime-table meter; support traversal is charged below.
                     guard_scan_complete: mutable bool = true
                     if short_circuit:
-                        guard_scan_complete <- proof_index_safety_preflight_expr_work(left, 7, report, name, line)
+                        guard_scan_complete <- proof_index_safety_preflight_expr_work(left, 5, report, name, line)
                         if guard_scan_complete:
-                            guard_scan_complete <- proof_index_safety_preflight_expr_work(right, 7, report, name, line)
+                            guard_scan_complete <- proof_index_safety_preflight_expr_work(right, 5, report, name, line)
                     guard_has_overloaded_operator: bool = true
                     guard_has_fresh_value: bool = true
                     guard_has_move: bool = true
@@ -144,8 +243,7 @@ extend ElisaProof:
                         guard_call_scan: (complete: bool, has_call: bool) = proof_runtime_call_presence_scan(left, functions)
                         guard_has_call <- guard_call_scan.has_call
                         guard_scan_complete <- false if not guard_call_scan.complete
-                        support_work: mutable usize = 0
-                        guard_is_supported <- proof_expr_supported_with_work(left, &support_work)
+                        guard_is_supported <- proof_index_safety_expr_supported_with_work(left, report, name, line)
                         right_has_overloaded_operator <- proof_source_expression_has_overloaded_operator(right, report.source.source_primitive_operator_mask, 0)
                         right_has_fresh_value <- proof_expression_has_fresh_runtime_value(right, functions, 0)
                         scan_work <- 0
@@ -153,8 +251,7 @@ extend ElisaProof:
                         right_call_scan: (complete: bool, has_call: bool) = proof_runtime_call_presence_scan(right, functions)
                         right_has_call <- right_call_scan.has_call
                         guard_scan_complete <- false if not right_call_scan.complete
-                        support_work <- 0
-                        right_is_supported <- proof_expr_supported_with_work(right, &support_work)
+                        right_is_supported <- proof_index_safety_expr_supported_with_work(right, report, name, line)
                         if guard_has_call:
                             guard_calls_are_pure <- proof_runtime_calls_are_pure_with_known_presence(left, functions, guard_has_call)
                         if right_has_call:
@@ -187,6 +284,9 @@ extend ElisaProof:
                         else:
                             (proof_check_index_safety_value(right, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Call(callee, arguments, _, _):
+                    # Protocol-transition admission linearly checks the compiler's validated
+                    # position set. Charge that scan before calling the shared recognizer.
+                    return if not proof_index_safety_take_source_work(report, name, line, report.source_syntax.protocol_transition_positions.count)
                     transition: (known: bool, operand: Ast::Expr) = proof_admitted_protocol_transition_operand(expression, report)
                     return if transition.known
                     (proof_check_index_safety_value(callee, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -201,6 +301,14 @@ extend ElisaProof:
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     (proof_check_index_safety_value(low, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     (proof_check_index_safety_value(high, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
+                    # Slice admission checks the receiver and each endpoint independently.
+                    return if not proof_index_safety_preflight_expr_work(object, 8, report, name, line)
+                    return if not proof_index_safety_preflight_expr_work(low, 8, report, name, line)
+                    return if not proof_index_safety_preflight_expr_work(high, 8, report, name, line)
+                    attempts: mutable usize = 0
+                    return if not proof_index_safety_add_call_requires(low, functions, report, name, line, &attempts)
+                    return if not proof_index_safety_add_call_requires(high, functions, report, name, line, &attempts)
+                    return if not proof_index_safety_preflight_fact_work(facts, attempts, report, name, line)
                     (proof_check_slice_access(object, low, high, position, facts, fixed_names, fixed_extents, report, name, annotations, functions) can Global{Read,Write})
                 Ast::Expr.Move(operand, _):
                     (proof_check_index_safety_value(operand, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})

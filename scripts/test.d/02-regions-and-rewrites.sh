@@ -537,6 +537,12 @@ if [[ "$getelse_checked_index_probe_status" -ne 0 ]]; then
     printf 'proof test matrix failed: checked-get safety certificate was not replayed\n' >&2
     exit 1
 fi
+run_json_report "$ROOT_DIR/examples/rejected_checked_access_unsupported_match.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "failed"; assert report["summary"]["semantic_errors"] == 0; assert report["summary"]["failed"] >= 2; assert {finding["kind"] for finding in report["findings"]} >= {"checked-index-unsupported", "checked-get-unsupported"}; assert not any(goal["rule"] in {"checked-index", "checked-get"} and goal["proven"] for goal in report["goals"]); assert not any(certificate["rule"] in {"checked-index", "checked-get"} for certificate in report["certificates"]); assert report["replay"]["gaps"] == 0'
+unsupported_checked_access_probe_status=${PIPESTATUS[1]}
+if [[ "$unsupported_checked_access_probe_status" -ne 0 ]]; then
+    printf 'proof test matrix failed: unsupported checked access was accepted without a replayable certificate\n' >&2
+    exit 1
+fi
 run_json_report "$ROOT_DIR/examples/getelse_call.elisa" | python3 -c 'import json, sys; report = json.load(sys.stdin); assert report["status"] == "proved"; assert any(dependency["kind"] == "function-summary" and dependency["name"] == "maybe_value" for goal in report["goals"] for dependency in goal["dependencies"]); assert report["replay"]["gaps"] == 0'
 getelse_call_probe_status=${PIPESTATUS[1]}
 if [[ "$getelse_call_probe_status" -ne 0 ]]; then
