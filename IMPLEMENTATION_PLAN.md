@@ -10187,6 +10187,18 @@ header parity checks passed under the then-pinned Stage1; a repeat compile from 
 dirty compiler checkout fails on unrelated source diagnostics, so this does not qualify a fresh
 compiler product.
 
+### 23.27.1391 Guard lexical call-result availability at joins
+
+The current resource-history implementation keeps newly executed call roots local to a branch or
+nested scope. This prevents a post-join result marker from re-resolving a call against bindings
+different from those used when it ran; only the inherited call-root prefix survives, while the
+separate duplicate-execution history still records child calls. Updated the kernel inventory
+regression to require this fail-closed lexical rule. Safe recovery of call results shared across
+branches would need explicit proof that the relevant binding environment agrees on every path.
+The kernel inventory, resource-summary cache guard, diff check, and source-length gate pass. Runtime
+resource regressions remain unqualified because the installed proof binary does not match this
+source tree.
+
 ### 23.27.113 Current integration and high-return order (2026-10-12)
 
 The local main branches now include the qualified core classifier proof fix (`4a6fc6d7`,
@@ -24737,11 +24749,12 @@ checks pass; no tests or builds were run.
 
 Threaded-summary certificate validation and mutable-local resymbolization now classify source types
 against a replay-owned scratch report whose indexes are reconstructed from source declarations and
-annotations. The scratch builder also checks every exact generic-row snapshot against one matching
-generic identity annotation and shares its work delta with replay's source budget. This prevents
-caller-mutated report indexes or generic rows from directly authorizing a threaded summary. The
-type-marker and reference-free classifiers remain common-mode dependencies. Static diff and
-source-length checks pass; runtime qualification and source mutation tests remain outstanding.
+annotations. The scratch builder also binds each function-generic row to one matching generic
+identity annotation, checks marker/row cardinality for omitted rows, and shares that work with
+replay's source budget. This prevents caller-mutated report indexes or function-generic rows from
+directly authorizing a threaded summary. The type-marker and reference-free classifiers remain
+common-mode dependencies. Static diff and source-length checks pass; runtime qualification and
+source mutation tests remain outstanding.
 
 ### 23.27.1385 Reuse threaded-summary indexes during mutable-local scans
 
@@ -24784,6 +24797,15 @@ inventories with their source-adapter roles. The workspace-cache boundary, kerne
 source-authority, diff, and source-length checks pass. Compiler/runtime qualification remains
 outstanding.
 
+### 23.27.1390 Guard resource-summary root cache identity
+
+Resource calls now locate a verified resource summary through its exact function-table slot rather
+than rescanning the whole kernel arena. Added a source regression requiring slot initialization,
+per-function invalidation, post-encoding cache publication, and revalidation of the cached node's
+kind, name, schema, and owner before a consumer uses it; the consumer must not regress to an arena
+scan. The dedicated regression passes. Kernel runtime behavior remains unqualified pending a
+source-matched compiler product.
+
 ### 23.27.1390 Reject omitted function-generic source rows in replay caches
 
 Replay source-cache authentication now compares the number of copied function-generic rows with
@@ -24791,3 +24813,25 @@ the independently indexed generic-identity markers. It validates each row agains
 function owner and exact generic marker, and rejects duplicate row identities. This closes the
 omitted-row case that a one-way row-to-marker lookup alone did not detect. Static diff and
 source-length checks pass; runtime source-mutation qualification remains outstanding.
+
+### 23.27.1391 Version the portable package metadata schema
+
+The package producer had started emitting `goal_status_snapshot_complete`,
+`origin_metadata_complete`, and per-theorem `hypothesis_origins_complete` while still labeling the
+document v3. The strict reader's exact-key schemas rejected those producer fields, so current
+exports could not round-trip through portable replay. The producer now labels this shape v4, and
+the reader and source-correspondence replay accept the new exact-key shape while preserving v1–v3
+compatibility. V4 checks each completeness marker's type, rejects an admissible-source claim when
+the goal-status snapshot is incomplete, and permits a truncated origin prefix only when its
+per-theorem marker says provenance is incomplete; kernel replay remains based on the hypotheses
+and conclusion. Updated the portable replay/fixed-width/mutation expectations and trust inventory.
+`git diff --check` and `scripts/check_source_length.py` pass. No tests or builds were run; runtime
+round-trip qualification remains outstanding.
+
+### 23.27.1392 Index verified resource summaries by function
+
+Resource call and return analysis now resolves a checked summary root from the exact function-table
+slot instead of rescanning the kernel arena by function name at each call. The lookup still checks
+verification state and reauthenticates the root's kind, function name, resource version, and owner;
+unresolved or stale slots fail closed. The focused diff passes `git diff --check`; no tests or
+builds were run.
