@@ -7,6 +7,9 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 model_path = ROOT / "src/proof/kernel_replay/goal_metered_bounded_model.elisa"
 unsigned_path = ROOT / "src/proof/kernel_replay/unsigned_bounds.elisa"
+producer_signed_path = ROOT / "src/proof/linear/fixed_width_arithmetic_safety_work.elisa"
+producer_unsigned_path = ROOT / "src/proof/linear/witnessed_expressions.elisa"
+producer_helpers_path = ROOT / "src/proof/linear/bounds_and_markers_integrated_helpers.elisa"
 
 
 def body(path: Path, name: str) -> str:
@@ -80,6 +83,20 @@ shortcut_accept = unsigned_safety.index("return true if conditional_safe", short
 branch_checks = unsigned_safety.index("then_signed_width:", conditional_gate)
 assert conditional_gate < branch_checks < shortcut < shortcut_accept
 assert unsigned_safety.index("then_signed_width != 0 and else_unsigned_width != 0", branch_checks) < shortcut
+producer_helper = body(producer_helpers_path, "proof_fixed_width_if_branch_sorts_compatible_with_work")
+for conflict in (
+    "then_signed != 0 and then_unsigned != 0",
+    "else_signed != 0 and else_unsigned != 0",
+    "then_signed != 0 and else_unsigned != 0",
+    "then_unsigned != 0 and else_signed != 0",
+    "then_signed != 0 and else_signed != 0 and then_signed != else_signed",
+    "then_unsigned != 0 and else_unsigned != 0 and then_unsigned != else_unsigned",
+):
+    assert conflict in producer_helper
+producer_signed = body(producer_signed_path, "proof_signed_expression_safe_with_bounds_work_inner_scaled")
+producer_unsigned = body(producer_unsigned_path, "proof_unsigned_expression_safe_inner_work")
+assert "proof_fixed_width_if_branch_sorts_compatible_with_work" in producer_signed
+assert "proof_fixed_width_if_branch_sorts_compatible_with_work" in producer_unsigned
 
 overflow_fixture = (ROOT / "examples/signed_overflow_bounded_model.elisa").read_text(encoding="utf-8")
 assert "signed_square_wraps_in_model_domain" in overflow_fixture

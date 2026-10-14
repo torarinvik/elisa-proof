@@ -11,7 +11,7 @@ This is the active high-return sequence. Older toolchain snapshots and experimen
 
 4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is twenty commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass focused static checks, but remain runtime-unqualified pending a source-matched compiler lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof main is twenty-three commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass focused static checks, but remain runtime-unqualified pending a source-matched compiler lane. Record exact compiler/proof revisions and commands with results. Keep timing skipped and refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -25154,3 +25154,19 @@ walk checked signedness and width consistency. Move those checks ahead of the sh
 them under the shared goal-search work meter. The bounded-model source guard now enforces this
 ordering. Focused static checks and source-length checks pass; runtime replay remains unqualified
 until a source-matched compiler pair is available.
+
+### 23.27.1428 Align producer conditional-width guards with replay (2026-10-14)
+
+The kernel refuses conditionals whose branches carry contradictory signedness or conflicting known
+widths, but the arithmetic producer previously walked each branch independently and could still
+attempt a certificate that replay necessarily rejected. Producer signed and unsigned safety now
+run the same branch-sort compatibility check before branch analysis, charging all marker and width
+lookups to the existing safety budget. The legacy signed precheck applies the same rule. Focused width-safety, kernel-budget, index-budget, AST-mirror and quantifier-meter static checks pass, as do source-length and diff checks. No compiler build or runtime replay was available.
+
+### 23.27.1428 Route legacy signed safety entry through the metered walker (2026-10-14)
+
+The legacy signed safety entry recursively rescanned both branch widths at each nested conditional.
+Its caller had no shared preflight reservation, so bounded AST depth alone still allowed repeated
+subtree work to grow with the whole input. The entry now builds the checked scalar-witness index
+once and delegates to the same work-aware walker used by primary proof paths; exhaustion refuses the
+candidate. Static diff review and `git diff --check` pass; no tests or build were run.
