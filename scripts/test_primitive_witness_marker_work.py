@@ -39,7 +39,12 @@ def main() -> None:
     )
     root_classification = function_body(
         REPLAY / "order_and_sign_integrated_helpers.elisa",
-        "proof_kernel_replay_comparison_root_untrusted_with_work",
+        "proof_kernel_replay_comparison_root_untrusted_with_markers_and_work",
+    )
+    core = function_body(ROOT / "src/proof/kernel_core.elisa", "proof_kernel_unsigned_width_valid")
+    unsigned_marker = function_body(
+        REPLAY / "scalar_witness_work.elisa",
+        "proof_kernel_replay_unsigned_marker_info_with_work",
     )
 
     # Invalid fact/callee references and exhausted name scans are incomplete, never
@@ -59,6 +64,18 @@ def main() -> None:
     )
     for marker in markers:
         assert marker in classify
+
+    # The host integer range 8..64 is not the set of supported unsigned widths.
+    # Keep producer and replay marker decoding on the same explicit width set.
+    for width in (
+        "PROOF_KERNEL_U8_WIDTH",
+        "PROOF_KERNEL_U16_WIDTH",
+        "PROOF_KERNEL_U32_WIDTH",
+        "PROOF_KERNEL_MACHINE_WORD_BITS",
+    ):
+        assert width in core
+    assert "ensure result ==" in core
+    assert "proof_kernel_unsigned_width_valid(width_work.value)" in unsigned_marker
     for reader in (
         "proof_kernel_replay_untrusted_operator_marker_with_work",
         "proof_kernel_replay_marker_argument_with_work",
