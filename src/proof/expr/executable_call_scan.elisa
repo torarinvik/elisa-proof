@@ -1,0 +1,177 @@
+# Syntax-only expression scans for call-rooted and executable-call shapes.
+extend ElisaProof:
+        def proof_expr_is_call_rooted(expression: Ast::Expr) -> bool:
+            return proof_expr_is_call_rooted_depth(expression, 0)
+
+    private:
+        def proof_expr_is_call_rooted_depth(expression: Ast::Expr, depth: usize) -> bool:
+            return false if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Call(_, _, _, _):
+                    return true
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_is_call_rooted_depth(inner, depth + 1)
+                _:
+                    return false
+
+    public:
+        # Detect executable calls inside logical expressions. The checker resolves these calls
+        # against its independently built pure-function table; this helper deliberately remains
+        # syntax-only so an unknown call cannot be mistaken for `old(...)`.
+        def proof_expr_has_executable_call(expression: Ast::Expr) -> bool:
+            work: mutable usize = 0
+            return proof_expr_has_executable_call_with_work(expression, &work, PROOF_EXPR_EXECUTABLE_CALL_WORK_LIMIT)
+
+        # `work` is cumulative across calls from one caller. Exhaustion is reported as a possible
+        # executable call so admission checks fail closed without needing a separate status bit.
+        def proof_expr_has_executable_call_with_work(expression: Ast::Expr, work: mutable usize&, limit: usize) -> bool:
+            return true if limit > PROOF_EXPR_EXECUTABLE_CALL_WORK_MAX or work > limit
+            proof_expr_has_executable_call_depth_with_work(expression, 0, work, limit)
+
+    private:
+        const PROOF_EXPR_EXECUTABLE_CALL_WORK_MAX: usize = 1048576
+        const PROOF_EXPR_EXECUTABLE_CALL_WORK_LIMIT: usize = 16384
+
+        def proof_expr_executable_call_charge_with_work(work: mutable usize&, limit: usize, amount: usize) -> bool:
+            return false if work > limit
+            if amount > limit - work:
+                work <- limit
+                return false
+            work <- work + amount
+            true
+
+        def proof_expr_has_executable_call_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, limit: usize) -> bool:
+            return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Absent:
+                    return false
+                Ast::Expr.IntLit(_, _):
+                    return false
+                Ast::Expr.FloatLit(_, _):
+                    return false
+                Ast::Expr.StringLit(_, _):
+                    return false
+                Ast::Expr.CharLit(_, _):
+                    return false
+                Ast::Expr.BoolLit(_, _):
+                    return false
+                Ast::Expr.Ident(_, _):
+                    return false
+                Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                    callee_is_old: mutable bool = false
+                    match callee:
+                        Ast::Expr.Ident(name, _):
+                            return true if not proof_expr_executable_call_charge_with_work(work, limit, sview_len(name))
+                            callee_is_old <- name == "old"
+                        _:
+                            pass
+                    if callee_is_old and arguments.count == 1:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return proof_expr_has_executable_call_depth_with_work(arguments[0], depth + 1, work, limit)
+                    return true
+                Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
+                    return true
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_executable_call_depth_with_work(inner, depth + 1, work, limit)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_executable_call_depth_with_work(operand, depth + 1, work, limit)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_executable_call_depth_with_work(left, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(right, depth + 1, work, limit)
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_executable_call_depth_with_work(object, depth + 1, work, limit)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_executable_call_depth_with_work(base, depth + 1, work, limit)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_executable_call_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(index, depth + 1, work, limit)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_executable_call_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(low, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(high, depth + 1, work, limit)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_executable_call_depth_with_work(object, depth + 1, work, limit)
+                    for argument in arguments:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(argument, depth + 1, work, limit)
+                    return false
+                Ast::Expr.Move(operand, _):
+                    return proof_expr_has_executable_call_depth_with_work(operand, depth + 1, work, limit)
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_executable_call_depth_with_work(operand, depth + 1, work, limit)
+                Ast::Expr.Array(elements, _):
+                    for element in elements:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(element, depth + 1, work, limit)
+                    return false
+                Ast::Expr.Tuple(elements, _):
+                    for element in elements:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(element, depth + 1, work, limit)
+                    return false
+                Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(element, depth + 1, work, limit)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(entry.key, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(entry.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_expr_has_executable_call_depth_with_work(type_expression, depth + 1, work, limit)
+                    for field in fields:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(field.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_executable_call_depth_with_work(base, depth + 1, work, limit)
+                    for field in fields:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_executable_call_depth_with_work(field.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_executable_call_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(then_expr, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(else_expr, depth + 1, work, limit)
+                Ast::Expr.Match(scrutinee, arms, _):
+                    return true if proof_expr_has_executable_call_depth_with_work(scrutinee, depth + 1, work, limit)
+                    for arm in arms:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        return true if:
+                            proof_expr_has_executable_call_depth_with_work(arm.guard, depth + 1, work, limit)
+                            arm.body.count != 1
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_executable_call_depth_with_work(value, depth + 1, work, limit)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_executable_call_depth_with_work(iterable, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(body, depth + 1, work, limit)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_executable_call_depth_with_work(base, depth + 1, work, limit) or proof_expr_has_executable_call_depth_with_work(predicate, depth + 1, work, limit)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        return true if not proof_expr_executable_call_charge_with_work(work, limit, 1)
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_executable_call_depth_with_work(initializer, depth + 1, work, limit)
+                            _:
+                                return true
+                    return proof_expr_has_executable_call_depth_with_work(value, depth + 1, work, limit)
+                Ast::Expr.GetElse(_, _, _):
+                    # Recovery contains executable control flow whose statement effects are
+                    # checked elsewhere. Do not let the unconditional-call test treat it as a
+                    # call-free value merely because this helper has no recovery-state model.
+                    return true
+                Ast::Expr.Lambda(_, _, _):
+                    # A closure body is executable later, outside the current expression walk.
+                    # Keep it opaque until a closure-aware effect model exists.
+                    return true
+                _:
+                    # Unknown expression forms may contain an executable call. Callers use this
+                    # predicate as an admission guard, so new syntax must fail closed.
+                    return true

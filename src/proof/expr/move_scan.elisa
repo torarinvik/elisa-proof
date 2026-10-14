@@ -1,0 +1,151 @@
+# Bounded ownership-effect scan for Move expressions.
+extend ElisaProof:
+    public:
+        def proof_expr_has_move(expression: Ast::Expr) -> bool:
+            work: mutable usize = 0
+            return proof_expr_has_move_with_work(expression, &work, PROOF_EXPR_HAS_MOVE_WORK_LIMIT)
+
+        def proof_expr_has_move_with_work(expression: Ast::Expr, work: mutable usize&, limit: usize) -> bool:
+            return true if limit > PROOF_EXPR_HAS_MOVE_WORK_MAX or work > limit
+            proof_expr_has_move_depth_with_work(expression, 0, work, limit)
+
+    private:
+        const PROOF_EXPR_HAS_MOVE_WORK_LIMIT: usize = 16384
+        const PROOF_EXPR_HAS_MOVE_WORK_MAX: usize = 1048576
+
+        def proof_expr_has_move_charge_with_work(work: mutable usize&, limit: usize, amount: usize) -> bool:
+            return false if work > limit
+            if amount > limit - work:
+                work <- limit
+                return false
+            work <- work + amount
+            true
+
+        def proof_expr_has_move_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, limit: usize) -> bool:
+            return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+            return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
+            match expression:
+                Ast::Expr.Move(_, _):
+                    return true
+                # Invalid is an internal/parser sentinel, not evidence that ownership
+                # effects are absent. Treat it like other unsupported forms.
+                Ast::Expr.Invalid:
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
+                Ast::Expr.Paren(inner, _):
+                    return proof_expr_has_move_depth_with_work(inner, depth + 1, work, limit)
+                Ast::Expr.Unary(_, operand, _):
+                    return proof_expr_has_move_depth_with_work(operand, depth + 1, work, limit)
+                Ast::Expr.Binary(left, _, right, _):
+                    return proof_expr_has_move_depth_with_work(left, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(right, depth + 1, work, limit)
+                Ast::Expr.Call(callee, arguments, _, _):
+                    return true if proof_expr_has_move_depth_with_work(callee, depth + 1, work, limit)
+                    for argument in arguments:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(argument, depth + 1, work, limit)
+                    return false
+                Ast::Expr.Field(object, _, _):
+                    return proof_expr_has_move_depth_with_work(object, depth + 1, work, limit)
+                Ast::Expr.Scope(base, _, _):
+                    return proof_expr_has_move_depth_with_work(base, depth + 1, work, limit)
+                Ast::Expr.Index(object, index, _):
+                    return proof_expr_has_move_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(index, depth + 1, work, limit)
+                Ast::Expr.Slice(object, low, high, _):
+                    return proof_expr_has_move_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(low, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(high, depth + 1, work, limit)
+                Ast::Expr.IndexN(object, arguments, _):
+                    return true if proof_expr_has_move_depth_with_work(object, depth + 1, work, limit)
+                    for argument in arguments:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(argument, depth + 1, work, limit)
+                    return false
+                Ast::Expr.RegionNew(operand, _, _):
+                    return proof_expr_has_move_depth_with_work(operand, depth + 1, work, limit)
+                Ast::Expr.StaticEffectCall(_, _, candidates, arguments, argument_names, _):
+                    # Lowering copies candidate captures and source arguments into fresh arrays.
+                    # Charge the full number of copied rows before invoking the lowering helper.
+                    return true if not proof_expr_has_move_charge_with_work(work, limit, candidates.count)
+                    return true if candidates.count != 1
+                    candidate: Ast::StaticEffectCandidate = candidates[0]
+                    return true if not proof_expr_has_move_charge_with_work(work, limit, arguments.count)
+                    return true if not proof_expr_has_move_charge_with_work(work, limit, argument_names.count)
+                    return true if not proof_expr_has_move_charge_with_work(work, limit, candidate.captures.count)
+                    return true if not proof_expr_has_move_charge_with_work(work, limit, sview_len(candidate.callee) + sview_len(candidate.callee_owner))
+                    return true if candidate.callee == "" or (argument_names.count != 0 and argument_names.count != arguments.count)
+                    # Lowering copies named-argument text into a fresh names array; rows
+                    # alone do not bound that allocation when labels are very large.
+                    for argument_name in argument_names |work, limit|:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, sview_len(argument_name))
+                    # Charge the full AST work over copied inputs before lowering allocates arrays.
+                    for capture in candidate.captures:
+                        return true if proof_expr_has_move_depth_with_work(capture, depth + 1, work, limit)
+                    for argument in arguments:
+                        return true if proof_expr_has_move_depth_with_work(argument, depth + 1, work, limit)
+                    lowered: (known: bool, call: Ast::Expr) = proof_lower_static_effect_call(expression)
+                    if lowered.known:
+                        match lowered.call:
+                            Ast::Expr.Call(callee, _, _, _):
+                                # Captures and arguments were scanned before lowering; the
+                                # generated callee alone is new and can carry no Move payload.
+                                return proof_expr_has_move_depth_with_work(callee, depth + 1, work, limit)
+                            _:
+                                return true
+                    return true
+                Ast::Expr.Array(elements, _) | Ast::Expr.Tuple(elements, _) | Ast::Expr.SetLit(elements, _):
+                    for element in elements:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(element, depth + 1, work, limit)
+                    return false
+                Ast::Expr.DictLit(entries, _):
+                    for entry in entries:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(entry.key, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(entry.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.Construct(type_expression, fields, _):
+                    return true if proof_expr_has_move_depth_with_work(type_expression, depth + 1, work, limit)
+                    for field in fields:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(field.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.RecordUpdate(base, fields, _):
+                    return true if proof_expr_has_move_depth_with_work(base, depth + 1, work, limit)
+                    for field in fields:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(field.value, depth + 1, work, limit)
+                    return false
+                Ast::Expr.If(condition, then_expr, else_expr, _):
+                    return proof_expr_has_move_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(then_expr, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(else_expr, depth + 1, work, limit)
+                Ast::Expr.Match(scrutinee, arms, _) | Ast::Expr.Catch(scrutinee, arms, _):
+                    return true if proof_expr_has_move_depth_with_work(scrutinee, depth + 1, work, limit)
+                    for arm in arms:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_move_depth_with_work(arm.guard, depth + 1, work, limit) or arm.body.count != 1
+                        match arm.body[0]:
+                            Ast::Stmt.Expr(value, _):
+                                return true if proof_expr_has_move_depth_with_work(value, depth + 1, work, limit)
+                            _:
+                                return true
+                    return false
+                Ast::Expr.Comprehension(_, iterable, condition, body, _):
+                    return proof_expr_has_move_depth_with_work(iterable, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(body, depth + 1, work, limit)
+                Ast::Expr.Refinement(base, predicate, _):
+                    return proof_expr_has_move_depth_with_work(base, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(predicate, depth + 1, work, limit)
+                Ast::Expr.Block(statements, value, _, _):
+                    for statement in statements:
+                        return true if not proof_expr_has_move_charge_with_work(work, limit, 1)
+                        match statement:
+                            Ast::Stmt.VarDecl(_, _, initializer, _):
+                                return true if proof_expr_has_move_depth_with_work(initializer, depth + 1, work, limit)
+                            Ast::Stmt.Assign(target, _, initializer, _):
+                                return true if proof_expr_has_move_depth_with_work(target, depth + 1, work, limit) or proof_expr_has_move_depth_with_work(initializer, depth + 1, work, limit)
+                            Ast::Stmt.Expr(statement_expression, _):
+                                return true if proof_expr_has_move_depth_with_work(statement_expression, depth + 1, work, limit)
+                            Ast::Stmt.Return(statement_value, _):
+                                if statement_value is returned:
+                                    return true if proof_expr_has_move_depth_with_work(returned, depth + 1, work, limit)
+                            _:
+                                return true
+                    return proof_expr_has_move_depth_with_work(value, depth + 1, work, limit)
+                _:
+                    # An unmodeled expression form may hide an ownership transition.
+                    return true

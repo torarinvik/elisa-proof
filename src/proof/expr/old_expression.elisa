@@ -1,120 +1,166 @@
 extend ElisaProof:
     public:
         def proof_expr_has_old(expression: Ast::Expr) -> bool:
-            return proof_expr_has_old_depth(expression, 0)
+            work: mutable usize = 0
+            return proof_expr_has_old_with_work(expression, &work, PROOF_EXPR_HAS_OLD_WORK_LIMIT)
+
+        def proof_expr_has_old_with_work(expression: Ast::Expr, work: mutable usize&, limit: usize) -> bool:
+            return true if limit > PROOF_EXPR_HAS_OLD_WORK_MAX or work > limit
+            proof_expr_has_old_depth_with_work(expression, 0, work, limit)
 
     private:
-        def proof_expr_has_old_depth(expression: Ast::Expr, depth: usize) -> bool:
+        const PROOF_EXPR_HAS_OLD_WORK_LIMIT: usize = 16384
+        const PROOF_EXPR_HAS_OLD_WORK_MAX: usize = 1048576
+
+        def proof_expr_has_old_charge_with_work(work: mutable usize&, limit: usize, amount: usize) -> bool:
+            return false if work > limit
+            if amount > limit - work:
+                work <- limit
+                return false
+            work <- work + amount
+            true
+
+        def proof_expr_has_old_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, limit: usize) -> bool:
+            return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
             # At the boundary, treat the term as containing old-state data. This prevents an
             # unvisited nested `old(...)` from being exported as a post-state fact.
             return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
+                # Invalid is a parser or lowering sentinel, not evidence that a term
+                # contains no old-state data. Keep it opaque so callers fail closed.
+                Ast::Expr.Invalid:
+                    return true
+                Ast::Expr.Absent | Ast::Expr.IntLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _):
+                    return false
                 Ast::Expr.Call(callee, arguments, _, _):
-                    return true if:
-                        proof_ident_name(callee) == "old"
-                        proof_expr_has_old_depth(callee, depth + 1)
+                    callee_name: sview = proof_ident_name(callee)
+                    return true if not proof_expr_has_old_charge_with_work(work, limit, sview_len(callee_name))
+                    return true if callee_name == "old" or proof_expr_has_old_depth_with_work(callee, depth + 1, work, limit)
                     for argument in arguments:
-                        return true if proof_expr_has_old_depth(argument, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(argument, depth + 1, work, limit)
                     return false
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     return true
                 Ast::Expr.Paren(inner, _):
-                    return proof_expr_has_old_depth(inner, depth + 1)
+                    return proof_expr_has_old_depth_with_work(inner, depth + 1, work, limit)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_expr_has_old_depth(operand, depth + 1)
+                    return proof_expr_has_old_depth_with_work(operand, depth + 1, work, limit)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_expr_has_old_depth(left, depth + 1) or proof_expr_has_old_depth(right, depth + 1)
+                    return proof_expr_has_old_depth_with_work(left, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(right, depth + 1, work, limit)
                 Ast::Expr.Field(object, _, _):
-                    return proof_expr_has_old_depth(object, depth + 1)
+                    return proof_expr_has_old_depth_with_work(object, depth + 1, work, limit)
                 Ast::Expr.Scope(base, _, _):
-                    return proof_expr_has_old_depth(base, depth + 1)
+                    return proof_expr_has_old_depth_with_work(base, depth + 1, work, limit)
                 Ast::Expr.Index(object, index, _):
-                    return proof_expr_has_old_depth(object, depth + 1) or proof_expr_has_old_depth(index, depth + 1)
+                    return proof_expr_has_old_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(index, depth + 1, work, limit)
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_expr_has_old_depth(object, depth + 1) or proof_expr_has_old_depth(low, depth + 1) or proof_expr_has_old_depth(high, depth + 1)
+                    return proof_expr_has_old_depth_with_work(object, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(low, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(high, depth + 1, work, limit)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_expr_has_old_depth(object, depth + 1)
+                    return true if proof_expr_has_old_depth_with_work(object, depth + 1, work, limit)
                     for argument in arguments:
-                        return true if proof_expr_has_old_depth(argument, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(argument, depth + 1, work, limit)
                     return false
                 Ast::Expr.Move(operand, _):
-                    return proof_expr_has_old_depth(operand, depth + 1)
+                    return proof_expr_has_old_depth_with_work(operand, depth + 1, work, limit)
                 Ast::Expr.RegionNew(operand, _, _):
-                    return proof_expr_has_old_depth(operand, depth + 1)
+                    return proof_expr_has_old_depth_with_work(operand, depth + 1, work, limit)
                 Ast::Expr.Array(elements, _):
                     for element in elements:
-                        return true if proof_expr_has_old_depth(element, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(element, depth + 1, work, limit)
                     return false
                 Ast::Expr.Tuple(elements, _):
                     for element in elements:
-                        return true if proof_expr_has_old_depth(element, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(element, depth + 1, work, limit)
                     return false
                 Ast::Expr.SetLit(elements, _):
                     for element in elements:
-                        return true if proof_expr_has_old_depth(element, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(element, depth + 1, work, limit)
                     return false
                 Ast::Expr.DictLit(entries, _):
                     for entry in entries:
-                        return true if proof_expr_has_old_depth(entry.key, depth + 1) or proof_expr_has_old_depth(entry.value, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(entry.key, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(entry.value, depth + 1, work, limit)
                     return false
                 Ast::Expr.Construct(type_expression, fields, _):
-                    return true if proof_expr_has_old_depth(type_expression, depth + 1)
+                    return true if proof_expr_has_old_depth_with_work(type_expression, depth + 1, work, limit)
                     for field in fields:
-                        return true if proof_expr_has_old_depth(field.value, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(field.value, depth + 1, work, limit)
                     return false
                 Ast::Expr.RecordUpdate(base, fields, _):
-                    return true if proof_expr_has_old_depth(base, depth + 1)
+                    return true if proof_expr_has_old_depth_with_work(base, depth + 1, work, limit)
                     for field in fields:
-                        return true if proof_expr_has_old_depth(field.value, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(field.value, depth + 1, work, limit)
                     return false
                 Ast::Expr.If(condition, then_expr, else_expr, _):
-                    return proof_expr_has_old_depth(condition, depth + 1) or proof_expr_has_old_depth(then_expr, depth + 1) or proof_expr_has_old_depth(else_expr, depth + 1)
+                    return proof_expr_has_old_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(then_expr, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(else_expr, depth + 1, work, limit)
                 Ast::Expr.Comprehension(_, iterable, condition, body, _):
-                    return proof_expr_has_old_depth(iterable, depth + 1) or proof_expr_has_old_depth(condition, depth + 1) or proof_expr_has_old_depth(body, depth + 1)
+                    return proof_expr_has_old_depth_with_work(iterable, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(condition, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(body, depth + 1, work, limit)
                 Ast::Expr.Refinement(base, predicate, _):
-                    return proof_expr_has_old_depth(base, depth + 1) or proof_expr_has_old_depth(predicate, depth + 1)
+                    return proof_expr_has_old_depth_with_work(base, depth + 1, work, limit) or proof_expr_has_old_depth_with_work(predicate, depth + 1, work, limit)
                 Ast::Expr.Match(scrutinee, arms, _):
-                    return true if proof_expr_has_old_depth(scrutinee, depth + 1)
+                    return true if proof_expr_has_old_depth_with_work(scrutinee, depth + 1, work, limit)
                     for arm in arms:
-                        return true if proof_expr_has_old_depth(arm.guard, depth + 1) or proof_body_has_old_depth(arm.body, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(arm.guard, depth + 1, work, limit) or proof_body_has_old_depth(arm.body, work, limit, depth + 1)
                     return false
                 Ast::Expr.Catch(guarded, arms, _):
-                    return true if proof_expr_has_old_depth(guarded, depth + 1)
+                    return true if proof_expr_has_old_depth_with_work(guarded, depth + 1, work, limit)
                     for arm in arms:
-                        return true if proof_expr_has_old_depth(arm.guard, depth + 1) or proof_body_has_old_depth(arm.body, depth + 1)
+                        return true if not proof_expr_has_old_charge_with_work(work, limit, 1)
+                        return true if proof_expr_has_old_depth_with_work(arm.guard, depth + 1, work, limit) or proof_body_has_old_depth(arm.body, work, limit, depth + 1)
                     return false
                 Ast::Expr.GetElse(guarded, recovery, _):
-                    return proof_expr_has_old_depth(guarded, depth + 1) or proof_body_has_old_depth(recovery, depth + 1)
+                    return proof_expr_has_old_depth_with_work(guarded, depth + 1, work, limit) or proof_body_has_old_depth(recovery, work, limit, depth + 1)
                 Ast::Expr.Lambda(_, body, _):
-                    return proof_body_has_old_depth(body, depth + 1)
+                    return proof_body_has_old_depth(body, work, limit, depth + 1)
                 Ast::Expr.Block(statements, value, _, _):
-                    return proof_body_has_old_depth(statements, depth + 1) or proof_expr_has_old_depth(value, depth + 1)
+                    return proof_body_has_old_depth(statements, work, limit, depth + 1) or proof_expr_has_old_depth_with_work(value, depth + 1, work, limit)
                 _:
-                    return false
+                    return true
 
         # Executable call summaries snapshot only the deliberately small case
         # `old(reference[0])`. Any other old-state shape remains opaque at call boundaries.
         # This scan accepts several occurrences only when they all name the same parameter.
         def proof_old_reference_parameter(expression: Ast::Expr) -> (known: bool, found: bool, parameter: sview):
-            return proof_old_reference_parameter_depth(expression, 0)
+            work: mutable usize = 0
+            return proof_old_reference_parameter_with_work(expression, &work, PROOF_EXPR_HAS_OLD_WORK_LIMIT)
 
-        def proof_old_reference_merge(left: (known: bool, found: bool, parameter: sview), right: (known: bool, found: bool, parameter: sview)) -> (known: bool, found: bool, parameter: sview):
+        def proof_old_reference_parameter_with_work(expression: Ast::Expr, work: mutable usize&, limit: usize) -> (known: bool, found: bool, parameter: sview):
+            return (false, true, "") if limit > PROOF_EXPR_HAS_OLD_WORK_MAX or work > limit
+            proof_old_reference_parameter_depth_with_work(expression, 0, work, limit)
+
+        def proof_old_reference_merge(left: (known: bool, found: bool, parameter: sview), right: (known: bool, found: bool, parameter: sview), work: mutable usize&, limit: usize) -> (known: bool, found: bool, parameter: sview):
             return (false, left.found or right.found, "") if not left.known or not right.known
+            return (false, true, "") if left.found and right.found and (not proof_expr_has_old_charge_with_work(work, limit, sview_len(left.parameter)) or not proof_expr_has_old_charge_with_work(work, limit, sview_len(right.parameter)))
             return (false, true, "") if left.found and right.found and left.parameter != right.parameter
             return left if left.found else right
 
-        def proof_old_reference_parameter_depth(expression: Ast::Expr, depth: usize) -> (known: bool, found: bool, parameter: sview):
+        def proof_old_reference_parameter_depth_with_work(expression: Ast::Expr, depth: usize, work: mutable usize&, limit: usize) -> (known: bool, found: bool, parameter: sview):
+            return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, 1)
             return (false, true, "") if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, _, _):
-                    if proof_ident_name(callee) == "old":
+                    callee_name: sview = proof_ident_name(callee)
+                    return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, sview_len(callee_name))
+                    if callee_name == "old":
+                        return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, arguments.count)
                         return (false, true, "") if arguments.count != 1
+                        return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, 1)
                         match arguments[0]:
                             Ast::Expr.Index(object, index, _):
+                                return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, 2)
                                 match object:
                                     Ast::Expr.Ident(parameter, _):
                                         match index:
                                             Ast::Expr.IntLit(offset, _):
+                                                return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, sview_len(parameter))
                                                 return (true, true, parameter) if offset == 0
                                             _:
                                                 pass
@@ -123,16 +169,19 @@ extend ElisaProof:
                             _:
                                 pass
                         return (false, true, "")
-                    found: mutable (known: bool, found: bool, parameter: sview) = proof_old_reference_parameter_depth(callee, depth + 1)
-                    for argument in arguments |found, depth|:
-                        found <- proof_old_reference_merge(found, proof_old_reference_parameter_depth(argument, depth + 1))
+                    return (false, true, "") if not proof_expr_has_old_charge_with_work(work, limit, arguments.count)
+                    found: mutable (known: bool, found: bool, parameter: sview) = proof_old_reference_parameter_depth_with_work(callee, depth + 1, work, limit)
+                    for argument in arguments |found, depth, work, limit|:
+                        found <- proof_old_reference_merge(found, proof_old_reference_parameter_depth_with_work(argument, depth + 1, work, limit), work, limit)
                     return found
                 Ast::Expr.Paren(inner, _):
-                    return proof_old_reference_parameter_depth(inner, depth + 1)
+                    return proof_old_reference_parameter_depth_with_work(inner, depth + 1, work, limit)
                 Ast::Expr.Unary(_, operand, _):
-                    return proof_old_reference_parameter_depth(operand, depth + 1)
+                    return proof_old_reference_parameter_depth_with_work(operand, depth + 1, work, limit)
                 Ast::Expr.Binary(left, _, right, _):
-                    return proof_old_reference_merge(proof_old_reference_parameter_depth(left, depth + 1), proof_old_reference_parameter_depth(right, depth + 1))
+                    left_result: (known: bool, found: bool, parameter: sview) = proof_old_reference_parameter_depth_with_work(left, depth + 1, work, limit)
+                    right_result: (known: bool, found: bool, parameter: sview) = proof_old_reference_parameter_depth_with_work(right, depth + 1, work, limit)
+                    return proof_old_reference_merge(left_result, right_result, work, limit)
                 _:
-                    return (false, true, "") if proof_expr_has_old(expression)
+                    return (false, true, "") if proof_expr_has_old_with_work(expression, work, limit)
                     return (true, false, "")
