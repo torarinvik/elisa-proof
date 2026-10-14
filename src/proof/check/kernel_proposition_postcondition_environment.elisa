@@ -1,6 +1,12 @@
 # Bounded source-derived type context for replaying direct body postconditions.
 extend ElisaProof:
     private:
+        struct ProofSourceKernelPostconditionModuleScope:
+            path: darray[sview]
+            constant_names: mutable darray[sview]
+            constant_types: mutable darray[sview]
+            constant_source_types: mutable darray[Ast::Expr]
+
         struct ProofSourceKernelPostconditionOwnerContext:
             name: sview
             line: u32
@@ -8,158 +14,283 @@ extend ElisaProof:
             parameters: darray[Ast::ParamDecl]
             return_type: Ast::Expr?
             module_path: darray[sview]
-            constant_names: darray[sview]
-            constant_types: darray[sview]
-            constant_source_types: darray[Ast::Expr]
+            module_scope_index: usize
             same_line_functions: usize
             generic_metadata_ambiguous: bool
+
+        struct ProofSourceKernelPostconditionLineSummary:
+            line: u32
+            function_count: usize
+            generic_row_count: usize
 
         # This value is scoped to one source-analysis invocation. Its AST-backed slices and
         # expressions must never be retained in a process-global or report-owned cache.
         struct ProofSourceKernelPostconditionContextIndex:
             owners: mutable darray[ProofSourceKernelPostconditionOwnerContext]
+            owner_index_hashes: mutable darray[u32]
+            owner_index_values: mutable darray[usize]
+            module_scopes: mutable darray[ProofSourceKernelPostconditionModuleScope]
+            module_scope_index_hashes: mutable darray[u32]
+            module_scope_index_values: mutable darray[usize]
+            line_summaries: mutable darray[ProofSourceKernelPostconditionLineSummary]
+            line_index_hashes: mutable darray[u32]
+            line_index_values: mutable darray[usize]
             complete: bool
 
-        def proof_source_kernel_postcondition_owner_keys_collect(declarations: darray[Ast::Decl]&, keys: mutable darray[(name: sview, line: u32, offset: usize)]&, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_source_kernel_postcondition_owner_key_hash(name: sview, line: u32, offset: usize, source_work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_source_kernel_charge_work(sview_len(name), source_work)
+            return (false, 0) if not proof_source_kernel_charge_work(2, source_work)
+            hash: u32 = proof_expr_shape_mix(proof_name_hash(name), line.i64())
+            hash <- proof_expr_shape_mix(hash, offset.i64())
+            return (true, hash)
+
+        def proof_source_kernel_postcondition_owner_index_slot(index: ProofSourceKernelPostconditionContextIndex&, name: sview, line: u32, offset: usize, wanted_hash: u32, source_work: mutable usize&) -> (complete: bool, found: bool, slot: usize, row: usize):
+            missing: usize = index.owners.count
+            capacity: usize = index.owner_index_values.count
+            return (false, false, 0, missing) if:
+                capacity == 0 or capacity != index.owner_index_hashes.count
+                index.owner_index_values.count != capacity
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, name, line, offset, wanted_hash, index, capacity, source_work, missing|:
+                return (false, false, 0, missing) if not proof_source_kernel_charge_work(1, source_work)
+                value: usize = index.owner_index_values[slot]
+                return (true, false, slot, missing) if value == 0
+                return (false, false, 0, missing) if value > index.owners.count
+                row: usize = value - 1
+                if index.owner_index_hashes[slot] == wanted_hash:
+                    owner: ProofSourceKernelPostconditionOwnerContext = index.owners[row]
+                    return (false, false, 0, missing) if not proof_source_kernel_charge_work(sview_len(owner.name) + sview_len(name) + 2, source_work)
+                    return (true, true, slot, row) if owner.line == line and owner.offset == offset and owner.name == name
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0, missing)
+
+        def proof_source_kernel_postcondition_line_index_slot(index: ProofSourceKernelPostconditionContextIndex&, line: u32, source_work: mutable usize&) -> (complete: bool, found: bool, slot: usize, row: usize):
+            missing: usize = index.line_summaries.count
+            capacity: usize = index.line_index_values.count
+            return (false, false, 0, missing) if:
+                capacity == 0 or capacity != index.line_index_hashes.count
+                index.line_index_values.count != capacity
+            wanted_hash: u32 = proof_expr_shape_mix(0, line.i64())
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, line, wanted_hash, index, capacity, source_work, missing|:
+                return (false, false, 0, missing) if not proof_source_kernel_charge_work(1, source_work)
+                value: usize = index.line_index_values[slot]
+                return (true, false, slot, missing) if value == 0
+                return (false, false, 0, missing) if value > index.line_summaries.count
+                row: usize = value - 1
+                if index.line_index_hashes[slot] == wanted_hash and index.line_summaries[row].line == line:
+                    return (true, true, slot, row)
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0, missing)
+
+        def proof_source_kernel_postcondition_module_scope_hash(path: darray[sview]&, source_work: mutable usize&) -> (complete: bool, hash: u32):
+            hash: mutable u32 = 0
+            for segment in path |segment, hash, source_work|:
+                return (false, 0) if not proof_source_kernel_charge_work(1 + sview_len(segment), source_work)
+                hash <- proof_expr_shape_mix(hash, proof_name_hash(segment).i64())
+            return (true, hash)
+
+        def proof_source_kernel_postcondition_module_scope_index_slot(index: ProofSourceKernelPostconditionContextIndex&, path: darray[sview]&, wanted_hash: u32, source_work: mutable usize&) -> (complete: bool, found: bool, slot: usize, row: usize):
+            missing: usize = index.module_scopes.count
+            capacity: usize = index.module_scope_index_values.count
+            return (false, false, 0, missing) if:
+                capacity == 0 or capacity != index.module_scope_index_hashes.count
+                index.module_scope_index_values.count != capacity
+            slot: mutable usize = (wanted_hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity and probes <= PROOF_NAME_INDEX_MAX_CLUSTER |probes, slot, path, wanted_hash, index, capacity, source_work, missing|:
+                return (false, false, 0, missing) if not proof_source_kernel_charge_work(1, source_work)
+                value: usize = index.module_scope_index_values[slot]
+                return (true, false, slot, missing) if value == 0
+                return (false, false, 0, missing) if value > index.module_scopes.count
+                row: usize = value - 1
+                if index.module_scope_index_hashes[slot] == wanted_hash:
+                    scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[row]
+                    if proof_source_kernel_type_path_equal(scope.path, path, source_work):
+                        return (true, true, slot, row)
+                    return (false, false, 0, missing) if source_work > PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0, missing)
+
+        def proof_source_kernel_postcondition_module_scope_add(index: mutable ProofSourceKernelPostconditionContextIndex&, path: darray[sview]&, wanted_hash: u32, source_work: mutable usize&) -> (complete: bool, row: usize):
+            slot_result: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_module_scope_index_slot(index, path, wanted_hash, &source_work)
+            return (false, 0) if not slot_result.complete
+            return (true, slot_result.row) if slot_result.found
+            return (false, 0) if index.module_scopes.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+            return (false, 0) if not proof_source_kernel_charge_work(1, source_work)
+            return (false, 0) if not proof_source_kernel_charge_work(path.count, source_work)
+            copied_path: mutable darray[sview] = []
+            for segment in path |segment, source_work|:
+                return (false, 0) if not proof_source_kernel_charge_work(sview_len(segment), source_work)
+                copied_path.push(segment)
+            row: usize = index.module_scopes.count
+            index.module_scopes.push(ProofSourceKernelPostconditionModuleScope{path: copied_path, constant_names: [], constant_types: [], constant_source_types: []})
+            index.module_scope_index_hashes[slot_result.slot] <- wanted_hash
+            index.module_scope_index_values[slot_result.slot] <- row + 1
+            return (true, row)
+
+        def proof_source_kernel_postcondition_owner_contexts_collect(declarations: darray[Ast::Decl]&, index: mutable ProofSourceKernelPostconditionContextIndex&, module_path: mutable darray[sview]&, module_path_hash: u32, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            for declaration in declarations |keys, source_work, depth|:
+            for declaration in declarations |index, module_path, module_path_hash, source_work, depth|:
                 return false if not proof_source_kernel_charge_work(1, source_work)
                 match declaration:
-                    Ast::Decl.Func(name, _, _, _, _, _, position):
-                        return false if keys.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
-                        return false if not proof_source_kernel_charge_work(sview_len(name), source_work)
-                        keys.push((name, position.line, position.offset.usize()))
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        return false if not proof_source_kernel_postcondition_owner_keys_collect(nested, keys, source_work, depth + 1)
+                    Ast::Decl.Func(name, function_parameters, function_return_type, _, _, _, position):
+                        return false if:
+                            index.owners.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                            function_parameters.count > PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                        key: (complete: bool, hash: u32) = proof_source_kernel_postcondition_owner_key_hash(name, position.line, position.offset.usize(), source_work)
+                        return false if not key.complete
+                        owner_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_owner_index_slot(index, name, position.line, position.offset.usize(), key.hash, &source_work)
+                        return false if not owner_slot.complete or owner_slot.found
+                        line_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_line_index_slot(index, position.line, &source_work)
+                        return false if not line_slot.complete
+                        if line_slot.found:
+                            index.line_summaries[line_slot.row].function_count <- index.line_summaries[line_slot.row].function_count + 1
+                        else:
+                            index.line_summaries.push(ProofSourceKernelPostconditionLineSummary{line: position.line, function_count: 1, generic_row_count: 0})
+                            index.line_index_hashes[line_slot.slot] <- proof_expr_shape_mix(0, position.line.i64())
+                            index.line_index_values[line_slot.slot] <- index.line_summaries.count
+                        parameters: mutable darray[Ast::ParamDecl] = []
+                        return false if not proof_source_kernel_charge_work(function_parameters.count, source_work)
+                        parameters.extend(function_parameters)
+                        return false if not proof_source_kernel_charge_work(module_path.count, source_work)
+                        copied_module_path: mutable darray[sview] = []
+                        for segment in module_path |segment, source_work|:
+                            return false if not proof_source_kernel_charge_work(sview_len(segment), source_work)
+                            copied_module_path.push(segment)
+                        module_scope_index: usize = PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                        if module_path.count != 0:
+                            scope_hash: u32 = module_path_hash
+                            scope: (complete: bool, row: usize) = proof_source_kernel_postcondition_module_scope_add(index, module_path, scope_hash, &source_work)
+                            return false if not scope.complete
+                            module_scope_index <- scope.row
+                        index.owners.push(ProofSourceKernelPostconditionOwnerContext{name: name, line: position.line, offset: position.offset.usize(), parameters: parameters, return_type: function_return_type, module_path: copied_module_path, module_scope_index: module_scope_index, same_line_functions: 0, generic_metadata_ambiguous: false})
+                        index.owner_index_hashes[owner_slot.slot] <- key.hash
+                        index.owner_index_values[owner_slot.slot] <- index.owners.count
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_source_kernel_charge_work(1 + sview_len(module_name), source_work)
+                        parent_path: darray[sview] = module_path
+                        module_path <- proof_global_constant_scope_with_module(module_path, module_name)
+                        nested_hash: (complete: bool, hash: u32) = proof_source_kernel_postcondition_module_scope_hash(module_path, source_work)
+                        return false if not nested_hash.complete
+                        complete: bool = proof_source_kernel_postcondition_owner_contexts_collect(nested, index, module_path, nested_hash.hash, source_work, depth + 1)
+                        module_path <- parent_path
+                        return false if not complete
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_kernel_postcondition_owner_contexts_collect(nested, index, module_path, module_path_hash, source_work, depth + 1)
+                    _:
+                        pass
+            return true
+
+        def proof_source_kernel_postcondition_constants_collect(declarations: darray[Ast::Decl]&, index: mutable ProofSourceKernelPostconditionContextIndex&, module_path: mutable darray[sview]&, module_path_hash: u32, module_scope_index: usize, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
+            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
+            for declaration in declarations |index, module_path, module_path_hash, module_scope_index, source_work, depth|:
+                return false if not proof_source_kernel_charge_work(1, source_work)
+                match declaration:
+                    Ast::Decl.Const(constant_name, constant_type, _, _, _):
+                        if module_scope_index < index.module_scopes.count:
+                            has_type: bool = match constant_type:
+                                Ast::Expr.Absent: false
+                                _: true
+                            if has_type:
+                                scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[module_scope_index]
+                                return false if scope.constant_names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                                return false if not proof_replay_summary_expr_charge_with_limit(constant_type, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
+                                type_name: sview = proof_source_type_spelling(constant_type, 0)
+                                return false if not proof_source_kernel_charge_work(sview_len(constant_name), source_work)
+                                return false if not proof_source_kernel_charge_work(sview_len(type_name), source_work)
+                                index.module_scopes[module_scope_index].constant_names.push(constant_name)
+                                index.module_scopes[module_scope_index].constant_types.push(type_name)
+                                index.module_scopes[module_scope_index].constant_source_types.push(constant_type)
+                    Ast::Decl.Module(module_name, nested, _):
+                        return false if not proof_source_kernel_charge_work(1 + sview_len(module_name), source_work)
+                        parent_path: darray[sview] = module_path
+                        module_path <- proof_global_constant_scope_with_module(module_path, module_name)
+                        nested_hash: (complete: bool, hash: u32) = proof_source_kernel_postcondition_module_scope_hash(module_path, source_work)
+                        return false if not nested_hash.complete
+                        scope_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_module_scope_index_slot(index, module_path, nested_hash.hash, &source_work)
+                        return false if not scope_slot.complete
+                        nested_scope: usize = scope_slot.row if scope_slot.found else PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                        complete: bool = proof_source_kernel_postcondition_constants_collect(nested, index, module_path, nested_hash.hash, nested_scope, source_work, depth + 1)
+                        module_path <- parent_path
+                        return false if not complete
+                    Ast::Decl.Scoped(nested, _):
+                        return false if not proof_source_kernel_postcondition_constants_collect(nested, index, module_path, module_path_hash, module_scope_index, source_work, depth + 1)
                     _:
                         pass
             return true
 
         def proof_source_kernel_postcondition_context_index_build(declarations: darray[Ast::Decl]&, generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (complete: bool, index: ProofSourceKernelPostconditionContextIndex) can[Memory.Allocate, Abort.Panic]:
-            empty: ProofSourceKernelPostconditionContextIndex = ProofSourceKernelPostconditionContextIndex{owners: [], complete: false}
+            empty: ProofSourceKernelPostconditionContextIndex = ProofSourceKernelPostconditionContextIndex{owners: [], owner_index_hashes: [], owner_index_values: [], module_scopes: [], module_scope_index_hashes: [], module_scope_index_values: [], line_summaries: [], line_index_hashes: [], line_index_values: [], complete: false}
             return (false, empty) if not generic_params_valid or generic_param_lines.count != generic_param_names.count
-            keys: mutable darray[(name: sview, line: u32, offset: usize)] = []
-            return (false, empty) if not proof_source_kernel_postcondition_owner_keys_collect(declarations, &keys, &source_work, 0)
-            owners: mutable darray[ProofSourceKernelPostconditionOwnerContext] = []
-            for key_index in 0..<keys.count |key_index, keys, owners, declarations, generic_param_lines, generic_param_names, source_work|:
-                key: (name: sview, line: u32, offset: usize) = keys[key_index]
-                duplicate_key: mutable bool = false
-                for previous in owners |previous, key, duplicate_key, source_work|:
-                    return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(key.name) + sview_len(previous.name), source_work)
-                    duplicate_key <- true if previous.name == key.name and previous.line == key.line and previous.offset == key.offset
-                return (false, empty) if duplicate_key
-                owner_matches: mutable usize = 0
-                same_line_functions: mutable usize = 0
-                parameters: mutable darray[Ast::ParamDecl] = []
-                return_type: mutable Ast::Expr? = null
-                module_path: mutable darray[sview] = []
-                current_path: mutable darray[sview] = []
-                return (false, empty) if:
-                    not proof_source_kernel_postcondition_owner_validate(declarations, key.name, key.line, key.offset, &owner_matches, &same_line_functions, &parameters, &return_type, &module_path, &current_path, &source_work, 0)
-                    owner_matches != 1
-                generic_rows: mutable usize = 0
-                for generic_index in 0..<generic_param_lines.count |generic_index, generic_param_lines, generic_param_names, key, generic_rows, source_work|:
-                    return (false, empty) if not proof_source_kernel_charge_work(1, source_work)
-                    if generic_param_lines[generic_index] == key.line:
-                        return (false, empty) if not proof_source_kernel_charge_work(sview_len(generic_param_names[generic_index]), source_work)
-                        generic_rows <- generic_rows + 1
-                generic_ambiguous: bool = generic_rows != 0 and same_line_functions != 1
-                constant_names: mutable darray[sview] = []
-                constant_types: mutable darray[sview] = []
-                constant_source_types: mutable darray[Ast::Expr] = []
-                if module_path.count != 0:
-                    return (false, empty) if not proof_source_kernel_collect_scope_constants_with_work(declarations, module_path, 0, &constant_names, &constant_types, &constant_source_types, &source_work, 0)
-                owners.push(ProofSourceKernelPostconditionOwnerContext{name: key.name, line: key.line, offset: key.offset, parameters: parameters, return_type: return_type, module_path: module_path, constant_names: constant_names, constant_types: constant_types, constant_source_types: constant_source_types, same_line_functions: same_line_functions, generic_metadata_ambiguous: generic_ambiguous})
-            index: ProofSourceKernelPostconditionContextIndex = ProofSourceKernelPostconditionContextIndex{owners: owners, complete: source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT}
+            capacity: usize = proof_name_index_capacity(PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT)
+            return (false, empty) if capacity == 0
+            return (false, empty) if not proof_source_kernel_charge_work(capacity * 6, source_work)
+            index: mutable ProofSourceKernelPostconditionContextIndex = empty
+            index.owner_index_hashes.resize(capacity)
+            index.owner_index_values.resize(capacity)
+            index.module_scope_index_hashes.resize(capacity)
+            index.module_scope_index_values.resize(capacity)
+            index.line_index_hashes.resize(capacity)
+            index.line_index_values.resize(capacity)
+            for slot in 0..<capacity |slot, index|:
+                index.owner_index_values[slot] <- 0
+                index.module_scope_index_values[slot] <- 0
+                index.line_index_values[slot] <- 0
+            module_path: mutable darray[sview] = []
+            return (false, empty) if not proof_source_kernel_postcondition_owner_contexts_collect(declarations, &index, &module_path, 0, &source_work, 0)
+            if index.owners.count == 0:
+                index.complete <- source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
+                return (index.complete, index)
+            for generic_index in 0..<generic_param_lines.count |generic_index, generic_param_lines, generic_param_names, index, source_work|:
+                return (false, empty) if not proof_source_kernel_charge_work(1, source_work)
+                line_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_line_index_slot(index, generic_param_lines[generic_index], &source_work)
+                return (false, empty) if not line_slot.complete
+                if line_slot.found:
+                    return (false, empty) if not proof_source_kernel_charge_work(sview_len(generic_param_names[generic_index]), source_work)
+                    index.line_summaries[line_slot.row].generic_row_count <- index.line_summaries[line_slot.row].generic_row_count + 1
+            for owner_index in 0..<index.owners.count |owner_index, index, source_work|:
+                return (false, empty) if not proof_source_kernel_charge_work(1, source_work)
+                owner: mutable ProofSourceKernelPostconditionOwnerContext = index.owners[owner_index]
+                line_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_line_index_slot(index, owner.line, &source_work)
+                return (false, empty) if not line_slot.complete or not line_slot.found
+                summary: ProofSourceKernelPostconditionLineSummary = index.line_summaries[line_slot.row]
+                owner.same_line_functions <- summary.function_count
+                owner.generic_metadata_ambiguous <- summary.generic_row_count != 0 and summary.function_count != 1
+                index.owners[owner_index] <- owner
+            return (false, empty) if index.module_scopes.count != 0 and not proof_source_kernel_postcondition_constants_collect(declarations, &index, &module_path, 0, PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT, &source_work, 0)
+            index.complete <- source_work <= PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT
             return (index.complete, index)
-
-        def proof_source_kernel_postcondition_owner_validate(declarations: darray[Ast::Decl]&, owner_name: sview, owner_line: u32, owner_offset: usize, owner_matches: mutable usize&, same_line_functions: mutable usize&, parameters: mutable darray[Ast::ParamDecl]&, return_type: mutable Ast::Expr?, module_path: mutable darray[sview]&, current_path: mutable darray[sview]&, source_work: mutable usize&, depth: usize) -> bool:
-            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            for declaration in declarations |owner_name, owner_line, owner_offset, owner_matches, same_line_functions, parameters, return_type, module_path, current_path, source_work, depth|:
-                return false if not proof_source_kernel_charge_work(1, source_work)
-                match declaration:
-                    Ast::Decl.Func(name, function_parameters, function_return_type, _, _, _, position):
-                        if position.line == owner_line:
-                            same_line_functions <- same_line_functions + 1
-                            return false if not proof_source_kernel_charge_work(sview_len(name) + sview_len(owner_name), source_work)
-                            if name == owner_name and position.line == owner_line and position.offset.usize() == owner_offset:
-                                owner_matches <- owner_matches + 1
-                                return false if owner_matches > 1
-                                return false if function_parameters.count > PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT - parameters.count
-                                return false if not proof_source_kernel_charge_work(function_parameters.count + current_path.count, source_work)
-                                parameters.extend(function_parameters)
-                                return_type <- function_return_type
-                                for path_name in current_path |path_name, source_work|:
-                                    return false if not proof_source_kernel_charge_work(sview_len(path_name), source_work)
-                                module_path.extend(current_path)
-                    Ast::Decl.Module(_, nested, _) | Ast::Decl.Scoped(nested, _):
-                        match declaration:
-                            Ast::Decl.Module(module_name, _, _):
-                                return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
-                                current_path.push(module_name)
-                                complete: bool = proof_source_kernel_postcondition_owner_validate(nested, owner_name, owner_line, owner_offset, &owner_matches, &same_line_functions, parameters, return_type, module_path, current_path, source_work, depth + 1)
-                                current_path.pop()
-                                return false if not complete
-                            _:
-                                return false if not proof_source_kernel_postcondition_owner_validate(nested, owner_name, owner_line, owner_offset, &owner_matches, &same_line_functions, parameters, return_type, module_path, current_path, source_work, depth + 1)
-                    _:
-                        pass
-            return true
-
-        def proof_source_kernel_collect_scope_constants_with_work(declarations: darray[Ast::Decl]&, module_path: darray[sview]&, level: usize, names: mutable darray[sview]&, types: mutable darray[sview]&, source_types: mutable darray[Ast::Expr]&, source_work: mutable usize&, depth: usize) -> bool can[Memory.Allocate, Abort.Panic]:
-            return false if depth >= PROOF_PROPOSITION_TYPE_DEPTH_LIMIT
-            for declaration in declarations |module_path, level, names, types, source_types, source_work, depth|:
-                return false if not proof_source_kernel_charge_work(1, source_work)
-                match declaration:
-                    Ast::Decl.Const(constant_name, constant_type, _, _, _):
-                        if level == module_path.count:
-                            has_type: bool = match constant_type:
-                                Ast::Expr.Absent: false
-                                _: true
-                            if has_type:
-                                return false if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
-                                return false if not proof_replay_summary_expr_charge_with_limit(constant_type, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
-                                type_name: sview = proof_source_type_spelling(constant_type, 0)
-                                return false if not proof_source_kernel_charge_work(sview_len(constant_name), source_work)
-                                return false if not proof_source_kernel_charge_work(sview_len(type_name), source_work)
-                                names.push(constant_name)
-                                types.push(type_name)
-                                source_types.push(constant_type)
-                    Ast::Decl.Module(module_name, body, _):
-                        if level < module_path.count:
-                            return false if not proof_source_kernel_charge_work(sview_len(module_name), source_work)
-                            return false if not proof_source_kernel_charge_work(sview_len(module_path[level]), source_work)
-                            if module_name == module_path[level]:
-                                return false if not proof_source_kernel_collect_scope_constants_with_work(body, module_path, level + 1, names, types, source_types, source_work, depth + 1)
-                    Ast::Decl.Scoped(body, _):
-                        return false if not proof_source_kernel_collect_scope_constants_with_work(body, module_path, level, names, types, source_types, source_work, depth + 1)
-                    _:
-                        pass
-            return true
 
         def proof_source_kernel_postcondition_environment_from_index(index: ProofSourceKernelPostconditionContextIndex&, owner_name: sview, owner_line: u32, owner_offset: usize, declarations: darray[Ast::Decl]&, type_index: ProofSourceKernelTypeIndex, tuple_label_index: ProofSourceKernelTupleLabelIndex, global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], generic_param_lines: darray[u32]&, generic_param_names: darray[sview]&, generic_params_valid: bool, source_work: mutable usize&) -> (known: bool, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment) can[Memory.Allocate, Abort.Panic]:
             empty: ElisaProofKernelCore::ProofKernelTypeEnvironment = ElisaProofKernelCore::ProofKernelTypeEnvironment{global_bindings: global_bindings, bindings: []}
-            return (false, empty) if not index.complete or not generic_params_valid or generic_param_lines.count != generic_param_names.count
-            owner_index: mutable usize = index.owners.count
-            for candidate in 0..<index.owners.count |candidate, index, owner_name, owner_line, owner_offset, owner_index, source_work|:
-                owner: ProofSourceKernelPostconditionOwnerContext = index.owners[candidate]
-                return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(owner.name) + sview_len(owner_name), source_work)
-                if owner.name == owner_name and owner.line == owner_line and owner.offset == owner_offset:
-                    return (false, empty) if owner_index != index.owners.count
-                    owner_index <- candidate
-            return (false, empty) if owner_index >= index.owners.count
-            owner: ProofSourceKernelPostconditionOwnerContext = index.owners[owner_index]
+            return (false, empty) if:
+                not index.complete or not generic_params_valid or generic_param_lines.count != generic_param_names.count
+                index.owner_index_hashes.count != index.owner_index_values.count
+            key: (complete: bool, hash: u32) = proof_source_kernel_postcondition_owner_key_hash(owner_name, owner_line, owner_offset, source_work)
+            return (false, empty) if not key.complete
+            owner_slot: (complete: bool, found: bool, slot: usize, row: usize) = proof_source_kernel_postcondition_owner_index_slot(index, owner_name, owner_line, owner_offset, key.hash, &source_work)
+            return (false, empty) if not owner_slot.complete or not owner_slot.found
+            owner: ProofSourceKernelPostconditionOwnerContext = index.owners[owner_slot.row]
             return (false, empty) if owner.generic_metadata_ambiguous
             names: mutable darray[sview] = []
             types: mutable darray[sview] = []
             source_types: mutable darray[Ast::Expr] = []
-            return (false, empty) if owner.constant_names.count != owner.constant_types.count or owner.constant_names.count != owner.constant_source_types.count
-            for constant_index in 0..<owner.constant_names.count |constant_index, owner, names, types, source_types, source_work|:
-                return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
-                return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(owner.constant_names[constant_index]) + sview_len(owner.constant_types[constant_index]), source_work)
-                names.push(owner.constant_names[constant_index])
-                types.push(owner.constant_types[constant_index])
-                source_types.push(owner.constant_source_types[constant_index])
+            if owner.module_scope_index != PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT:
+                return (false, empty) if owner.module_scope_index >= index.module_scopes.count
+                scope: ProofSourceKernelPostconditionModuleScope = index.module_scopes[owner.module_scope_index]
+                return (false, empty) if scope.constant_names.count != scope.constant_types.count or scope.constant_names.count != scope.constant_source_types.count
+                for constant_index in 0..<scope.constant_names.count |constant_index, scope, names, types, source_types, source_work|:
+                    return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
+                    return (false, empty) if not proof_source_kernel_charge_work(1 + sview_len(scope.constant_names[constant_index]) + sview_len(scope.constant_types[constant_index]), source_work)
+                    names.push(scope.constant_names[constant_index])
+                    types.push(scope.constant_types[constant_index])
+                    source_types.push(scope.constant_source_types[constant_index])
             for parameter in owner.parameters |owner, names, types, source_types, source_work|:
                 return (false, empty) if names.count >= PROOF_SOURCE_KERNEL_CONTEXT_NAME_LIMIT
                 return (false, empty) if not proof_replay_summary_expr_charge_with_limit(parameter.type_expression, source_work, PROOF_REPLAY_SUMMARY_SOURCE_WORK_LIMIT)
