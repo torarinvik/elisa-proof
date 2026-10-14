@@ -25,9 +25,11 @@ def run(payload, code=0):
     assert result == payload
     return list(scope["failures"])
 
-valid = {"replay": {"certificates": 2, "replayed": 2, "gaps": 0}}
+valid = {"status": "proved",
+         "summary": {"obligations": 2, "proven": 2, "unproven": 0, "semantic_errors": 0},
+         "replay": {"certificates": 2, "replayed": 2, "gaps": 0}}
 assert run(valid) == []
-assert run(valid, 1) == []  # Refused source claims can still replay cleanly.
+assert any("disagrees with report verdict" in f for f in run(valid, 1))
 assert any("replay gaps" in f for f in run(
     {"replay": {"certificates": 2, "replayed": 2, "gaps": 1}}))
 assert any("unreplayed certificates" in f for f in run(

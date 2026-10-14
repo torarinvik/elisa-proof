@@ -61,8 +61,10 @@ for path, caller in (
     caller_body = body(path, caller)
     assert "return false if not proof_kernel_replay_close_plain_bounds_with_goal_work" in caller_body, caller
 
-legacy_caller = body(ROOT / "src/proof/kernel_replay/unsigned_bounds.elisa", "proof_kernel_replay_unsigned_facts_safe")
-assert "return false if not proof_kernel_replay_close_plain_bounds(nodes, children, facts, &closed)" in legacy_caller
+unsigned_bounds = (ROOT / "src/proof/kernel_replay/unsigned_bounds.elisa").read_text(encoding="utf-8")
+assert not re.search(r"\bdef\s+proof_kernel_replay_unsigned_facts_safe\b", unsigned_bounds)
+assert not re.search(r"\bdef\s+proof_kernel_replay_unsigned_goal_safe\b", unsigned_bounds)
+assert not re.search(r"\bdef\s+proof_kernel_replay_unsigned_expression_safe\b", unsigned_bounds)
 
 metered_closure = body(goal_difference, "proof_kernel_replay_difference_bound_closure_with_work")
 assert metered_closure.index("return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT") < metered_closure.index("return true if constraints.count == 0")

@@ -80,12 +80,16 @@ assert "root_target.blocks_parent" in replay_builtin_head
 shape = function_body("proof_replay_call_conversion_type_argument_shape_safe")
 assert shape.count("proof_replay_call_conversion_builtin_generic_type_head(head, resolution_owner, resolution_owner_known, call_target, work)") == 3
 single_argument_alias = shape.split("Ast::Expr.Index(head, argument, _):", 1)[1].split("Ast::Expr.IndexN(head, arguments, _):", 1)[0]
+assert single_argument_alias.index("proof_replay_call_conversion_alias_formal_head(root.name") < single_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head")
+assert single_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head") < single_argument_alias.index("proof_replay_call_conversion_generic_name(root.name")
 assert "field_conversion_alias_generic_application_valid[application.row]" in single_argument_alias
 assert "field_conversion_alias_generic_formal_counts[application.row] != 1" in single_argument_alias
 assert "if not application.found:" in single_argument_alias
 assert "type_argument_shape_safe(head," in single_argument_alias
 assert "type_argument_shape_safe(argument," in single_argument_alias
 multi_argument_alias = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
+assert multi_argument_alias.index("proof_replay_call_conversion_alias_formal_head(root.name") < multi_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head")
+assert multi_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head") < multi_argument_alias.index("proof_replay_call_conversion_generic_name(root.name")
 assert "field_conversion_alias_has_formals[application.row]" in multi_argument_alias
 assert "field_conversion_alias_generic_application_valid[application.row]" in multi_argument_alias
 assert "arguments.count != call_target.aliases.field_conversion_alias_generic_formal_counts[application.row]" in multi_argument_alias
