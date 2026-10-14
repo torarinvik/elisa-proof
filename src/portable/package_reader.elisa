@@ -1,4 +1,4 @@
-# Strict reader for `elisa-proof-package-v3`, with compatibility for package v1 and v2.
+# Strict reader for `elisa-proof-package-v4`, with compatibility for package v1 through v3.
 # It is part of the trusted replay base: whatever it builds is what the kernel checks, so it
 # accepts one spelling of each package and nothing else.
 #
@@ -13,7 +13,12 @@
 
 const PROOF_PACKAGE_INPUT_FORMAT_V1: sview = "elisa-proof-package-v1"
 const PROOF_PACKAGE_INPUT_FORMAT_V2: sview = "elisa-proof-package-v2"
-const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v3"
+const PROOF_PACKAGE_INPUT_FORMAT_V3: sview = "elisa-proof-package-v3"
+const PROOF_PACKAGE_INPUT_FORMAT: sview = "elisa-proof-package-v4"
+
+def proof_package_theorem_keys(format: sview) -> darray[sview]:
+    return ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint", "hypothesis_origins_complete"] if format == PROOF_PACKAGE_INPUT_FORMAT
+    ["goal_id", "name", "line", "rule", "hypotheses", "hypothesis_origins", "conclusion", "statement", "goal_fingerprint"]
 
 const module ProofPackageLimit:
     THEOREMS: usize = 65536
@@ -311,16 +316,20 @@ def proof_package_build_nodes(raw: darray[ProofPackageRawNode]&, pool: darray[u8
 # package that claims more trust than the format grants (say, kernel-checked hypotheses) is not
 # a package of this format.
 def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdict:
-    root_keys: darray[sview] = ["format", "source", "trust", "kernel", "theorems"]
-    return proof_package_malformed("package-schema") if not proof_package_has_exactly(root, &root_keys)
     format: (known: bool, value: sview) = proof_package_string_field(root, "format")
     format_v1: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT_V1
     format_v2: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT_V2
-    format_v3: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT
-    return proof_package_malformed("format") if not format_v1 and not format_v2 and not format_v3
-    source_v2: bool = format_v2 or format_v3
+    format_v3: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT_V3
+    format_v4: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT
+    return proof_package_malformed("format") if not format_v1 and not format_v2 and not format_v3 and not format_v4
+    root_keys: darray[sview] = ["format", "source", "trust", "kernel", "theorems", "origin_metadata_complete"] if format_v4
+    root_keys <- ["format", "source", "trust", "kernel", "theorems"] if not format_v4
+    return proof_package_malformed("package-schema") if not proof_package_has_exactly(root, &root_keys)
+    source_v2: bool = format_v2 or format_v3 or format_v4
     source: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "source")
-    source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated", "expanded", "files"] if source_v2 else ["path", "bytes", "fingerprint", "admissible", "authenticated"]
+    source_keys: darray[sview] = ["path", "bytes", "fingerprint", "admissible", "authenticated", "expanded", "files", "goal_status_snapshot_complete"] if format_v4
+    source_keys <- ["path", "bytes", "fingerprint", "admissible", "authenticated", "expanded", "files"] if not format_v4 and source_v2
+    source_keys <- ["path", "bytes", "fingerprint", "admissible", "authenticated"] if not source_v2
     return proof_package_malformed("source-schema") if not source.known or not proof_package_has_exactly(source.value, &source_keys)
     path: (known: bool, value: sview) = proof_package_string_field(source.value, "path")
     bytes: (known: bool, value: usize) = proof_package_index_field(source.value, "bytes")
@@ -332,6 +341,10 @@ def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdi
     return proof_package_malformed("source-schema") if not fingerprint.known or not proof_package_has_exactly(fingerprint.value, &fingerprint_keys)
     fingerprint_value: (known: bool, value: usize) = proof_package_index_field(fingerprint.value, "value")
     return proof_package_malformed("source-schema") if not proof_package_string_is(proof_package_string_field(fingerprint.value, "algorithm"), "fnv1a32") or not fingerprint_value.known or fingerprint_value.value >= ProofPackageNumber::U32_BOUND
+    if format_v4:
+        snapshot_complete: (known: bool, value: bool) = proof_package_bool_field(source.value, "goal_status_snapshot_complete")
+        return proof_package_malformed("source-schema") if not snapshot_complete.known
+        return proof_package_rejected("source-inadmissible") if not snapshot_complete.value
     if source_v2:
         expanded: (known: bool, value: sview) = proof_package_source_text_field(source.value, "expanded")
         files: (known: bool, value: JsonValueHandle[r], count: usize) = proof_package_array_field(source.value, "files")
@@ -341,10 +354,13 @@ def proof_package_read_header[@r](root: JsonValueHandle[r]) -> ProofPackageVerdi
             path_entry: (known: bool, value: sview) = proof_package_string_value(entry)
             return proof_package_malformed("source-schema") if not path_entry.known or sview_len(path_entry.value) == 0
     trust: (known: bool, value: JsonValueHandle[r]) = ElisaProofJson::field(root, "trust")
-    trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 else ["hypotheses", "source_correspondence", "fingerprints"]
+    if format_v4:
+        origin_metadata_complete: (known: bool, value: bool) = proof_package_bool_field(root, "origin_metadata_complete")
+        return proof_package_malformed("package-schema") if not origin_metadata_complete.known
+    trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 or format_v4 else ["hypotheses", "source_correspondence", "fingerprints"]
     return proof_package_malformed("trust-schema") if:
         not trust.known or not proof_package_has_exactly(trust.value, &trust_keys)
-        (format_v3 and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))
+        ((format_v3 or format_v4) and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))
         not proof_package_string_is(proof_package_string_field(trust.value, "hypotheses"), "adapter")
         not proof_package_string_is(proof_package_string_field(trust.value, "source_correspondence"), "adapter")
         not proof_package_string_is(proof_package_string_field(trust.value, "fingerprints"), "identity-hint")

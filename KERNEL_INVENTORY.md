@@ -292,7 +292,7 @@ and blank lines. `scripts/test_kernel_inventory.py` checks the dependency claims
 | Trusted certificate admission | `proof/certificate_admission.elisa` | 82 | Admits trace-certificate roots by kind and version tag. |
 | Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | 14,734 | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
 | Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | 29,525 | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
-| Trusted package reader | `portable/*`, `app/portable_io.elisa` | 351 | Reads v1/v2 packages under their legacy exact schemas and v3 packages with a required classical logic-mode declaration, then hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
+| Trusted package reader | `portable/*`, `app/portable_io.elisa` | 351 | Reads v1/v2 packages under their legacy exact schemas, v3 packages with a required classical logic-mode declaration, and v4 packages with explicit goal-status and hypothesis-origin completeness fields; every sequent goes to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
 | Trusted correspondence checker | `correspondence/*` | 3,116 | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | 12,512 | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair and portable I/O | 3,138 | Output and CLI. Fingerprints are binding guards only (limitation 2). |
@@ -359,7 +359,7 @@ propositional complement rules for abstract atoms.
 | Comparison denial in arithmetic replay | `kernel_replay/unsigned_pinned_comparison.elisa`: `proof_kernel_replay_disjunction_refutes_comparison`; `kernel_replay/arithmetic_refutation.elisa`: `proof_kernel_replay_facts_arithmetically_inconsistent_with_work`, `proof_kernel_replay_facts_order_complementary_with_work`; `kernel_replay/goal_metered_negated_bounds.elisa`: `proof_kernel_replay_collect_negated_comparison_with_work`; `kernel_replay/term_arithmetic.elisa`: `proof_kernel_replay_collect_negated_bounds` | Contradiction checks need only establish that the witnessed primitive comparisons are disjoint (with exact or supported mirrored operands); they do not infer a general proposition complement. Translating a negated ordering comparison into a bound requires witnessed integers and the admitted total-order theory. All kernel paths are bounded by replay work limits. |
 | Disjunctive refutation by case split | `kernel_replay/unsigned_pinned_comparison.elisa`: `proof_kernel_replay_disjunction_refutes_conjunction` | A disjunction of comparison denials can refute a conjunction when each branch refutes a conjunct. This is bounded structural case analysis over the admitted comparison fragment. |
 
-Ordinary reports, portable replay results, and package v3 identify the global mode as
+Ordinary reports, portable replay results, and packages v3/v4 identify the global mode as
 `classical_propositional`; `trusted_assumptions: []` continues to mean no source/user axiom was
 accepted. Package v1/v2 retain their old schemas and are interpreted under the same current
 classical kernel. The output does not yet identify which individual theorem roots actually use
@@ -523,6 +523,7 @@ dependencies are not a verification claim.
 | `proof_source_conversion_generic_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_generic_line_index_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_generic_owner_index_ensure` | `proof/check/source_conversion_name_lookups.elisa` | source adapter |
+| `proof_source_conversion_generic_owner_lookup` | `proof/check/source_conversion_name_lookups.elisa` | source adapter; exact owner-row authentication during structural replay |
 | `proof_source_conversion_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_root_alias_visibility_scan` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_scope_expression_key_hash` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
@@ -538,6 +539,7 @@ dependencies are not a verification claim.
 | `proof_source_field_conversion_index_build` | `proof/check/field_conversion_index.elisa` | source adapter |
 | `proof_source_function_has_drop_risk` | `proof/check/implicit_effect_guard.elisa` | source adapter |
 | `proof_source_generic_owner_param_index_build` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
+| `proof_source_generic_owner_param_line` | `proof/check/source_generic_owner_param_index.elisa` | source adapter; decode owner-bound generic line during structural replay |
 | `proof_source_generic_owner_param_present_in_index_with_work` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
 | `proof_source_generic_owner_param_present_with_work` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
 | `proof_source_kernel_base_context` | `proof/check/kernel_proposition_environment.elisa` | source adapter |
@@ -600,6 +602,7 @@ dependencies are not a verification claim.
 | `proof_package_index_field` | `portable/package_reader.elisa` | package reader |
 | `proof_package_input_preflight` | `portable/package_reader.elisa` | package reader |
 | `proof_package_malformed` | `portable/package_reader.elisa` | package reader |
+| `proof_package_theorem_keys` | `portable/package_reader.elisa` | package correspondence adapter; canonical package-format theorem keys |
 | `proof_package_ok` | `portable/package_reader.elisa` | package reader |
 | `proof_package_over_budget` | `portable/package_reader.elisa` | package reader |
 | `proof_package_read_header` | `portable/package_reader.elisa` | package reader |

@@ -68,10 +68,15 @@ require('"oversized-json-index-token"' in numeric_regressions
 
 # The format only accepts adapter-supplied hypotheses/correspondence and an identity-hint digest;
 # source authentication must remain false. These are exactly the labels the result may report.
-require('trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 else ["hypotheses", "source_correspondence", "fingerprints"]' in header,
+require('trust_keys: darray[sview] = ["logic_mode", "hypotheses", "source_correspondence", "fingerprints"] if format_v3 or format_v4 else ["hypotheses", "source_correspondence", "fingerprints"]' in header,
         "portable input trust schema changed; review and inventory the new fields")
-require('(format_v3 and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))' in header,
-        "v3 package reader no longer requires the current kernel logic mode")
+require('((format_v3 or format_v4) and not proof_package_string_is(proof_package_string_field(trust.value, "logic_mode"), "classical_propositional"))' in header,
+        "v3/v4 package reader no longer requires the current kernel logic mode")
+require('format_v4: bool = format.known and format.value == PROOF_PACKAGE_INPUT_FORMAT' in header
+        and '"goal_status_snapshot_complete"' in header
+        and '"origin_metadata_complete"' in header
+        and '"hypothesis_origins_complete"' in reader,
+        "v4 output metadata is not admitted by its exact-key schema")
 for field in ("hypotheses", "source_correspondence"):
     require(f'proof_package_string_is(proof_package_string_field(trust.value, "{field}"), "adapter")' in header,
             f"portable reader no longer restricts {field} to adapter trust")

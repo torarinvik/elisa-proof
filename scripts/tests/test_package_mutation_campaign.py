@@ -31,7 +31,7 @@ def export_package(example):
     result = run([str(PRODUCER), "--package", str(ROOT / "examples" / (example + ".elisa"))])
     assert result.returncode == 0, (example, result.returncode, result.stderr)
     package = json.loads(result.stdout)
-    assert package["format"] == "elisa-proof-package-v3", example
+    assert package["format"] == "elisa-proof-package-v4", example
     assert package["trust"]["logic_mode"] == "classical_propositional", example
     assert package["source"]["admissible"] is True, example
     assert package["theorems"], f"{example} must export at least one certificate"
@@ -144,7 +144,7 @@ def main():
     # These single-field mutations stay below resource caps so they exercise schema and
     # reference validation rather than the separate aggregate-budget boundary tests.
     cases = [
-        ("unknown-package-tag", ("format",), "elisa-proof-package-v3"),
+        ("unknown-package-tag", ("format",), "elisa-proof-package-v5"),
         ("unknown-node-tag", ("kernel", "nodes", theorem["conclusion"], "kind"), "proof-oracle"),
         ("node-tag-case", ("kernel", "nodes", theorem["conclusion"], "kind"),
          nodes[theorem["conclusion"]]["kind"].upper()),
@@ -307,7 +307,7 @@ def main():
         # A one-byte discriminator corruption remains parseable; truncation separately exercises
         # incomplete-token handling.
         encoded = json.dumps(base, separators=(",", ":"))
-        marker = '"format":"elisa-proof-package-v3"'
+        marker = '"format":"elisa-proof-package-v4"'
         marker_start = encoded.index(marker) + len('"format":"')
         byte_changed = encoded[:marker_start] + "X" + encoded[marker_start + 1:]
         assert_refused(directory, "single-byte-format-tag", byte_changed.encode("utf-8"))

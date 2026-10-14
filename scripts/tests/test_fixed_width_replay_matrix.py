@@ -247,7 +247,7 @@ with tempfile.TemporaryDirectory(prefix="elisa-d3-fixed-width-") as directory:
     assert package_run.returncode in (0, 1), (package_run.returncode, package_run.stderr[-2000:])
     package_file.write_text(package_run.stdout, encoding="utf-8")
     package = json.loads(package_run.stdout)
-    assert package["format"] == "elisa-proof-package-v3" and package["source"]["admissible"], package
+    assert package["format"] == "elisa-proof-package-v4" and package["source"]["admissible"], package
     assert package["trust"]["logic_mode"] == "classical_propositional", package
     goal_theorem_names = {theorem["name"] for theorem in package["theorems"]
                           if theorem["rule"] == "goal"}

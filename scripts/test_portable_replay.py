@@ -44,7 +44,7 @@ packages = {}
 for example, rules in POSITIVE.items():
     package = export(example)
     packages[example] = package
-    assert package["format"] == "elisa-proof-package-v3" and package["source"]["admissible"], example
+    assert package["format"] == "elisa-proof-package-v4" and package["source"]["admissible"], example
     assert package["trust"]["logic_mode"] == "classical_propositional", example
     assert package["source"]["authenticated"] is False, example
     seen = {theorem["rule"] for theorem in package["theorems"]}

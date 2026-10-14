@@ -625,8 +625,9 @@ summary counters, findings, replay coverage, every logical goal attempt (includi
 ### Portable replay packages
 
 `elisa-proof --package <source>` exports the proved goals of one run as an
-`elisa-proof-package-v3` file, and `elisa-proof-replay <package>` re-checks it. The reader keeps
-compatibility with v1 and v2 packages; v3 requires an explicit `trust.logic_mode` field. The
+`elisa-proof-package-v4` file, and `elisa-proof-replay <package>` re-checks it. The reader keeps
+compatibility with v1 through v3 packages; v3 and v4 require an explicit `trust.logic_mode` field.
+Version 4 also requires explicit goal-status and hypothesis-origin completeness fields. The
 checker is
 built from `src/replay_main.elisa` with `ELISA_PROOF_MAIN=src/replay_main.elisa scripts/build.sh`.
 It links the kernel, the JSON reader and the package reader. It does not link the compiler front
