@@ -1,0 +1,406 @@
+# Search-local hash buckets for expression keyed interval bounds. Hashes only shortlist
+# candidates: proof_kernel_replay_expr_equal_with_work remains the semantic equality test.
+extend ElisaProofKernelReplay:
+    private:
+        const PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_MIN_ROWS: usize = 8
+        const PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_ROW_LIMIT: usize = 4096
+        const PROOF_KERNEL_REPLAY_INTERVAL_EXPR_PRECHECK_ROWS: usize = 4
+
+        struct ProofKernelReplayIntervalExprIndex:
+            mutable enabled: bool
+            mutable complete: bool
+            mutable lookup_complete: bool
+            mutable capacity: usize
+            mutable build_attempted: bool
+            mutable setup_work_ceiling: usize
+            mutable setup_refused: bool
+            # 0 unseen, 1 hashing, 2 cached hash, 3 unsupported hash, 4 complete ordered miss.
+            mutable states: darray[u8]
+            mutable hashes: darray[u32]
+            # First source-ordered bound row proven equal to each query root.
+            mutable matched_rows: darray[usize]
+            mutable heads: darray[usize]
+            mutable tails: darray[usize]
+            mutable next_rows: darray[usize]
+
+        def proof_kernel_replay_empty_interval_expr_index() -> ProofKernelReplayIntervalExprIndex:
+            ProofKernelReplayIntervalExprIndex{enabled: false, complete: false, lookup_complete: false, capacity: 0, build_attempted: false, setup_work_ceiling: 0, setup_refused: false, states: [], hashes: [], matched_rows: [], heads: [], tails: [], next_rows: []}
+
+        def proof_kernel_replay_interval_expr_setup_charge_amount(index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&, amount: usize) -> bool:
+            ceiling: usize = index.setup_work_ceiling
+            if ceiling == 0 or work >= ceiling or amount > ceiling - work:
+                index.setup_refused <- true
+                return false
+            proof_kernel_replay_goal_search_charge_amount(work, amount)
+
+        def proof_kernel_replay_interval_expr_setup_charge(index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> bool:
+            proof_kernel_replay_interval_expr_setup_charge_amount(index, work, 1)
+
+        def proof_kernel_replay_interval_expr_setup_charge_node_text(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> bool:
+            return false if root >= nodes.count
+            return false if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, sview_len(nodes[root].kind))
+            return false if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, sview_len(nodes[root].operator))
+            return false if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, sview_len(nodes[root].name))
+            proof_kernel_replay_interval_expr_setup_charge_amount(index, work, sview_len(nodes[root].secondary_name))
+
+        def proof_kernel_replay_interval_expr_index_abandon(index: mutable ProofKernelReplayIntervalExprIndex&) -> bool:
+            index.enabled <- false
+            index.complete <- false
+            index.lookup_complete <- false
+            index.setup_work_ceiling <- 0
+            index.setup_refused <- false
+            true
+
+        def proof_kernel_replay_interval_expr_query_state(root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> u8:
+            return 0 if not index.enabled or root >= index.states.count
+            return 255 if not proof_kernel_replay_goal_search_charge(work)
+            index.states[root]
+
+        def proof_kernel_replay_interval_expr_cache_scan_miss(root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&):
+            return if not index.enabled or root >= index.states.count or work >= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if proof_kernel_replay_goal_search_charge(work):
+                index.states[root] <- 4
+
+        def proof_kernel_replay_interval_expr_hash_child(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize, index: mutable ProofKernelReplayIntervalExprIndex&, hash: mutable u32&, work: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+            child: (known: bool, hash: u32) = proof_kernel_replay_interval_expr_hash_node(nodes, children, root, depth + 1, index, work)
+            return false if not child.known
+            hash <- proof_kernel_replay_type_hash_mix(hash, child.hash.i64())
+            true
+
+        def proof_kernel_replay_interval_expr_hash_span(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, start: usize, count: usize, depth: usize, index: mutable ProofKernelReplayIntervalExprIndex&, hash: mutable u32&, work: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_child_range_valid(start, count, children.count)
+            for offset in 0..<count |offset, children, start, count, depth, index, hash, work|:
+                return false if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, start + offset)
+                return false if not child.known or not proof_kernel_replay_interval_expr_hash_child(nodes, children, child.value, depth, index, hash, work)
+            true
+
+        def proof_kernel_replay_interval_expr_hash_node(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, depth: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> (known: bool, hash: u32):
+            decreases ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT - depth
+            empty: (known: bool, hash: u32) = (false, 0)
+            return empty if depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT or not ElisaProofKernelCore::depth_valid(depth) or root >= nodes.count or root >= index.states.count
+            return empty if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+            return (true, index.hashes[root]) if index.states[root] == 2
+            return empty if index.states[root] == 1 or index.states[root] == 3 or index.states[root] == 4
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return empty if not proof_kernel_replay_valid(nodes, root) or not proof_kernel_replay_interval_expr_setup_charge_node_text(nodes, root, index, work)
+            return empty if not proof_kernel_replay_arena_shape_valid(node)
+            index.states[root] <- 1
+            hash: mutable u32 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS.u32()
+            hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.kind).i64())
+            hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.operator).i64())
+            if node.kind == "absent":
+                hash <- proof_kernel_replay_type_hash_mix(hash, 0)
+            elif node.kind == "int" or node.kind == "bool":
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.value)
+            elif node.kind == "typed-int":
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.value)
+                hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.name).i64())
+            elif node.kind in {"float", "opaque-float-literal", "string", "char", "ident", "shorthand"}:
+                hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.name).i64())
+            elif node.kind in {"field", "scope", "call_arg", "field-init"}:
+                hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.name).i64())
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work)
+            elif node.kind == "unary" or node.kind == "move":
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work)
+            elif node.kind == "binary" or node.kind == "index" or node.kind == "dict_entry":
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.right, depth, index, hash, work)
+            elif node.kind == "slice" or node.kind == "if":
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.right, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.auxiliary, depth, index, hash, work)
+            elif node.kind in {"array", "tuple", "set", "dict"}:
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.children_count.i64())
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_span(nodes, children, node.children_start, node.children_count, depth, index, hash, work)
+            elif node.kind in {"index-n", "construct", "record-update"}:
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.children_count.i64())
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_span(nodes, children, node.children_start, node.children_count, depth, index, hash, work)
+            elif node.kind == "call":
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.auxiliary.i64())
+                hash <- proof_kernel_replay_type_hash_mix(hash, node.children_count.i64())
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_span(nodes, children, node.children_start, node.children_count, depth, index, hash, work)
+            elif node.kind == "quantifier":
+                hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.name).i64())
+                hash <- proof_kernel_replay_type_hash_mix(hash, proof_kernel_replay_name_hash(node.secondary_name).i64())
+                return proof_kernel_replay_interval_expr_hash_fail(index, root, work) if not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.left, depth, index, hash, work) or not proof_kernel_replay_interval_expr_hash_child(nodes, children, node.right, depth, index, hash, work)
+            else:
+                index.states[root] <- 3
+                return empty
+            return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            index.hashes[root] <- hash
+            index.states[root] <- 2
+            (true, hash)
+
+        def proof_kernel_replay_interval_expr_hash_fail(index: mutable ProofKernelReplayIntervalExprIndex&, root: usize, work: usize) -> (known: bool, hash: u32):
+            index.states[root] <- 0 if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            index.states[root] <- 3 if work <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            (false, 0)
+
+        def proof_kernel_replay_interval_expr_ordered_precheck(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> (found: bool, row: usize, scanned_rows: usize):
+            empty: (found: bool, row: usize, scanned_rows: usize) = (false, 0, 0)
+            return empty if root >= nodes.count or root >= index.states.count or index.states[root] != 2
+            query_node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            rows: mutable usize = 0
+            # A small source-ordered prefix catches cheap early structural hits before
+            # cached-hash bucket traversal spends the remaining lookup budget.
+            for bound in bounds |bound, nodes, children, root, index, query_node, rows, work|:
+                break if rows >= PROOF_KERNEL_REPLAY_INTERVAL_EXPR_PRECHECK_ROWS
+                return (false, 0, rows) if not proof_kernel_replay_goal_search_charge(work)
+                rows <- rows + 1
+                continue if not bound.term_expression_key or bound.term_root >= nodes.count or bound.term_root >= index.states.count or index.states[bound.term_root] != 2
+                return (true, rows - 1, rows) if bound.term_root == root
+                bound_node: ElisaProofKernelCore::ProofKernelNode = nodes[bound.term_root]
+                # The complete, cached structural hashes are a candidate filter only;
+                # exact equality below remains authoritative after collisions.
+                continue if index.hashes[bound.term_root] != index.hashes[root]
+                same_kind: bool = proof_kernel_replay_goal_search_text_equal(bound_node.kind, query_node.kind, work)
+                return (false, 0, rows) if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not same_kind
+                same_operator: bool = proof_kernel_replay_goal_search_text_equal(bound_node.operator, query_node.operator, work)
+                return (false, 0, rows) if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                continue if not same_operator
+                return (true, rows - 1, rows) if proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work)
+                return (false, 0, rows) if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            (false, 0, rows)
+
+        def proof_kernel_replay_interval_expr_index_build(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&, continuation_reserve: usize) -> bool:
+            index.build_attempted <- true
+            index.enabled <- false
+            index.complete <- false
+            index.lookup_complete <- false
+            index.setup_refused <- false
+            index.setup_work_ceiling <- 0
+            return false if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return true if bounds.count > PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_ROW_LIMIT or bounds.count < PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_MIN_ROWS or nodes.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            remaining_at_entry: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work
+            return true if continuation_reserve >= remaining_at_entry
+            setup_allowance: mutable usize = remaining_at_entry / 2
+            available_for_setup: usize = remaining_at_entry - continuation_reserve
+            setup_allowance <- available_for_setup if setup_allowance > available_for_setup
+            return true if setup_allowance == 0
+            build_deadline: usize = work + setup_allowance
+            index.setup_work_ceiling <- build_deadline
+            rows: mutable usize = 0
+            for bound in bounds |bound, rows, work, index|:
+                if not proof_kernel_replay_interval_expr_setup_charge(index, work):
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                if work >= build_deadline:
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                rows <- rows + 1 if bound.term_expression_key
+            return proof_kernel_replay_interval_expr_index_abandon(index) if rows < PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_MIN_ROWS
+            capacity: mutable usize = 1
+            while capacity < rows * 2 |capacity, rows, index, work, build_deadline|:
+                if not proof_kernel_replay_interval_expr_setup_charge(index, work):
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                capacity <- capacity * 2
+            slots: usize = nodes.count * 3 + capacity * 2 + bounds.count
+            setup_remaining: usize = build_deadline - work
+            return proof_kernel_replay_interval_expr_index_abandon(index) if slots > setup_remaining / 2
+            return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, slots)
+            index.states.resize(nodes.count)
+            index.hashes.resize(nodes.count)
+            index.matched_rows.resize(nodes.count)
+            index.heads.resize(capacity)
+            index.tails.resize(capacity)
+            index.next_rows.resize(bounds.count)
+            for node in 0..<nodes.count |node, index, work|:
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.states[node] <- 0
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.hashes[node] <- 0
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.matched_rows[node] <- bounds.count
+            for slot in 0..<capacity |slot, index, bounds, work|:
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.heads[slot] <- bounds.count
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.tails[slot] <- bounds.count
+            for row in 0..<bounds.count |row, index, bounds, work|:
+                return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge(index, work)
+                index.next_rows[row] <- bounds.count
+            index.capacity <- capacity
+            index.complete <- true
+            for row in 0..<bounds.count |row, nodes, children, bounds, index, work|:
+                if work >= build_deadline:
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                if not proof_kernel_replay_interval_expr_setup_charge(index, work):
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                if work >= build_deadline:
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                continue if not bounds[row].term_expression_key or bounds[row].term_root >= nodes.count
+                value: (known: bool, hash: u32) = proof_kernel_replay_interval_expr_hash_node(nodes, children, bounds[row].term_root, 0, index, work)
+                if index.setup_refused:
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                return false if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                if work > build_deadline:
+                    return proof_kernel_replay_interval_expr_index_abandon(index)
+                if not value.known:
+                    index.complete <- false
+                    continue
+                slot: usize = (value.hash.i64() % capacity.i64()).usize()
+                if index.heads[slot] >= bounds.count:
+                    return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, 2)
+                    index.heads[slot] <- row
+                    index.tails[slot] <- row
+                else:
+                    tail: usize = index.tails[slot]
+                    return proof_kernel_replay_interval_expr_index_abandon(index) if not proof_kernel_replay_interval_expr_setup_charge_amount(index, work, 2)
+                    index.next_rows[tail] <- row
+                    index.tails[slot] <- row
+            index.enabled <- true
+            # Query hashing is search work, not optional setup work.
+            index.setup_work_ceiling <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            true
+
+        def proof_kernel_replay_interval_expr_index_find(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work: mutable usize&) -> ProofKernelReplayBound:
+            empty: ProofKernelReplayBound = ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+            index.lookup_complete <- false
+            return empty if:
+                root >= nodes.count or index.capacity == 0
+                index.states.count != nodes.count or index.hashes.count != nodes.count or index.matched_rows.count != nodes.count
+                index.heads.count != index.capacity or index.tails.count != index.capacity or index.next_rows.count != bounds.count
+            if not proof_kernel_replay_goal_search_charge(work):
+                return empty
+            cached_row: usize = index.matched_rows[root]
+            if cached_row < bounds.count:
+                return bounds[cached_row] if bounds[cached_row].term_expression_key
+                return empty
+            # `bounds.count + 1` records a completed miss from a complete index. A plain
+            # `bounds.count` remains the unqueried sentinel. Never memoize misses from a partial
+            # index: those still require the ordered fallback to establish absence.
+            if cached_row == bounds.count + 1 and index.complete:
+                index.lookup_complete <- true
+                return empty
+            # The parallel hash census validates child ranges and supported node shapes.
+            # State-2 roots have a cached hash, but still walk the source-ordered bucket:
+            # a distinct earlier arena root may be structurally equal to this query.
+            prechecked_rows: mutable usize = 0
+            if index.states.count == nodes.count and index.states[root] == 2:
+                if not proof_kernel_replay_goal_search_charge(work):
+                    return empty
+                prechecked: (found: bool, row: usize, scanned_rows: usize) = proof_kernel_replay_interval_expr_ordered_precheck(nodes, children, bounds, root, index, work)
+                prechecked_rows <- prechecked.scanned_rows
+                if prechecked.found:
+                    index.matched_rows[root] <- prechecked.row
+                    return bounds[prechecked.row]
+                return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            query: (known: bool, hash: u32) = proof_kernel_replay_interval_expr_hash_node(nodes, children, root, 0, index, work)
+            return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not query.known
+            row: usize = index.heads[(query.hash.i64() % index.capacity.i64()).usize()]
+            while row < bounds.count |row, bounds, nodes, children, index, root, query, prechecked_rows, work|:
+                return empty if not proof_kernel_replay_goal_search_charge(work)
+                bound: ProofKernelReplayBound = bounds[row]
+                # The ordered precheck has already ruled out every row in its prefix.
+                # Buckets are appended in source order, so skip those rows instead of
+                # repeating potentially deep exact comparisons for hash collisions.
+                if row >= prechecked_rows and bound.term_expression_key and bound.term_root < nodes.count and index.states[bound.term_root] == 2 and index.hashes[bound.term_root] == query.hash:
+                    if bound.term_root == root:
+                        index.matched_rows[root] <- row
+                        return bound
+                    if proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work):
+                        index.matched_rows[root] <- row
+                        return bound
+                    return empty if work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                row <- index.next_rows[row]
+            return empty if row != bounds.count
+            index.lookup_complete <- index.complete
+            index.matched_rows[root] <- bounds.count + 1 if index.complete
+            empty
+
+        def proof_kernel_replay_loop_range_atom_key_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, root: usize, work_used: mutable usize&) -> (known: bool, name: sview, offset: i64):
+            empty: (known: bool, name: sview, offset: i64) = (false, "", 0)
+            return empty if:
+                not proof_kernel_replay_goal_search_charge(work_used)
+                root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
+                not proof_kernel_replay_goal_search_charge_node_text(nodes, root, work_used)
+                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+            return empty if:
+                node.kind != "tuple" or node.children_count != 2 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                not proof_kernel_replay_goal_search_charge(work_used)
+            first: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start)
+            return empty if:
+                not first.known or first.value >= nodes.count or not proof_kernel_replay_goal_search_charge_node_text(nodes, first.value, work_used)
+                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                not proof_kernel_replay_goal_search_charge(work_used)
+            second: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + 1)
+            return empty if:
+                not second.known or second.value >= nodes.count or not proof_kernel_replay_goal_search_charge_node_text(nodes, second.value, work_used)
+                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                nodes[first.value].kind != "ident" or nodes[first.value].name == "" or nodes[second.value].kind != "int"
+            (true, nodes[first.value].name, nodes[second.value].value)
+        def proof_kernel_replay_interval_bound_for_term_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, root: usize, index: mutable ProofKernelReplayIntervalExprIndex&, work_used: mutable usize&) -> ProofKernelReplayBound:
+            return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if root >= nodes.count
+            lookup_start_work: usize = work_used
+            skip_expression_scan: mutable bool = false
+            cached_state: u8 = proof_kernel_replay_interval_expr_query_state(root, index, work_used)
+            return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if cached_state == 255
+            skip_expression_scan <- true if cached_state == 4
+            # Preserve ordered lookup when hashing was not already computed.
+            if index.enabled and cached_state == 2 and not skip_expression_scan:
+                indexed: ProofKernelReplayBound = proof_kernel_replay_interval_expr_index_find(nodes, children, bounds, root, index, work_used)
+                return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return indexed if indexed.term_expression_key
+                skip_expression_scan <- index.lookup_complete
+            expression_rows: mutable usize = 0
+            if not skip_expression_scan:
+                query_node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+                fallback_row: mutable usize = 0
+                # A complete ordered fallback hit is reusable too: this index and its bounds
+                # stay local to the same interval-goal calculation.
+                for bound in bounds |bound, nodes, children, root, work_used, expression_rows, fallback_row, index, cached_state|:
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_kernel_replay_goal_search_charge(work_used)
+                    row: usize = fallback_row
+                    fallback_row <- fallback_row + 1
+                    expression_rows <- expression_rows + 1 if bound.term_expression_key
+                    continue if not bound.term_expression_key or bound.term_root >= nodes.count
+                    if bound.term_root == root:
+                        index.matched_rows[root] <- row if cached_state == 2 and index.enabled and index.matched_rows.count == nodes.count
+                        return bound
+                    bound_node: ElisaProofKernelCore::ProofKernelNode = nodes[bound.term_root]
+                    same_kind: bool = proof_kernel_replay_goal_search_text_equal(bound_node.kind, query_node.kind, work_used)
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    continue if not same_kind
+                    same_operator: bool = proof_kernel_replay_goal_search_text_equal(bound_node.operator, query_node.operator, work_used)
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    continue if not same_operator
+                    if proof_kernel_replay_goal_search_expr_equal(nodes, children, bound.term_root, root, work_used):
+                        index.matched_rows[root] <- row if cached_state == 2 and index.enabled and index.matched_rows.count == nodes.count
+                        return bound
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                proof_kernel_replay_interval_expr_cache_scan_miss(root, index, work_used)
+            key: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key_with_goal_work(nodes, children, root, work_used)
+            return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if key.known:
+                for bound in bounds |bound, key, work_used|:
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_kernel_replay_goal_search_charge(work_used)
+                    continue if not bound.term_key
+                    same_name: bool = proof_kernel_replay_goal_search_text_equal(bound.term_name, key.name, work_used)
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return bound if same_name and bound.term_offset == key.offset
+            # Index construction is optional. Finish this lookup's independent loop-range
+            # fallback before charging setup work, so an expression-key miss cannot prevent a
+            # name/offset match that the ordered path could have returned.
+            if not skip_expression_scan and not index.build_attempted:
+                if expression_rows >= PROOF_KERNEL_REPLAY_INTERVAL_EXPR_INDEX_MIN_ROWS:
+                    continuation_children: mutable usize = 0
+                    query_node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
+                    continuation_children <- 1 if query_node.kind == "unary" and query_node.operator == "-"
+                    continuation_children <- 2 if query_node.kind == "binary" and query_node.operator in {"+", "-", "*", "/"}
+                    continuation_reserve: mutable usize = 0
+                    if continuation_children > 0 and work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT:
+                        remaining_work: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+                        observed_lookup_work: usize = work_used - lookup_start_work
+                        # Preserve at least two future row sweeps per immediate child and the
+                        # lookup cost observed here. Candidate equality and key extraction are
+                        # data-dependent, so the shared limit remains the hard work cap.
+                        minimum_scan_work: usize = bounds.count * 2
+                        child_scan_work: mutable usize = observed_lookup_work
+                        child_scan_work <- minimum_scan_work if minimum_scan_work > observed_lookup_work
+                        continuation_reserve <- remaining_work if child_scan_work > remaining_work / continuation_children
+                        continuation_reserve <- child_scan_work * continuation_children if child_scan_work <= remaining_work / continuation_children
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not proof_kernel_replay_interval_expr_index_build(nodes, children, bounds, index, work_used, continuation_reserve)
+                    return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                else:
+                    index.build_attempted <- true
+            return ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0} if not key.known
+            ProofKernelReplayBound{name: "", term_name: key.name, term_offset: key.offset, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}

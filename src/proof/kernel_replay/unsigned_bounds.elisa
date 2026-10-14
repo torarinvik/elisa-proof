@@ -182,34 +182,12 @@ extend ElisaProofKernelReplay:
             return (true, value != 0) if kind == "bool"
             return (false, false)
 
-        def proof_kernel_replay_constant_bool(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, depth: usize) -> (known: bool, value: bool):
-            requires depth <= PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT
-            decreases PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT - depth
-            return (false, false) if depth >= PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT or root >= nodes.count
-            remaining: usize = PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT - depth
-            return proof_kernel_replay_constant_bool_remaining(nodes, root, remaining)
-
-        def proof_kernel_replay_constant_bool_remaining(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize) -> (known: bool, value: bool):
-            decreases remaining
-            return (false, false) if root >= nodes.count
-            match nodes[root].kind:
-                "binary":
-                    node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
-                    return (false, false) if not proof_kernel_replay_arena_shape_valid(node) or node.left >= nodes.count or node.right >= nodes.count
-                    return ElisaProofKernelCore::typed_constant_expression_comparison(nodes, node.left, node.operator, node.right)
-                "unary":
-                    return (false, false) if remaining < 1 or nodes[root].operator != "not"
-                    inner: (known: bool, value: bool) = proof_kernel_replay_constant_bool_remaining(nodes, nodes[root].left, remaining - 1)
-                    return (inner.known, not inner.value)
-                _:
-                    return proof_kernel_replay_constant_bool_leaf(nodes[root].kind, nodes[root].value)
-
-        def proof_kernel_replay_constant_bool_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
+        def proof_kernel_replay_constant_bool_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
             return (false, false) if root >= nodes.count
             remaining: usize = PROOF_KERNEL_REPLAY_BOOLEAN_FOLD_DEPTH_LIMIT
-            proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, root, remaining, goal_work)
+            proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, children, facts, root, remaining, goal_work)
 
-        def proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
+        def proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, remaining: usize, goal_work: mutable usize&) -> (known: bool, value: bool):
             decreases remaining
             return (false, false) if:
                 root >= nodes.count
@@ -218,10 +196,15 @@ extend ElisaProofKernelReplay:
             node: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             if node.kind == "binary":
                 return (false, false) if not proof_kernel_replay_arena_shape_valid(node) or node.left >= nodes.count or node.right >= nodes.count
+                if node.operator in {"==", "!=", "<", "<=", ">", ">="}:
+                    comparison_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_work(nodes, children, facts, root, goal_work, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return (false, false) if not comparison_admission.complete or comparison_admission.untrusted or goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    primitive_operands: bool = proof_kernel_replay_scalar_term_pair_witnessed_with_work(nodes, children, facts, node.left, node.right, 0, goal_work, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return (false, false) if not primitive_operands or goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 return ElisaProofKernelCore::typed_constant_expression_comparison_with_goal_work(nodes, node.left, node.operator, node.right, goal_work, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             if node.kind == "unary":
                 return (false, false) if remaining < 1 or node.operator != "not"
-                inner: (known: bool, value: bool) = proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, node.left, remaining - 1, goal_work)
+                inner: (known: bool, value: bool) = proof_kernel_replay_constant_bool_remaining_with_goal_work(nodes, children, facts, node.left, remaining - 1, goal_work)
                 return (inner.known, not inner.value)
             proof_kernel_replay_constant_bool_leaf(node.kind, node.value)
 
@@ -328,7 +311,7 @@ extend ElisaProofKernelReplay:
                 # `or` and `and` short-circuit, so an operand the left one settles is never
                 # evaluated and its arithmetic never happens.
                 if node.operator in {"or", "and"}:
-                    settled: (known: bool, value: bool) = proof_kernel_replay_constant_bool_with_goal_work(nodes, node.left, goal_work)
+                    settled: (known: bool, value: bool) = proof_kernel_replay_constant_bool_with_goal_work(nodes, children, facts, node.left, goal_work)
                     return false if goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     return true if:
                         settled.known and settled.value and node.operator == "or"
@@ -379,6 +362,8 @@ extend ElisaProofKernelReplay:
                     return false if:
                         goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                         not divisor.known or divisor.value <= 0
+                        not proof_kernel_replay_constant_fits_unsigned_with_goal_work(nodes, node.right, width, goal_work)
+                        goal_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                         divisor.value > proof_kernel_replay_unsigned_width_max(width)
                     remainder_upper: ProofKernelReplayInt = proof_kernel_replay_sub_safe(divisor.value, 1)
                     return false if not remainder_upper.known
@@ -401,14 +386,14 @@ extend ElisaProofKernelReplay:
                     guarded_bounds: mutable darray[ProofKernelReplayBound] = []
                     return false if not proof_kernel_replay_arm_bounds_with_work(nodes, children, guarded, nodes.count, &guarded_bounds, goal_work)
                     if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, guarded, guarded_bounds, work_used, goal_work, depth + 1):
-                        proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, guarded, &guarded_bounds, goal_work)
+                        return false if not proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, guarded, &guarded_bounds, goal_work)
                         return false if not proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.right, guarded, guarded_bounds, work_used, goal_work, depth + 1)
                 return true if proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, bounds, work_used, goal_work, depth + 1)
                 # Mirror of `proof_unsigned_arm_safe_unless`: the complement enters the bounds alone.
                 else_bounds: mutable darray[ProofKernelReplayBound] = []
                 return false if not proof_kernel_replay_arm_bounds_with_work(nodes, children, facts, node.left, &else_bounds, goal_work)
                 return true if proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, else_bounds, work_used, goal_work, depth + 1)
-                proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &else_bounds, goal_work)
+                return false if not proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &else_bounds, goal_work)
                 return proof_kernel_replay_unsigned_expression_safe_with_replay_work(nodes, children, node.auxiliary, facts, else_bounds, work_used, goal_work, depth + 1)
             if node.kind == "call":
                 return false if:
@@ -440,7 +425,7 @@ extend ElisaProofKernelReplay:
                 if not unsigned_safe:
                     if not has_closed:
                         closed.extend(bounds)
-                        proof_kernel_replay_close_plain_bounds(nodes, children, facts, &closed)
+                        return false if not proof_kernel_replay_close_plain_bounds(nodes, children, facts, &closed)
                         has_closed <- true
                     unsigned_safe <- proof_kernel_replay_unsigned_expression_safe(nodes, children, fact, facts, closed, 0)
                 return false if not unsigned_safe or not proof_kernel_replay_signed_expression_safe_with_bounds(nodes, children, fact, facts, signed_bounds, 0)
@@ -478,7 +463,7 @@ extend ElisaProofKernelReplay:
                     if not has_closed:
                         return false if not proof_kernel_replay_goal_search_charge_amount(work_used, bounds.count)
                         closed.extend(bounds)
-                        proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &closed, work_used)
+                        return false if not proof_kernel_replay_close_plain_bounds_with_goal_work(nodes, children, facts, &closed, work_used)
                         return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                         has_closed <- true
                     unsigned_safe <- proof_kernel_replay_unsigned_expression_safe_with_goal_work(nodes, children, fact, facts, closed, work_used, 0)

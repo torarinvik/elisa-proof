@@ -12,9 +12,12 @@ extend ElisaProofKernelReplay:
             return false if:
                 split_depth >= PROOF_KERNEL_REPLAY_CASE_SPLIT_DEPTH_LIMIT or remaining <= 1
                 not ElisaProofKernelCore::depth_valid(depth) or depth >= ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT
-            for fact in facts |fact, facts, nodes, children, goal_root, split_depth, depth, remaining, work_used|:
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            marker_cache_ready: mutable bool = false
+            marker_cache_attempted: mutable bool = false
+            for fact in facts |fact, facts, nodes, children, goal_root, split_depth, depth, remaining, work_used, markers, marker_cache_ready, marker_cache_attempted|:
                 return false if not proof_kernel_replay_goal_search_charge(work_used)
-                if proof_kernel_replay_place_alias_shape(nodes, children, facts, fact):
+                if proof_kernel_replay_place_alias_shape_with_work(nodes, children, facts, fact, &markers, &marker_cache_ready, &marker_cache_attempted, work_used):
                     alias: usize = nodes[fact].left
                     place: usize = nodes[fact].right
                     rewritten_goal: (changed: bool, value: usize) = proof_kernel_replay_replace_exact_with_goal_work(nodes, children, goal_root, place, alias, work_used, 0)
@@ -27,13 +30,28 @@ extend ElisaProofKernelReplay:
                         rewritten_facts.push(replaced.value)
                     if rewritten_goal.changed or (goal_names_alias and facts_changed):
                         return true if (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, rewritten_facts, rewritten_goal.value, split_depth + 1, depth + 1, work_used, remaining: remaining - 1) can Global{Read,Write})
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return false
 
-        def proof_kernel_replay_place_alias_shape(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact: usize) -> bool:
-            return false if not proof_kernel_replay_valid(nodes, fact)
+        def proof_kernel_replay_place_alias_shape_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], fact: usize, markers: mutable darray[ProofKernelReplayWitnessMarker]&, marker_cache_ready: mutable bool&, marker_cache_attempted: mutable bool&, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            return false if not proof_kernel_replay_valid(nodes, fact) or not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, work_used)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             node: ElisaProofKernelCore::ProofKernelNode = nodes[fact]
             return false if:
                 node.kind != "binary" or node.operator != "=="
                 not proof_kernel_replay_valid(nodes, node.left) or not proof_kernel_replay_valid(nodes, node.right)
+                not proof_kernel_replay_goal_search_charge_node_text(nodes, node.left, work_used)
+                not proof_kernel_replay_goal_search_charge_node_text(nodes, node.right, work_used)
+                work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                 nodes[node.left].kind != "ident" or nodes[node.left].name == "" or nodes[node.right].kind != "index"
-            proof_kernel_replay_primitive_comparison(nodes, children, facts, node.left, node.right)
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            remaining_goal_work: usize = PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT - work_used
+            witness_allowance: usize = PROOF_KERNEL_REPLAY_SCALAR_WITNESS_WORK_LIMIT if PROOF_KERNEL_REPLAY_SCALAR_WITNESS_WORK_LIMIT < remaining_goal_work else remaining_goal_work
+            witness_work_limit: usize = work_used + witness_allowance
+            if not proof_kernel_replay_goal_bool_ref_value(marker_cache_ready):
+                return false if proof_kernel_replay_goal_bool_ref_value(marker_cache_attempted)
+                marker_cache_attempted <- true
+                return false if not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, work_used, witness_work_limit)
+                marker_cache_ready <- true
+            proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, node.left, node.right, work_used, witness_work_limit)

@@ -38,6 +38,9 @@ extend ElisaProofKernelReplay:
             def proof_kernel_replay_typing_workspace_prepare_globals_with_work(global_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], typing_workspace: mutable ProofKernelReplayTypingWorkspace&, work_used: mutable usize&) -> bool:
                 return proof_kernel_replay_typing_workspace_prepare_globals_internal(global_bindings, typing_workspace, work_used)
 
+            # Source-neutral validation of an abstract resource-event trace. A successful result
+            # does not prove that this caller-supplied arena corresponds to a source program;
+            # source claims must go through the checked-view path and its parser-owned producer.
             def proof_kernel_replay_resource_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool can[Global.Read, Global.Write]:
                 # Full resource summaries are function-boundary certificates. They must not
                 # leave a lexical region open; only explicit external region parameters may
@@ -61,7 +64,8 @@ extend ElisaProofKernelReplay:
             # Complete-arena-checked entry points preserve the report adapter's bounded fast
             # replay for large resource traces. Unlike the former `_after_arena` API, each one
             # validates the whole externally supplied arena and all fact/goal roots atomically
-            # before it asks a private implementation to skip its repeated per-root walk.
+            # before it asks a private implementation to skip its repeated per-root walk. This
+            # is still source-neutral structural replay; whole-arena admission adds no AST link.
             def proof_kernel_replay_resource_report_checked_arena[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
                 return false if facts.count != 0 or not (proof_kernel_replay_checked_arena_inputs_valid(nodes, children, facts, goal_root) can Global{Read,Write})
                 return (proof_kernel_replay_resource_report_impl(nodes, children, facts, goal_root, true, true) can Global{Read,Write})
@@ -87,6 +91,7 @@ extend ElisaProofKernelReplay:
             # Reusable-workspace variants revalidate every supplied root on every call. Arena
             # arrays retain scratch capacity; source-scan and logical-goal counters accumulate
             # for one certificate batch. Construct a fresh workspace for each independent batch.
+            # Resource replay through this API remains source-neutral as well.
             def proof_kernel_replay_arena_report_with_workspace[@r](nodes: darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, facts: darray[usize], goal_root: usize, workspace: mutable ProofKernelReplayValidationWorkspace&) -> bool:
                 return proof_kernel_replay_arena_valid_with_workspace(nodes, children, facts, goal_root, workspace)
 
@@ -175,7 +180,9 @@ extend ElisaProofKernelReplay:
                 # Only this typed entry point can establish the built-in receiver selector
                 # required for indexed-read congruence. The source-neutral goal API below keeps
                 # Index nodes opaque. The environment's provenance is the caller's responsibility;
-                # source-level callers must bind it to checked source before using this result.
+                # the environment contains no effect/purity metadata, so call nodes are interpreted
+                # as logical function applications. Source-level callers must authenticate the
+                # context and establish applicable call-purity conditions before using this result.
                 goal_work_used: mutable usize = 0
                 indexed_read_proven: bool = proof_kernel_replay_typed_index_read_equality_with_work(nodes, children, environment, typing_index.index, facts, goal_root, &type_work_used, &goal_work_used)
                 return true if indexed_read_proven and type_work_used <= ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET and goal_work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
@@ -184,7 +191,8 @@ extend ElisaProofKernelReplay:
             # Batch adapter for the typed indexed-read rule. Callers share both work meters and
             # validation scratch across goals; no caller-supplied arena-valid bit crosses this
             # boundary. The source-level caller remains responsible for authenticating the
-            # environment and premise roots before using a successful result as proof evidence.
+            # environment and premise roots and establishing call-purity conditions; the type
+            # environment has no effect metadata, and call nodes have logical-function semantics.
             def proof_kernel_replay_typed_index_read_report_with_workspaces[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, facts: darray[usize], goal_root: usize, validation_workspace: mutable ProofKernelReplayValidationWorkspace&, type_work_used: mutable usize&, goal_work_used: mutable usize&) -> bool can[Global.Read, Global.Write]:
                 ensure result => goal_root < nodes.count
                 return false if:
@@ -200,7 +208,9 @@ extend ElisaProofKernelReplay:
                 proof_kernel_replay_typed_index_read_equality_with_work(nodes, children, environment, typing_index.index, facts, goal_root, &type_work_used, &goal_work_used)
 
             # Source adapter variant reuses an independently admitted global declaration
-            # snapshot while rebuilding owner-local indexes under the kernel work meter.
+            # snapshot while rebuilding owner-local indexes under the kernel work meter. It
+            # still does not authenticate source provenance or call purity; callers must bind
+            # both before exposing a successful result as source-level proof evidence.
             def proof_kernel_replay_typed_index_read_report_with_cached_globals_and_workspaces[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, local_bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], facts: darray[usize], goal_root: usize, validation_workspace: mutable ProofKernelReplayValidationWorkspace&, typing_workspace: mutable ProofKernelReplayTypingWorkspace&, type_work_used: mutable usize&, goal_work_used: mutable usize&) -> bool can[Global.Read, Global.Write]:
                 ensure result => goal_root < nodes.count
                 return false if:
@@ -346,10 +356,12 @@ extend ElisaProofKernelReplay:
                     facts.count != 0
                 return proof_kernel_replay_effect_goal(nodes, children, goal_root)
 
-            # Abstract propositional-calculus entry point. Opaque node forms (including calls and
-            # projections) are atoms of this source-neutral logic; this API makes no Elisa source
-            # typing claim. A source adapter must validate its declarations through the typed
-            # entry point above before binding a result to an Elisa obligation.
+            # Source-neutral logical entry point. Calls and projections remain opaque propositions;
+            # reserved scalar-witness calls in the premises may additionally provide sort metadata
+            # to the arithmetic model, but do not prove source declarations or marker provenance.
+            # Results are conditional on the supplied premises and make no Elisa source-typing
+            # claim. A source adapter must validate declarations through the typed entry point above
+            # before binding a result to an Elisa obligation.
             def proof_kernel_replay_goal_report[@r](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, facts: darray[usize], goal_root: usize) -> bool:
                 return (proof_kernel_replay_goal_report_impl(nodes, children, facts, goal_root, false) can Global{Read,Write})
 
@@ -418,9 +430,10 @@ extend ElisaProofKernelReplay:
                         argument_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, typing_index.index, argument, 0, &typing_work_used)
                         return false if not proof_kernel_replay_sort_equal(argument_sort, secondary_sort, &typing_work_used)
                         # Rewriting is a Leibniz rule. Named/aggregate values may use Elisa
-                        # protocol equality, which has no substitutivity law, so the typed kernel
-                        # admits only language-owned primitive equality sorts here.
-                        return false if argument_sort.family != "integer" and argument_sort.family != "floating" and argument_sort.family != "character" and argument_sort.family != "boolean" and argument_sort.family != "string"
+                        # protocol equality, which has no substitutivity law. IEEE floating
+                        # equality also is not substitutive because NaNs and signed zero break
+                        # the needed equivalence, so admit only the remaining primitive sorts.
+                        return false if argument_sort.family != "integer" and argument_sort.family != "character" and argument_sort.family != "boolean" and argument_sort.family != "string"
                 return false if typing_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
                 return (proof_kernel_replay_tactic_step_impl(nodes, children, action, accepted, before_solved, after_solved, before_facts, before_goal, after_facts, after_goal, argument, has_argument, secondary, has_secondary, argument_index, has_argument_index, detail, true) can Global{Read,Write})
 

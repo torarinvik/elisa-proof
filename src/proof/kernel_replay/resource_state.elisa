@@ -9,6 +9,46 @@ extend ElisaProofKernelReplay:
                 return (true, true) if value == target
             return (true, false)
 
+        # Producer resource-event nodes are appended in trace order, so their root IDs are
+        # usually sorted. Use logarithmic membership when that invariant has been tracked, while
+        # keeping the linear fallback for externally supplied traces with arbitrary node order.
+        def proof_kernel_replay_resource_usize_sorted_membership(values: darray[usize], sorted: bool, target: usize, work_used: mutable usize&) -> (complete: bool, found: bool):
+            return proof_kernel_replay_resource_usize_membership(values, target, work_used) if not sorted
+            low: mutable usize = 0
+            high: mutable usize = values.count
+            while low < high |low, high, values, target, work_used|:
+                middle: usize = low + (high - low) / 2
+                return (false, false) if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
+                if values[middle] < target:
+                    low <- middle + 1
+                else:
+                    high <- middle
+            return (true, false) if low >= values.count
+            return (false, false) if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
+            return (true, values[low] == target)
+
+        # Appending to an ID history keeps its sorted fast path only while nondecreasing order
+        # is preserved. Existing callers account for the event itself; this charges the extra
+        # comparison needed to maintain the index invariant.
+        def proof_kernel_replay_resource_record_sorted_id(values: mutable darray[usize]&, sorted: mutable bool&, value: usize, work_used: mutable usize&) -> bool:
+            if sorted and values.count > 0:
+                return false if not proof_kernel_replay_resource_charge_work_used(work_used, 1)
+                sorted <- false if value < values[values.count - 1]
+            values.push(value)
+            true
+
+        def proof_kernel_replay_resource_record_call_event(state: mutable ProofKernelReplayResourceState&, root: usize) -> bool:
+            return false if not proof_kernel_replay_resource_charge_work(state, 3)
+            if state.scope.resource_call_events_are_sorted and state.scope.resource_call_events.count > 0:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                state.scope.resource_call_events_are_sorted <- false if root < state.scope.resource_call_events[state.scope.resource_call_events.count - 1]
+            if state.scope.resource_call_events_seen_are_sorted and state.scope.resource_call_events_seen.count > 0:
+                return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                state.scope.resource_call_events_seen_are_sorted <- false if root < state.scope.resource_call_events_seen[state.scope.resource_call_events_seen.count - 1]
+            state.scope.resource_call_events.push(root)
+            state.scope.resource_call_events_seen.push(root)
+            return true
+
         def proof_kernel_replay_resource_sview_membership(values: darray[sview], target: sview, work_used: mutable usize&) -> (complete: bool, found: bool):
             for value in values |target, work_used|:
                 return (false, false) if not proof_kernel_replay_resource_charge_text_pair_used(work_used, value, target)
@@ -28,7 +68,51 @@ extend ElisaProofKernelReplay:
         # intentionally discarded after replay, so compare inherited liveness before accepting
         # the scope; otherwise `destroy r` inside a plain nested block could disappear with the
         # snapshot and make a later use of an r-owned binding look live again.
-        def proof_kernel_replay_resource_scope_preserves_parent(parent: ProofKernelReplayResourceState&, child: ProofKernelReplayResourceState&) -> bool:
+        def proof_kernel_replay_resource_scope_binding_prefix_preserved(parent: ProofKernelReplayResourceState&, child: ProofKernelReplayResourceState&) -> bool:
+            count: usize = parent.bindings.binding_names.count
+            child_count: usize = child.bindings.binding_names.count
+            return false if:
+                parent.bindings.binding_scope_depth.count != count or parent.bindings.binding_reference.count != count or parent.bindings.binding_mutable_reference.count != count
+                parent.bindings.binding_writable.count != count or parent.bindings.binding_borrowable.count != count or parent.bindings.binding_moved.count != count
+                parent.bindings.binding_origin_places.count != count or parent.scope.pending_join_moves.count != count
+                parent.provenance.binding_region.count != count or parent.provenance.binding_region_live.count != count or parent.provenance.binding_region_owner.count != count
+                parent.borrows.borrow_target_slots.count != count or parent.borrows.borrow_target_places.count != count or parent.borrows.borrow_mutable.count != count or parent.borrows.borrow_present.count != count
+                child_count < count
+                child.bindings.binding_scope_depth.count != child_count or child.bindings.binding_reference.count != child_count or child.bindings.binding_mutable_reference.count != child_count
+                child.bindings.binding_writable.count != child_count or child.bindings.binding_borrowable.count != child_count or child.bindings.binding_moved.count != child_count
+                child.bindings.binding_origin_places.count != child_count or child.scope.pending_join_moves.count != child_count
+                child.provenance.binding_region.count != child_count or child.provenance.binding_region_live.count != child_count or child.provenance.binding_region_owner.count != child_count
+                child.borrows.borrow_target_slots.count != child_count or child.borrows.borrow_target_places.count != child_count or child.borrows.borrow_mutable.count != child_count or child.borrows.borrow_present.count != child_count
+            for index in 0..<count |index, parent, child|:
+                return false if:
+                    not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 6)
+                    not proof_kernel_replay_resource_charge_text_pair_used(&parent.scope.resource_work_used, parent.bindings.binding_names[index], child.bindings.binding_names[index])
+                    parent.bindings.binding_names[index] != child.bindings.binding_names[index]
+                    parent.bindings.binding_scope_depth[index] != child.bindings.binding_scope_depth[index]
+                    parent.bindings.binding_reference[index] != child.bindings.binding_reference[index]
+                    parent.bindings.binding_mutable_reference[index] != child.bindings.binding_mutable_reference[index]
+                    parent.bindings.binding_writable[index] != child.bindings.binding_writable[index]
+                    parent.bindings.binding_borrowable[index] != child.bindings.binding_borrowable[index]
+                    parent.scope.pending_join_moves[index] != child.scope.pending_join_moves[index]
+                prior_origin: ProofKernelReplayResourcePlace = parent.bindings.binding_origin_places[index]
+                child_origin: ProofKernelReplayResourcePlace = child.bindings.binding_origin_places[index]
+                return false if:
+                    not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 5)
+                    prior_origin.has_root != child_origin.has_root or prior_origin.root_node != child_origin.root_node
+                    prior_origin.path_root != child_origin.path_root or prior_origin.depth != child_origin.depth or prior_origin.whole != child_origin.whole
+                prior_borrow_place: ProofKernelReplayResourcePlace = parent.borrows.borrow_target_places[index]
+                child_borrow_place: ProofKernelReplayResourcePlace = child.borrows.borrow_target_places[index]
+                return false if:
+                    not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 8)
+                    parent.borrows.borrow_target_slots[index] != child.borrows.borrow_target_slots[index]
+                    parent.borrows.borrow_mutable[index] != child.borrows.borrow_mutable[index]
+                    parent.borrows.borrow_present[index] != child.borrows.borrow_present[index]
+                    prior_borrow_place.has_root != child_borrow_place.has_root or prior_borrow_place.root_node != child_borrow_place.root_node
+                    prior_borrow_place.path_root != child_borrow_place.path_root or prior_borrow_place.depth != child_borrow_place.depth or prior_borrow_place.whole != child_borrow_place.whole
+            return true
+
+        def proof_kernel_replay_resource_scope_preserves_parent(parent: mutable ProofKernelReplayResourceState&, child: ProofKernelReplayResourceState&, adopt_event_history: bool = true) -> bool:
+            return false if not proof_kernel_replay_resource_scope_binding_prefix_preserved(parent, child)
             # A scope join discards the child resource state. Therefore the active region stack
             # must be exactly the inherited stack at the join: membership alone would allow a
             # forged child to leak a fresh local region, or to reorder lifetimes before its state
@@ -55,6 +139,7 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_resource_charge_work_used(&parent.scope.resource_work_used, 1)
                 if parent.provenance.binding_region_live[index]:
                     return false if index >= child.provenance.binding_region_live.count or not child.provenance.binding_region_live[index]
+            return proof_kernel_replay_resource_scope_event_history_adopt(parent, child) if adopt_event_history
             return true
 
         def proof_kernel_replay_resource_lookup(state: ProofKernelReplayResourceState&, name: sview) -> usize:
@@ -419,12 +504,9 @@ extend ElisaProofKernelReplay:
                     allocation_root >= nodes.count
                     not proof_kernel_replay_resource_charge_text_pair(state, nodes[allocation_root].secondary_name, nodes[argument_root].secondary_name)
                     nodes[allocation_root].kind != "resource-region-call-alloc" or nodes[allocation_root].secondary_name != nodes[argument_root].secondary_name
-                allocation_recorded: mutable bool = false
-                for prior_allocation in state.scope.resource_call_allocations |prior_allocation, allocation_recorded, state|:
-                    return (false, empty, state.bindings.binding_names.count, false, false) if not proof_kernel_replay_resource_charge_work(state, 1)
-                    allocation_recorded <- true if prior_allocation == allocation_root
+                allocation_recorded: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_allocations, state.scope.resource_call_allocations_are_sorted, allocation_root, &state.scope.resource_work_used)
                 return (false, empty, state.bindings.binding_names.count, false, false) if:
-                    not allocation_recorded
+                    not allocation_recorded.complete or not allocation_recorded.found
                     not proof_kernel_replay_resource_region_active(state, nodes[argument_root].secondary_name)
                     not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], nodes[allocation_root].left)
                 # A fresh allocation has no pre-existing caller place and is writable for the

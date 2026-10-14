@@ -4,78 +4,97 @@ extend ElisaProofKernelReplay:
         # The source adapter records an underlying scalar only for a const enum and ties it to
         # the enum's exact declaration identity. Reject duplicate rows, even identical ones, so a
         # replay package cannot add or shadow an enum representation claim.
-        def proof_kernel_replay_const_enum_underlying_sort(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, expected: ProofKernelInferredSort, work: mutable usize&) -> ProofKernelInferredSort:
-            return proof_kernel_replay_unknown_sort() if not expected.known or expected.family != "named" or expected.name == "" or expected.type_identity == 0
+        def proof_kernel_replay_const_enum_underlying_binding(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, expected: ProofKernelInferredSort, work: mutable usize&) -> (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding):
+            empty: ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
+            total: usize = proof_kernel_replay_type_environment_binding_count(environment)
+            return (false, empty) if:
+                not expected.known or expected.family != "named" or expected.name == "" or expected.type_identity == 0
+                typing_index.source_binding_count != total or typing_index.declaration_binding_capacity != typing_index.declaration_binding_heads.count
+                typing_index.value_overlay_count > total or typing_index.declaration_binding_next.count != total - typing_index.value_overlay_count
+                not proof_kernel_replay_type_work_consume_amount(sview_len(expected.name), work)
+            return (false, empty) if typing_index.declaration_binding_capacity == 0
+            hash: u32 = proof_kernel_replay_declaration_key_hash("enum-underlying", expected.name, expected.name, expected.type_identity)
+            slot: usize = (hash.i64() % typing_index.declaration_binding_capacity.i64()).usize()
+            row: mutable usize = typing_index.declaration_binding_heads[slot]
+            probes: mutable usize = 0
             found: mutable bool = false
-            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
-            for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, expected, found, selected, work|:
-                return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if binding.kind != "enum-underlying" or not proof_kernel_replay_type_text_equal(binding.owner, expected.name, work) or not proof_kernel_replay_type_text_equal(binding.name, expected.name, work) or binding.owner_type_identity != expected.type_identity
-                return proof_kernel_replay_unknown_sort() if found
-                selected <- binding
-                found <- true
-            return proof_kernel_replay_known_sort(selected.sort, selected.type_name) if found
+            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = empty
+            return (false, empty) if row > typing_index.declaration_binding_next.count
+            while row != typing_index.declaration_binding_next.count and probes < typing_index.declaration_binding_next.count |row, probes, environment, typing_index, total, expected, work, found, selected|:
+                return (false, empty) if row >= total or row >= typing_index.declaration_binding_next.count or not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, row)
+                if binding.kind == "enum-underlying" and binding.owner_type_identity == expected.type_identity and proof_kernel_replay_type_text_equal(binding.owner, expected.name, work) and proof_kernel_replay_type_text_equal(binding.name, expected.name, work):
+                    return (false, empty) if found
+                    selected <- binding
+                    found <- true
+                row <- typing_index.declaration_binding_next[row]
+                return (false, empty) if row > typing_index.declaration_binding_next.count
+                probes <- probes + 1
+            return (false, empty) if row != typing_index.declaration_binding_next.count or work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+            return (found, selected)
+
+        def proof_kernel_replay_const_enum_underlying_sort(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, expected: ProofKernelInferredSort, work: mutable usize&) -> ProofKernelInferredSort:
+            underlying: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_const_enum_underlying_binding(environment, typing_index, expected, work)
+            return proof_kernel_replay_known_sort(underlying.binding.sort, underlying.binding.type_name) if underlying.known
             return proof_kernel_replay_unknown_sort()
 
         # The compiler cast-hook table includes nested-module functions and checks exact
         # source/return types without owner filtering. Any exact hook may therefore win.
         # Incomplete __cast__ metadata also refuses admission rather than assuming a builtin.
-        def proof_kernel_replay_builtin_cast_dispatch_absent(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, source: ProofKernelInferredSort, target: ProofKernelInferredSort, work: mutable usize&) -> bool:
-            return false if not source.known or not target.known
-            for index in 0..<proof_kernel_replay_type_environment_binding_count(environment) |index, environment, source, target, work|:
+        def proof_kernel_replay_builtin_cast_dispatch_absent_in_group(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, bindings: darray[ElisaProofKernelCore::ProofKernelTypingBinding], indexed_overlay_count: usize, group_index: ProofKernelReplayFunctionGroupIndex, source: ProofKernelInferredSort, target: ProofKernelInferredSort, work: mutable usize&) -> bool:
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET or group_index.source_binding_count > bindings.count or bindings.count - group_index.source_binding_count != indexed_overlay_count or group_index.next_rows.count != group_index.source_binding_count or group_index.function_count > group_index.source_binding_count
+            return true if group_index.function_count == 0 and group_index.capacity == 0 and group_index.slots.count == 0 and group_index.heads.count == 0 and group_index.tails.count == 0 and group_index.counts.count == 0 and group_index.hashes.count == 0
+            return false if group_index.capacity == 0 or group_index.slots.count != group_index.capacity or group_index.heads.count != group_index.capacity or group_index.tails.count != group_index.capacity or group_index.counts.count != group_index.capacity or group_index.hashes.count != group_index.capacity
+            indexed_function_count: mutable usize = 0
+            for slot in 0..<group_index.capacity |slot, group_index, bindings, environment, typing_index, source, target, work, indexed_function_count|:
                 return false if not proof_kernel_replay_type_work_consume(work)
-                hook: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                if hook.kind == "function-incomplete":
+                representative_index: usize = group_index.slots[slot]
+                continue if representative_index == group_index.source_binding_count
+                group_count: usize = group_index.counts[slot]
+                return false if representative_index >= group_index.source_binding_count or group_count == 0 or group_count > group_index.function_count - indexed_function_count or group_index.heads[slot] >= group_index.source_binding_count or group_index.tails[slot] >= group_index.source_binding_count
+                indexed_function_count <- indexed_function_count + group_count
+                representative: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[representative_index]
+                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(representative.name), work)
+                continue if representative.name != "__cast__"
+                row: mutable usize = group_index.heads[slot]
+                visited: mutable usize = 0
+                while row < group_index.source_binding_count and visited < group_index.counts[slot] |row, visited, group_index, bindings, environment, typing_index, source, target, work|:
+                    return false if not proof_kernel_replay_type_work_consume(work)
+                    hook: ElisaProofKernelCore::ProofKernelTypingBinding = bindings[row]
                     return false if:
-                        not proof_kernel_replay_type_work_consume_amount(sview_len(hook.name), work)
-                        hook.name == "__cast__"
-                    continue
-                continue if hook.kind != "function"
-                return false if not proof_kernel_replay_type_work_consume_amount(sview_len(hook.name), work)
-                continue if hook.name != "__cast__" or hook.parameter_count != 1 or not proof_kernel_replay_type_text_equal(hook.sort, target.family, work) or not proof_kernel_replay_type_text_equal(hook.type_name, target.name, work) or hook.type_identity != target.type_identity
-                parameter: (known: bool, parameter: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, hook, 0, work)
-                return false if not parameter.known
-                matched_source: bool = proof_kernel_replay_type_text_equal(parameter.parameter.sort, source.family, work) and proof_kernel_replay_type_text_equal(parameter.parameter.type_name, source.name, work) and parameter.parameter.type_identity == source.type_identity
-                return false if matched_source
+                        (hook.kind != "function" and hook.kind != "function-incomplete")
+                        not proof_kernel_replay_type_text_equal(hook.name, "__cast__", work)
+                    if hook.kind == "function-incomplete":
+                        return false
+                    if hook.parameter_count == 1 and proof_kernel_replay_type_text_equal(hook.sort, target.family, work) and proof_kernel_replay_type_text_equal(hook.type_name, target.name, work) and hook.type_identity == target.type_identity:
+                        parameter: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_function_parameter_by_index(environment, typing_index, hook, 0, work)
+                        return false if not parameter.known
+                        matched_source: bool = proof_kernel_replay_type_text_equal(parameter.parameter.sort, source.family, work) and proof_kernel_replay_type_text_equal(parameter.parameter.type_name, source.name, work) and parameter.parameter.type_identity == source.type_identity
+                        return false if matched_source
+                    row <- group_index.next_rows[row]
+                    visited <- visited + 1
+                return false if visited != group_index.counts[slot] or row != group_index.source_binding_count
+            return false if indexed_function_count != group_index.function_count
+            return false if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
             return true
 
-        def proof_kernel_replay_enum_member_sort(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, name: sview, work: mutable usize&) -> ProofKernelInferredSort:
-            found: mutable bool = false
-            ambiguous: mutable bool = false
-            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
-            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            for index in 0..<total_bindings |index, environment, name, found, ambiguous, selected, work|:
-                return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if binding.kind != "enum-member" or not proof_kernel_replay_type_text_equal(binding.name, name, work)
-                if not found:
-                    selected <- binding
-                    found <- true
-                elif not proof_kernel_replay_type_text_equal(selected.owner, binding.owner, work) or selected.owner_type_identity != binding.owner_type_identity or selected.type_identity != binding.type_identity:
-                    ambiguous <- true
-            return proof_kernel_replay_binding_sort(selected) if found and not ambiguous
+        def proof_kernel_replay_builtin_cast_dispatch_absent(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, source: ProofKernelInferredSort, target: ProofKernelInferredSort, work: mutable usize&) -> bool:
+            return false if not source.known or not target.known
+            return false if not proof_kernel_replay_builtin_cast_dispatch_absent_in_group(environment, typing_index, environment.global_bindings, 0, typing_index.global_function_group_index, source, target, work)
+            return false if not proof_kernel_replay_builtin_cast_dispatch_absent_in_group(environment, typing_index, environment.bindings, typing_index.value_overlay_count, typing_index.local_function_group_index, source, target, work)
+            return true
+
+        def proof_kernel_replay_enum_member_sort(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, name: sview, work: mutable usize&) -> ProofKernelInferredSort:
+            selected: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, typing_index, "enum-member", name, "", 0, false, 0, "", work)
+            return proof_kernel_replay_binding_sort(selected.binding) if selected.known
             return proof_kernel_replay_unknown_sort()
 
         # A bare `.Variant` can occur in several enums. Its owner must be supplied by a typed
         # counterpart, then checked against the environment's exact enum declaration identity.
-        def proof_kernel_replay_enum_member_sort_for_type(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, name: sview, expected: ProofKernelInferredSort, work: mutable usize&) -> ProofKernelInferredSort:
+        def proof_kernel_replay_enum_member_sort_for_type(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, name: sview, expected: ProofKernelInferredSort, work: mutable usize&) -> ProofKernelInferredSort:
             return proof_kernel_replay_unknown_sort() if not expected.known or expected.family != "named" or expected.name == "" or expected.type_identity == 0
-            found: mutable bool = false
-            ambiguous: mutable bool = false
-            selected: mutable ElisaProofKernelCore::ProofKernelTypingBinding = ElisaProofKernelCore::ProofKernelTypingBinding{kind: "", name: "", owner: "", sort: "", type_name: "", element_sort: "", element_type_name: "", type_identity: 0, owner_type_identity: 0, element_type_identity: 0, signature_identity: 0, parameter_index: 0, parameter_count: 0, parameter_has_default: false, parameter_by_reference: false}
-            total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            for index in 0..<total_bindings |index, environment, name, expected, found, ambiguous, selected, work|:
-                return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if binding.kind != "enum-member" or not proof_kernel_replay_type_text_equal(binding.name, name, work)
-                continue if not proof_kernel_replay_type_text_equal(binding.owner, expected.name, work) or binding.type_identity != expected.type_identity or binding.owner_type_identity != expected.type_identity
-                if found:
-                    ambiguous <- true if not proof_kernel_replay_typing_evidence_equal(selected, binding, work)
-                else:
-                    selected <- binding
-                    found <- true
-            return proof_kernel_replay_binding_sort(selected) if found and not ambiguous
+            selected: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typed_enum_member_binding(environment, typing_index, name, expected.name, expected.type_identity, work)
+            return proof_kernel_replay_binding_sort(selected.binding) if selected.known
             return proof_kernel_replay_unknown_sort()
 
         def proof_kernel_replay_enum_type_path(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, path: mutable darray[sview]&, depth: usize, work: mutable usize&) -> bool:
@@ -127,41 +146,60 @@ extend ElisaProofKernelReplay:
                 return false if not proof_kernel_replay_type_text_equal(binding.name, path[segment], work)
             return true
 
-        def proof_kernel_replay_enum_type_sort_for_path(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, path: darray[sview]&, work: mutable usize&) -> ProofKernelInferredSort:
+        def proof_kernel_replay_enum_type_sort_for_path(environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, path: darray[sview]&, work: mutable usize&) -> ProofKernelInferredSort:
             return proof_kernel_replay_unknown_sort() if path.count == 0 or path.count > 128
-            context_identity: mutable usize = 0
-            context_seen: mutable bool = false
             total_bindings: usize = proof_kernel_replay_type_environment_binding_count(environment)
-            for index in 0..<total_bindings |index, environment, context_identity, context_seen, work|:
-                return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
-                context: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, index)
-                continue if context.kind != "module-context"
-                return proof_kernel_replay_unknown_sort() if context_seen or not proof_kernel_replay_owner_identity_recorded(environment, context.owner_type_identity, work)
-                context_identity <- context.owner_type_identity
-                context_seen <- true
+            owner_paths: ProofKernelReplayOwnerPathIndex = typing_index.owner_path_index
+            return proof_kernel_replay_unknown_sort() if:
+                typing_index.source_binding_count != total_bindings
+                owner_paths.source_binding_count != total_bindings
+                owner_paths.owner_ids.count != owner_paths.owner_count or owner_paths.starts.count != owner_paths.owner_count or owner_paths.counts.count != owner_paths.owner_count
+                owner_paths.slots.count != owner_paths.capacity or (owner_paths.capacity == 0 and owner_paths.owner_count != 0)
+                owner_paths.context_seen and owner_paths.context_identity == 0
+                not owner_paths.context_seen and owner_paths.context_identity != 0
+            context_identity: usize = owner_paths.context_identity
+            context_seen: bool = owner_paths.context_seen
             context_start: mutable usize = 0
             context_count: mutable usize = 0
             if context_seen:
-                context_path: (known: bool, start_index: usize, path_count: usize) = proof_kernel_replay_type_scope_owner_path_start(environment, context_identity, work)
-                return proof_kernel_replay_unknown_sort() if not context_path.known
-                context_start <- context_path.start_index
-                context_count <- context_path.path_count
+                context_ordinal: usize = proof_kernel_replay_owner_path_index_find(owner_paths, context_identity, work)
+                return proof_kernel_replay_unknown_sort() if context_ordinal >= owner_paths.owner_count
+                context_start <- owner_paths.starts[context_ordinal]
+                context_count <- owner_paths.counts[context_ordinal]
+                return proof_kernel_replay_unknown_sort() if context_start >= total_bindings or context_count == 0 or context_count > total_bindings - context_start
             found_identity: mutable usize = 0
             found_name: mutable sview = ""
             selected_depth: mutable usize = 0
             ambiguous: mutable bool = false
-            for binding_index in 0..<total_bindings |binding_index, environment, path, context_start, context_count, context_seen, work, found_identity, found_name, selected_depth, ambiguous|:
-                return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume(work)
-                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, binding_index)
-                continue if binding.kind != "enum-scope-segment" or binding.parameter_index != 0
-                continue if not proof_kernel_replay_enum_scope_binding_matches(environment, binding_index, binding.type_identity, binding.owner, path, context_start, context_count, context_seen, work)
-                if found_identity == 0 or binding.parameter_count > selected_depth:
-                    found_identity <- binding.type_identity
-                    found_name <- binding.owner
-                    selected_depth <- binding.parameter_count
-                    ambiguous <- false
-                elif binding.parameter_count == selected_depth and (found_identity != binding.type_identity or not proof_kernel_replay_type_text_equal(found_name, binding.owner, work)):
-                    ambiguous <- true
+            leaf: sview = path[path.count - 1]
+            return proof_kernel_replay_unknown_sort() if not proof_kernel_replay_type_work_consume_amount(sview_len(leaf), work)
+            return proof_kernel_replay_unknown_sort() if typing_index.value_overlay_count > total_bindings or typing_index.declaration_binding_capacity == 0 or typing_index.declaration_binding_heads.count != typing_index.declaration_binding_capacity or typing_index.declaration_binding_next.count != total_bindings - typing_index.value_overlay_count
+            indexed_binding_count: usize = typing_index.declaration_binding_next.count
+            hash: u32 = proof_kernel_replay_declaration_key_hash("enum-scope-segment", "", leaf, 0)
+            slot: usize = (hash.i64() % typing_index.declaration_binding_capacity.i64()).usize()
+            row: mutable usize = typing_index.declaration_binding_heads[slot]
+            probes: mutable usize = 0
+            return proof_kernel_replay_unknown_sort() if row > indexed_binding_count
+            # Repeated enum leaf names can be legitimate across modules. Traverse their bounded
+            # index chain under the shared work budget instead of treating name frequency as a
+            # collision cluster and refusing otherwise resolvable qualified paths.
+            while row != indexed_binding_count and probes < indexed_binding_count |row, probes, environment, typing_index, indexed_binding_count, path, context_start, context_count, context_seen, work, found_identity, found_name, selected_depth, ambiguous, leaf|:
+                return proof_kernel_replay_unknown_sort() if row >= typing_index.declaration_binding_next.count or not proof_kernel_replay_type_work_consume(work)
+                binding: ElisaProofKernelCore::ProofKernelTypingBinding = proof_kernel_replay_type_environment_binding_at(environment, row)
+                if binding.kind == "enum-scope-segment" and binding.parameter_index == 0 and proof_kernel_replay_type_text_equal(binding.owner, leaf, work):
+                    if proof_kernel_replay_enum_scope_binding_matches(environment, row, binding.type_identity, binding.owner, path, context_start, context_count, context_seen, work):
+                        if found_identity == 0 or binding.parameter_count > selected_depth:
+                            found_identity <- binding.type_identity
+                            found_name <- binding.owner
+                            selected_depth <- binding.parameter_count
+                            ambiguous <- false
+                        elif binding.parameter_count == selected_depth and (found_identity != binding.type_identity or not proof_kernel_replay_type_text_equal(found_name, binding.owner, work)):
+                            ambiguous <- true
+                row <- typing_index.declaration_binding_next[row]
+                return proof_kernel_replay_unknown_sort() if row > indexed_binding_count
+                probes <- probes + 1
+            return proof_kernel_replay_unknown_sort() if row != indexed_binding_count
+            return proof_kernel_replay_unknown_sort() if work > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
             return proof_kernel_replay_identity_sort("named", found_name, found_identity) if found_identity != 0 and not ambiguous
             return proof_kernel_replay_unknown_sort()
 
@@ -183,16 +221,16 @@ extend ElisaProofKernelReplay:
                     # Check before both enum-resolution paths so fallback cannot bypass it.
                     # An ambiguous lookup can also carry a candidate with known=false.
                     return (false, unknown) if shadowing_value.known or shadowing_value.binding.name != ""
-                resolved_owner: ProofKernelInferredSort = proof_kernel_replay_enum_type_sort_for_path(environment, owner_path, work)
+                resolved_owner: ProofKernelInferredSort = proof_kernel_replay_enum_type_sort_for_path(environment, typing_index, owner_path, work)
                 if resolved_owner.known:
-                    return (true, proof_kernel_replay_enum_member_sort_for_type(environment, member.name, resolved_owner, work))
+                    return (true, proof_kernel_replay_enum_member_sort_for_type(environment, typing_index, member.name, resolved_owner, work))
                 # A qualified declaration path must never fall back to its leaf type name.
                 # Otherwise Wrong::Option.Some could borrow the identity of a unique Option
                 # declaration when the exact Wrong::Option owner is absent or inconsistent.
                 return (true, unknown) if owner_path.count > 1
             owner_name: sview = proof_kernel_replay_symbol_name(nodes, member.left, 0, work)
             return (false, unknown) if owner_name == ""
-            owner: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, "type", owner_name, "", 0, work)
+            owner: (known: bool, binding: ElisaProofKernelCore::ProofKernelTypingBinding) = proof_kernel_replay_find_typing_binding(environment, typing_index, "type", owner_name, "", 0, true, 0, "", work)
             return (false, unknown) if not owner.known or owner.binding.sort != "named" or owner.binding.type_identity == 0
             expected: ProofKernelInferredSort = proof_kernel_replay_binding_sort(owner.binding)
-            return (true, proof_kernel_replay_enum_member_sort_for_type(environment, member.name, expected, work))
+            return (true, proof_kernel_replay_enum_member_sort_for_type(environment, typing_index, member.name, expected, work))

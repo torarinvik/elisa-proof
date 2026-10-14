@@ -7,9 +7,12 @@ extend ElisaProofKernelReplay:
             requires depth <= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
             return false if depth >= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
             remaining: usize = PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT - depth
-            return (proof_kernel_replay_resource_events_remaining(nodes, children, roots, state, effects, depth, remaining, arena_admitted) can Global{Read,Write})
+            return (proof_kernel_replay_resource_events_remaining(nodes, children, roots, state, effects, depth, remaining, arena_admitted, false) can Global{Read,Write})
 
-        def proof_kernel_replay_resource_events_remaining[@r, @e, @s](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, roots: darray[usize]&, state: mutable ProofKernelReplayResourceState& @s, effects: mutable darray[ProofKernelReplayResourceEffect]& @e, depth: usize, remaining: usize, arena_admitted: bool) -> bool can[Global.Read, Global.Write]:
+        # Only a resource-alternatives arm may return with pending moves: its enclosing
+        # alternative node unions those per-arm masks, and the parent must consume them with
+        # explicit resource-join-move events. Public, scope, and callee boundaries pass false.
+        def proof_kernel_replay_resource_events_remaining[@r, @e, @s](nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: mutable darray[usize]& @r, roots: darray[usize]&, state: mutable ProofKernelReplayResourceState& @s, effects: mutable darray[ProofKernelReplayResourceEffect]& @e, depth: usize, remaining: usize, arena_admitted: bool, allow_boundary_pending_join: bool) -> bool can[Global.Read, Global.Write]:
             requires remaining > 0
             decreases remaining
             return false if depth >= PROOF_KERNEL_REPLAY_RESOURCE_EVENT_DEPTH_LIMIT
@@ -37,11 +40,13 @@ extend ElisaProofKernelReplay:
                         return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                         return false if not child.known or child.value >= nodes.count
+                        return false if not proof_kernel_replay_resource_charge_work(state, 2)
                         proof_facts.push(child.value)
                     return false if:
                         not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, proof_facts, node.auxiliary)
                         not proof_kernel_replay_proposition_state_valid_with_goal_work(nodes, children, proof_facts, node.auxiliary, state.scope.goal_work_used)
                         not (proof_kernel_replay_goal_depth_remaining_with_work(nodes, children, proof_facts, node.auxiliary, 0, 0, &state.scope.goal_work_used, remaining: ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT) can Global{Read,Write}) or state.scope.goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return false if not proof_kernel_replay_resource_charge_work(state, 4)
                     state.scope.disjoint_left.push(node.left)
                     state.scope.disjoint_right.push(node.right)
                     continue
@@ -52,6 +57,7 @@ extend ElisaProofKernelReplay:
                         return false if not proof_kernel_replay_resource_charge_work(state, 1)
                         child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + index)
                         return false if not child.known
+                        return false if not proof_kernel_replay_resource_charge_work(state, 2)
                         child_roots.push(child.value)
                     child_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
                     return false if not proof_kernel_replay_resource_copy(state, &child_state)
@@ -70,10 +76,12 @@ extend ElisaProofKernelReplay:
                             if prior == inherited_region:
                                 already_protected <- true
                                 break
-                        child_state.regions.protected_regions.push(inherited_region) if not already_protected
+                        if not already_protected:
+                            return false if not proof_kernel_replay_resource_charge_work(&child_state, 2)
+                            child_state.regions.protected_regions.push(inherited_region)
                     return false if:
                         remaining <= 1
-                        not (proof_kernel_replay_resource_events_remaining(nodes, children, child_roots, &child_state, effects, depth + 1, remaining - 1, arena_admitted) can Global{Read,Write})
+                        not (proof_kernel_replay_resource_events_remaining(nodes, children, child_roots, &child_state, effects, depth + 1, remaining - 1, arena_admitted, false) can Global{Read,Write})
                     state.scope.resource_work_used <- child_state.scope.resource_work_used
                     state.scope.goal_work_used <- child_state.scope.goal_work_used
                     return false if not proof_kernel_replay_resource_scope_preserves_parent(state, child_state)
@@ -83,12 +91,47 @@ extend ElisaProofKernelReplay:
                             index >= child_state.bindings.binding_moved.count or index >= state.scope.pending_join_moves.count
                         state.scope.pending_join_moves[index] <- true if not state.bindings.binding_moved[index] and child_state.bindings.binding_moved[index]
                     continue
+                if node.kind == "resource-alternatives":
+                    return false if node.children_count == 0 or not proof_kernel_replay_child_range_valid(node.children_start, node.children_count, children.count)
+                    alternative_baseline: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
+                    alternative_history: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
+                    return false if:
+                        not proof_kernel_replay_resource_copy(state, &alternative_baseline)
+                        not proof_kernel_replay_resource_copy(state, &alternative_history)
+                    first_alternative: mutable bool = true
+                    for arm_index in 0..<node.children_count |arm_index, node, children, nodes, state, effects, depth, remaining, arena_admitted, alternative_history, alternative_baseline, first_alternative|:
+                        return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                        arm_child: (known: bool, value: usize) = proof_kernel_replay_child_at(children, node.children_start + arm_index)
+                        return false if not arm_child.known or arm_child.value >= nodes.count
+                        arm_node: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, arm_child.value)
+                        return false if not arm_node.known or arm_node.node.kind != "resource-scope"
+                        arm_state: mutable ProofKernelReplayResourceState = proof_kernel_replay_resource_empty()
+                        return false if not proof_kernel_replay_resource_copy(state, &arm_state)
+                        for slot in 0..<arm_state.scope.pending_join_moves.count |slot, arm_state|:
+                            return false if not proof_kernel_replay_resource_charge_work(&arm_state, 1) or slot >= arm_state.bindings.binding_moved.count
+                            arm_state.scope.pending_join_moves[slot] <- false
+                        arm_roots: darray[usize] = [arm_child.value]
+                        return false if:
+                            remaining <= 1
+                            not (proof_kernel_replay_resource_events_remaining(nodes, children, arm_roots, &arm_state, effects, depth + 1, remaining - 1, arena_admitted, true) can Global{Read,Write})
+                        state.scope.resource_work_used <- arm_state.scope.resource_work_used
+                        state.scope.goal_work_used <- arm_state.scope.goal_work_used
+                        return false if not proof_kernel_replay_resource_scope_event_history_merge_alternative(&alternative_history, &alternative_baseline, &arm_state, &state.scope.resource_work_used, first_alternative)
+                        first_alternative <- false
+                        for slot in 0..<state.bindings.binding_moved.count |slot, state, arm_state|:
+                            return false if not proof_kernel_replay_resource_charge_work(state, 1)
+                            return false if slot >= arm_state.scope.pending_join_moves.count or slot >= state.scope.pending_join_moves.count
+                            state.scope.pending_join_moves[slot] <- true if arm_state.scope.pending_join_moves[slot]
+                    return false if not proof_kernel_replay_resource_scope_event_history_adopt(&state, &alternative_history)
+                    continue
                 if node.kind == "resource-region-open":
                     return false if proof_kernel_replay_resource_region_active(state, node.name)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 2)
                     state.regions.active_regions.push(node.name)
                     continue
                 if node.kind == "resource-region-param":
                     return false if node.name == "" or proof_kernel_replay_resource_region_active(state, node.name)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 4)
                     state.regions.active_regions.push(node.name)
                     state.regions.external_regions.push(node.name)
                     continue
@@ -110,6 +153,7 @@ extend ElisaProofKernelReplay:
                         not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
                         not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                         not proof_kernel_replay_resource_binding_name_available(state, node.name)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 32)
                     state.bindings.binding_names.push(node.name)
                     state.bindings.binding_scope_depth.push(state.scope.scope_depth)
                     state.bindings.binding_reference.push((node.auxiliary & PROOF_KERNEL_REPLAY_REFERENCE_FLAG) != 0)
@@ -139,8 +183,8 @@ extend ElisaProofKernelReplay:
                         not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
                         not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
                         not proof_kernel_replay_resource_region_external(state, node.secondary_name)
-                    state.regions.resource_return_alloc_regions.push(node.secondary_name)
-                    state.scope.resource_return_witnesses.push(root)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 4)
+                    return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses, &state.scope.resource_return_witnesses_are_sorted, root, &state.scope.resource_work_used)
                     continue
                 if node.kind == "resource-region-call-alloc":
                     # A call temporary is a real allocation in the caller's active region, but
@@ -150,10 +194,11 @@ extend ElisaProofKernelReplay:
                         not proof_kernel_replay_resource_region_active(state, node.secondary_name)
                         not arena_admitted and not proof_kernel_replay_arena_valid(nodes, children, [], node.left)
                         not proof_kernel_replay_resource_value_term_has_no_region(nodes, children, state, node.left, 0)
-                    state.scope.resource_call_allocations.push(root)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                    return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_call_allocations, &state.scope.resource_call_allocations_are_sorted, root, &state.scope.resource_work_used)
                     continue
                 if node.kind == "resource-region-return":
-                    used_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_return_witnesses_used, node.left, &state.scope.resource_work_used)
+                    used_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_return_witnesses_used, state.scope.resource_return_witnesses_used_are_sorted, node.left, &state.scope.resource_work_used)
                     return false if not used_witness_membership.complete or used_witness_membership.found
                     if node.name == "":
                         # A region-less reference return: see resource_call_returns.elisa.
@@ -161,12 +206,13 @@ extend ElisaProofKernelReplay:
                             return false if not proof_kernel_replay_resource_reference_call_return(nodes, children, state, node, prior_event, arena_admitted)
                         else:
                             return false if not proof_kernel_replay_resource_regionless_return(nodes, state, node)
-                        state.scope.resource_return_witnesses_used.push(node.left)
+                        return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                        return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses_used, &state.scope.resource_return_witnesses_used_are_sorted, node.left, &state.scope.resource_work_used)
                         continue
                     return false if not proof_kernel_replay_resource_region_external(state, node.name) or not proof_kernel_replay_resource_region_active(state, node.name)
                     if node.operator == "value-param":
                         return false if node.auxiliary != 0 or not proof_kernel_replay_resource_region_collection_type(nodes, children, node.right, &state.scope.resource_work_used)
-                        value_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_return_witnesses, node.left, &state.scope.resource_work_used)
+                        value_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_return_witnesses, state.scope.resource_return_witnesses_are_sorted, node.left, &state.scope.resource_work_used)
                         return false if:
                             not value_witness_membership.complete or not value_witness_membership.found
                             node.left >= nodes.count or nodes[node.left].kind != "resource-use" or nodes[node.left].name == ""
@@ -178,13 +224,15 @@ extend ElisaProofKernelReplay:
                         # resource-use witness must therefore have been followed by the move that
                         # the source checker observed.
                         return false if value_slot >= state.bindings.binding_moved.count or not state.bindings.binding_moved[value_slot]
-                        state.scope.resource_return_witnesses_used.push(node.left)
+                        return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                        return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses_used, &state.scope.resource_return_witnesses_used_are_sorted, node.left, &state.scope.resource_work_used)
                         continue
                     if node.operator in {"sview-call", "param-call"}:
                         return false if not proof_kernel_replay_resource_region_call_return(nodes, children, state, node, prior_event, arena_admitted)
-                        state.scope.resource_return_witnesses_used.push(node.left)
+                        return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                        return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses_used, &state.scope.resource_return_witnesses_used_are_sorted, node.left, &state.scope.resource_work_used)
                         continue
-                    return_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_return_witnesses, node.left, &state.scope.resource_work_used)
+                    return_witness_membership: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_return_witnesses, state.scope.resource_return_witnesses_are_sorted, node.left, &state.scope.resource_work_used)
                     return false if not return_witness_membership.complete or not return_witness_membership.found
                     witness: (known: bool, node: ElisaProofKernelCore::ProofKernelNode) = proof_kernel_replay_node_at(nodes, node.left)
                     return false if not witness.known
@@ -215,7 +263,8 @@ extend ElisaProofKernelReplay:
                             return false if (node.auxiliary == 1) != witness_mutable
                     else:
                         return false
-                    state.scope.resource_return_witnesses_used.push(node.left)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                    return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses_used, &state.scope.resource_return_witnesses_used_are_sorted, node.left, &state.scope.resource_work_used)
                     continue
                 if node.kind == "resource-region-rebind-alloc":
                     return false if:
@@ -286,6 +335,7 @@ extend ElisaProofKernelReplay:
                         not is_sview_borrow and source_is_reference and source_is_mutable_reference and not source_region_owner
                         not is_sview_borrow and source_region_owner and proof_kernel_replay_resource_has_borrow_overlap(nodes, state, source.place, state.bindings.binding_names.count)
                         not proof_kernel_replay_resource_binding_name_available(state, node.name)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 32)
                     state.bindings.binding_names.push(node.name)
                     state.bindings.binding_scope_depth.push(state.scope.scope_depth)
                     state.bindings.binding_reference.push((node.auxiliary & PROOF_KERNEL_REPLAY_REFERENCE_FLAG) != 0)
@@ -365,6 +415,7 @@ extend ElisaProofKernelReplay:
                     return false if:
                         external_region != "" and not proof_kernel_replay_resource_region_active(state, external_region)
                         not proof_kernel_replay_resource_binding_name_available(state, node.name)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 32)
                     state.bindings.binding_names.push(node.name)
                     state.bindings.binding_scope_depth.push(state.scope.scope_depth)
                     state.bindings.binding_reference.push(is_reference)
@@ -397,7 +448,8 @@ extend ElisaProofKernelReplay:
                     return false if:
                         region != "" and (not proof_kernel_replay_resource_binding_region_is_live(state, slot) or not proof_kernel_replay_resource_region_active(state, region))
                         slot >= state.bindings.binding_moved.count or state.bindings.binding_moved[slot]
-                    state.scope.resource_return_witnesses.push(root)
+                    return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                    return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_return_witnesses, &state.scope.resource_return_witnesses_are_sorted, root, &state.scope.resource_work_used)
                     continue
                 if node.kind == "resource-write":
                     decoded: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_place(state, nodes, children, node.left, 0)
@@ -416,6 +468,7 @@ extend ElisaProofKernelReplay:
                     borrow_except_slot: usize = slot if is_reference and is_mutable_reference else state.bindings.binding_names.count
                     return false if (not is_reference or is_mutable_reference) and proof_kernel_replay_resource_has_borrow_overlap(nodes, state, decoded.place, borrow_except_slot)
                     resolved_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_resolve_origin(nodes, state, decoded.place, node.name)
+                    return false if resolved_origin.known and not proof_kernel_replay_resource_charge_work(state, 2)
                     effects.push(ProofKernelReplayResourceEffect{kind: "write", place: resolved_origin.place}) if resolved_origin.known
                     continue
                 if node.kind == "resource-move":
@@ -430,6 +483,7 @@ extend ElisaProofKernelReplay:
                         slot < state.borrows.borrow_present.count and state.borrows.borrow_present[slot]
                         proof_kernel_replay_resource_has_borrow_overlap(nodes, state, decoded.place, state.bindings.binding_names.count)
                     resolved_origin: (known: bool, place: ProofKernelReplayResourcePlace) = proof_kernel_replay_resource_resolve_origin(nodes, state, decoded.place, node.name)
+                    return false if resolved_origin.known and not proof_kernel_replay_resource_charge_work(state, 2)
                     effects.push(ProofKernelReplayResourceEffect{kind: "move", place: resolved_origin.place}) if resolved_origin.known
                     state.bindings.binding_moved[slot] <- true
                     continue
@@ -452,12 +506,12 @@ extend ElisaProofKernelReplay:
                     # which subsumes every effect any callee summary could have exported — the
                     # summary composer accepts writes rooted at a mutable formal and nothing else.
                     return false if not proof_kernel_replay_resource_lend(nodes, children, state, effects, root)
-                    lend_prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_call_events, root, &state.scope.resource_work_used)
+                    lend_prior_call: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_events_seen, state.scope.resource_call_events_seen_are_sorted, root, &state.scope.resource_work_used)
                     return false if not lend_prior_call.complete or lend_prior_call.found
-                    state.scope.resource_call_events.push(root)
+                    return false if not proof_kernel_replay_resource_record_call_event(state, root)
                     continue
                 if node.kind == "resource-call":
-                    call_prior: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_call_events, root, &state.scope.resource_work_used)
+                    call_prior: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_events_seen, state.scope.resource_call_events_seen_are_sorted, root, &state.scope.resource_work_used)
                     return false if:
                         not call_prior.complete or call_prior.found
                         remaining <= 1
@@ -471,13 +525,15 @@ extend ElisaProofKernelReplay:
                             not call_argument.known
                             not proof_kernel_replay_resource_charge_node_text(state, call_argument.node)
                         if call_argument.node.kind == "resource-call-arg" and call_argument.node.operator == "region-new":
-                            used_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_call_allocations_used, call_argument.node.left, &state.scope.resource_work_used)
+                            used_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_allocations_used, state.scope.resource_call_allocations_used_are_sorted, call_argument.node.left, &state.scope.resource_work_used)
                             return false if not used_allocation.complete or used_allocation.found
-                            available_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_membership(state.scope.resource_call_allocations, call_argument.node.left, &state.scope.resource_work_used)
+                            available_allocation: (complete: bool, found: bool) = proof_kernel_replay_resource_usize_sorted_membership(state.scope.resource_call_allocations, state.scope.resource_call_allocations_are_sorted, call_argument.node.left, &state.scope.resource_work_used)
                             return false if not available_allocation.complete or not available_allocation.found
-                            state.scope.resource_call_allocations_used.push(call_argument.node.left)
-                    state.scope.resource_call_events.push(root)
+                            return false if not proof_kernel_replay_resource_charge_work(state, 2)
+                            return false if not proof_kernel_replay_resource_record_sorted_id(&state.scope.resource_call_allocations_used, &state.scope.resource_call_allocations_used_are_sorted, call_argument.node.left, &state.scope.resource_work_used)
+                    return false if not proof_kernel_replay_resource_record_call_event(state, root)
                     continue
                 return false
-            return false if proof_kernel_replay_resource_has_pending_join(state)
+            return false if not allow_boundary_pending_join and proof_kernel_replay_resource_has_pending_join(state)
+            return false if state.scope.resource_work_used > PROOF_KERNEL_REPLAY_RESOURCE_WORK_LIMIT
             return true

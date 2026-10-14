@@ -53,10 +53,11 @@ extend ElisaProofKernelReplay:
             return false
 
         # Typed API only: establish equality between two built-in indexed reads when their
-        # receivers are the same term and their indices are structurally equal or explicitly
-        # equated by an admitted premise. Requiring the same receiver term avoids treating
-        # container value equality as object identity. Primitive result sorts keep overloaded
-        # equality out of the conclusion; known receiver typing rules out protocol indexing.
+        # receivers are the same term and their indices are structurally equal or connected by
+        # admitted equality premises. Requiring the same receiver term avoids treating
+        # container value equality as object identity. Primitive result sorts plus the explicit
+        # primitive-comparison witness check keep overloaded equality out of the conclusion;
+        # known receiver typing rules out protocol indexing.
         def proof_kernel_replay_typed_index_read_equality_with_work(nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]& @r, children: darray[usize]& @r, environment: ElisaProofKernelCore::ProofKernelTypeEnvironment, typing_index: ProofKernelReplayTypingIndex, facts: darray[usize], root: usize, type_work_used: mutable usize&, goal_work_used: mutable usize&) -> bool:
             return false if:
                 root >= nodes.count or not proof_kernel_replay_valid(nodes, root)
@@ -67,6 +68,15 @@ extend ElisaProofKernelReplay:
             return false if:
                 goal.kind != "binary" or goal.operator != "=="
                 goal.left >= nodes.count or goal.right >= nodes.count
+            # Typing the indexed values as primitive does not establish which source-level
+            # `==` implementation was selected. An overloaded equality may return false even
+            # for identical values, so this rule is valid only for the built-in comparison.
+            markers: mutable darray[ProofKernelReplayWitnessMarker] = []
+            return false if:
+                not proof_kernel_replay_witness_marker_cache_fill_with_work(nodes, children, facts, &markers, goal_work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            primitive_goal: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, goal.left, goal.right, goal_work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not primitive_goal
             left: ElisaProofKernelCore::ProofKernelNode = nodes[goal.left]
             right: ElisaProofKernelCore::ProofKernelNode = nodes[goal.right]
             return false if:
@@ -101,18 +111,84 @@ extend ElisaProofKernelReplay:
             indices_equal: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, left.right, right.right, goal_work_used)
             return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return true if indices_equal
-            for fact in facts |fact, nodes, children, goal_work_used|:
-                return false if:
-                    not proof_kernel_replay_goal_search_charge(goal_work_used)
-                    fact >= nodes.count or not proof_kernel_replay_valid(nodes, fact)
-                    not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, goal_work_used)
-                    goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            return false if facts.count > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET
+            reachable_limit: usize = facts.count * 2 + 1
+            return false if not proof_kernel_replay_goal_search_charge(goal_work_used)
+            # Typed formation authenticates operand sorts, but it does not prove that a
+            # source-level `==` selected the kernel's builtin primitive equality. Reuse the
+            # marker cache already validated for the goal and require each graph edge to be a
+            # primitive comparison before treating it as symmetric/transitive equality.
+            # Endpoint typing is invariant for a premise in this immutable query. Cache each
+            # edge's result so it is not re-inferred from the other endpoint later.
+            edge_sort_states: mutable darray[u8] = []
+            edge_primitive_states: mutable darray[u8] = []
+            for fact in facts |fact, edge_sort_states, goal_work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(goal_work_used)
+                edge_sort_states.push(0)
+            for fact in facts |fact, nodes, children, markers, edge_primitive_states, goal_work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(goal_work_used)
+                return false if fact >= nodes.count
                 candidate: ElisaProofKernelCore::ProofKernelNode = nodes[fact]
-                continue if candidate.kind != "binary" or candidate.operator != "=="
-                forward: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.left, left.right, goal_work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.right, right.right, goal_work_used)
-                return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return true if forward
-                reverse: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.left, right.right, goal_work_used) and proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.right, left.right, goal_work_used)
-                return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
-                return true if reverse
+                if candidate.kind == "binary" and candidate.operator == "==":
+                    primitive: bool = proof_kernel_replay_primitive_comparison_with_markers_with_work(nodes, children, markers, candidate.left, candidate.right, goal_work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    edge_primitive_states.push(1 if primitive else 2)
+                else:
+                    edge_primitive_states.push(2)
+            # Equality premises form an undirected graph over typed index terms. Walk it
+            # iteratively so transitive chains need no recursive kernel calls or unbounded stack.
+            reachable: mutable darray[usize] = [left.right]
+            cursor: mutable usize = 0
+            while cursor < reachable.count |cursor, reachable, facts, nodes, children, edge_sort_states, edge_primitive_states, goal_work_used|:
+                source_root: usize = reachable[cursor]
+                for fact_index in 0..<facts.count |fact_index, facts, nodes, children, source_root, right, reachable, edge_sort_states, edge_primitive_states, goal_work_used|:
+                    fact: usize = facts[fact_index]
+                    return false if:
+                        not proof_kernel_replay_goal_search_charge(goal_work_used)
+                        fact >= nodes.count
+                        not proof_kernel_replay_goal_search_charge_node_text(nodes, fact, goal_work_used)
+                        goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    candidate: ElisaProofKernelCore::ProofKernelNode = nodes[fact]
+                    continue if candidate.kind != "binary" or candidate.operator != "=="
+                    continue if edge_primitive_states[fact_index] != 1
+                    left_matches: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.left, source_root, goal_work_used)
+                    return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    right_matches: mutable bool = false
+                    if not left_matches:
+                        right_matches <- proof_kernel_replay_goal_search_expr_equal(nodes, children, candidate.right, source_root, goal_work_used)
+                        return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    continue if not left_matches and not right_matches
+                    # Numeric equality propositions may admit operand coercions. A well-typed
+                    # cross-sort proposition cannot serve as a transitive equality edge for index
+                    # values. Traverse only edges whose endpoints have the exact goal index sort.
+                    if edge_sort_states[fact_index] == 0:
+                        left_edge_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, typing_index, candidate.left, 0, type_work_used)
+                        return false if type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                        right_edge_sort: ProofKernelInferredSort = proof_kernel_replay_term_sort(nodes, children, environment, typing_index, candidate.right, 0, type_work_used)
+                        return false if type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                        edge_sort_states[fact_index] <- 2
+                        if left_edge_sort.known and right_edge_sort.known:
+                            same_left_sort: bool = proof_kernel_replay_sort_equal(left_edge_sort, left_index_sort, type_work_used)
+                            return false if type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                            same_right_sort: mutable bool = false
+                            if same_left_sort:
+                                same_right_sort <- proof_kernel_replay_sort_equal(right_edge_sort, left_index_sort, type_work_used)
+                                return false if type_work_used > ElisaProofKernelCore::PROOF_KERNEL_TYPE_WORK_BUDGET
+                            edge_sort_states[fact_index] <- 1 if same_left_sort and same_right_sort
+                    continue if edge_sort_states[fact_index] != 1
+                    next_root: usize = candidate.right if left_matches else candidate.left
+                    reaches_goal: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, next_root, right.right, goal_work_used)
+                    return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    return true if reaches_goal
+                    already_reached: mutable bool = false
+                    for seen_root in reachable |seen_root, nodes, children, next_root, already_reached, goal_work_used|:
+                        seen_equal: bool = proof_kernel_replay_goal_search_expr_equal(nodes, children, seen_root, next_root, goal_work_used)
+                        return false if goal_work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                        if seen_equal:
+                            already_reached <- true
+                            break
+                    if not already_reached:
+                        return false if reachable.count >= reachable_limit or not proof_kernel_replay_goal_search_charge(goal_work_used)
+                        reachable.push(next_root)
+                cursor <- cursor + 1
             return false

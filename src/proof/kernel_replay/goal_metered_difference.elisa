@@ -1,5 +1,21 @@
 extend ElisaProofKernelReplay:
     private:
+        def proof_kernel_replay_difference_push_with_goal_work(left: ProofKernelReplayAffine, right: ProofKernelReplayAffine, reverse: bool, strict: bool, constraints: mutable darray[ProofKernelReplayDifference]&, work_used: mutable usize&) -> bool:
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            proof_kernel_replay_difference_push(left, right, reverse, strict, constraints)
+            return true
+
+        def proof_kernel_replay_guarded_difference_push_with_goal_work(left: ProofKernelReplayAffine, operator: sview, right: ProofKernelReplayAffine, constraints: mutable darray[ProofKernelReplayDifference]&, work_used: mutable usize&) -> bool:
+            if operator in {"<=", "=="}:
+                return false if not proof_kernel_replay_difference_push_with_goal_work(left, right, false, false, constraints, work_used)
+            if operator == "<":
+                return false if not proof_kernel_replay_difference_push_with_goal_work(left, right, false, true, constraints, work_used)
+            if operator in {">=", "=="}:
+                return false if not proof_kernel_replay_difference_push_with_goal_work(left, right, true, false, constraints, work_used)
+            if operator == ">":
+                return false if not proof_kernel_replay_difference_push_with_goal_work(left, right, true, true, constraints, work_used)
+            return true
+
         def proof_kernel_replay_facts_state_disequality_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left: usize, right: usize, work_used: mutable usize&) -> bool:
             for fact in facts |fact, nodes, children, facts, left, right, work_used|:
                 return false if not proof_kernel_replay_goal_search_charge(work_used)
@@ -71,16 +87,14 @@ extend ElisaProofKernelReplay:
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not split.known
                 high: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.high, offset: 0, known: true, negative: false}
                 low: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.low, offset: right_constant.value, known: true, negative: false}
-                proof_kernel_replay_guarded_difference_push(high, operator, low, constraints)
-                return true
+                return proof_kernel_replay_guarded_difference_push_with_goal_work(high, operator, low, constraints, work_used)
             left_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_remaining_with_work_limit(nodes, left_root, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not left_constant.known
             split: (known: bool, high: sview, low: sview) = proof_kernel_replay_guarded_difference_names_with_work(nodes, children, right_root, facts, work_used)
             return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not split.known
             low: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.low, offset: left_constant.value, known: true, negative: false}
             high: ProofKernelReplayAffine = ProofKernelReplayAffine{base: split.high, offset: 0, known: true, negative: false}
-            proof_kernel_replay_guarded_difference_push(low, operator, high, constraints)
-            true
+            proof_kernel_replay_guarded_difference_push_with_goal_work(low, operator, high, constraints, work_used)
 
         def proof_kernel_replay_unsigned_unit_increment_base_with_work(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, left: usize, right: usize, work_used: mutable usize&) -> (known: bool, base: usize):
             right_constant: ProofKernelReplayInt = proof_kernel_replay_constant_int_with_goal_work(nodes, right, ElisaProofKernelCore::PROOF_KERNEL_REPLAY_DEPTH_LIMIT, work_used)
@@ -204,6 +218,8 @@ extend ElisaProofKernelReplay:
                 return if node.left >= nodes.count
                 inner: ElisaProofKernelCore::ProofKernelNode = nodes[node.left]
                 if inner.kind == "binary" and proof_kernel_replay_negation_supported(inner.operator):
+                    comparison_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_work(nodes, children, facts, node.left, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return if not comparison_admission.complete or comparison_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
                     if proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, inner.left, inner.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT):
                         return if proof_kernel_replay_is_order_operator(inner.operator) and (not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.left, facts, work_used, 0) or not proof_kernel_replay_denial_integer_term_with_work(nodes, children, inner.right, facts, work_used, 0))
                         left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, inner.left, depth + 1, work_used)
@@ -212,19 +228,21 @@ extend ElisaProofKernelReplay:
                         right_admissible: bool = proof_kernel_replay_affine_safe_with_work(right, bounds, work_used) or proof_kernel_replay_affine_peer_safe_from_facts_with_work(right, inner.right, nodes, children, facts, work_used)
                         if left.known and right.known and left_admissible and right_admissible:
                             negated_distinct: bool = (inner.operator in {">", "<"}) and proof_kernel_replay_facts_state_disequality_with_work(nodes, children, facts, inner.left, inner.right, work_used)
-                            proof_kernel_replay_difference_push(left, right, false, negated_distinct, constraints) if inner.operator == ">"
-                            proof_kernel_replay_difference_push(left, right, false, true, constraints) if inner.operator == ">="
-                            proof_kernel_replay_difference_push(left, right, true, negated_distinct, constraints) if inner.operator == "<"
-                            proof_kernel_replay_difference_push(left, right, true, true, constraints) if inner.operator == "<="
+                            return if inner.operator == ">" and not proof_kernel_replay_difference_push_with_goal_work(left, right, false, negated_distinct, constraints, work_used)
+                            return if inner.operator == ">=" and not proof_kernel_replay_difference_push_with_goal_work(left, right, false, true, constraints, work_used)
+                            return if inner.operator == "<" and not proof_kernel_replay_difference_push_with_goal_work(left, right, true, negated_distinct, constraints, work_used)
+                            return if inner.operator == "<=" and not proof_kernel_replay_difference_push_with_goal_work(left, right, true, true, constraints, work_used)
                             if inner.operator == "!=":
-                                proof_kernel_replay_difference_push(left, right, false, false, constraints)
-                                proof_kernel_replay_difference_push(left, right, true, false, constraints)
+                                return if not proof_kernel_replay_difference_push_with_goal_work(left, right, false, false, constraints, work_used)
+                                return if not proof_kernel_replay_difference_push_with_goal_work(left, right, true, false, constraints, work_used)
                 return
             if node.kind == "binary" and node.operator == "and":
                 proof_kernel_replay_collect_differences_with_goal_work(nodes, node.left, bounds, children, facts, constraints, work_used, depth + 1)
                 proof_kernel_replay_collect_differences_with_goal_work(nodes, node.right, bounds, children, facts, constraints, work_used, depth + 1)
                 return
             return if node.kind != "binary" or node.operator != "==" and node.operator != "<" and node.operator != "<=" and node.operator != ">" and node.operator != ">="
+            comparison_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_work(nodes, children, facts, root, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return if not comparison_admission.complete or comparison_admission.untrusted or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return if not proof_kernel_replay_primitive_comparison_with_work(nodes, children, facts, node.left, node.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
             return if proof_kernel_replay_guarded_difference_import_with_work(nodes, children, node.left, node.operator, node.right, facts, constraints, work_used)
             left: ProofKernelReplayAffine = proof_kernel_replay_affine_expression_with_work(nodes, node.left, depth + 1, work_used)
@@ -234,40 +252,131 @@ extend ElisaProofKernelReplay:
             right_admissible: bool = proof_kernel_replay_affine_safe_with_work(right, bounds, work_used) or proof_kernel_replay_affine_peer_safe_from_facts_with_work(right, node.right, nodes, children, facts, work_used)
             return if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or not left_admissible or not right_admissible
             distinct: bool = (node.operator in {"<=", ">="}) and proof_kernel_replay_facts_state_disequality_with_work(nodes, children, facts, node.left, node.right, work_used)
-            proof_kernel_replay_difference_push(left, right, false, distinct, constraints) if node.operator == "<="
-            proof_kernel_replay_difference_push(left, right, false, true, constraints) if node.operator == "<"
-            proof_kernel_replay_difference_push(left, right, true, distinct, constraints) if node.operator == ">="
-            proof_kernel_replay_difference_push(left, right, true, true, constraints) if node.operator == ">"
+            return if node.operator == "<=" and not proof_kernel_replay_difference_push_with_goal_work(left, right, false, distinct, constraints, work_used)
+            return if node.operator == "<" and not proof_kernel_replay_difference_push_with_goal_work(left, right, false, true, constraints, work_used)
+            return if node.operator == ">=" and not proof_kernel_replay_difference_push_with_goal_work(left, right, true, distinct, constraints, work_used)
+            return if node.operator == ">" and not proof_kernel_replay_difference_push_with_goal_work(left, right, true, true, constraints, work_used)
             if node.operator == "==":
-                proof_kernel_replay_difference_push(left, right, false, false, constraints)
-                proof_kernel_replay_difference_push(left, right, true, false, constraints)
+                return if not proof_kernel_replay_difference_push_with_goal_work(left, right, false, false, constraints, work_used)
+                return if not proof_kernel_replay_difference_push_with_goal_work(left, right, true, false, constraints, work_used)
+
+        def proof_kernel_replay_difference_bound_at_vertex_with_work(bounds: darray[ProofKernelReplayBound]&, rows: darray[usize]&, found: darray[bool]&, vertex: usize, name: sview, work_used: mutable usize&) -> ProofKernelReplayBound:
+            empty: ProofKernelReplayBound = ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+            if vertex >= rows.count or vertex >= found.count:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return empty
+            return empty if not found[vertex]
+            row: usize = rows[vertex]
+            if row >= bounds.count or bounds[row].term_key or not proof_kernel_replay_equality_closure_charge_text_pair(work_used, bounds[row].name, name, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT):
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1 if work_used <= PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                return empty
+            if bounds[row].name != name:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return empty
+            bounds[row]
+
+        def proof_kernel_replay_difference_add_lower_at_vertex_with_work(bounds: mutable darray[ProofKernelReplayBound]&, rows: mutable darray[usize]&, found: mutable darray[bool]&, vertex: usize, name: sview, value: i64, work_used: mutable usize&) -> bool:
+            return false if vertex >= rows.count or vertex >= found.count or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if not found[vertex]:
+                return false if not proof_kernel_replay_equality_closure_charge_text_entry(work_used, name, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                row: usize = bounds.count
+                bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
+                rows[vertex] <- row
+                found[vertex] <- true
+                return true
+            row: usize = rows[vertex]
+            return false if row >= bounds.count or bounds[row].term_key or not proof_kernel_replay_equality_closure_charge_text_pair(work_used, bounds[row].name, name, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            if bounds[row].name != name:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            return true if bounds[row].has_lower and value <= bounds[row].lower
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            bounds[row].has_lower <- true
+            bounds[row].lower <- value
+            return true
+
+        def proof_kernel_replay_difference_add_upper_at_vertex_with_work(bounds: mutable darray[ProofKernelReplayBound]&, rows: mutable darray[usize]&, found: mutable darray[bool]&, vertex: usize, name: sview, value: i64, work_used: mutable usize&) -> bool:
+            return false if vertex >= rows.count or vertex >= found.count or work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+            if not found[vertex]:
+                return false if not proof_kernel_replay_equality_closure_charge_text_entry(work_used, name, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                row: usize = bounds.count
+                bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
+                rows[vertex] <- row
+                found[vertex] <- true
+                return true
+            row: usize = rows[vertex]
+            return false if row >= bounds.count or bounds[row].term_key or not proof_kernel_replay_equality_closure_charge_text_pair(work_used, bounds[row].name, name, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            if bounds[row].name != name:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            return true if bounds[row].has_upper and value >= bounds[row].upper
+            return false if not proof_kernel_replay_goal_search_charge(work_used)
+            bounds[row].has_upper <- true
+            bounds[row].upper <- value
+            return true
 
         def proof_kernel_replay_difference_bound_closure_with_work(constraints: darray[ProofKernelReplayDifference]&, bounds: mutable darray[ProofKernelReplayBound]&, work_used: mutable usize&) -> bool:
+            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return true if constraints.count == 0
-            for round in 0..<PROOF_KERNEL_REPLAY_BOUND_PROPAGATION_ROUND_LIMIT |round, constraints, bounds, work_used|:
+            vertex_index_result: (complete: bool, index: ProofKernelReplayEqualityVertexIndex) = proof_kernel_replay_equality_vertex_index_build(constraints.count, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return false if not vertex_index_result.complete
+            vertex_index: mutable ProofKernelReplayEqualityVertexIndex = vertex_index_result.index
+            names: mutable darray[sview] = []
+            left_vertices: mutable darray[usize] = []
+            right_vertices: mutable darray[usize] = []
+            for constraint in constraints |constraint, vertex_index, names, left_vertices, right_vertices, work_used|:
+                if constraint.left == "" or constraint.right == "":
+                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                    left_vertices.push(names.count)
+                    right_vertices.push(names.count)
+                else:
+                    left_vertex: (complete: bool, row: usize) = proof_kernel_replay_equality_vertex_index_insert(&vertex_index, &names, constraint.left, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if not left_vertex.complete
+                    right_vertex: (complete: bool, row: usize) = proof_kernel_replay_equality_vertex_index_insert(&vertex_index, &names, constraint.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                    return false if not right_vertex.complete or not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
+                    left_vertices.push(left_vertex.row)
+                    right_vertices.push(right_vertex.row)
+            bound_rows: mutable darray[usize] = []
+            bound_found: mutable darray[bool] = []
+            for vertex in 0..<names.count |vertex, names, bound_rows, bound_found, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
+                bound_rows.push(0)
+                bound_found.push(false)
+            for row in 0..<bounds.count |row, bounds, names, vertex_index, bound_rows, bound_found, work_used|:
+                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                continue if bounds[row].term_key or bounds[row].name == ""
+                vertex: (complete: bool, found: bool, row: usize) = proof_kernel_replay_equality_vertex_index_find(vertex_index, names, bounds[row].name, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                return false if not vertex.complete
+                if vertex.found and not bound_found[vertex.row]:
+                    bound_rows[vertex.row] <- row
+                    bound_found[vertex.row] <- true
+            for round in 0..<PROOF_KERNEL_REPLAY_BOUND_PROPAGATION_ROUND_LIMIT |round, constraints, bounds, left_vertices, right_vertices, names, bound_rows, bound_found, work_used|:
                 return false if not proof_kernel_replay_goal_search_charge(work_used)
                 changed: mutable bool = false
-                for constraint in constraints |constraint, bounds, changed, work_used|:
-                    return false if not proof_kernel_replay_goal_search_charge(work_used)
+                for constraint_index in 0..<constraints.count |constraint_index, constraints, bounds, left_vertices, right_vertices, names, bound_rows, bound_found, changed, work_used|:
+                    return false if constraint_index >= left_vertices.count or constraint_index >= right_vertices.count or not proof_kernel_replay_goal_search_charge(work_used)
+                    constraint: ProofKernelReplayDifference = constraints[constraint_index]
                     continue if constraint.left == "" or constraint.right == ""
-                    right_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, constraint.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                    left_vertex: usize = left_vertices[constraint_index]
+                    right_vertex: usize = right_vertices[constraint_index]
+                    right_bound: ProofKernelReplayBound = proof_kernel_replay_difference_bound_at_vertex_with_work(bounds, bound_rows, bound_found, right_vertex, constraint.right, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or right_vertex >= names.count
                     if right_bound.has_upper:
                         derived_upper: ProofKernelReplayInt = proof_kernel_replay_add_safe(right_bound.upper, constraint.bound)
                         if derived_upper.known:
-                            prior: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, constraint.left, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            prior: ProofKernelReplayBound = proof_kernel_replay_difference_bound_at_vertex_with_work(bounds, bound_rows, bound_found, left_vertex, constraint.left, work_used)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or left_vertex >= names.count
                             changed <- true if not prior.has_upper or derived_upper.value < prior.upper
-                            return false if not proof_kernel_replay_add_upper_with_work(bounds, constraint.left, derived_upper.value, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                    left_bound: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, constraint.left, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            return false if not proof_kernel_replay_difference_add_upper_at_vertex_with_work(bounds, &bound_rows, &bound_found, left_vertex, constraint.left, derived_upper.value, work_used)
+                    left_bound: ProofKernelReplayBound = proof_kernel_replay_difference_bound_at_vertex_with_work(bounds, bound_rows, bound_found, left_vertex, constraint.left, work_used)
+                    return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or left_vertex >= names.count
                     if left_bound.has_lower:
                         derived_lower: ProofKernelReplayInt = proof_kernel_replay_sub_safe(left_bound.lower, constraint.bound)
                         if derived_lower.known:
-                            prior: ProofKernelReplayBound = proof_kernel_replay_bound_for_with_work(bounds, constraint.right, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
-                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
+                            prior: ProofKernelReplayBound = proof_kernel_replay_difference_bound_at_vertex_with_work(bounds, bound_rows, bound_found, right_vertex, constraint.right, work_used)
+                            return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or right_vertex >= names.count
                             changed <- true if not prior.has_lower or derived_lower.value > prior.lower
-                            return false if not proof_kernel_replay_add_lower_with_work(bounds, constraint.right, derived_lower.value, work_used, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+                            return false if not proof_kernel_replay_difference_add_lower_at_vertex_with_work(bounds, &bound_rows, &bound_found, right_vertex, constraint.right, derived_lower.value, work_used)
                 break if not changed
             true
 
@@ -387,11 +496,11 @@ extend ElisaProofKernelReplay:
             known: mutable darray[bool] = []
             matrix_count: usize = names.count * names.count
             for index in 0..<matrix_count |index, matrix, known, work_used|:
-                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                return false if not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
                 matrix.push(0)
                 known.push(false)
             for index in 0..<names.count |index, names, matrix, known, work_used|:
-                return false if not proof_kernel_replay_goal_search_charge(work_used)
+                return false if not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
                 slot: usize = index * names.count + index
                 matrix[slot] <- 0
                 known[slot] <- true
@@ -401,6 +510,7 @@ extend ElisaProofKernelReplay:
                 right_index: usize = proof_kernel_replay_difference_node_index_with_work(names, constraint.right, work_used)
                 return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or left_index >= names.count or right_index >= names.count
                 slot: usize = left_index * names.count + right_index
+                return false if not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
                 matrix[slot] <- constraint.bound if not known[slot] or constraint.bound < matrix[slot]
                 known[slot] <- true
             for pivot in 0..<names.count |pivot, names, matrix, known, work_used|:
@@ -414,6 +524,7 @@ extend ElisaProofKernelReplay:
                         combined: ProofKernelReplayInt = proof_kernel_replay_add_safe(matrix[first_slot], matrix[second_slot])
                         continue if not combined.known
                         result_slot: usize = source * names.count + target
+                        return false if not proof_kernel_replay_goal_search_charge_amount(work_used, 2)
                         matrix[result_slot] <- combined.value if not known[result_slot] or combined.value < matrix[result_slot]
                         known[result_slot] <- true
             return false if work_used > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT

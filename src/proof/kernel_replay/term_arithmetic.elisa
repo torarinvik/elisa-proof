@@ -320,6 +320,31 @@ module ElisaProofKernelReplay:
                     return bounds[index]
             return ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
 
+        # Budget-aware counterparts are used by goal-search paths. Charge text before equality
+        # and each row before inspecting it, so a wide bound table cannot hide linear work behind
+        # a single candidate visit. Exhaustion is represented by a work value above the limit;
+        # callers must reject the result when that happens.
+        def proof_kernel_replay_bound_scan_charge_with_work(work_used: mutable usize&, work_limit: usize, amount: usize) -> bool:
+            if work_limit > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT or work_used > work_limit:
+                work_used <- PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT + 1
+                return false
+            if amount > work_limit - work_used:
+                work_used <- work_limit + 1
+                return false
+            work_used <- work_used + amount
+            true
+
+        def proof_kernel_replay_bound_for_with_work(bounds: darray[ProofKernelReplayBound]&, name: sview, work_used: mutable usize&, work_limit: usize) -> ProofKernelReplayBound:
+            empty: ProofKernelReplayBound = ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: false, upper: 0}
+            return empty if name == ""
+            return empty if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, sview_len(name))
+            for index in 0..<bounds.count |index, bounds, name, work_used, work_limit, empty|:
+                bound_name: sview = bounds[index].name
+                return empty if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, 1 + sview_len(bound_name))
+                if not bounds[index].term_key and bound_name == name:
+                    return bounds[index]
+            empty
+
         def proof_kernel_replay_add_lower(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64) -> void:
             return if name == ""
             for mutable bound in bounds:
@@ -341,6 +366,36 @@ module ElisaProofKernelReplay:
                     bound.upper <- value if not old_has or value < old_value
                     return
             bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
+
+        def proof_kernel_replay_add_lower_with_work(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64, work_used: mutable usize&, work_limit: usize) -> bool:
+            return true if name == ""
+            return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, sview_len(name))
+            for mutable bound in bounds |name, value, work_used, work_limit|:
+                return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, 1 + sview_len(bound.name))
+                if not bound.term_key and bound.name == name:
+                    old_has: bool = bound.has_lower
+                    old_value: i64 = bound.lower
+                    bound.has_lower <- true
+                    bound.lower <- value if not old_has or value > old_value
+                    return true
+            return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, 1)
+            bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: true, lower: value, has_upper: false, upper: 0})
+            true
+
+        def proof_kernel_replay_add_upper_with_work(bounds: mutable darray[ProofKernelReplayBound]&, name: sview, value: i64, work_used: mutable usize&, work_limit: usize) -> bool:
+            return true if name == ""
+            return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, sview_len(name))
+            for mutable bound in bounds |name, value, work_used, work_limit|:
+                return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, 1 + sview_len(bound.name))
+                if not bound.term_key and bound.name == name:
+                    old_has: bool = bound.has_upper
+                    old_value: i64 = bound.upper
+                    bound.has_upper <- true
+                    bound.upper <- value if not old_has or value < old_value
+                    return true
+            return false if not proof_kernel_replay_bound_scan_charge_with_work(work_used, work_limit, 1)
+            bounds <- bounds.push(ProofKernelReplayBound{name: name, term_name: "", term_offset: 0, term_key: false, term_root: 0, term_expression_key: false, has_lower: false, lower: 0, has_upper: true, upper: value})
+            true
 
         # Loop binders are encoded as `(source-name, source-offset)` tuple atoms so shadowed
         # binders remain distinct. Only the producer's exact shape with an independent scalar
@@ -366,6 +421,8 @@ module ElisaProofKernelReplay:
 
         def proof_kernel_replay_bound_for_term(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, bounds: darray[ProofKernelReplayBound]&, root: usize) -> ProofKernelReplayBound:
             for bound in bounds:
+                if bound.term_expression_key and bound.term_root == root and bound.term_root < nodes.count:
+                    return bound
                 if bound.term_expression_key and bound.term_root < nodes.count and proof_kernel_replay_expr_equal(nodes, children, bound.term_root, root, 0):
                     return bound
             key: (known: bool, name: sview, offset: i64) = proof_kernel_replay_loop_range_atom_key(nodes, children, root)
@@ -414,7 +471,10 @@ module ElisaProofKernelReplay:
                     return
             bounds <- bounds.push(ProofKernelReplayBound{name: "", term_name: "", term_offset: 0, term_key: false, term_root: root, term_expression_key: true, has_lower: false, lower: 0, has_upper: true, upper: value})
 
-        def proof_kernel_replay_collect_bound_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], left_root: usize, operator: sview, right_root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+        def proof_kernel_replay_collect_bound_comparison(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], comparison_root: usize, left_root: usize, operator: sview, right_root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
+            comparison_work: mutable usize = 0
+            comparison_admission: (complete: bool, untrusted: bool) = proof_kernel_replay_comparison_root_untrusted_with_work(nodes, children, facts, comparison_root, &comparison_work, PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT)
+            return if not comparison_admission.complete or comparison_admission.untrusted or comparison_work > PROOF_KERNEL_REPLAY_GOAL_SEARCH_WORK_LIMIT
             return if not proof_kernel_replay_primitive_comparison(nodes, children, facts, left_root, right_root)
             left_name_root: mutable usize = nodes.count
             right_name_root: mutable usize = nodes.count
@@ -500,7 +560,7 @@ module ElisaProofKernelReplay:
                 proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, node.left, bounds, work_used, depth + 1)
                 proof_kernel_replay_collect_bounds_with_work(nodes, children, facts, node.right, bounds, work_used, depth + 1)
                 return
-            proof_kernel_replay_collect_bound_comparison_with_goal_work(nodes, children, facts, node.left, node.operator, node.right, bounds, work_used)
+                proof_kernel_replay_collect_bound_comparison_with_goal_work(nodes, children, facts, root, node.left, node.operator, node.right, bounds, work_used)
 
         # The bounds of `not root`, splitting one disjunction by De Morgan as the producer does.
         def proof_kernel_replay_collect_negated_bounds(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, children: darray[usize]&, facts: darray[usize], root: usize, bounds: mutable darray[ProofKernelReplayBound]&) -> void:
@@ -518,12 +578,12 @@ module ElisaProofKernelReplay:
             inner: ElisaProofKernelCore::ProofKernelNode = nodes[root]
             return if inner.kind != "binary"
             return if proof_kernel_replay_is_order_operator(inner.operator) and (not proof_kernel_replay_denial_integer_term(nodes, children, inner.left, facts, 0) or not proof_kernel_replay_denial_integer_term(nodes, children, inner.right, facts, 0))
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, "!=", inner.right, bounds) if inner.operator == "=="
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, "==", inner.right, bounds) if inner.operator == "!="
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, ">=", inner.right, bounds) if inner.operator == "<"
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, ">", inner.right, bounds) if inner.operator == "<="
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, "<=", inner.right, bounds) if inner.operator == ">"
-            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, inner.left, "<", inner.right, bounds) if inner.operator == ">="
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, "!=", inner.right, bounds) if inner.operator == "=="
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, "==", inner.right, bounds) if inner.operator == "!="
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, ">=", inner.right, bounds) if inner.operator == "<"
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, ">", inner.right, bounds) if inner.operator == "<="
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, "<=", inner.right, bounds) if inner.operator == ">"
+            proof_kernel_replay_collect_bound_comparison(nodes, children, facts, root, inner.left, "<", inner.right, bounds) if inner.operator == ">="
 
         # A call of a named function, never of a type marker, which the field-place rule may
         # generalize when a pure-call witness says it denotes one value.

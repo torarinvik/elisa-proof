@@ -17,6 +17,15 @@ extend ElisaProof:
             work <- work + amount
             return true
 
+        # The shared counter also carries fail-closed status for arena-cap exhaustion so every
+        # active aggregate loop stops without needing a second recursive status parameter.
+        def proof_kernel_encode_mark_failed(work: mutable usize&) -> void:
+            work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+
+        def proof_kernel_encode_child_slot_available(children_count: usize, staged_count: usize) -> bool:
+            return false if children_count >= ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET
+            return staged_count < ElisaProofKernelCore::PROOF_KERNEL_CHILD_BUDGET - children_count
+
     public:
         def proof_kernel_operator(operator: TokenKind) -> sview:
             return "+" if operator == TokenKind.Plus
@@ -94,6 +103,7 @@ extend ElisaProof:
                     return name == "i64"
                 _:
                     return false
+
 
         # Checked-get nodes intentionally erase their recovery body from the source-neutral
         # arena, but that body still belongs to the source term being admitted. Validate its
@@ -321,207 +331,4 @@ extend ElisaProof:
                 _:
                     return false
 
-    public:
-        def proof_kernel_encode_annotated_depth(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, depth: usize, annotations: darray[Ast::EnumAnnotation]&) -> usize:
-            match_work: mutable usize = 0
-            return proof_kernel_encode_annotated_depth_with_work(expression, nodes, children, depth, annotations, &match_work)
-
-        def proof_kernel_encode_annotated_depth_with_work(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, depth: usize, annotations: darray[Ast::EnumAnnotation]&, match_work: mutable usize&) -> usize:
-            return nodes.count if not proof_match_lowering_charge(1, match_work)
-            if not ElisaProofKernelCore::depth_valid(depth):
-                return proof_kernel_add_node(nodes, "unsupported", "depth", 0, 0, 0, 0, 0, 0, "", "")
-            match expression:
-                Ast::Expr.IntLit(value, position):
-                    literal = proof_replay_numeric_literal_sort(annotations, position.line, position.column, value)
-                    if literal.known:
-                        sort: sview = proof_numeric_literal_sort_name(literal.unsigned, literal.width)
-                        return proof_kernel_add_node(nodes, "typed-int", "", 0, 0, 0, 0, 0, value, sort, "")
-                    return proof_kernel_add_node(nodes, "int", "", 0, 0, 0, 0, 0, value, "", "")
-                Ast::Expr.Absent:
-                    return proof_kernel_add_node(nodes, "absent", "", 0, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.BoolLit(value, _):
-                    return proof_kernel_add_node(nodes, "bool", "", 0, 0, 0, 0, 0, 1 if value else 0, "", "")
-                Ast::Expr.FloatLit(value, _):
-                    # This leaf is only a structural token for an opaque comparison atom.
-                    # It is deliberately distinct from the rejected numeric `float` term.
-                    return proof_kernel_add_node(nodes, "opaque-float-literal", "", 0, 0, 0, 0, 0, 0, value, "")
-                Ast::Expr.StringLit(value, _):
-                    return proof_kernel_add_node(nodes, "string", "", 0, 0, 0, 0, 0, 0, value, "")
-                Ast::Expr.CharLit(value, _):
-                    return proof_kernel_add_node(nodes, "char", "", 0, 0, 0, 0, 0, 0, value, "")
-                Ast::Expr.Ident(name, _):
-                    return proof_kernel_add_node(nodes, "ident", "", 0, 0, 0, 0, 0, 0, name, "")
-                Ast::Expr.ShorthandMember(parts, _):
-                    return proof_kernel_add_node(nodes, "shorthand", "", 0, 0, 0, 0, 0, 0, parts[0], "") if parts.count == 1 and parts[0] != ""
-                    return proof_kernel_add_node(nodes, "unsupported", "shorthand", 0, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.Paren(inner, _):
-                    return proof_kernel_encode_annotated_depth_with_work(inner, nodes, children, depth + 1, annotations, match_work)
-                Ast::Expr.Unary(operator, operand, _):
-                    return proof_kernel_add_node(nodes, "unsupported", "operator", 0, 0, 0, 0, 0, 0, "", "") if not proof_kernel_operator_supported(operator)
-                    operand_index: usize = proof_kernel_encode_annotated_depth_with_work(operand, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "unary", proof_kernel_operator(operator), operand_index, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.Binary(Ast::Expr.Index(object, index, _), TokenKind.Else, fallback, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    index_index: usize = proof_kernel_encode_annotated_depth_with_work(index, nodes, children, depth + 1, annotations, match_work)
-                    index_node: usize = proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
-                    fallback_index: usize = proof_kernel_encode_annotated_depth_with_work(fallback, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "checked-index", "", index_node, fallback_index, 0, 0, 0, 0, "", "")
-                Ast::Expr.GetElse(Ast::Expr.Index(object, index, _), _, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    index_index: usize = proof_kernel_encode_annotated_depth_with_work(index, nodes, children, depth + 1, annotations, match_work)
-                    index_node: usize = proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
-                    return proof_kernel_add_node(nodes, "checked-get", "", index_node, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.Binary(left, operator, right, _):
-                    return proof_kernel_add_node(nodes, "unsupported", "operator", 0, 0, 0, 0, 0, 0, "", "") if not proof_kernel_operator_supported(operator)
-                    left_index: usize = proof_kernel_encode_annotated_depth_with_work(left, nodes, children, depth + 1, annotations, match_work)
-                    right_index: usize = proof_kernel_encode_annotated_depth_with_work(right, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "binary", proof_kernel_operator(operator), left_index, right_index, 0, 0, 0, 0, "", "")
-                Ast::Expr.If(condition, then_expression, else_expression, _):
-                    condition_index: usize = proof_kernel_encode_annotated_depth_with_work(condition, nodes, children, depth + 1, annotations, match_work)
-                    then_index: usize = proof_kernel_encode_annotated_depth_with_work(then_expression, nodes, children, depth + 1, annotations, match_work)
-                    else_index: usize = proof_kernel_encode_annotated_depth_with_work(else_expression, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "if", "", condition_index, then_index, else_index, 0, 0, 0, "", "")
-                Ast::Expr.Match(_, _, _):
-                    # Encode only the closed, value-producing match fragment. Its checked lowering
-                    # preserves arm order, guards, and pattern tests as ordinary kernel terms;
-                    # unsupported binders or non-value arms remain an explicit refusal.
-                    lowered: (known: bool, value: Ast::Expr) = proof_lower_value_match_with_work(expression, match_work)
-                    return proof_kernel_add_node(nodes, "unsupported", "match", 0, 0, 0, 0, 0, 0, "", "") if not lowered.known
-                    return proof_kernel_encode_annotated_depth_with_work(lowered.value, nodes, children, depth + 1, annotations, match_work)
-                Ast::Expr.Move(operand, _):
-                    operand_index: usize = proof_kernel_encode_annotated_depth_with_work(operand, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "move", "", operand_index, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.Call(callee, arguments, argument_names, _):
-                    return proof_kernel_add_node(nodes, "unsupported", "call-arguments", 0, 0, 0, 0, 0, 0, "", "") if argument_names.count != 0 and argument_names.count != arguments.count
-                    callee_index: usize = proof_kernel_encode_annotated_depth_with_work(callee, nodes, children, depth + 1, annotations, match_work)
-                    # Nested argument terms may append their own tuple/array child edges to the
-                    # shared arena. Stage the enclosing call-argument nodes separately so the
-                    # call's child slice contains only `call_arg` roots, regardless of how many
-                    # child edges an argument term owns.
-                    argument_roots: mutable darray[usize] = []
-                    for index in 0..<arguments.count |index, arguments, argument_names, nodes, children, depth, annotations, match_work|:
-                        argument_index: usize = proof_kernel_encode_annotated_depth_with_work(arguments[index], nodes, children, depth + 1, annotations, match_work)
-                        argument_name: sview = argument_names[index] if index < argument_names.count else ""
-                        argument_roots.push(proof_kernel_add_node(nodes, "call_arg", "", argument_index, 0, 0, 0, 0, 0, argument_name, ""))
-                    argument_start: usize = children.count
-                    children.extend(argument_roots)
-                    return proof_kernel_add_node(nodes, "call", "", callee_index, 0, argument_names.count, argument_start, arguments.count, 0, "", "")
-                Ast::Expr.Field(object, field, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "field", "", object_index, 0, 0, 0, 0, 0, field, "")
-                Ast::Expr.Scope(base, field, _):
-                    base_index: usize = proof_kernel_encode_annotated_depth_with_work(base, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "scope", "", base_index, 0, 0, 0, 0, 0, field, "")
-                Ast::Expr.Index(object, index, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    index_index: usize = proof_kernel_encode_annotated_depth_with_work(index, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "index", "", object_index, index_index, 0, 0, 0, 0, "", "")
-                Ast::Expr.Slice(object, low, high, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    low_index: usize = proof_kernel_encode_annotated_depth_with_work(low, nodes, children, depth + 1, annotations, match_work)
-                    high_index: usize = proof_kernel_encode_annotated_depth_with_work(high, nodes, children, depth + 1, annotations, match_work)
-                    return proof_kernel_add_node(nodes, "slice", "", object_index, low_index, high_index, 0, 0, 0, "", "")
-                Ast::Expr.IndexN(object, arguments, _):
-                    object_index: usize = proof_kernel_encode_annotated_depth_with_work(object, nodes, children, depth + 1, annotations, match_work)
-                    argument_roots: mutable darray[usize] = []
-                    for argument in arguments |argument, nodes, children, depth, argument_roots, annotations, match_work|:
-                        argument_roots.push(proof_kernel_encode_annotated_depth_with_work(argument, nodes, children, depth + 1, annotations, match_work))
-                    start: usize = children.count
-                    children.extend(argument_roots)
-                    return proof_kernel_add_node(nodes, "index-n", "", object_index, 0, 0, start, arguments.count, 0, "", "") if arguments.count > 0
-                    return proof_kernel_add_node(nodes, "unsupported", "index-n", 0, 0, 0, 0, 0, 0, "", "")
-                Ast::Expr.Array(elements, _):
-                    element_roots: mutable darray[usize] = []
-                    for element in elements |element, nodes, children, depth, element_roots, annotations, match_work|:
-                        element_roots.push(proof_kernel_encode_annotated_depth_with_work(element, nodes, children, depth + 1, annotations, match_work))
-                    start: usize = children.count
-                    children.extend(element_roots)
-                    return proof_kernel_add_node(nodes, "array", "", 0, 0, 0, start, elements.count, 0, "", "")
-                Ast::Expr.Tuple(elements, _):
-                    element_roots: mutable darray[usize] = []
-                    for element in elements |element, nodes, children, depth, element_roots, annotations, match_work|:
-                        element_roots.push(proof_kernel_encode_annotated_depth_with_work(element, nodes, children, depth + 1, annotations, match_work))
-                    start: usize = children.count
-                    children.extend(element_roots)
-                    return proof_kernel_add_node(nodes, "tuple", "", 0, 0, 0, start, elements.count, 0, "", "")
-                Ast::Expr.SetLit(elements, _):
-                    element_roots: mutable darray[usize] = []
-                    for element in elements |element, nodes, children, depth, element_roots, annotations, match_work|:
-                        element_roots.push(proof_kernel_encode_annotated_depth_with_work(element, nodes, children, depth + 1, annotations, match_work))
-                    start: usize = children.count
-                    children.extend(element_roots)
-                    return proof_kernel_add_node(nodes, "set", "", 0, 0, 0, start, elements.count, 0, "", "")
-                Ast::Expr.DictLit(entries, _):
-                    entry_roots: mutable darray[usize] = []
-                    for entry in entries |entry, nodes, children, depth, entry_roots, annotations, match_work|:
-                        key_index: usize = proof_kernel_encode_annotated_depth_with_work(entry.key, nodes, children, depth + 1, annotations, match_work)
-                        value_index: usize = proof_kernel_encode_annotated_depth_with_work(entry.value, nodes, children, depth + 1, annotations, match_work)
-                        entry_index: usize = proof_kernel_add_node(nodes, "dict_entry", "", key_index, value_index, 0, 0, 0, 0, "", "")
-                        entry_roots.push(entry_index)
-                    start: usize = children.count
-                    children.extend(entry_roots)
-                    return proof_kernel_add_node(nodes, "dict", "", 0, 0, 0, start, entries.count, 0, "", "")
-                Ast::Expr.Construct(type_expression, fields, _):
-                    type_index: usize = proof_kernel_encode_annotated_depth_with_work(type_expression, nodes, children, depth + 1, annotations, match_work)
-                    field_roots: mutable darray[usize] = []
-                    for field in fields |field, nodes, children, depth, field_roots, annotations, match_work|:
-                        value_index: usize = proof_kernel_encode_annotated_depth_with_work(field.value, nodes, children, depth + 1, annotations, match_work)
-                        field_roots.push(proof_kernel_add_node(nodes, "field-init", "", value_index, 0, 0, 0, 0, 0, field.name, ""))
-                    start: usize = children.count
-                    children.extend(field_roots)
-                    return proof_kernel_add_node(nodes, "construct", "", type_index, 0, 0, start, fields.count, 0, "", "")
-                Ast::Expr.RecordUpdate(base, fields, _):
-                    base_index: usize = proof_kernel_encode_annotated_depth_with_work(base, nodes, children, depth + 1, annotations, match_work)
-                    field_roots: mutable darray[usize] = []
-                    for field in fields |field, nodes, children, depth, field_roots, annotations, match_work|:
-                        value_index: usize = proof_kernel_encode_annotated_depth_with_work(field.value, nodes, children, depth + 1, annotations, match_work)
-                        field_roots.push(proof_kernel_add_node(nodes, "field-init", "", value_index, 0, 0, 0, 0, 0, field.name, ""))
-                    start: usize = children.count
-                    children.extend(field_roots)
-                    return proof_kernel_add_node(nodes, "record-update", "", base_index, 0, 0, start, fields.count, 0, "", "")
-                Ast::Expr.Block(statements, value, _, _):
-                    # Quantifier blocks are the only block form accepted by the replay kernel.
-                    # Preserve the source kind at every nesting level, including hypotheses.
-                    return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if statements.count == 0 or statements.count > ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS
-                    match statements[0]:
-                        Ast::Stmt.VarDecl(binder, type_expression, range_expression, _):
-                            return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if binder == "" or not proof_kernel_quantifier_integer_type(type_expression)
-                            if statements.count == ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS:
-                                match range_expression:
-                                    Ast::Expr.DictLit(_, _):
-                                        pass
-                                    _:
-                                        return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
-                            else:
-                                match range_expression:
-                                    Ast::Expr.DictLit(_, _):
-                                        return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
-                                    _:
-                                        pass
-                            range_index: usize = proof_kernel_encode_annotated_depth_with_work(range_expression, nodes, children, depth + 1, annotations, match_work)
-                            body_index: usize = proof_kernel_encode_annotated_depth_with_work(value, nodes, children, depth + 1, annotations, match_work)
-                            secondary: mutable sview = ""
-                            if statements.count == ElisaProofKernelCore::PROOF_KERNEL_QUANTIFIER_MAX_STATEMENTS:
-                                match statements[1]:
-                                    # Keep this in lockstep with the support predicate above:
-                                    # the erased dictionary value binder must carry the parser's
-                                    # exact zero placeholder, never an unencoded expression.
-                                    Ast::Stmt.VarDecl(value_binder, value_type, Ast::Expr.IntLit(value, _), _):
-                                        return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "") if:
-                                            value_binder == "" or value_binder == binder
-                                            not proof_kernel_quantifier_integer_type(value_type)
-                                            value != 0
-                                        secondary <- value_binder
-                                    _:
-                                        return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
-                            return proof_kernel_add_node(nodes, "quantifier", proof_quantifier_kind(expression, annotations), range_index, body_index, statements.count, 0, 0, 0, binder, secondary)
-                        _:
-                            return proof_kernel_add_node(nodes, "unsupported", "block", 0, 0, 0, 0, 0, 0, "", "")
-                _:
-                    return proof_kernel_add_node(nodes, "unsupported", "", 0, 0, 0, 0, 0, 0, "", "")
-        def proof_kernel_encode_expression(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&) -> usize:
-            annotations: darray[Ast::EnumAnnotation] = []
-            return proof_kernel_encode_annotated_depth(expression, nodes, children, 0, annotations)
-
-        def proof_kernel_encode_annotated(expression: Ast::Expr, nodes: mutable darray[ElisaProofKernelCore::ProofKernelNode]&, children: mutable darray[usize]&, annotations: darray[Ast::EnumAnnotation]&) -> usize:
-            return proof_kernel_encode_annotated_depth(expression, nodes, children, 0, annotations)
+include "./kernel_encode.elisa"

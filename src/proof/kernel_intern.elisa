@@ -36,10 +36,9 @@ extend ElisaProof:
         def proof_kernel_intern_has_children(kind: sview) -> bool:
             return kind in {"call", "index-n", "array", "tuple", "set", "dict", "construct", "record-update"}
 
-        # Rewrite the nodes appended since `node_start` (and the children appended since
-        # `child_start`) onto existing identical terms, and return the root's final index. The
-        # suffix is left exactly as encoded when any node in it is not shareable or does not have
-        # the bottom-up shape the encoder produces.
+    private:
+        # Rewrite a checked encoding's fresh suffix onto existing identical terms. Keep this
+        # helper private: arbitrary caller-supplied start indices could truncate a report prefix.
         def proof_kernel_intern_encoded(report: mutable ProofReport&, node_start: usize, child_start: usize, root: usize) -> usize:
             node_end: usize = report.analysis_1.kernel.nodes.count
             return root if:
@@ -50,6 +49,11 @@ extend ElisaProof:
                 not proof_kernel_intern_suffix_shareable(report, node_start, child_start)
             proof_kernel_intern_reserve(report, node_end - node_start)
             return root if report.analysis_1.kernel.intern_work_exhausted
+            # Child slices of nodes removed by sharing are dead. Reserve the compaction pass
+            # before rewriting either arena so budget exhaustion leaves the encoded suffix
+            # intact and usable.
+            return root if not proof_kernel_intern_charge(report, node_end - node_start)
+            return root if not proof_kernel_intern_charge(report, report.analysis_1.kernel.children.count - child_start)
             final_index: mutable darray[usize] = []
             write: mutable usize = node_start
             for index in node_start..<node_end |index, report, node_start, write, final_index|:
@@ -68,9 +72,9 @@ extend ElisaProof:
             report.analysis_1.kernel.nodes <- report.analysis_1.kernel.nodes.truncate(write)
             # With every fresh node shared, the fresh children are referenced by nothing.
             report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(child_start) if write == node_start
+            proof_kernel_intern_compact_children(report, node_start, write, child_start) if write != node_start
             return final_index[root - node_start]
 
-    private:
         def proof_kernel_intern_charge(report: mutable ProofReport&, amount: usize) -> bool:
             return false if report.analysis_1.kernel.intern_work_exhausted
             if report.analysis_1.kernel.intern_work_used > PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT:
@@ -83,7 +87,8 @@ extend ElisaProof:
             return true
 
         def proof_kernel_intern_suffix_shareable(report: ProofReport&, node_start: usize, child_start: usize) -> bool:
-            for index in node_start..<report.analysis_1.kernel.nodes.count |index, report, node_start, child_start|:
+            children_end: mutable usize = child_start
+            for index in node_start..<report.analysis_1.kernel.nodes.count |index, report, node_start, child_start, children_end|:
                 node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[index]
                 fields: usize = proof_kernel_intern_reference_fields(node.kind)
                 return false if fields == PROOF_KERNEL_INTERN_UNSHAREABLE
@@ -98,11 +103,28 @@ extend ElisaProof:
                     return false if:
                         node.children_start < child_start or node.children_start > report.analysis_1.kernel.children.count
                         node.children_count > report.analysis_1.kernel.children.count - node.children_start
+                        node.children_start < children_end
                     for offset in 0..<node.children_count |offset, node, report, index|:
                         return false if report.analysis_1.kernel.children[node.children_start + offset] >= index
+                    children_end <- node.children_start + node.children_count
                 else:
                     return false if node.children_count != 0
             return true
+
+        # Kept nodes are in postorder, so their owned child slices are also in append order.
+        # Compact those slices toward `child_start`, discarding ranges owned only by nodes
+        # replaced with existing interned nodes.
+        def proof_kernel_intern_compact_children(report: mutable ProofReport&, node_start: usize, node_end: usize, child_start: usize) -> void:
+            write: mutable usize = child_start
+            for index in node_start..<node_end |index, report, child_start, write|:
+                node: ElisaProofKernelCore::ProofKernelNode = report.analysis_1.kernel.nodes[index]
+                if proof_kernel_intern_has_children(node.kind):
+                    old_start: usize = node.children_start
+                    for offset in 0..<node.children_count |offset, node, report, write, old_start|:
+                        report.analysis_1.kernel.children[write + offset] <- report.analysis_1.kernel.children[old_start + offset]
+                    report.analysis_1.kernel.nodes[index] <- ElisaProofKernelCore::ProofKernelNode{kind: node.kind, operator: node.operator, left: node.left, right: node.right, auxiliary: node.auxiliary, children_start: write, children_count: node.children_count, value: node.value, name: node.name, secondary_name: node.secondary_name}
+                    write <- write + node.children_count
+            report.analysis_1.kernel.children <- report.analysis_1.kernel.children.truncate(write)
 
         def proof_kernel_intern_final(value: usize, node_start: usize, final_index: darray[usize]&) -> usize:
             return value if value < node_start
@@ -222,10 +244,11 @@ extend ElisaProof:
         # recorded indices that still lie inside the arena; the rest were truncated away.
         def proof_kernel_intern_reserve(report: mutable ProofReport&, additional: usize) -> void:
             return if report.analysis_1.kernel.intern_work_exhausted
-            # Successful insertions charge at least one unit, and one encoding can append no
-            # more than the kernel node budget. Reject inconsistent state before sizing the
-            # table, so corrupted counters cannot wrap the addition or capacity calculation.
-            if report.analysis_1.kernel.intern_used > PROOF_KERNEL_INTERN_TOTAL_WORK_LIMIT or additional > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
+            # One encoding can append no more than the kernel node budget. `intern_used` may
+            # include stale slots left by a rolled-back suffix, so if that historical count
+            # exceeds the maximum live arena, stop optional sharing instead of sizing a table
+            # from the much larger work limit or a caller-mutated counter.
+            if report.analysis_1.kernel.intern_used > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET or additional > ElisaProofKernelCore::PROOF_KERNEL_NODE_BUDGET:
                 report.analysis_1.kernel.intern_work_exhausted <- true
                 return
             needed: usize = (report.analysis_1.kernel.intern_used + additional) * 2
