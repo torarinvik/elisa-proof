@@ -174,10 +174,10 @@ extend ElisaProof:
         # not prove that the returned position is safe. Admit the call only when its verified
         # executable summary contains an exact, call-free result equation; the caller's ordinary
         # arithmetic facts then prove the bounds for that returned expression.
-        def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) can[Global.Read, Global.Write]:
+        def proof_index_call_result(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, share_index_search_work: bool) -> (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) can[Global.Read, Global.Write]:
             match expression:
                 Ast::Expr.Paren(inner, _):
-                    return (proof_index_call_result(inner, facts, functions, annotations, summary_facts, report, owner) can Global{Read,Write})
+                    return (proof_index_call_result(inner, facts, functions, annotations, summary_facts, report, owner, share_index_search_work) can Global{Read,Write})
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
                     function_index: usize = proof_function_index_for_callee(functions, callee)
@@ -205,7 +205,12 @@ extend ElisaProof:
                     for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
                         required: Ast::Expr = proof_substitute_with_work(functions.contracts.obligations.all_requires[requires_start + requires_index], parameter_names, mapped_arguments, &substitution_work)
                         return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if proof_expr_is_invalid(required) or proof_expr_has_old(required)
-                        required_proven: bool = (proof_certify_goal(facts, required, report, position.line, owner, annotations) can Global{Read,Write})
+                        return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if share_index_search_work and not proof_index_safety_preflight_fact_work(facts, PROOF_INDEX_SAFETY_REQUIRES_FACT_PASSES, report, owner, position.line)
+                        required_proven: mutable bool = false
+                        if share_index_search_work:
+                            required_proven <- (proof_certify_goal_with_rule_shared(facts, required, report, position.line, owner, annotations, "") can Global{Read,Write})
+                        else:
+                            required_proven <- (proof_certify_goal(facts, required, report, position.line, owner, annotations) can Global{Read,Write})
                         require_goal_ids.push(report.results.goal_attempts.count - 1) if report.results.goal_attempts.count > 0
                         return (false, Ast::Expr.Invalid, Ast::Expr.Invalid, "") if not required_proven
                     ensures_start: usize = functions.contracts.obligations.ensure_starts[function_index] if function_index < functions.contracts.obligations.ensure_starts.count else functions.contracts.obligations.all_ensures.count
@@ -260,7 +265,7 @@ extend ElisaProof:
             if unsigned_conversion.known:
                 checked_index <- unsigned_conversion.receiver
             elif proof_expr_has_call(index):
-                resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name) can Global{Read,Write})
+                resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})
                 if resolved.known:
                     checked_index <- resolved.value
                 else:
@@ -273,7 +278,7 @@ extend ElisaProof:
             count: Ast::Expr = Ast::Expr.Field(object, "count", position)
             upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, count, position)
             return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-            lower_proven: bool = (proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower") can Global{Read,Write})
+            lower_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, lower, report, position.line, name, annotations, "index-lower") can Global{Read,Write})
             report.proof_obligation(lower_proven)
             proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "indexed access may use a negative position") if not lower_proven
             # The array type establishes its count, never this particular index's
@@ -297,8 +302,8 @@ extend ElisaProof:
             fixed_upper_proven: mutable bool = false
             if fixed_extent >= 0:
                 fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(fixed_extent, position), position)
-                return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                fixed_upper_proven <- (proof_goal(checked_facts, fixed_upper, annotations) can Global{Read,Write})
+                return if not proof_index_safety_preflight_fact_work(checked_facts, PROOF_INDEX_SAFETY_PROBE_FACT_PASSES, report, name, position.line)
+                fixed_upper_proven <- (proof_index_safety_goal_with_shared_work(checked_facts, fixed_upper, annotations, report, name, position.line) can Global{Read,Write})
                 if source_global_array and fixed_upper_proven:
                     precondition_bound: (complete: bool, found: bool) = proof_global_mutable_array_has_precondition_bound(checked_facts, report, fixed_upper, name)
                     if not precondition_bound.complete:
@@ -326,19 +331,19 @@ extend ElisaProof:
                 converted_count: Ast::Expr = Ast::Expr.Call(Ast::Expr.Field(count, "i64", position), [], [], position)
                 converted_upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, converted_count, position)
                 if proof_resource_function_name_count(functions, "i64") == 0:
-                    return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                    current_upper_proven: bool = proof_goal(checked_facts, upper, annotations) can Global{Read,Write}
+                    return if not proof_index_safety_preflight_fact_work(checked_facts, PROOF_INDEX_SAFETY_PROBE_FACT_PASSES, report, name, position.line)
+                    current_upper_proven: bool = proof_index_safety_goal_with_shared_work(checked_facts, upper, annotations, report, name, position.line) can Global{Read,Write}
                     if not current_upper_proven:
-                        return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                        converted_upper_proven: bool = proof_goal(checked_facts, converted_upper, annotations) can Global{Read,Write}
+                        return if not proof_index_safety_preflight_fact_work(checked_facts, PROOF_INDEX_SAFETY_PROBE_FACT_PASSES, report, name, position.line)
+                        converted_upper_proven: bool = proof_index_safety_goal_with_shared_work(checked_facts, converted_upper, annotations, report, name, position.line) can Global{Read,Write}
                         if converted_upper_proven:
                             return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                            converted_proven: bool = (proof_certify_goal_with_rule(checked_facts, converted_upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
+                            converted_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, converted_upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
                             report.proof_obligation(converted_proven)
                             proof_add_type_bound_fact(checked_facts, report, upper, position.line, name) if converted_proven
             proof_add_dynamic_array_guard_bound(checked_facts, report, upper, name, position.line)
             return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-            upper_proven: bool = (proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
+            upper_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
             report.proof_obligation(upper_proven)
             proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "indexed access may exceed the collection bound") if not upper_proven
 
@@ -364,7 +369,7 @@ extend ElisaProof:
                 checked_index: mutable Ast::Expr = index
                 checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                 if proof_expr_has_call(index):
-                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name) can Global{Read,Write})
+                    resolved: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(index, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})
                     if resolved.known:
                         checked_index <- resolved.value
                     else:
@@ -381,11 +386,11 @@ extend ElisaProof:
                         lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, checked_index, position)
                         upper: Ast::Expr = Ast::Expr.Binary(checked_index, TokenKind.Lt, Ast::Expr.IntLit(extent, position), position)
                         return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                        lower_proven: bool = (proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "index-lower") can Global{Read,Write})
+                        lower_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, lower, report, position.line, name, annotations, "index-lower") can Global{Read,Write})
                         report.proof_obligation(lower_proven)
                         proof_add_latest_goal_finding(report, "index-lower-unproven", position.line, name, "multi-index position may be negative") if not lower_proven
                         return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                        upper_proven: bool = (proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
+                        upper_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, upper, report, position.line, name, annotations, "index-upper") can Global{Read,Write})
                         report.proof_obligation(upper_proven)
                         proof_add_latest_goal_finding(report, "index-upper-unproven", position.line, name, "multi-index position may exceed its fixed dimension") if not upper_proven
                 dimension <- dimension + 1
@@ -426,13 +431,13 @@ extend ElisaProof:
             checked_high: mutable Ast::Expr = high
             checked_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
             if proof_expr_has_call(low):
-                resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(low, facts, functions, annotations, &checked_facts, report, name) can Global{Read,Write})
+                resolved_low: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(low, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})
                 if resolved_low.known:
                     checked_low <- resolved_low.value
                 else:
                     checked_low <- Ast::Expr.Invalid
             if proof_expr_has_call(high):
-                resolved_high: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(high, facts, functions, annotations, &checked_facts, report, name) can Global{Read,Write})
+                resolved_high: (known: bool, value: Ast::Expr, summary: Ast::Expr, dependency: sview) = (proof_index_call_result(high, facts, functions, annotations, &checked_facts, report, name, true) can Global{Read,Write})
                 if resolved_high.known:
                     checked_high <- resolved_high.value
                 else:
@@ -447,7 +452,7 @@ extend ElisaProof:
                 _:
                     lower: Ast::Expr = Ast::Expr.Binary(Ast::Expr.IntLit(0, position), TokenKind.LtEq, checked_low, position)
                     return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                    lower_proven: bool = (proof_certify_goal_with_rule(checked_facts, lower, report, position.line, name, annotations, "slice-lower") can Global{Read,Write})
+                    lower_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, lower, report, position.line, name, annotations, "slice-lower") can Global{Read,Write})
                     report.proof_obligation(lower_proven)
                     proof_add_latest_goal_finding(report, "slice-lower-unproven", position.line, name, "slice may begin before the collection") if not lower_proven
             match checked_high:
@@ -468,11 +473,11 @@ extend ElisaProof:
                     fixed_extent: i64 = fixed_lookup.extent if fixed_lookup.complete else -1
                     if fixed_extent >= 0:
                         fixed_upper: Ast::Expr = Ast::Expr.Binary(checked_high, TokenKind.LtEq, Ast::Expr.IntLit(fixed_extent, position), position)
-                        return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                        if (proof_goal(checked_facts, fixed_upper, annotations) can Global{Read,Write}):
+                        return if not proof_index_safety_preflight_fact_work(checked_facts, PROOF_INDEX_SAFETY_PROBE_FACT_PASSES, report, name, position.line)
+                        if (proof_index_safety_goal_with_shared_work(checked_facts, fixed_upper, annotations, report, name, position.line) can Global{Read,Write}):
                             proof_add_type_bound_fact(checked_facts, report, upper, position.line, name)
                     return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                    upper_proven: bool = (proof_certify_goal_with_rule(checked_facts, upper, report, position.line, name, annotations, "slice-upper") can Global{Read,Write})
+                    upper_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, upper, report, position.line, name, annotations, "slice-upper") can Global{Read,Write})
                     report.proof_obligation(upper_proven)
                     proof_add_latest_goal_finding(report, "slice-upper-unproven", position.line, name, "slice may end beyond the collection") if not upper_proven
             match checked_low:
@@ -485,6 +490,6 @@ extend ElisaProof:
                         _:
                             ordered: Ast::Expr = Ast::Expr.Binary(checked_low, TokenKind.LtEq, checked_high, position)
                             return if not proof_index_safety_preflight_fact_work(checked_facts, 1, report, name, position.line)
-                            ordered_proven: bool = (proof_certify_goal_with_rule(checked_facts, ordered, report, position.line, name, annotations, "slice-order") can Global{Read,Write})
+                            ordered_proven: bool = (proof_certify_goal_with_rule_shared(checked_facts, ordered, report, position.line, name, annotations, "slice-order") can Global{Read,Write})
                             report.proof_obligation(ordered_proven)
                             proof_add_latest_goal_finding(report, "slice-order-unproven", position.line, name, "slice bounds may be reversed") if not ordered_proven

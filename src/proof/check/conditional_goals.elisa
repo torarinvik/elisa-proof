@@ -138,7 +138,7 @@ extend ElisaProof:
         # certified goal, so replay re-derives all three.
         # Only called once the goal failed as a whole; the final step, whose facts are exactly
         # the two cases, does not split again.
-        def proof_certify_conditional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_certify_conditional_goal_core(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, shared_search: bool, solver_work: mutable usize&, tactic_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             conditionals: mutable darray[Ast::Expr] = []
             proof_goal_conditional_terms(goal, &conditionals, 0)
             return false if conditionals.count != 1
@@ -156,7 +156,7 @@ extend ElisaProof:
                     return false if report.context.conditional_split_active
                     report.context.conditional_split_active <- true
                     mark: (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize) = proof_goal_record_mark(report)
-                    proven: bool = (proof_certify_conditional_cases(facts, goal, then_case, else_case, report, line, name, annotations) can Global{Read,Write})
+                    proven: bool = (proof_certify_conditional_cases(facts, goal, then_case, else_case, report, line, name, annotations, shared_search, solver_work, tactic_work) can Global{Read,Write})
                     report.context.conditional_split_active <- false
                     # A split that did not prove the goal leaves no record: its case attempts are
                     # not obligations, and the caller records the goal's own failure.
@@ -164,6 +164,14 @@ extend ElisaProof:
                     return proven
                 _:
                     return false
+
+        def proof_certify_conditional_goal(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+            solver_work: mutable usize = 0
+            tactic_work: mutable usize = 0
+            (proof_certify_conditional_goal_core(facts, goal, report, line, name, annotations, false, &solver_work, &tactic_work) can Global{Read,Write})
+
+        def proof_certify_conditional_goal_shared(facts: darray[Ast::Expr]&, goal: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, solver_work: mutable usize&, tactic_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
+            (proof_certify_conditional_goal_core(facts, goal, report, line, name, annotations, true, &solver_work, &tactic_work) can Global{Read,Write})
 
         # The conditional terms of a goal, at most two, outside other conditionals.
         def proof_goal_conditional_terms(expression: Ast::Expr, terms: mutable darray[Ast::Expr]&, depth: usize) -> void:
@@ -181,7 +189,7 @@ extend ElisaProof:
                 _:
                     return
 
-        def proof_certify_conditional_cases(facts: darray[Ast::Expr]&, goal: Ast::Expr, then_case: Ast::Expr, else_case: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_certify_conditional_cases(facts: darray[Ast::Expr]&, goal: Ast::Expr, then_case: Ast::Expr, else_case: Ast::Expr, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, shared_search: bool, solver_work: mutable usize&, tactic_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             # The facts the solver cannot split: bounds, markers, equalities. A case proved from
             # these alone needs no split, so its certificate and trace replay cheaply; the other
             # disjunctions are kept out of the final step for the same reason.
@@ -195,28 +203,28 @@ extend ElisaProof:
             # preservation certificates in their own right.
             previous_phase: sview = report.context.current_loop_invariant_phase
             report.context.current_loop_invariant_phase <- ""
-            then_proven: bool = (proof_stage_conditional_case(facts, plain, then_case, &cases, report, line, name, annotations) can Global{Read,Write})
+            then_proven: bool = (proof_stage_conditional_case(facts, plain, then_case, &cases, report, line, name, annotations, shared_search, solver_work, tactic_work) can Global{Read,Write})
             else_proven: mutable bool = false
-            else_proven <- (proof_stage_conditional_case(facts, plain, else_case, &cases, report, line, name, annotations) can Global{Read,Write}) if then_proven
+            else_proven <- (proof_stage_conditional_case(facts, plain, else_case, &cases, report, line, name, annotations, shared_search, solver_work, tactic_work) can Global{Read,Write}) if then_proven
             report.context.current_loop_invariant_phase <- previous_phase
             return false if not then_proven or not else_proven
-            return (proof_certify_goal_with_rule(cases, goal, report, line, name, annotations, "") can Global{Read,Write})
+            (proof_certify_goal_with_rule_core(cases, goal, report, line, name, annotations, "", shared_search, &solver_work, &tactic_work) can Global{Read,Write})
 
         # Prove one case and add it to the final step's facts with the smallest premise set
         # that worked. A case that is already a fact (a guarded arm fact the join imported)
         # keeps its own trace.
-        def proof_stage_conditional_case(facts: darray[Ast::Expr]&, plain: darray[Ast::Expr]&, case: Ast::Expr, cases: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&) -> bool can[Global.Read, Global.Write]:
+        def proof_stage_conditional_case(facts: darray[Ast::Expr]&, plain: darray[Ast::Expr]&, case: Ast::Expr, cases: mutable darray[Ast::Expr]&, report: mutable ProofReport&, line: u32, name: sview, annotations: darray[Ast::EnumAnnotation]&, shared_search: bool, solver_work: mutable usize&, tactic_work: mutable usize&) -> bool can[Global.Read, Global.Write]:
             if any fact in facts where proof_expr_equal(fact, case):
                 cases.push(case)
                 return true
             before: usize = cases.count
             mark: (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize) = proof_goal_record_mark(report)
-            if (proof_certify_goal_with_rule(plain, case, report, line, name, annotations, "") can Global{Read,Write}):
+            if (proof_certify_goal_with_rule_core(plain, case, report, line, name, annotations, "", shared_search, &solver_work, &tactic_work) can Global{Read,Write}):
                 proof_add_derived_fact_from(cases, report, case, plain, "proof-step", line, name)
             else:
                 # The cheaper attempt's failure is not an obligation either.
                 proof_goal_record_rollback(report, mark)
-                proof_add_derived_fact_from(cases, report, case, facts, "proof-step", line, name) if (proof_certify_goal_with_rule(facts, case, report, line, name, annotations, "") can Global{Read,Write})
+                proof_add_derived_fact_from(cases, report, case, facts, "proof-step", line, name) if (proof_certify_goal_with_rule_core(facts, case, report, line, name, annotations, "", shared_search, &solver_work, &tactic_work) can Global{Read,Write})
             return cases.count > before
 
         def proof_goal_record_mark(report: ProofReport&) -> (attempts: usize, certificates: usize, facts: usize, kernel_facts: usize):
