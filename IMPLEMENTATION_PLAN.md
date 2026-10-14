@@ -25003,3 +25003,12 @@ before passing the total to a bounded work charger. The sum itself could overflo
 charger compared it with the remaining budget. Each length is now charged separately in those
 multi-field checks, so every reservation is bounded before accumulation. Static diff check passes;
 no build or runtime qualification was run.
+
+### 23.27.1411 Traverse unsigned safety through aggregate and resource-call children (2026-10-14)
+
+Unsigned safety previously rejected supported aggregate expressions because their stored values are
+in the child table, despite the signed safety walk having an explicit child policy. It now checks
+constructor and record-update bases, every aggregate child, and the argument prefix of resource
+calls; resource argument/region boundaries are validated and argument visits are metered. Indexed
+access and quantifiers retain their existing explicit policies. `git diff --check` and the
+source-length gate pass; no tests or build were run.
