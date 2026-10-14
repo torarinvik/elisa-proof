@@ -25220,3 +25220,19 @@ uses the work-aware report after typed whole-arena admission, avoiding a second 
 retaining proposition and transition checks. The dedicated source guard is included in the kernel
 audit suite and passes; focused width/budget checks and source length also pass. Runtime replay remains
 unqualified pending a source-matched Stage1.
+
+### 23.27.1435 Keep validated typing cache private (2026-10-14)
+
+`ProofKernelReplayTypingWorkspace` exposed its validated-global cache, including the mutable
+`ready` bit, bindings, and indexes. Typed replay trusts that cache after preparation, so mutating it
+could forge typing evidence. The cache field is now private; all cache access is inside the kernel
+replay module. Static source review and `git diff --check` pass. No build or runtime qualification
+was available.
+
+### 23.27.1436 Share arena admission across untyped tactic branch roots (2026-10-14)
+
+The untyped tactic-branch API validated the parent, left, and right states with three fresh
+whole-root arena walks before checking the transition. It now shares one validation workspace and
+one aggregate transition allowance across those roots, reusing already admitted DAG nodes while
+retaining fail-closed validation for each supplied root. Static diff and source-length checks pass;
+no tests or build were run.
