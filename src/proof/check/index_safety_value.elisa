@@ -1,13 +1,58 @@
 extend ElisaProof:
     private:
+        def proof_index_safety_report_work_exhausted(report: mutable ProofReport&, name: sview, line: u32) -> void:
+            report.analysis_1.budgets.index_safety_source_work <- PROOF_LINEAR_SAFETY_WORK_LIMIT
+            if not report.analysis_1.budgets.index_safety_reported:
+                report.analysis_1.budgets.index_safety_reported <- true
+                proof_add_budget_finding(report, "resource-analysis-budget", line, name, "index-safety guard classification exceeded its per-function source-work bound", "index-safety-source-work", PROOF_LINEAR_SAFETY_WORK_LIMIT, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+
+        def proof_index_safety_take_source_work(report: mutable ProofReport&, name: sview, line: u32, amount: usize) -> bool:
+            work: usize = report.analysis_1.budgets.index_safety_source_work
+            if work >= PROOF_LINEAR_SAFETY_WORK_LIMIT or amount > PROOF_LINEAR_SAFETY_WORK_LIMIT - work:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            report.analysis_1.budgets.index_safety_source_work <- work + amount
+            true
+
         def proof_index_safety_preflight_expr_work(expression: Ast::Expr, passes: usize, report: mutable ProofReport&, name: sview, line: u32) -> bool:
-            # Share the existing per-function classification budget used by return, branch,
-            # and frame analysis so all repeated expression walks are bounded together.
-            proof_frame_expression_rechecks_with_work(expression, report, name, line, passes)
+            work: mutable usize = report.analysis_1.budgets.index_safety_source_work
+            exhausted: mutable bool = false
+            cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(expression, &work, &exhausted)
+            complete: mutable bool = cost.complete
+            if complete and passes > 1:
+                complete <- proof_linear_safety_work_charge_scaled(&work, &exhausted, cost.cost, passes - 1)
+            report.analysis_1.budgets.index_safety_source_work <- work
+            if not complete:
+                proof_index_safety_report_work_exhausted(report, name, line)
+            complete
+
+        # The support walk also charges its nested conversion/call scans and Match lowering
+        # into the same `work` reference. Offset that counter so its existing 1 Mi ceiling
+        # represents only the remaining per-function index-safety allowance; the shared source
+        # cap is then enforced before each nested visit or reservation.
+        def proof_index_safety_expr_supported_with_work(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            work_before: usize = report.analysis_1.budgets.index_safety_source_work
+            if work_before >= PROOF_LINEAR_SAFETY_WORK_LIMIT:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            remaining: usize = PROOF_LINEAR_SAFETY_WORK_LIMIT - work_before
+            support_work_start: usize = PROOF_MATCH_LOWERING_WORK_LIMIT - remaining
+            support_work: mutable usize = support_work_start
+            supported: bool = proof_expr_supported_with_work(expression, &support_work)
+            if support_work > PROOF_MATCH_LOWERING_WORK_LIMIT or support_work < support_work_start:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            support_cost: usize = support_work - support_work_start
+            if support_cost > remaining:
+                proof_index_safety_report_work_exhausted(report, name, line)
+                return false
+            report.analysis_1.budgets.index_safety_source_work <- work_before + support_cost
+            return supported
 
         const PROOF_INDEX_SAFETY_SCAN_LIMIT: usize = 16384
 
         def proof_check_index_safety_value(expression: Ast::Expr, facts: mutable darray[Ast::Expr]&, fixed_names: darray[Ast::Expr]&, fixed_extents: darray[i64]&, report: mutable ProofReport&, name: sview, annotations: darray[Ast::EnumAnnotation]&, line: u32, functions: mutable ProofFunctionTable&) -> void can[Global.Read, Global.Write]:
+            return if not proof_index_safety_take_source_work(report, name, line, 1)
             match expression:
                 Ast::Expr.Index(object, index, position):
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -17,6 +62,7 @@ extend ElisaProof:
                 Ast::Expr.IndexN(object, arguments, position):
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     for argument in arguments |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(argument, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     (proof_check_indexn_access(object, arguments, position, facts, fixed_names, fixed_extents, report, name, annotations, functions) can Global{Read,Write})
                 Ast::Expr.Paren(inner, _):
@@ -70,15 +116,24 @@ extend ElisaProof:
                     # summary already describes -- and `live(t, s) and t.flags[s]` proves exactly
                     # as its `if` spelling does.
                     short_circuit: bool = binary_operator == TokenKind.And or binary_operator == TokenKind.Or
-                    # The freshness classifier walks the term once for block-produced values
-                    # and again for call-produced values; precharge both passes alongside the
-                    # overloaded, move, call-presence, and supported-form scans.
-                    guard_scan_complete: bool = not short_circuit or proof_index_safety_preflight_expr_work(left, 7, report, name, line)
+                    # Classify both sides before reusing guard facts. Either side can mutate
+                    # state before an indexed access in the right operand. The freshness
+                    # classifier walks twice; reserve those passes and all other scans.
+                    guard_scan_complete: mutable bool = true
+                    if short_circuit:
+                        guard_scan_complete <- proof_index_safety_preflight_expr_work(left, 7, report, name, line)
+                        if guard_scan_complete:
+                            guard_scan_complete <- proof_index_safety_preflight_expr_work(right, 7, report, name, line)
                     guard_has_overloaded_operator: bool = true
                     guard_has_fresh_value: bool = true
                     guard_has_move: bool = true
                     guard_has_call: bool = true
                     guard_is_supported: bool = false
+                    right_has_overloaded_operator: bool = true
+                    right_has_fresh_value: bool = true
+                    right_has_move: bool = true
+                    right_has_call: bool = true
+                    right_is_supported: bool = false
                     guard_calls_are_pure: bool = false
                     right_calls_are_pure: bool = false
                     if short_circuit and guard_scan_complete:
@@ -86,15 +141,27 @@ extend ElisaProof:
                         guard_has_fresh_value <- proof_expression_has_fresh_runtime_value(left, functions, 0)
                         scan_work: mutable usize = 0
                         guard_has_move <- proof_expr_has_move_with_work(left, &scan_work, PROOF_INDEX_SAFETY_SCAN_LIMIT)
-                        scan_work <- 0
-                        guard_has_call <- proof_expr_has_call_with_work(left, &scan_work, PROOF_INDEX_SAFETY_SCAN_LIMIT)
+                        guard_call_scan: (complete: bool, has_call: bool) = proof_runtime_call_presence_scan(left, functions)
+                        guard_has_call <- guard_call_scan.has_call
+                        guard_scan_complete <- false if not guard_call_scan.complete
                         support_work: mutable usize = 0
                         guard_is_supported <- proof_expr_supported_with_work(left, &support_work)
+                        right_has_overloaded_operator <- proof_source_expression_has_overloaded_operator(right, report.source.source_primitive_operator_mask, 0)
+                        right_has_fresh_value <- proof_expression_has_fresh_runtime_value(right, functions, 0)
+                        scan_work <- 0
+                        right_has_move <- proof_expr_has_move_with_work(right, &scan_work, PROOF_INDEX_SAFETY_SCAN_LIMIT)
+                        right_call_scan: (complete: bool, has_call: bool) = proof_runtime_call_presence_scan(right, functions)
+                        right_has_call <- right_call_scan.has_call
+                        guard_scan_complete <- false if not right_call_scan.complete
+                        support_work <- 0
+                        right_is_supported <- proof_expr_supported_with_work(right, &support_work)
                         if guard_has_call:
-                            guard_calls_are_pure <- proof_runtime_calls_are_pure(left, functions)
-                            right_calls_are_pure <- proof_runtime_calls_are_pure(right, functions)
-                    stable_guard: bool = guard_scan_complete and not guard_has_overloaded_operator and not guard_has_fresh_value and not guard_has_move and (not guard_has_call or (guard_calls_are_pure and right_calls_are_pure))
-                    guard_may_invalidate_state: bool = not guard_scan_complete or not guard_is_supported or guard_has_overloaded_operator or guard_has_move or guard_has_fresh_value or (guard_has_call and not guard_calls_are_pure)
+                            guard_calls_are_pure <- proof_runtime_calls_are_pure_with_known_presence(left, functions, guard_has_call)
+                        if right_has_call:
+                            right_calls_are_pure <- proof_runtime_calls_are_pure_with_known_presence(right, functions, right_has_call)
+                    right_may_invalidate_state: bool = not right_is_supported or right_has_overloaded_operator or right_has_move or right_has_fresh_value or (right_has_call and not right_calls_are_pure)
+                    stable_guard: bool = guard_scan_complete and not guard_has_overloaded_operator and not guard_has_fresh_value and not guard_has_move and (not guard_has_call or guard_calls_are_pure) and not right_may_invalidate_state
+                    guard_may_invalidate_state: bool = not guard_scan_complete or not guard_is_supported or guard_has_overloaded_operator or guard_has_move or guard_has_fresh_value or (guard_has_call and not guard_calls_are_pure) or right_may_invalidate_state
                     if short_circuit and stable_guard and guard_is_supported:
                         guarded_facts: mutable darray[Ast::Expr] = proof_copy_exprs(facts)
                         guard_position: Ast::Pos = Ast::Pos{line: line, column: 0, offset: 0, end_line: line, end_column: 0, end_offset: 0}
@@ -124,6 +191,7 @@ extend ElisaProof:
                     return if transition.known
                     (proof_check_index_safety_value(callee, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     for argument in arguments |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(argument, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Field(object, _, _):
                     (proof_check_index_safety_value(object, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -140,23 +208,29 @@ extend ElisaProof:
                     (proof_check_index_safety_value(operand, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Array(elements, _):
                     for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Tuple(elements, _):
                     for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.SetLit(elements, _):
                     for element in elements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(element, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.DictLit(entries, _):
                     for entry in entries |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(entry.key, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                         (proof_check_index_safety_value(entry.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Construct(_, fields, _):
                     for field in fields |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(field.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.RecordUpdate(base, fields, _):
                     (proof_check_index_safety_value(base, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                     for field in fields |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         (proof_check_index_safety_value(field.value, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.If(condition, then_expr, else_expr, _):
                     (proof_check_index_safety_value(condition, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
@@ -171,6 +245,7 @@ extend ElisaProof:
                     (proof_check_index_safety_value(predicate, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
                 Ast::Expr.Block(statements, value, _, _):
                     for statement in statements |facts, fixed_names, fixed_extents, report, name, annotations, line|:
+                        return if not proof_index_safety_take_source_work(report, name, line, 1)
                         match statement:
                             Ast::Stmt.VarDecl(_, _, initializer, _):
                                 (proof_check_index_safety_value(initializer, facts, fixed_names, fixed_extents, report, name, annotations, line, functions) can Global{Read,Write})
