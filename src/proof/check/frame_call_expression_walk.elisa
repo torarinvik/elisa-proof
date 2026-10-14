@@ -1,5 +1,23 @@
 extend ElisaProof:
     private:
+        # Reuse the frame traversal budget when classifying effects in return and branch
+        # expressions. The standalone proof_expr_has_call wrapper remains for isolated callers.
+        def proof_frame_expression_has_call_with_work(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return true if proof_frame_source_work_stop(report, name, line)
+            work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            has_call: bool = proof_expr_has_call_with_work(expression, &work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            report.analysis_1.budgets.frame_call_source_work <- work
+            return true if proof_frame_source_work_stop(report, name, line)
+            has_call
+
+        def proof_frame_expression_has_move_with_work(expression: Ast::Expr, report: mutable ProofReport&, name: sview, line: u32) -> bool:
+            return true if proof_frame_source_work_stop(report, name, line)
+            work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            has_move: bool = proof_expr_has_move_with_work(expression, &work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+            report.analysis_1.budgets.frame_call_source_work <- work
+            return true if proof_frame_source_work_stop(report, name, line)
+            has_move
+
         def proof_frame_state_copy_with_work(facts: darray[Ast::Expr]&, values: darray[Ast::Expr]&, report: mutable ProofReport&, name: sview, line: u32) -> bool:
             return false if not proof_frame_source_work_take(report, name, line, facts.count + values.count, "frame-branch-state-copy-work", "branch frame state copying exceeded its bounded source-work budget")
             for fact in facts |fact, report, name, line|:
@@ -117,9 +135,13 @@ extend ElisaProof:
                 Ast::Expr.Binary(left, operator, right, _):
                     (proof_check_frame_calls_in_expression(left, facts, names, values, parameter_names, changes, preserves, functions, report, name, annotations) can Global{Read,Write})
                     return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    has_executable_call: mutable bool = false
                     if operator == TokenKind.And or operator == TokenKind.Or:
-                        return if not proof_frame_expression_rechecks_with_work(right, report, name, expression_position.line, 2)
-                    if (operator == TokenKind.And or operator == TokenKind.Or) and proof_expr_has_executable_call(right):
+                        executable_call_work: mutable usize = report.analysis_1.budgets.frame_call_source_work
+                        has_executable_call <- proof_expr_has_executable_call_with_work(right, &executable_call_work, PROOF_LINEAR_SAFETY_WORK_LIMIT)
+                        report.analysis_1.budgets.frame_call_source_work <- executable_call_work
+                        return if proof_frame_source_work_stop(report, name, expression_position.line)
+                    if (operator == TokenKind.And or operator == TokenKind.Or) and has_executable_call:
                         # The right operand may not execute, even when its calls are pure: a
                         # pure function can still establish ensures. Join both possible states.
                         return if not proof_frame_state_copy_with_work(facts, values, report, name, expression_position.line)
@@ -242,16 +264,13 @@ extend ElisaProof:
                     # guarded expression here as well for callers that inspect a catch before
                     # reaching that boundary.
                     has_calls: mutable bool = false
-                    return if not proof_frame_expression_rechecks_with_work(guarded, report, name, expression_position.line, 1)
-                    has_calls <- proof_expr_has_call(guarded)
+                    has_calls <- proof_frame_expression_has_call_with_work(guarded, report, name, expression_position.line)
                     for arm in arms |arm, has_calls, report, name, expression_position|:
-                        return if not proof_frame_expression_rechecks_with_work(arm.guard, report, name, expression_position.line, 1)
-                        has_calls <- has_calls or proof_expr_has_call(arm.guard)
+                        has_calls <- has_calls or proof_frame_expression_has_call_with_work(arm.guard, report, name, expression_position.line)
                         if arm.body.count == 1:
                             match arm.body[0]:
                                 Ast::Stmt.Expr(value, _):
-                                    return if not proof_frame_expression_rechecks_with_work(value, report, name, expression_position.line, 1)
-                                    has_calls <- has_calls or proof_expr_has_call(value)
+                                    has_calls <- has_calls or proof_frame_expression_has_call_with_work(value, report, name, expression_position.line)
                                 _:
                                     pass
                     if not has_calls:
@@ -297,10 +316,9 @@ extend ElisaProof:
                     return if proof_frame_source_work_stop(report, name, expression_position.line)
                 _:
                     if changes.count > 0 or preserves.count > 0:
-                        return if not proof_frame_expression_rechecks_with_work(expression, report, name, expression_position.line, 1)
-                    if proof_expr_has_call(expression) and (changes.count > 0 or preserves.count > 0):
-                        report.proof_obligation(false)
-                        proof_add_finding(report, "frame-expression-opaque", expression_position.line, name, "unsupported expression may contain an unmodeled call with frame effects")
+                        if proof_frame_expression_has_call_with_work(expression, report, name, expression_position.line):
+                            report.proof_obligation(false)
+                            proof_add_finding(report, "frame-expression-opaque", expression_position.line, name, "unsupported expression may contain an unmodeled call with frame effects")
 
         # A summarized outer call must not hide calls evaluated in its callee or arguments.
         # Check these children against the caller's pre-call facts before applying the outer
