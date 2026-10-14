@@ -139,6 +139,56 @@ dict_single["theorems"] = [reseal(dict_single, single_exists_theorem)]
 single_code, single_result = replay(dict_single, "single-key-existential-control")
 assert single_code == 0 and single_result["status"] == "replayed", single_result
 
+# Typed integer literals may prove uniqueness only when both the bits and integer sort match.
+typed_dict_exists = copy.deepcopy(quantified)
+typed_dict_exists["kernel"] = {"nodes": [], "children": []}
+typed_key_a = append_node(typed_dict_exists, "typed-int", value="1", name="i64")
+typed_key_b = append_node(typed_dict_exists, "typed-int", value="1", name="i64")
+typed_value_zero = append_node(typed_dict_exists, "typed-int", value="0", name="i64")
+typed_value_one = append_node(typed_dict_exists, "typed-int", value="1", name="i64")
+typed_entry_a = append_node(typed_dict_exists, "dict_entry", left=typed_key_a, right=typed_value_zero)
+typed_entry_b = append_node(typed_dict_exists, "dict_entry", left=typed_key_b, right=typed_value_one)
+typed_range = collection(typed_dict_exists, "dict", [typed_entry_a, typed_entry_b])
+typed_bound_key = append_node(typed_dict_exists, "ident", name="typed_k")
+typed_bound_value = append_node(typed_dict_exists, "ident", name="typed_v")
+typed_key_match = append_node(typed_dict_exists, "binary", "==", typed_bound_key, typed_key_a)
+typed_value_match = append_node(typed_dict_exists, "binary", "==", typed_bound_value, typed_value_zero)
+typed_body = append_node(typed_dict_exists, "binary", "and", typed_key_match, typed_value_match)
+typed_duplicate_exists = append_node(typed_dict_exists, "quantifier", "exists", typed_range, typed_body,
+                                    name="typed_k", auxiliary=2, secondary_name="typed_v")
+typed_duplicate_theorem = {
+    "goal_id": 0, "name": "typed-duplicate-key-existential", "line": 1,
+    "rule": "quantifier-exists", "hypotheses": [], "hypothesis_origins": [],
+    "conclusion": typed_duplicate_exists, "statement": "", "goal_fingerprint": 0,
+}
+typed_dict_exists["theorems"] = [reseal(typed_dict_exists, typed_duplicate_theorem)]
+refused(typed_dict_exists, "typed-duplicate-key-existential", "rejected", "kernel-rejected")
+
+typed_dict_unique = copy.deepcopy(typed_dict_exists)
+typed_dict_unique["kernel"] = {"nodes": [], "children": []}
+typed_key_a = append_node(typed_dict_unique, "typed-int", value="1", name="i64")
+typed_key_b = append_node(typed_dict_unique, "typed-int", value="2", name="i64")
+typed_value_zero = append_node(typed_dict_unique, "typed-int", value="0", name="i64")
+typed_value_one = append_node(typed_dict_unique, "typed-int", value="1", name="i64")
+typed_entry_a = append_node(typed_dict_unique, "dict_entry", left=typed_key_a, right=typed_value_zero)
+typed_entry_b = append_node(typed_dict_unique, "dict_entry", left=typed_key_b, right=typed_value_one)
+typed_range = collection(typed_dict_unique, "dict", [typed_entry_a, typed_entry_b])
+typed_bound_key = append_node(typed_dict_unique, "ident", name="typed_k")
+typed_bound_value = append_node(typed_dict_unique, "ident", name="typed_v")
+typed_key_match = append_node(typed_dict_unique, "binary", "==", typed_bound_key, typed_key_a)
+typed_value_match = append_node(typed_dict_unique, "binary", "==", typed_bound_value, typed_value_zero)
+typed_body = append_node(typed_dict_unique, "binary", "and", typed_key_match, typed_value_match)
+typed_unique_exists = append_node(typed_dict_unique, "quantifier", "exists", typed_range, typed_body,
+                                  name="typed_k", auxiliary=2, secondary_name="typed_v")
+typed_unique_theorem = {
+    "goal_id": 0, "name": "typed-unique-key-existential-control", "line": 1,
+    "rule": "quantifier-exists", "hypotheses": [], "hypothesis_origins": [],
+    "conclusion": typed_unique_exists, "statement": "", "goal_fingerprint": 0,
+}
+typed_dict_unique["theorems"] = [reseal(typed_dict_unique, typed_unique_theorem)]
+typed_unique_code, typed_unique_result = replay(typed_dict_unique, "typed-unique-key-existential-control")
+assert typed_unique_code == 0 and typed_unique_result["status"] == "replayed", typed_unique_result
+
 base = packages["verified"]
 # A recognized type marker is a domain restriction when used as a premise; it is not
 # an automatically true proposition. Keep this source-neutral sequent from proving an

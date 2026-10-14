@@ -43,6 +43,9 @@ assert "left_key.bits == right_key.bits" in unique
 arena = body("proof_kernel_replay_arena_children_valid_with_work")
 assert 'if node.operator == "exists" and node.auxiliary == 2:' in arena
 assert "proof_kernel_replay_existential_dictionary_keys_unique_with_work" in arena
+direct = body("proof_kernel_replay_quantifier_remaining_with_work")
+assert 'if kind == "exists" and quantifier.auxiliary == 2:' in direct
+assert "proof_kernel_replay_existential_dictionary_keys_unique_with_work" in direct
 
 direct = body("proof_kernel_replay_quantifier_remaining_with_work")
 assert 'if kind == "exists" and quantifier.auxiliary == 2:' in direct
@@ -53,4 +56,7 @@ assert '"name": "duplicate-key-existential"' in forgery
 assert '"name": "single-key-existential-control"' in forgery
 assert 'refused(dict_exists, "duplicate-key-existential", "rejected", "kernel-rejected")' in forgery
 assert 'single_result["status"] == "replayed"' in forgery
+assert '"name": "typed-duplicate-key-existential"' in forgery
+assert 'refused(typed_dict_exists, "typed-duplicate-key-existential", "rejected", "kernel-rejected")' in forgery
+assert 'typed_unique_result["status"] == "replayed"' in forgery
 print("existential dictionary replay: duplicate/uncertain keys fail closed under metered literal checks")
