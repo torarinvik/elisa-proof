@@ -9,6 +9,7 @@ SOURCES = (
     ROOT / "src/proof/check/source_conversion_alias_resolution.elisa",
     ROOT / "src/proof/check/source_conversion_generic_alias_application.elisa",
     ROOT / "src/proof/check/source_conversion_type_aliases.elisa",
+    ROOT / "src/proof/check/source_conversion_type_alias_collectors.elisa",
     ROOT / "src/proof/replay/source_call_type_aliases.elisa",
     ROOT / "src/proof/replay/source_call_type_argument_shape.elisa",
 )
@@ -82,6 +83,8 @@ assert shape.count("proof_replay_call_conversion_builtin_generic_type_head(head,
 single_argument_alias = shape.split("Ast::Expr.Index(head, argument, _):", 1)[1].split("Ast::Expr.IndexN(head, arguments, _):", 1)[0]
 assert single_argument_alias.index("proof_replay_call_conversion_alias_formal_head(root.name") < single_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head")
 assert single_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head") < single_argument_alias.index("proof_replay_call_conversion_generic_name(root.name")
+assert "generic_head <- generic.count > 0" in single_argument_alias
+assert "if generic_head else proof_replay_call_conversion_alias_application_target" in single_argument_alias
 assert "field_conversion_alias_generic_application_valid[application.row]" in single_argument_alias
 assert "field_conversion_alias_generic_formal_counts[application.row] != 1" in single_argument_alias
 assert "if not application.found:" in single_argument_alias
@@ -90,11 +93,27 @@ assert "type_argument_shape_safe(argument," in single_argument_alias
 multi_argument_alias = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
 assert multi_argument_alias.index("proof_replay_call_conversion_alias_formal_head(root.name") < multi_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head")
 assert multi_argument_alias.index("proof_replay_call_conversion_builtin_generic_type_head(head") < multi_argument_alias.index("proof_replay_call_conversion_generic_name(root.name")
+assert "generic_head <- generic.count > 0" in multi_argument_alias
+assert "if generic_head else proof_replay_call_conversion_alias_application_target" in multi_argument_alias
 assert "field_conversion_alias_has_formals[application.row]" in multi_argument_alias
 assert "field_conversion_alias_generic_application_valid[application.row]" in multi_argument_alias
 assert "arguments.count != call_target.aliases.field_conversion_alias_generic_formal_counts[application.row]" in multi_argument_alias
 assert "if not application.found:" in multi_argument_alias
 assert "type_argument_shape_safe(head," in multi_argument_alias
+
+# Nominal generic declarations carry their own source-derived arity table. Both replay
+# application shapes must reject a mismatch, and incomplete arity metadata must refuse.
+nominal_arity = function_body("proof_replay_call_conversion_nominal_generic_arity")
+assert "formal_counts.count != declared_count" in nominal_arity
+assert "not call_target.types.field_conversion_declared_type_generic_formal_counts_valid" in nominal_arity
+assert nominal_arity.index("not call_target.types.field_conversion_declared_type_generic_formal_counts_valid") < nominal_arity.index("return (true, false, 0) if declared_count == 0")
+assert "proof_replay_call_conversion_scoped_owner_lookup(name, owner" in nominal_arity
+assert "proof_replay_call_conversion_scoped_lookup(name, normalized.head" in nominal_arity
+assert "proof_replay_call_conversion_name_lookup(name, call_target.types.field_conversion_declared_types" in nominal_arity
+single_nominal = shape.split("Ast::Expr.Index(head, argument, _):", 1)[1].split("Ast::Expr.IndexN(head, arguments, _):", 1)[0]
+multi_nominal = shape.split("Ast::Expr.IndexN(head, arguments, _):", 1)[1]
+assert "nominal_arity.arity != 1" in single_nominal
+assert "nominal_arity.arity != arguments.count" in multi_nominal
 
 source_builtin_head = function_body("proof_source_conversion_builtin_generic_type_head")
 assert "owner_target.blocks_parent" in source_builtin_head
