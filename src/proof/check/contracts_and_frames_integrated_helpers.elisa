@@ -9,6 +9,15 @@ extend ElisaProof:
         # so retain call terms only when the resolved return summary proves a scalar result.
         # Unknown, duplicated, external, or malformed call targets fail closed.
         def proof_expr_has_fresh_call_result(expression: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
+            fallback_work: mutable usize = 0
+            return proof_expr_has_fresh_call_result_core(expression, functions, depth, &fallback_work, false, PROOF_EXPR_HAS_CALL_WORK_LIMIT)
+
+        # Runtime-call purity precharges this classifier's AST traversal. Opaque forms may
+        # perform an additional full call-presence scan, which must consume the same table meter.
+        def proof_expr_has_fresh_call_result_with_fallback_work(expression: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize, work: mutable usize&, limit: usize) -> bool:
+            proof_expr_has_fresh_call_result_core(expression, functions, depth, work, true, limit)
+
+        def proof_expr_has_fresh_call_result_core(expression: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize, work: mutable usize&, meter_fallback: bool, limit: usize) -> bool:
             return true if depth >= ElisaProofKernelCore::PROOF_KERNEL_AST_DEPTH_LIMIT
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, _):
@@ -24,30 +33,32 @@ extend ElisaProof:
                         if called_index < functions.lookup.names.count:
                             return true if called_index >= functions.returns.return_scalar.count or not functions.returns.return_scalar[called_index]
                         return true if not proof_fresh_call_is_builtin_numeric_cast(callee, arguments.count, functions)
-                    return true if proof_expr_has_fresh_call_result(callee, functions, depth + 1)
+                    return true if proof_expr_has_fresh_call_result_core(callee, functions, depth + 1, work, meter_fallback, limit)
                     for argument in arguments:
-                        return true if proof_expr_has_fresh_call_result(argument, functions, depth + 1)
+                        return true if proof_expr_has_fresh_call_result_core(argument, functions, depth + 1, work, meter_fallback, limit)
                     return false
                 Ast::Expr.StaticEffectCall(_, _, _, _, _, _):
                     return true
                 Ast::Expr.Paren(inner, _) | Ast::Expr.Unary(_, inner, _) | Ast::Expr.Move(inner, _) | Ast::Expr.Field(inner, _, _) | Ast::Expr.Scope(inner, _, _):
-                    return proof_expr_has_fresh_call_result(inner, functions, depth + 1)
+                    return proof_expr_has_fresh_call_result_core(inner, functions, depth + 1, work, meter_fallback, limit)
                 Ast::Expr.Binary(left, _, right, _) | Ast::Expr.Index(left, right, _):
-                    return proof_expr_has_fresh_call_result(left, functions, depth + 1) or proof_expr_has_fresh_call_result(right, functions, depth + 1)
+                    return proof_expr_has_fresh_call_result_core(left, functions, depth + 1, work, meter_fallback, limit) or proof_expr_has_fresh_call_result_core(right, functions, depth + 1, work, meter_fallback, limit)
                 Ast::Expr.Slice(object, low, high, _):
-                    return proof_expr_has_fresh_call_result(object, functions, depth + 1) or proof_expr_has_fresh_call_result(low, functions, depth + 1) or proof_expr_has_fresh_call_result(high, functions, depth + 1)
+                    return proof_expr_has_fresh_call_result_core(object, functions, depth + 1, work, meter_fallback, limit) or proof_expr_has_fresh_call_result_core(low, functions, depth + 1, work, meter_fallback, limit) or proof_expr_has_fresh_call_result_core(high, functions, depth + 1, work, meter_fallback, limit)
                 Ast::Expr.IndexN(object, arguments, _):
-                    return true if proof_expr_has_fresh_call_result(object, functions, depth + 1)
+                    return true if proof_expr_has_fresh_call_result_core(object, functions, depth + 1, work, meter_fallback, limit)
                     for argument in arguments:
-                        return true if proof_expr_has_fresh_call_result(argument, functions, depth + 1)
+                        return true if proof_expr_has_fresh_call_result_core(argument, functions, depth + 1, work, meter_fallback, limit)
                     return false
                 Ast::Expr.If(condition, then_expression, else_expression, _):
-                    return proof_expr_has_fresh_call_result(condition, functions, depth + 1) or proof_expr_has_fresh_call_result(then_expression, functions, depth + 1) or proof_expr_has_fresh_call_result(else_expression, functions, depth + 1)
+                    return proof_expr_has_fresh_call_result_core(condition, functions, depth + 1, work, meter_fallback, limit) or proof_expr_has_fresh_call_result_core(then_expression, functions, depth + 1, work, meter_fallback, limit) or proof_expr_has_fresh_call_result_core(else_expression, functions, depth + 1, work, meter_fallback, limit)
                 Ast::Expr.IntLit(_, _) | Ast::Expr.FloatLit(_, _) | Ast::Expr.StringLit(_, _) | Ast::Expr.CharLit(_, _) | Ast::Expr.BoolLit(_, _) | Ast::Expr.Ident(_, _) | Ast::Expr.ShorthandMember(_, _) | Ast::Expr.Absent:
                     return false
                 _:
                     # New expression forms containing calls are opaque until their result and
                     # evaluation behavior have an explicit source-level summary.
+                    if meter_fallback:
+                        return proof_expr_has_call_with_work(expression, work, limit)
                     return proof_expr_has_call(expression)
 
         def proof_expression_has_fresh_runtime_value(expression: Ast::Expr, functions: mutable ProofFunctionTable&, depth: usize) -> bool:
