@@ -1,33 +1,165 @@
 extend ElisaProof:
     private:
+        def proof_guard_call_summary_work_charge(amount: usize, work: mutable usize&) -> bool:
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT
+            if amount > PROOF_MATCH_LOWERING_WORK_LIMIT - work:
+                work <- PROOF_MATCH_LOWERING_WORK_LIMIT + 1
+                return false
+            work <- work + amount
+            true
+
+        def proof_guard_call_summary_seen(expression: Ast::Expr, summary_facts: darray[Ast::Expr]&, work: mutable usize&) -> (complete: bool, duplicate: bool):
+            duplicate: mutable bool = false
+            for existing in summary_facts |expression, work, duplicate|:
+                equal: bool = proof_replay_summary_expr_proof_equal_with_limit(existing, expression, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                return (false, false) if not equal and work >= PROOF_MATCH_LOWERING_WORK_LIMIT
+                if equal:
+                    duplicate <- true
+                    break
+            (work <= PROOF_MATCH_LOWERING_WORK_LIMIT, duplicate)
+
+        def proof_guard_call_summary_charge_name_search(expression: Ast::Expr, target: sview, work: mutable usize&) -> bool:
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+            multiplier: usize = sview_len(target) + 2
+            return false if multiplier == 0 or work > PROOF_MATCH_LOWERING_WORK_LIMIT or cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
+            proof_guard_call_summary_work_charge(cost * multiplier, work)
+
+        # Purity traversal resolves each call against the function table. Charge the
+        # expression traversal multiplied by the maximum linear callee lookup cost.
+        def proof_guard_call_summary_charge_purity(expression: Ast::Expr, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
+            cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(expression, &cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+            multiplier: usize = functions.lookup.names.count + 4
+            return false if multiplier < functions.lookup.names.count or work > PROOF_MATCH_LOWERING_WORK_LIMIT or cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / multiplier
+            proof_guard_call_summary_work_charge(cost * multiplier, work)
+
+        # `proof_add_function_summary_fact` repeats freshness, call-purity, and kernel-support
+        # scans after summary construction. Reserve their AST and callee-lookup work before
+        # entering that shared helper, which has callers outside this guard-local meter.
+        def proof_guard_call_summary_charge_fact_admission(expression: Ast::Expr, parameter_names: darray[sview]&, arguments: darray[Ast::Expr]&, require_goal_ids: darray[usize]&, report: ProofReport&, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
+            expression_cost: mutable usize = 0
+            return false if not proof_replay_summary_expr_cost_with_limit(expression, &expression_cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+            lookup_count: usize = functions.lookup.names.count
+            return false if lookup_count > (PROOF_MATCH_LOWERING_WORK_LIMIT - 6) / 2
+            expression_multiplier: usize = lookup_count * 2 + 6
+            return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT or expression_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / expression_multiplier
+            return false if not proof_guard_call_summary_work_charge(expression_cost * expression_multiplier, work)
+            argument_multiplier: usize = lookup_count + 2
+            return false if argument_multiplier < lookup_count
+            for argument in arguments |argument, work|:
+                argument_cost: mutable usize = 0
+                return false if not proof_replay_summary_expr_cost_with_limit(argument, &argument_cost, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                return false if work > PROOF_MATCH_LOWERING_WORK_LIMIT or argument_cost > (PROOF_MATCH_LOWERING_WORK_LIMIT - work) / argument_multiplier
+                return false if not proof_guard_call_summary_work_charge(argument_cost * argument_multiplier, work)
+            return false if arguments.count > PROOF_MATCH_LOWERING_WORK_LIMIT / 2
+            row_work: usize = arguments.count * 2 + parameter_names.count + require_goal_ids.count + report.threading.summary_threaded_symbols.count + 8
+            return false if row_work < arguments.count or not proof_guard_call_summary_work_charge(row_work, work)
+            true
+
+        def proof_guard_call_summary_map_arguments(parameters: darray[sview]&, has_defaults: darray[bool]&, defaults: darray[Ast::Expr]&, arguments: darray[Ast::Expr]&, argument_names: darray[sview]&, mapped: mutable darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, work: mutable usize&) -> bool:
+            mapped.clear()
+            return false if argument_names.count != 0 and argument_names.count != arguments.count
+            return false if:
+                not proof_guard_call_summary_work_charge(parameters.count, work)
+                not proof_guard_call_summary_work_charge(arguments.count, work)
+                not proof_guard_call_summary_work_charge(argument_names.count, work)
+            used: mutable darray[bool] = []
+            for parameter in parameters |mapped, used, work|:
+                return false if not proof_guard_call_summary_work_charge(1, work)
+                mapped.push(Ast::Expr.Absent)
+                used.push(false)
+            saw_named: mutable bool = false
+            next_positional: mutable usize = 0
+            for argument_index in 0..<arguments.count |argument_index, arguments, argument_names, parameters, mapped, used, saw_named, next_positional, work|:
+                label: sview = argument_names[argument_index] if argument_names.count == arguments.count else ""
+                return false if not proof_guard_call_summary_work_charge(sview_len(label), work)
+                parameter_index: mutable usize = parameters.count
+                if label == "":
+                    return false if saw_named
+                    while next_positional < parameters.count |next_positional, used, work|:
+                        return false if not proof_guard_call_summary_work_charge(1, work)
+                        break if not used[next_positional]
+                        next_positional <- next_positional + 1
+                    return false if next_positional >= parameters.count
+                    parameter_index <- next_positional
+                    next_positional <- next_positional + 1
+                else:
+                    saw_named <- true
+                    for candidate in 0..<parameters.count |candidate, parameters, label, parameter_index, work|:
+                        return false if not proof_guard_call_summary_work_charge(1, work)
+                        return false if not proof_guard_call_summary_work_charge(sview_len(label), work)
+                        return false if not proof_guard_call_summary_work_charge(sview_len(parameters[candidate]), work)
+                        if parameters[candidate] == label:
+                            parameter_index <- candidate
+                            break
+                    return false if parameter_index >= parameters.count
+                return false if used[parameter_index]
+                mapped[parameter_index] <- arguments[argument_index]
+                used[parameter_index] <- true
+            for parameter_index in 0..<parameters.count |parameter_index, used, parameters, has_defaults, defaults, mapped, functions, work|:
+                return false if not proof_guard_call_summary_work_charge(1, work)
+                if not used[parameter_index]:
+                    return false if parameter_index >= has_defaults.count or parameter_index >= defaults.count or not has_defaults[parameter_index]
+                    default_expression: Ast::Expr = defaults[parameter_index]
+                    return false if not proof_expr_supported_with_work(default_expression, work)
+                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(default_expression, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_old(default_expression)
+                    if parameter_index + 1 < parameters.count:
+                        for later_index in parameter_index + 1..<parameters.count |later_index, parameters, default_expression, work|:
+                            return false if not proof_guard_call_summary_charge_name_search(default_expression, parameters[later_index], work)
+                            return false if proof_expr_mentions_name(default_expression, parameters[later_index])
+                    resolved_default: Ast::Expr = proof_substitute_with_work(default_expression, parameters, mapped, work)
+                    return false if proof_expr_is_invalid(resolved_default) or not proof_expr_supported_with_work(resolved_default, work)
+                    return false if not proof_replay_summary_expr_repeat_charge_with_limit(resolved_default, 2, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+                    return false if proof_expr_has_old(resolved_default)
+                    has_call: bool = proof_expr_has_call(resolved_default)
+                    if has_call:
+                        return false if not proof_guard_call_summary_charge_purity(resolved_default, functions, work)
+                        return false if not proof_contract_calls_are_pure(resolved_default, functions)
+                    mapped[parameter_index] <- resolved_default
+                    used[parameter_index] <- true
+            true
+
         # A short-circuit guard runs before its right operand, so every call the guard always
         # evaluates has returned by the time the operand runs. `live(t, s) and t.flags[s]` needs
         # the callee's summary `not live(t, s) or s < CAP` beside the guard itself; the statement
         # records that summary only after the whole expression, which is too late for the operand.
         # Only calls on the guard's unconditional path qualify: the right operand of a nested
         # `and`/`or`/`else` may not run, and neither may its callee's postcondition.
-        def proof_add_guard_call_summaries(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, depth: usize) -> void can[Global.Read, Global.Write]:
-            return if depth >= 16
+        def proof_add_guard_call_summaries(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, line: u32, depth: usize) -> void can[Global.Read, Global.Write]:
+            # Share one ceiling across all guards in this report. Otherwise many small guard
+            # expressions could each spend the full substitution and summary budget.
+            work: mutable usize = report.analysis_1.budgets.guard_call_summary_source_work
+            (proof_add_guard_call_summaries_with_work(guard, facts, functions, annotations, guarded_facts, report, owner, depth, &work) can Global{Read,Write})
+            report.analysis_1.budgets.guard_call_summary_source_work <- work
+            if work > PROOF_MATCH_LOWERING_WORK_LIMIT and not report.analysis_1.budgets.guard_call_summary_reported:
+                report.analysis_1.budgets.guard_call_summary_reported <- true
+                proof_add_budget_finding(report, "resource-analysis-budget", line, owner, "guard call-summary expansion exceeded its shared source-work budget", "guard-call-summary-source-work", work, PROOF_MATCH_LOWERING_WORK_LIMIT)
+
+        def proof_add_guard_call_summaries_with_work(guard: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, guarded_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, depth: usize, work: mutable usize&) -> void can[Global.Read, Global.Write]:
+            return if depth >= 16 or not proof_guard_call_summary_work_charge(1, work)
             match guard:
                 Ast::Expr.Paren(inner, _):
-                    (proof_add_guard_call_summaries(inner, facts, functions, annotations, guarded_facts, report, owner, depth + 1) can Global{Read,Write})
+                    (proof_add_guard_call_summaries_with_work(inner, facts, functions, annotations, guarded_facts, report, owner, depth + 1, work) can Global{Read,Write})
                 Ast::Expr.Unary(_, operand, _):
-                    (proof_add_guard_call_summaries(operand, facts, functions, annotations, guarded_facts, report, owner, depth + 1) can Global{Read,Write})
+                    (proof_add_guard_call_summaries_with_work(operand, facts, functions, annotations, guarded_facts, report, owner, depth + 1, work) can Global{Read,Write})
                 Ast::Expr.Binary(left, operator, right, _):
-                    (proof_add_guard_call_summaries(left, facts, functions, annotations, guarded_facts, report, owner, depth + 1) can Global{Read,Write})
+                    (proof_add_guard_call_summaries_with_work(left, facts, functions, annotations, guarded_facts, report, owner, depth + 1, work) can Global{Read,Write})
                     if operator != TokenKind.And and operator != TokenKind.Or and operator != TokenKind.Else:
-                        (proof_add_guard_call_summaries(right, facts, functions, annotations, guarded_facts, report, owner, depth + 1) can Global{Read,Write})
+                        (proof_add_guard_call_summaries_with_work(right, facts, functions, annotations, guarded_facts, report, owner, depth + 1, work) can Global{Read,Write})
                 Ast::Expr.Call(_, arguments, _, _):
-                    for argument in arguments |facts, functions, annotations, guarded_facts, report, owner, depth|:
-                        (proof_add_guard_call_summaries(argument, facts, functions, annotations, guarded_facts, report, owner, depth + 1) can Global{Read,Write})
-                    (proof_add_call_summary_facts(guard, facts, functions, annotations, guarded_facts, report, owner) can Global{Read,Write})
+                    return if not proof_guard_call_summary_work_charge(arguments.count, work)
+                    for argument in arguments |facts, functions, annotations, guarded_facts, report, owner, depth, work|:
+                        (proof_add_guard_call_summaries_with_work(argument, facts, functions, annotations, guarded_facts, report, owner, depth + 1, work) can Global{Read,Write})
+                    (proof_add_call_summary_facts(guard, facts, functions, annotations, guarded_facts, report, owner, work) can Global{Read,Write})
                 _:
                     pass
 
         # Every ensure of a verified pure callee whose requires hold at the guard, instantiated
         # with the call itself as `result`. Each fact is a function-summary trace, so replay
         # re-derives it from the callee's contract and the recorded precondition goals.
-        def proof_add_call_summary_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview) -> void can[Global.Read, Global.Write]:
+        def proof_add_call_summary_facts(expression: Ast::Expr, facts: darray[Ast::Expr]&, functions: mutable ProofFunctionTable&, annotations: darray[Ast::EnumAnnotation]&, summary_facts: mutable darray[Ast::Expr]&, report: mutable ProofReport&, owner: sview, work: mutable usize&) -> void can[Global.Read, Global.Write]:
+            return if not proof_guard_call_summary_work_charge(1, work)
             match expression:
                 Ast::Expr.Call(callee, arguments, argument_names, position):
                     function_name: sview = proof_callable_name(callee)
@@ -36,6 +168,10 @@ extend ElisaProof:
                     return if function_index >= functions.summaries.pure.count or not functions.summaries.pure[function_index]
                     return if function_index >= functions.summaries.verified.count or not functions.summaries.verified[function_index]
                     return if function_index >= functions.parameters.metadata.param_counts.count or arguments.count > functions.parameters.metadata.param_counts[function_index]
+                    parameter_count: usize = functions.parameters.metadata.param_counts[function_index]
+                    return if:
+                        not proof_guard_call_summary_work_charge(parameter_count, work)
+                        not proof_guard_call_summary_work_charge(parameter_count, work)
                     parameter_names: mutable darray[sview] = []
                     parameter_start: usize = functions.parameters.metadata.param_starts[function_index]
                     for parameter_index in 0..<functions.parameters.metadata.param_counts[function_index] |parameter_names, functions, parameter_start|:
@@ -46,27 +182,36 @@ extend ElisaProof:
                         default_flags.push(functions.parameters.metadata.all_has_defaults[parameter_start + parameter_index])
                         default_values.push(functions.parameters.metadata.all_defaults[parameter_start + parameter_index])
                     mapped_arguments: mutable darray[Ast::Expr] = []
-                    return if not proof_map_runtime_call_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions)
+                    return if not proof_guard_call_summary_map_arguments(parameter_names, default_flags, default_values, arguments, argument_names, &mapped_arguments, functions, work)
                     requires_start: usize = functions.contracts.obligations.requires_starts[function_index] if function_index < functions.contracts.obligations.requires_starts.count else functions.contracts.obligations.all_requires.count
                     requires_count: usize = functions.contracts.obligations.requires_counts[function_index] if function_index < functions.contracts.obligations.requires_counts.count else 0
                     return if requires_start > functions.contracts.obligations.all_requires.count or requires_count > functions.contracts.obligations.all_requires.count - requires_start
+                    return if not proof_guard_call_summary_work_charge(requires_count, work)
                     require_goal_ids: mutable darray[usize] = []
-                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids|:
-                        required: Ast::Expr = proof_substitute(functions.contracts.obligations.all_requires[requires_start + requires_index], parameter_names, mapped_arguments)
-                        return if proof_expr_has_old(required)
+                    for requires_index in 0..<requires_count |requires_index, functions, requires_start, parameter_names, mapped_arguments, facts, annotations, report, position, owner, require_goal_ids, work|:
+                        required: Ast::Expr = proof_substitute_with_work(functions.contracts.obligations.all_requires[requires_start + requires_index], parameter_names, mapped_arguments, work)
+                        return if proof_expr_is_invalid(required) or not proof_replay_summary_expr_repeat_charge_with_limit(required, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT) or proof_expr_has_old(required)
+                        return if not proof_guard_call_summary_work_charge(1, work)
                         required_proven: bool = (proof_certify_goal(facts, required, report, position.line, owner, annotations) can Global{Read,Write})
                         require_goal_ids.push(report.results.goal_attempts.count - 1) if report.results.goal_attempts.count > 0
                         return if not required_proven
                     ensures_start: usize = functions.contracts.obligations.ensure_starts[function_index] if function_index < functions.contracts.obligations.ensure_starts.count else functions.contracts.obligations.all_ensures.count
                     ensures_count: usize = functions.contracts.obligations.ensure_counts[function_index] if function_index < functions.contracts.obligations.ensure_counts.count else 0
                     return if ensures_start > functions.contracts.obligations.all_ensures.count or ensures_count > functions.contracts.obligations.all_ensures.count - ensures_start
+                    return if not proof_guard_call_summary_work_charge(ensures_count, work)
                     result_name: darray[sview] = ["result"]
                     result_value: darray[Ast::Expr] = [expression]
-                    for ensures_index in 0..<ensures_count |ensures_index, functions, ensures_start, parameter_names, mapped_arguments, result_name, result_value, expression, summary_facts, report, position, owner, function_name, require_goal_ids|:
-                        ensured: Ast::Expr = proof_substitute(functions.contracts.obligations.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments)
+                    for ensures_index in 0..<ensures_count |ensures_index, functions, ensures_start, parameter_names, mapped_arguments, result_name, result_value, expression, summary_facts, report, position, owner, function_name, require_goal_ids, work|:
+                        ensured: Ast::Expr = proof_substitute_with_work(functions.contracts.obligations.all_ensures[ensures_start + ensures_index], parameter_names, mapped_arguments, work)
+                        return if proof_expr_is_invalid(ensured) or not proof_replay_summary_expr_repeat_charge_with_limit(ensured, 1, work, PROOF_MATCH_LOWERING_WORK_LIMIT)
                         continue if proof_expr_has_old(ensured)
-                        instantiated: Ast::Expr = proof_substitute(ensured, result_name, result_value)
-                        continue if any existing in summary_facts where proof_expr_equal(existing, instantiated)
+                        instantiated: Ast::Expr = proof_substitute_with_work(ensured, result_name, result_value, work)
+                        return if proof_expr_is_invalid(instantiated)
+                        seen: (complete: bool, duplicate: bool) = proof_guard_call_summary_seen(instantiated, summary_facts, work)
+                        return if not seen.complete
+                        continue if seen.duplicate
+                        return if not proof_guard_call_summary_charge_fact_admission(instantiated, parameter_names, mapped_arguments, require_goal_ids, report, functions, work)
+                        return if not proof_guard_call_summary_work_charge(1, work)
                         proof_add_function_summary_fact(summary_facts, report, functions, instantiated, position.line, owner, function_name, parameter_names, mapped_arguments, expression, require_goal_ids, ensures_index, false, Ast::Expr.Absent, functions.lookup.lines[function_index] if function_index < functions.lookup.lines.count else 0, position)
                 _:
                     pass
