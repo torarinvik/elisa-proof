@@ -232,13 +232,13 @@ assert "producer_claim: bool = goal_status.producer_claimed" in explained_goal
 assert 'goal_state_result.state == "proved" and producer_claim and replayed and source_admitted' in explained_goal
 
 # Equality rewriting is unsound for IEEE floats because NaN makes equality nonreflexive.
-# Keep the rewrite rule's operand and fact walks configured to reject any float node.
+# Keep rewrite operands and the equality witness float-free, and require integer witnesses for
+# substituted expressions. The surrounding goal may contain unrelated opaque float atoms.
 tactic_replay = ROOT / "src/proof/kernel_replay/tactic_replay.elisa"
 rewrite_transition = tactic_replay.read_text(encoding="utf-8").split('if action == "rewrite":', 1)[1]
 transition_work = (ROOT / "src/proof/kernel_replay/tactic_transition_work.elisa").read_text(encoding="utf-8")
 assert 'return false if reject_float and node.kind in {"float", "opaque-float-literal"}' in transition_work
-assert 'return false if reject_float and node.kind == "ident" and not proof_kernel_replay_denial_integer_term_with_work(nodes, children, root, facts, step_work, depth)' in transition_work
-assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, before_goal, before_facts, 0, step_work, true)" in rewrite_transition
+assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, before_goal, before_facts, 0, step_work, false)" in rewrite_transition
 assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, argument, before_facts, 0, step_work, true)" in rewrite_transition
 assert "proof_kernel_replay_tactic_effect_free_with_work(nodes, children, secondary, before_facts, 0, step_work, true)" in rewrite_transition
 assert "proof_kernel_replay_denial_integer_term_with_work(nodes, children, argument, before_facts, step_work, 0)" in rewrite_transition
