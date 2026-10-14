@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """JSON source positions across includes, and per-function status that counts findings."""
 import json
-import os
+import os, qualified_test_binary
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 source = ROOT / "examples/rejected_source_map_include.elisa"
 run = subprocess.run([str(BINARY), "--json", str(source)], capture_output=True, text=True, timeout=120)
 assert run.returncode == 1, (run.returncode, run.stderr)

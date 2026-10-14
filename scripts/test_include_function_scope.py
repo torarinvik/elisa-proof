@@ -1,11 +1,12 @@
 """G68: a bare call inside an included module resolves to that module's own function, and a qualified `Mod::f` (also nested `Geometry::Scalar::f`) only within Mod, never to a same-named function of the including module, in both the prover and kernel replay."""
 import json
-import os
+import os, qualified_test_binary
 from pathlib import Path
 import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
-BINARY = Path(os.environ.get("ELISA_PROOF_BIN", ROOT / "build/elisa-proof"))
+
+BINARY = Path(qualified_test_binary.proof_test_binary(ROOT))
 
 
 def report(fixture, expected_status):

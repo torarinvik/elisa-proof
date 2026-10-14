@@ -1,0 +1,94 @@
+# Bounded include-once lookup for the textual proof importer.
+extend ElisaProof:
+    private:
+        struct ProofImportPathIndex:
+            slot_rows: mutable darray[usize] = []
+            path_hashes: mutable darray[u32] = []
+            path_starts: mutable darray[usize] = []
+            path_lengths: mutable darray[usize] = []
+            valid: bool = false
+
+        def proof_import_path_work_charge(amount: usize, path_scan_work: mutable usize&) -> bool:
+            return false if path_scan_work > PROOF_IMPORT_PATH_SCAN_WORK_MAX or amount > PROOF_IMPORT_PATH_SCAN_WORK_MAX - path_scan_work
+            path_scan_work <- path_scan_work + amount
+            return true
+
+        def proof_import_path_index_create(path_scan_work: mutable usize&) -> ProofImportPathIndex can[Memory.Allocate]:
+            index: mutable ProofImportPathIndex = ProofImportPathIndex{}
+            return index if not proof_import_path_work_charge(PROOF_IMPORT_PATH_INDEX_INITIAL_CAPACITY, path_scan_work)
+            index.slot_rows.resize(PROOF_IMPORT_PATH_INDEX_INITIAL_CAPACITY)
+            for slot in 0..<PROOF_IMPORT_PATH_INDEX_INITIAL_CAPACITY |slot, index|:
+                index.slot_rows[slot] <- 0
+            index.valid <- true
+            return index
+
+        def proof_import_path_index_grow(index: mutable ProofImportPathIndex&, path_scan_work: mutable usize&) -> bool:
+            capacity: usize = index.slot_rows.count
+            return false if:
+                not index.valid or capacity == 0 or capacity > PROOF_IMPORT_PATH_INDEX_MAX_CAPACITY
+                index.path_hashes.count != index.path_starts.count or index.path_hashes.count != index.path_lengths.count
+                index.path_hashes.count > capacity / 2 or index.path_hashes.count > PROOF_IMPORT_MAX_FILES
+            return true if index.path_hashes.count < capacity / 2
+            return false if capacity >= PROOF_IMPORT_PATH_INDEX_MAX_CAPACITY
+            new_capacity: usize = capacity * 2
+            return false if new_capacity > PROOF_IMPORT_PATH_INDEX_MAX_CAPACITY
+            return false if not proof_import_path_work_charge(new_capacity, path_scan_work)
+            new_slots: mutable darray[usize] = []
+            new_slots.resize(new_capacity)
+            for slot in 0..<new_capacity |slot, new_slots|:
+                new_slots[slot] <- 0
+            for row in 0..<index.path_hashes.count |row, index, new_slots, new_capacity, path_scan_work|:
+                slot: mutable usize = (index.path_hashes[row].i64() % new_capacity.i64()).usize()
+                probes: mutable usize = 0
+                placed: mutable bool = false
+                while probes < new_capacity and placed == false |probes, slot, row, index, new_slots, new_capacity, path_scan_work, placed|:
+                    return false if not proof_import_path_work_charge(1, path_scan_work)
+                    if new_slots[slot] == 0:
+                        new_slots[slot] <- row + 1
+                        placed <- true
+                    else:
+                        slot <- (slot + 1) % new_capacity
+                        probes <- probes + 1
+                return false if not placed
+            index.slot_rows <- new_slots
+            return true
+
+        def proof_import_path_hash(path: darray[u8]&, path_scan_work: mutable usize&) -> (complete: bool, hash: u32):
+            return (false, 0) if not proof_import_path_work_charge(path.count, path_scan_work)
+            hash: mutable i64 = ElisaProofKernelCore::PROOF_KERNEL_FNV1A_OFFSET_BASIS
+            for byte in path |path, hash|:
+                hash <- ((hash ^ byte.i64()) * ElisaProofKernelCore::PROOF_KERNEL_FNV1A_PRIME) % ElisaProofKernelCore::PROOF_KERNEL_HASH_U32_MODULUS
+            return (true, hash.u32())
+
+        # `slot_rows` stores row + 1 so zero remains the empty-slot marker. Rows point into
+        # the flat `seen` buffer, preserving its first-visit order for source maps. Probes
+        # stop at table capacity and every probe is charged to the shared work budget.
+        def proof_import_path_index_lookup(index: ProofImportPathIndex, seen: darray[u8]&, path: darray[u8]&, path_scan_work: mutable usize&) -> (complete: bool, found: bool, slot: usize, hash: u32):
+            capacity: usize = index.slot_rows.count
+            return (false, false, 0, 0) if:
+                not index.valid or capacity == 0 or capacity > PROOF_IMPORT_PATH_INDEX_MAX_CAPACITY
+                index.path_hashes.count != index.path_starts.count or index.path_hashes.count != index.path_lengths.count
+                index.path_hashes.count > PROOF_IMPORT_MAX_FILES or index.path_hashes.count > capacity / 2
+            hashed: (complete: bool, hash: u32) = proof_import_path_hash(path, path_scan_work)
+            return (false, false, 0, 0) if not hashed.complete
+            slot: mutable usize = (hashed.hash.i64() % capacity.i64()).usize()
+            probes: mutable usize = 0
+            while probes < capacity |probes, slot, hashed, index, seen, path, path_scan_work, capacity|:
+                return (false, false, 0, 0) if not proof_import_path_work_charge(1, path_scan_work)
+                row_plus_one: usize = index.slot_rows[slot]
+                return (true, false, slot, hashed.hash) if row_plus_one == 0
+                return (false, false, 0, 0) if row_plus_one > index.path_hashes.count
+                row: usize = row_plus_one - 1
+                if index.path_hashes[row] == hashed.hash and index.path_lengths[row] == path.count:
+                    start: usize = index.path_starts[row]
+                    length: usize = index.path_lengths[row]
+                    return (false, false, 0, 0) if start > seen.count or length >= seen.count - start
+                    return (false, false, 0, 0) if seen[start + length] != PROOF_IMPORT_BYTE_NUL
+                    return (false, false, 0, 0) if not proof_import_path_work_charge(path.count, path_scan_work)
+                    matched: mutable bool = true
+                    for offset in 0..<path.count |matched, offset, index, seen, path, start|:
+                        matched <- false if seen[start + offset] != path[offset]
+                    return (true, true, slot, hashed.hash) if matched
+                slot <- (slot + 1) % capacity
+                probes <- probes + 1
+            return (false, false, 0, 0)
