@@ -16820,7 +16820,7 @@ Resource-call classification now receives the callee table and distinguishes ver
 
 ### 23.27.655 Resolve conversion aliases with replay parity (2026-10-14)
 
-Conversion alias producer and replay carry an explicit caller-owner-known bit, so an empty owner for a root function is resolved exactly while synthetic or unavailable callers retain conservative indexed lookup. The current precedence is tracked under item 23.27.671 and follows backend annotation representation lookup; it must not be described as matching the separate GlobalAuthority parent/import walk. The structural source graph stores one owner per graph node and validates the parallel-array length before use. Drop-risk analysis preserves caller ownership through function bodies, contracts, and extern ensures; structural-operator checks carry owner context through source checking, termination, purity, extern ensures, and deterministic replay. Ambiguous or absent line-to-module mappings remain incomplete. Parent-owner slicing is no longer used by conversion-alias resolution. Imported alias expansion still needs an exact selected declaration witness and matching replay metadata; spelling alone cannot establish the imported module's target. Static diff/call-site review only; no parser, build, tests, or replay were run, so this work remains unqualified.
+Conversion alias producer and replay carry an explicit caller-owner-known bit, so an empty owner for a root function is resolved exactly while synthetic or unavailable callers retain conservative indexed lookup. The current precedence is tracked under item 23.27.671 and follows backend annotation representation lookup; it must not be described as matching the separate GlobalAuthority parent/import walk. The structural source graph stores one owner per graph node and validates the parallel-array length before use. Drop-risk analysis preserves caller ownership through function bodies, contracts, and extern ensures; structural-operator checks carry owner context through source checking, termination, purity, extern ensures, and deterministic replay. Ambiguous or absent line-to-module mappings remain incomplete. Parent-owner slicing is no longer used by conversion-alias resolution. A later producer/replay audit confirms that imported declarations are intentionally absent from annotation-representation alias lookup in Stage1 and the source index; imported aliases stay opaque in this path, so adding an import census would diverge from the backend. The ownerless/synthetic caller path also conservatively refuses to expand a globally unique module-owned alias; thread exact owner metadata there only if a production caller is found that already knows it. Static diff/call-site review only; no parser, build, tests, or replay were run, so this work remains unqualified.
 
 ### 23.27.656 Record current clean compiler qualification seed failures (2026-10-14)
 
@@ -20588,3 +20588,183 @@ checkout and both proof pins remain unchanged. This confirms that the newer comp
 alone does not restore qualification. Resolve the compiler/Core escape-analysis mismatch, then
 record Stage1 provenance and run the frozen proof qualification gates. No proof tests or builds
 were run; the compiler seed was the only build attempted.
+
+### 23.27.1004 Count every index-safety guard scan
+
+The index-safety preflight counts its own AST cost walk in addition to the classifier passes.
+Freshness classification performs two walks, and overload, move, call-presence, and support
+classification add four more; reserve all six classifier passes as well as the cost walk. Reuse
+the metered call-presence result when deciding whether to expand guard summaries, avoiding an
+extra unmetered scan. Each call's protocol-transition admission also scans the compiler-validated
+position list, so charge that list length against the same per-function index-safety budget before
+recognition. Static checks pass; no tests or builds were run.
+
+### 23.27.1005 Avoid purity work for call-free expressions
+
+Runtime purity now returns after its metered call-presence scan when no call exists. It reserves
+the fresh-result and transitive-purity passes only for expressions that actually contain calls,
+avoiding unnecessary refusals on large call-free guards. Static checks pass; no tests or builds
+were run.
+
+### 23.27.1006 Avoid repeated call-purity scans in catch arms
+
+Catch-arm admission first records call presence and rejects an impure call, then called the
+general runtime-call gate, which repeated both scans. The recorded call result plus the existing
+purity check already enforces that every arm call is pure; retain the expression-support check and
+remove the redundant gate. Static checks pass; no tests or builds were run.
+
+### 23.27.1007 Keep rooted runtime calls on the fast path
+
+Runtime-value admission already scans for call presence before checking whether an expression is
+rooted at a call. Preserve that established admission immediately after the scan instead of first
+walking the full expression for unconditional evaluation order. Non-rooted expressions still use
+the detailed walk and purity fallback. Static checks pass; no tests or builds were run.
+
+### 23.27.1008 Invalidate short-circuit index facts for effects on either side
+
+Short-circuit index checking previously inspected the left guard for mutation but reused its facts
+through the right operand even when that operand could mutate state before a later indexed access.
+Classify both sides under the per-function aggregate budget, check call purity independently on
+each side, and clear inherited facts when either side may mutate or classification is incomplete.
+The capped call-presence scanner's exhaustion signal also marks classification incomplete, so a
+fallback purity scan cannot turn an unknown call-presence result into permission to reuse facts.
+Static checks pass; no tests or builds were run.
+
+### 23.27.1009 Avoid duplicate cached typing-context validation
+
+Cached-global typing used to validate enum-underlying and type-scope relationships on the local
+bindings during index collection, then repeat those whole-environment checks against the combined
+global/local context. Move the checks out of index collection and into the full-environment
+builder. The cached path validates the combined context once, preserving cross-binding checks
+while removing the redundant local-only pass. Static checks pass; no tests or builds were run.
+
+### 23.27.1010 Meter widening-cast source classification
+
+Widening-cast proof search previously used unmetered conversion, scalar-witness, fact-bound,
+and operator-witness generation. Both callers now share the per-function frame source-work budget,
+reserve legacy/indexed-receiver scans before traversal, and use metered scalar-marker, width,
+bounds, equality-closure, and interval APIs. The local-binding follow-up also meters callee
+substitution, receiver equality, and initializer move scanning. Incomplete analysis is distinguished
+from an ordinary non-widening result; exhaustion is reported without emitting a widening fact.
+Static checks pass; no tests or builds were run.
+
+### 23.27.1011 Bound repeated index-access classification
+
+The recursive index-safety visitor charges its own visits, protocol-transition position searches,
+and bounded operand rechecks performed by single-index, multi-index, and slice admission. Call
+summary work remains under the shared runtime-call meter. Exhaustion records a resource-analysis
+finding and stops the affected access path. Before each goal call, access admission reserves fact
+context scans and one attempt unit against the shared per-function meter, after any call-summary
+facts have been added. Single-index access covers up to six possible calls, IndexN covers two per
+argument, and slices reserve four certificate-call slots (lower bound, optional fixed upper
+bound, upper bound, and endpoint ordering), plus direct-call `requires` goals for either endpoint.
+Each solver still uses its individual search bound; this source-work counter does not share solver
+fuel across attempts. Checked-index and checked-get certificates reserve their expression and
+recording scans plus one attempt unit. Static checks pass; no tests or builds were run.
+
+### 23.27.1012 Apply the frame budget to widening-cast substitution
+
+The declaration caller previously checked its 65,536-unit frame limit only after using
+substitution's 1,048,576-unit default reservation. Added a limit-aware substitution entrypoint and
+use the frame limit during reservation, preventing oversized callee substitution from traversing
+before fail-closed reporting. Nested substitutions inherit that ceiling; match lowering remains
+opaque when a caller supplies the tighter frame limit because that lowering API only accepts its
+larger independent cap. The recursive worker now accepts an exact-fit reservation. Static checks
+pass; no tests or builds were run.
+
+### 23.27.1013 Bound snapshot fact transfer scans
+
+Numeric and indexed snapshot transfer copied and revisited every current fact while splitting
+conjunctions, substituting places, checking receiver freedom, deduplicating, and attempting new
+proofs. Preflight likely rewrite candidates before reserving the quadratic deduplication bound, so
+receiver-free fact sets stay on the linear path. Aggregate candidate proof attempts under one
+shared solver and tactic-preflight budget, meter the indexed receiver scan before root recognition,
+and decline exhausted transfers. Static checks pass; tests and builds were not run.
+
+### 23.27.1014 Bound widening witness comparisons additively
+
+Conditional-return conversion snapshots now charge their move scan to the shared per-function
+frame budget. Widening witness deduplication reserves one marker-to-fact comparison per fact and
+the summed fact traversal cost, instead of multiplying total fact size by marker size. Static checks
+pass; no tests or builds were run.
+
+### 23.27.1015 Exhaust shared linear-safety work on incomplete cost walks
+
+The shared expression-cost wrapper marked an incomplete bounded walk as exhausted but retained its
+old counter value. If a later phase created a fresh local exhaustion flag, it could retry the same
+over-limit expression. Failed measurements now consume the remaining linear-safety allowance,
+matching failed work reservations and preventing repeated scans. Static checks pass; tests and builds
+were not run.
+
+### 23.27.1016 Allow exactly fitting bounded substitutions
+
+The limit-aware substitution reservation accepts work that exactly consumes the remaining budget,
+but the recursive worker rejected work equal to the limit. Permit that already-reserved exact-fit
+case; failed reservations still set the counter above the limit and return an invalid expression.
+Static checks pass; no tests or builds were run.
+
+### 23.27.1017 Fail closed on unsupported checked-index certificates
+
+Checked-index and checked-get analysis could return without recording a failed obligation when
+their expression was outside the replayable kernel fragment. They now add an explicit finding and
+failed obligation in that case. Budget exhaustion in the surrounding index walk also contributes a
+failed obligation alongside its deduplicated finding. Static checks pass; no tests or builds were
+run.
+
+### 23.27.1018 Meter module-constant proposition context collection
+
+Proposition formation charges each declaration and module-name scan while collecting the current
+module's typed constants, and charges each constant type projection before spelling or allocating
+its context row. Context-cap overflow and depth truncation make collection incomplete; formation
+then marks the shared source-work budget exhausted so the proposition fails closed. Static checks
+pass; no tests or builds were run.
+
+### 23.27.1019 Meter proposition contract and parameter inventories
+
+Direct-body precondition and postcondition extraction now charges each statement before inspecting
+it and fails closed when either inventory is incomplete. Parameter type projection and context-row
+allocation are also charged, with the context cap checked before each row is appended. This
+complements the metered module-constant context collector. Static checks pass; no tests or builds
+were run.
+
+### 23.27.1020 Bound local alias discovery over facts and saved values
+
+Local alias transfer searched every fact and could scan the saved-value environment for each
+equality candidate without charging that product to the shared frame source-work meter. Preflight
+fact structure, saved-value rows and text, and the worst-case fact/value comparison product before
+alias discovery; then use the existing snapshot-transfer preflight before copying and rewriting
+facts. Exhaustion declines the transfer. Static checks pass; tests and builds were not run.
+
+### 23.27.1021 Bound proposition statement typing contexts
+
+The shared checker-run source meter now charges statement and match-pattern traversal while
+proposition validation builds local typing contexts. It caps local, loop, pattern, and result
+binder rows before appending them, and reserves initializer, declared-type, loop-iterable, and
+pattern-bound expression work before source typing. The first exhaustion records a failed
+obligation and a sticky budget finding, then stops later clause and statement encoding so no
+subsequent function can restart an exhausted meter. Static checks pass; no tests or builds were run.
+
+### 23.27.1022 Worklist and meter binding resymbolization
+
+Transitive local-symbol invalidation repeatedly rescanned all saved expressions for every growing
+target set and searched all facts for every target. Replace the repeated fixed-point scans with a
+worklist so each target causes one saved-value pass, and reserve the value, fact, and name work
+against the per-function frame budget before mutating proof state. If reservation fails, clear
+stale facts and make saved values opaque. Static checks pass; no tests or builds were run.
+
+### 23.27.1023 Share proof-search budgets across alias transfer attempts
+
+Saved-value alias transfer used an unshared proof-goal call for each rewritten fact, so every
+attempt could restart the tactic and solver limits. It now shares source, solver, and tactic
+preflight work across the transfer, reports exhaustion through the frame budget, and supplies the
+missing empty index-root argument to its transfer preflight. Static checks pass; no tests or builds
+were run.
+
+### 23.27.1024 Share scoped-function index across postcondition owners
+
+Typed postcondition replay could construct a new scoped-function index for each distinct owner
+context. Since the index is built by scanning global typing bindings, a batch with F owners and G
+global bindings could repeat O(F x G) index construction. The source replay pass now retains one
+index and threads it through each owner environment build, while proposition formation reuses its
+workspace index. Exact owner and module-path resolution remains intact. Static checks pass; tests
+and builds were not run.
