@@ -4,14 +4,14 @@
 
 This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
 
-1. **Restore a trustworthy compiler lane.** Proof `main` is at `e68dc328` (46 commits ahead of `origin/main`) and pins Elisa-compiler `c5a6616a`, which contains the alias-formal identity/offset parser fix and its AST regression. A clean detached compiler snapshot at the pin and Core Stage0 `f8735f58` are available. The focused `test/parity/parser_ast_smoke.sh` was run against that pair; `-emit test` exits 1 before the summary, so the parser regression is not qualified. Its log records 19 unproved preconditions, 6 region store diagnostics, 3 ghost-purity diagnostics, and 6 loop-decreases fallbacks (plus style warnings). Resolve these blockers without weakening checks, then rebuild a source-matched Stage1 and qualify the proof runtime against exact proof HEAD `e68dc328`. Keep timing skipped. Historical seed evidence remains: clean c93 failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; p115 O0 against Core 26af7953 had 651 and 3 respectively. Those separate diagnostic classes are not an aggregate quality score. The p115 candidate emitted no object and is not qualified.
+1. **Restore a trustworthy compiler lane.** Proof source is at `15d7f785` and pins Elisa-compiler `c5a6616a`, which contains the alias-formal identity/offset parser fix and its AST regression. A clean detached compiler snapshot at the pin and Core Stage0 `f8735f58` are available. The focused `test/parity/parser_ast_smoke.sh` was run against that pair; `-emit test` exits 1 before the summary, so the parser regression is not qualified. Its log records 19 unproved preconditions, 6 region store diagnostics, 3 ghost-purity diagnostics, and 6 loop-decreases fallbacks (plus style warnings). Resolve these blockers without weakening checks, then rebuild a source-matched Stage1 and qualify the proof runtime against exact proof source revision `15d7f785`. Keep timing skipped. Historical seed evidence remains: clean c93 failed before object emission with 438 `call may store` and 81 `cannot infer region` diagnostics; p115 O0 against Core 26af7953 had 651 and 3 respectively. Those separate diagnostic classes are not an aggregate quality score. The p115 candidate emitted no object and is not qualified.
 
 2. **Restore the recursive proof semantic gate.** Core `main` is now f8735f58. Its relevant-formal SMT binding change removes the recursive call-precondition diagnostics and has focused positive/negative environment tests, but `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex` still fails at the recursive `ensure` equality. The VC contains the `next_state` defining equation; the missing link is the local `byte: u8 = value[index].u8()` because SMT translation cannot recover the source type of the indexed `char` cast. A general bitvector/call-alias experiment made the focused test exceed two minutes and was discarded. Next implement a narrowly scoped, exact SView-byte/cast model with bounded solver work; retain sign-changing conversion negatives and require the recursive gate plus the full semantic package to pass.
 3. **Qualify global-mutable grants and kernel soundness.** Existing Core grant controls cover separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access; rerun that matrix on f8735f58. The proof runtime grant regression still lacks a current source-matched executable. After the Stage1 lane is restored, run proof CLI and direct-API grants, wrong-member, alias/reference, inferred-row, and transitive-call controls. Preserve the typed-kernel classical-mode fixture and frozen replay/mutation checks; malformed certificates, missing identity, and exhausted budgets must fail closed.
 
-4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. The latest normalized-arithmetic guard requires integer witnesses and independent signed/unsigned fixed-width safety before the certified affine path. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass; this latest change remains runtime-unqualified. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
+4. **Verify proof/kernel soundness and high-return performance changes.** The local proof main now includes arithmetic safety leaf/shape hardening, aggregate traversal, bounded quantifier scans, and binary/unary operator arity checks. The normalized-arithmetic shortcut requires integer witnesses and passes only after the whole current goal root has passed signed and unsigned fixed-width safety checks. Source-only budget, width, index, AST-mirror, quantifier-premise, source-length, and diff checks pass; this latest change remains runtime-unqualified. Runtime refusal/replay testing correctly refuses the old binary because it does not match the current proof HEAD; the Stage1 source checkout is also dirty and its product is stale. Once a clean source-matched Stage1 exists, run malformed-slice/sentinel and operator/arity mutations, goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, retaining bounded accounting for walks, allocation, hashing, and probes.
 
-5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof `main` is forty-six commits ahead of origin; recent kernel and bounded-work changes are committed locally and pass source-length, diff, typed-transition, and width-safety guards, but remain runtime-unqualified pending the source-matched Stage1. Record exact compiler/proof revisions and commands with results. Keep timing skipped; do not treat a successful seed or source freshness alone as semantic qualification.
+5. **Commit qualified source improvements and refresh this plan.** Core commits ce002c04 and f8735f58 are on main and synced to origin; f873’s focused SMT relevant-formal tests pass, while the recursive `ensure` gate remains red. Proof `main` is ahead of origin; recent kernel and bounded-work changes are committed locally and pass source-length, diff, typed-transition, and width-safety guards, but remain runtime-unqualified pending the source-matched Stage1. Record exact compiler/proof revisions and commands with results. Keep timing skipped; do not treat a successful seed or source freshness alone as semantic qualification.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -20080,6 +20080,14 @@ comparisons, without another pattern-cost debit or repeated scrutinee projection
 `git diff --check` and the source-length gate pass; parser/build/runtime qualification remains held
 until a matched proof and compiler product is available.
 
+One replay expressiveness edge remains: source admission accepts explicit valued returns, while
+the local-scalar availability witness used for type-bound replay currently recognizes only a final
+expression statement. The explicit-return fixture exercises parameter-only substitution and does
+not establish local scalar availability through `return local`. If this feature is added, derive
+the value-expression source span from the returned expression itself; the `Return` statement
+position may identify only the `return` token. Track this alongside the type-bound-local regression
+matrix after the source-matched runtime lane is restored.
+
 Function declarations are visited in source order, so return-owner offset ordering is checked as
 each row is appended rather than by a second whole-inventory validation pass. Any order violation
 still makes the immutable inventory incomplete.
@@ -25252,5 +25260,35 @@ ordinary path. Before scanning, it reserves `8*S^2 + 16*S` in the shared preflig
 overflow-safe scaled charges. For total fact shape `F` and goal shape `G`, candidate subtree costs
 sum to at most `F^2` and repeated goal costs to at most `F*G`, together bounded by `S^2` where
 `S = F + G`. Six metered equality passes plus input sizing, formula checks, and recursion-node
-charges fit within `8*S^2 + 16*S`. Helper exhaustion latches the aggregate ledger and skips
-propositional fallback. No compiler, build, or runtime tests were run.
+charges fit within `8*S^2 + 16*S`. The aggregate reservation remains charged when containment
+exhausts its local cap, allowing the separately metered propositional fallback to use only the
+remaining shared allowance. No compiler, build, or runtime tests were run.
+
+### 23.27.1439 Keep normalized arithmetic behind the enclosing no-wrap gate (2026-10-14)
+
+The normalized affine shortcut uses unbounded-integer identities and is sound only when its
+fixed-width operands cannot wrap. `resource_model` checks the complete goal root after constructing
+the premise-derived bounds and before dispatching ordinary arithmetic tiers; split and derived
+goals re-enter the same gate. Premise-only checks are not treated as goal validation. The binary
+comparison helper is private and has one caller, after this gate, so it can reuse that proof instead
+of rescanning each operand. A new caller must preserve this call ordering or add its own gate.
+Source inspection only; no compiler, build, tests, or replay were run.
+
+### 23.27.1440 Keep IEEE floats out of tactic equality rewrites (2026-10-14)
+
+Static review of tactic replay found that effect freedom alone cannot authorize rewriting because
+IEEE equality is not substitutive in general (notably for NaN). Rewrite replay now rejects float
+literal encodings and requires a fact-backed integer witness for every identifier in its equality
+fact, target, replacement, and pre-rewrite goal. This also closes the source-neutral AST gap where
+float-typed variables appear only as identifiers. Implication and hypothesis paths retain their
+opaque-float behavior. A source guard checks both restrictions. Elisa parsing, build, and runtime
+regression remain unverified.
+
+
+### 23.27.1441 Remove unmetered normalized replay dead path (2026-10-14)
+
+Call-site inspection found no users of the unmetered normalized-difference wrapper or its helper
+family; production replay enters through the work-metered module. Removed the dead unmetered module
+and include, moving its shared term record and limit into the metered module. This reduces duplicate
+trusted code and prevents future callers from bypassing work accounting. `git diff --check` and
+source-length inspection pass; no compiler, build, or runtime tests were run.
