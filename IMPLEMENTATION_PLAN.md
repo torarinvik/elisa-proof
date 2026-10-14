@@ -24927,3 +24927,12 @@ reused only when the parser table itself had zero rows, causing bound-only table
 on every lookup. The cache now records the source-row count independently from the indexed-binder
 count and reuses a validated empty index when those extents match. Reset and clear paths invalidate
 both counts. Static diff and source-length checks pass; no runtime qualification was run.
+
+### 23.27.1401 Traverse signed safety through aggregate expression children (2026-10-14)
+
+Signed fixed-width safety rejected known aggregate and multi-index expressions solely because their
+children live in the arena child table. Both the ordinary and cached safety paths now traverse
+`index-n`, constructors, record updates, arrays, tuples, sets, and dictionaries, including their
+base expressions and every stored child; `field-init` is treated as a value wrapper. Child ranges,
+node validity, depth, and the existing work limits remain enforced, and unsupported child-bearing
+forms still fail closed. `git diff --check` and the source-length gate pass; no tests or build were run.
