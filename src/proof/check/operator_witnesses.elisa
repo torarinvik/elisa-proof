@@ -370,27 +370,49 @@ extend ElisaProof:
         # fits the destination range. Places are limited to names, fields, and an explicitly
         # witnessed zero-index scalar reference element; calls and arbitrary reference roots do
         # not acquire a scalar type by shape alone.
-        def proof_widening_cast_receiver(callee: Ast::Expr, argument_count: usize, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&) -> (known: bool, receiver: Ast::Expr, target: sview):
+        def proof_widening_cast_receiver_with_work(callee: Ast::Expr, argument_count: usize, facts: darray[Ast::Expr]&, functions: ProofFunctionTable&, budget: mutable usize&, exhausted: mutable bool&) -> (complete: bool, known: bool, receiver: Ast::Expr, target: sview):
+            return (false, false, Ast::Expr.Invalid, "") if exhausted
+            # The conversion and builtin-index recognizers below predate source-work APIs.
+            # Measure their inputs and reserve their bounded source scans before calling them.
+            callee_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(callee, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if not callee_cost.complete
+            return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_work_charge_scaled(&budget, &exhausted, callee_cost.cost, 2)
+            return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_work_charge(&budget, &exhausted, argument_count)
             conversion: (known: bool, receiver: Ast::Expr) = proof_runtime_numeric_conversion(callee, argument_count, functions)
-            return (false, Ast::Expr.Invalid, "") if not conversion.known
+            return (true, false, Ast::Expr.Invalid, "") if not conversion.known
             receiver: Ast::Expr = proof_strip_parens(conversion.receiver)
+            receiver_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(receiver, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if not receiver_cost.complete
             match receiver:
-                Ast::Expr.Ident(name, _): return (false, Ast::Expr.Invalid, "") if name == ""
-                Ast::Expr.Field(_, field, _): return (false, Ast::Expr.Invalid, "") if field == ""
+                Ast::Expr.Ident(name, _): return (true, false, Ast::Expr.Invalid, "") if name == ""
+                Ast::Expr.Field(_, field, _): return (true, false, Ast::Expr.Invalid, "") if field == ""
                 Ast::Expr.Index(_, index, _):
-                    return (false, Ast::Expr.Invalid, "") if:
-                        not proof_builtin_index_expression_witnessed(receiver, facts)
-                        not proof_expr_is_zero(index)
+                    fact_scan_cost: mutable usize = 0
+                    for fact in facts |fact, budget, exhausted, fact_scan_cost|:
+                        fact_cost: (complete: bool, cost: usize) = proof_linear_safety_expr_cost_with_work(fact, &budget, &exhausted)
+                        return (false, false, Ast::Expr.Invalid, "") if not fact_cost.complete
+                        fact_scan_cost <- fact_scan_cost + fact_cost.cost
+                    return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_charge_cross_with_work(&budget, &exhausted, fact_scan_cost, receiver_cost.cost, 8)
+                    return (false, false, Ast::Expr.Invalid, "") if not proof_linear_safety_fact_term_scan_with_work(receiver, facts, fact_scan_cost, 1, &budget, &exhausted)
+                    return (true, false, Ast::Expr.Invalid, "") if not proof_builtin_index_expression_witnessed(receiver, facts) or not proof_expr_is_zero(index)
                 _:
-                    return (false, Ast::Expr.Invalid, "")
+                    return (true, false, Ast::Expr.Invalid, "")
             target_name: sview = proof_cast_target_name(callee)
             target: Ast::Expr = Ast::Expr.Ident(target_name, Ast::expr_pos(callee))
             target_unsigned: i64 = proof_unsigned_primitive_width(target)
             target_signed: i64 = proof_signed_primitive_width(target)
-            return (false, Ast::Expr.Invalid, "") if target_unsigned <= 0 and target_signed <= 0
-            receiver_unsigned: i64 = proof_unsigned_width_in_expression(receiver, facts)
-            receiver_signed: i64 = proof_signed_width_in_expression(receiver, facts)
-            return (false, Ast::Expr.Invalid, "") if not proof_scalar_term_witnessed(receiver, facts, 0)
+            return (true, false, Ast::Expr.Invalid, "") if target_unsigned <= 0 and target_signed <= 0
+            marker_result: (complete: bool, witnesses: ProofScalarWitnesses) = proof_scalar_witness_markers_with_work(facts, false, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if not marker_result.complete
+            marker_scale: (complete: bool, scale: usize) = proof_linear_safety_marker_scale_with_work(marker_result.witnesses, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if not marker_scale.complete
+            receiver_unsigned: i64 = proof_unsigned_width_in_expression_with_work(receiver, marker_result.witnesses, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if exhausted
+            receiver_signed: i64 = proof_signed_width_in_expression_with_work(receiver, marker_result.witnesses, 0, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if exhausted
+            scalar_witness: (complete: bool, matches: bool) = proof_linear_safety_scalar_witness_with_work(receiver, marker_result.witnesses, marker_scale.scale, &budget, &exhausted)
+            return (false, false, Ast::Expr.Invalid, "") if not scalar_witness.complete or exhausted
+            return (true, false, Ast::Expr.Invalid, "") if not scalar_witness.matches
             widening: mutable bool = false
             if receiver_unsigned > 0:
                 widening <- (target_unsigned > 0 and target_unsigned >= receiver_unsigned) or (target_signed > 0 and target_signed > receiver_unsigned)
@@ -398,17 +420,17 @@ extend ElisaProof:
                 widening <- target_signed > 0 and target_signed >= receiver_signed
             if not widening:
                 bounds: mutable darray[ProofBound] = []
-                for fact in facts |bounds|:
-                    proof_collect_bounds(fact, facts, &bounds)
-                proof_close_equalities(facts, &bounds)
-                interval = proof_interval(receiver, bounds)
+                return (false, false, Ast::Expr.Invalid, "") if not proof_collect_fact_bounds_with_work(facts, marker_result.witnesses, &bounds, &budget, &exhausted)
+                return (false, false, Ast::Expr.Invalid, "") if not proof_close_equalities_with_work(facts, marker_result.witnesses, &bounds, &budget, &exhausted)
+                interval = proof_interval_with_work(receiver, bounds, 0, &budget, &exhausted)
+                return (false, false, Ast::Expr.Invalid, "") if exhausted
                 if interval.has_lower and interval.has_upper and interval.lower <= interval.upper:
                     if target_signed > 0:
                         widening <- interval.lower >= ElisaProofKernelCore::proof_kernel_signed_width_min(target_signed) and interval.upper <= ElisaProofKernelCore::proof_kernel_signed_width_max(target_signed)
                     elif target_unsigned > 0:
                         widening <- interval.lower >= 0 and interval.upper <= proof_unsigned_width_max(target_unsigned)
-            return (widening, conversion.receiver, target_name) if widening
-            return (false, Ast::Expr.Invalid, "")
+            return (true, widening, conversion.receiver, target_name) if widening
+            return (true, false, Ast::Expr.Invalid, "")
 
         def proof_expr_is_zero(expression: Ast::Expr) -> bool:
             match proof_strip_parens(expression):
@@ -417,7 +439,14 @@ extend ElisaProof:
                     return false
 
         def proof_add_widening_cast_witnesses(expression: Ast::Expr, callee: Ast::Expr, argument_count: usize, facts: mutable darray[Ast::Expr]&, functions: ProofFunctionTable&, report: mutable ProofReport&, line: u32, owner: sview, position: Ast::Pos) -> void:
-            widening: (known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver(callee, argument_count, facts, functions)
+            budget: mutable usize = report.analysis_1.budgets.frame_call_source_work
+            exhausted: mutable bool = false
+            widening: (complete: bool, known: bool, receiver: Ast::Expr, target: sview) = proof_widening_cast_receiver_with_work(callee, argument_count, facts, functions, &budget, &exhausted)
+            report.analysis_1.budgets.frame_call_source_work <- budget
+            source_work_stopped: bool = proof_frame_source_work_stop(report, owner, line)
+            if exhausted or not widening.complete or source_work_stopped:
+                proof_frame_source_work_report_exhaustion(report, owner, line, "widening-cast-work", "widening-cast classification exceeded its bounded source-work budget")
+                return
             return if not widening.known
             target: Ast::Expr = Ast::Expr.Ident(widening.target, position)
             target_unsigned: i64 = proof_unsigned_primitive_width(target)
