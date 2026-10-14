@@ -1,0 +1,98 @@
+extend ElisaProofKernelReplay:
+    private:
+
+        def proof_kernel_replay_small_constant_remaining_with_work_limit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&, work_limit: usize) -> ProofKernelReplayInt:
+            decreases remaining
+            empty: ProofKernelReplayInt = ProofKernelReplayInt{known: false, value: 0}
+            if work_used >= work_limit:
+                work_used <- work_limit + 1 if work_used == work_limit
+                return empty
+            work_used <- work_used + 1
+            return empty if root >= nodes.count
+            match nodes[root].kind:
+                "int":
+                    return proof_kernel_replay_small_range(ProofKernelReplayInt{known: true, value: nodes[root].value})
+                "field":
+                    # The empty literal's count is 0 under every width, as in the constant leaf.
+                    return proof_kernel_replay_constant_leaf(nodes, nodes[root].kind, nodes[root].name, nodes[root].left, nodes[root].value)
+                "unary":
+                    return empty if:
+                        remaining < 1
+                        nodes[root].operator != "+"
+                    inner: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining_with_work_limit(nodes, nodes[root].left, remaining - 1, work_used, work_limit)
+                    return proof_kernel_replay_small_range(inner)
+                "binary":
+                    return empty if:
+                        remaining < 1
+                        not proof_kernel_replay_integer_arithmetic_operator(nodes[root].operator)
+                    left: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining_with_work_limit(nodes, nodes[root].left, remaining - 1, work_used, work_limit)
+                    right: ProofKernelReplayInt = proof_kernel_replay_small_constant_remaining_with_work_limit(nodes, nodes[root].right, remaining - 1, work_used, work_limit)
+                    # Every admitted machine-integer width has at least 8 bits, so a shift by fewer
+                    # than 7 keeps a small operand inside the width and off the i8 sign bit. The
+                    # limit is a literal: an i64 global becomes a fact in every audited function.
+                    shift: bool = nodes[root].operator == "<<" or nodes[root].operator == ">>"
+                    return empty if shift and (not right.known or right.value >= 7)
+                    combined: ProofKernelReplayInt = proof_kernel_replay_constant_binary(nodes[root].operator, left, right)
+                    return proof_kernel_replay_small_range(combined)
+                _:
+                    return empty
+
+
+        def proof_kernel_replay_small_nonnegative_constant_with_work_limit(nodes: darray[ElisaProofKernelCore::ProofKernelNode]&, root: usize, remaining: usize, work_used: mutable usize&, work_limit: usize) -> ProofKernelReplayInt:
+            proof_kernel_replay_small_constant_remaining_with_work_limit(nodes, root, remaining, work_used, work_limit)
+
+
+        def proof_kernel_replay_unsigned_integer_maximum(width: i64) -> (known: bool, value: u64):
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U8_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U8_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U16_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U16_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U32_MAX.u64()) if width == ElisaProofKernelCore::PROOF_KERNEL_U32_WIDTH
+            return (true, ElisaProofKernelCore::PROOF_KERNEL_U64_MAX) if width == ElisaProofKernelCore::PROOF_KERNEL_MACHINE_WORD_BITS
+            return (false, 0)
+
+
+        def proof_kernel_replay_unsigned_binary_node_valid(node: ElisaProofKernelCore::ProofKernelNode) -> bool:
+            return false if node.kind != "binary" or (node.operator != "+" and node.operator != "-" and node.operator != ">>")
+            return node.auxiliary == 0 and node.children_start == 0 and node.children_count == 0 and node.value == 0 and node.name == "" and node.secondary_name == ""
+
+
+        def proof_kernel_replay_unsigned_wrapped_add(left: u64, right: u64, maximum: u64) -> u64:
+            room: u64 = maximum - right
+            return left - room - 1 if left > room
+            return left + right
+
+
+        def proof_kernel_replay_unsigned_wrapped_subtract(left: u64, right: u64, maximum: u64) -> u64:
+            return left - right if left >= right
+            difference: u64 = right - left
+            return maximum - difference + 1
+
+
+        def proof_kernel_replay_unsigned_binary_maximum(left_bits: u64, left_width: i64, right_bits: u64, right_width: i64) -> (known: bool, value: u64):
+            return (false, 0) if left_width != right_width
+            maximum: (known: bool, value: u64) = proof_kernel_replay_unsigned_integer_maximum(left_width)
+            return (false, 0) if:
+                not maximum.known
+                left_bits > maximum.value or right_bits > maximum.value
+            return maximum
+
+
+        def proof_kernel_replay_unsigned_typed_binary(node: ElisaProofKernelCore::ProofKernelNode, left_bits: u64, left_width: i64, right_bits: u64, right_width: i64) -> (known: bool, bits: u64, width: i64):
+            return (false, 0, 0) if not proof_kernel_replay_unsigned_binary_node_valid(node)
+            if node.operator == ">>":
+                return (false, 0, 0) if left_width != right_width or right_bits >= left_width
+                return (true, left_bits >> right_bits.i64(), left_width)
+            maximum: (known: bool, value: u64) = proof_kernel_replay_unsigned_binary_maximum(left_bits, left_width, right_bits, right_width)
+            return (false, 0, 0) if not maximum.known
+            return (true, proof_kernel_replay_unsigned_wrapped_add(left_bits, right_bits, maximum.value), left_width) if node.operator == "+"
+            return (true, proof_kernel_replay_unsigned_wrapped_subtract(left_bits, right_bits, maximum.value), left_width) if node.operator == "-"
+            return (false, 0, 0)
+
+
+        def proof_kernel_replay_u64_comparison(left: u64, operator: sview, right: u64) -> (known: bool, value: bool):
+            return (true, left == right) if operator == "=="
+            return (true, left != right) if operator == "!="
+            return (true, left < right) if operator == "<"
+            return (true, left <= right) if operator == "<="
+            return (true, left > right) if operator == ">"
+            return (true, left >= right) if operator == ">="
+            return (false, false)
