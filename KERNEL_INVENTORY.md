@@ -84,12 +84,13 @@ Consumers are all kernel modules unless the row names specific ones. Structural 
 | `resource-call-region` | resource call | `operator` = param, `name`/`secondary_name` = formal/actual region | `resources/borrows_and_bindings.elisa`, `resources/call_regions.elisa` |
 | `resource-call-result` | resource call | `operator` in {"", sview}, `left` = call, `auxiliary` = flags | `resources/statement_checker.elisa`, `resources/sview_certificates.elisa` |
 | `resource-scope` | resource summary | children = events in scope | `resources/state_and_regions.elisa` |
+| `resource-alternatives` | resource summary | children = alternative `resource-scope` arms | `resources/conditional_resource_join.elisa` |
 | `resource-join-move` | resource summary | `name` = place, `auxiliary` = join count | `resources/state_and_regions.elisa` |
-| `resource-safety` | resource summary | `name` = function, children = events, `secondary_name` = `resource-v1` | `resources/state_and_regions.elisa` |
+| `resource-safety` | resource summary | `operator` = `resource-v2`, `name` = function, `auxiliary` = formal parameter count, children = events, `secondary_name` = function owner module identity | `resources/state_and_regions.elisa` |
 | `resource-disjoint` | resource summary | `operator` = `!=`, `left`/`right` = places, children = premise facts | `resources/places_and_calls.elisa` |
 | `structural-argument` | structural | `operator` in {same, strict}, `name`/`secondary_name` = formal/actual, `value`/`auxiliary` = sizes | `check/flow_and_type_model.elisa` |
 | `structural-edge` | structural | `name`/`secondary_name` = caller/callee, children = arguments | `check/flow_and_type_model.elisa` |
-| `structural-safety` | structural | `name` = SCC root, children = edges, `secondary_name` = `structural-v1` | `check/flow_and_type_model.elisa` |
+| `structural-safety` | structural | `name` = SCC root, children = edges, `secondary_name` = `structural-v2` | `check/flow_and_type_model.elisa` |
 | `frame-field` | frame policy | nonempty field label; other fields zero/empty | frame policy runtime probes; source producer pending |
 | `frame-place` | frame policy | versioned parameter ordinal and up to three backward field children | frame policy runtime probes; source producer pending |
 | `frame-policy` | frame policy | versioned spec/allow/write/preserve operation, actual place, bounded partitioned policy children and owner label | frame policy runtime probes; source producer pending |
@@ -144,8 +145,8 @@ goal attempt, bound every fact to a trace and re-matched the AST against the are
 | `checked-get` | `proof_kernel_replay_checked_get_report_with_workspace` | |
 | `quantifier-forall` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `forall` |
 | `quantifier-exists` | `proof_kernel_replay_quantifier_report_with_workspace` | mode `exists` |
-| `resource-safety` | `proof_kernel_replay_resource_report_with_workspace` | trace certificate; source goal is literal `true`; root admitted by `proof/certificate_admission.elisa` (`resource-v1`); embedded facts checked by `proof_replay_resource_event_facts_with_owner` |
-| `structural-safety` | `proof_kernel_replay_structural_report_with_workspace` | trace certificate; root admitted as `structural-v1` |
+| `resource-safety` | `proof_kernel_replay_resource_report_with_workspace` | trace certificate; source goal is literal `true`; `resource-v2` root is admitted by `proof/certificate_admission.elisa`; function owner identity is carried in `secondary_name`; embedded facts checked by `proof_replay_resource_event_facts_with_owner` |
+| `structural-safety` | `proof_kernel_replay_structural_report_with_workspace` | trace certificate; root admitted as `structural-v2`, then independently matched to the source call graph and complete regenerated certificate set |
 | `effect-containment` | `proof_kernel_replay_effect_report_with_workspace` | trace certificate |
 <!-- /inventory:certificate-rules -->
 
@@ -243,9 +244,15 @@ through `resource-disjoint` children. `proof_replay_resource_event_facts_with_ow
 resource tree:
 
 - It requires each disjoint premise to be a traced fact.
-- It recurses through `resource-safety`, `resource-scope` and `resource-call`.
+- It recurses through `resource-safety`, `resource-scope`, `resource-alternatives` and `resource-call`.
 - It accepts exactly the leaves below as carrying no facts.
 - Any other kind fails closed.
+
+Nested scope replay snapshots resource bindings but carries event-use history forward. Call events,
+pending call allocations, and return witnesses are available after alternatives only when every arm
+produces them; allocation, call-result, and return-witness consumption is merged across arms so no
+path can reuse a one-shot event. Sequential scopes append their child history after validating the
+inherited prefix. The work meter charges these comparisons and merges.
 
 <!-- inventory:resource-fact-free-leaves -->
 | Kind |
@@ -285,7 +292,7 @@ and blank lines. `scripts/test_kernel_inventory.py` checks the dependency claims
 | Trusted certificate admission | `proof/certificate_admission.elisa` | 82 | Admits trace-certificate roots by kind and version tag. |
 | Trusted replay adapter | `proof/replay.elisa`, `proof/replay/*` | 14,734 | Binds certificates to goals and facts to traces; re-proves derived steps. Calls into the kernel through public entry points, and calls only the external helpers listed under limitation 1 (checked). |
 | Trusted source adapter | `proof/kernel.elisa`, `proof/check/*`, `proof/resources/*`, `proof/expr/*` | 29,525 | Lowers source to arena terms and emits boundary facts. Soundness depends on each boundary fact meaning what its row above says. |
-| Trusted package reader | `portable/*`, `app/portable_io.elisa` | 351 | Reads `elisa-proof-package-v1` files under exact schemas and hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
+| Trusted package reader | `portable/*`, `app/portable_io.elisa` | 351 | Reads v1/v2 packages under their legacy exact schemas and v3 packages with a required classical logic-mode declaration, then hands every sequent to kernel replay. Trusted by `elisa-proof-replay` and by the correspondence checker (DESIGN.md, "Portable replay packages"). |
 | Trusted correspondence checker | `correspondence/*` | 3,116 | Re-derives a function's obligations from the parsed source by its own reference semantics and matches them against replayed theorems term by term (DESIGN.md, "Checked correspondence"). Calls only the kernel's public entry points, the package reader and the output helpers listed under limitation 5 (checked). It does not call the source adapter. |
 | Untrusted search | `proof/linear/*` search, `proof/tactics/*`, `proof/tactic_json*.elisa`, `app/repair.elisa` | 12,512 | Finds proofs. A tactic's `solved` flag and the solver's verdict are never authority; the kernel re-checks every result. |
 | Presentation | `app/*` except repair and portable I/O | 3,138 | Output and CLI. Fingerprints are binding guards only (limitation 2). |
@@ -335,6 +342,32 @@ checker product identity and validate the adapter/source separately. No such pro
 has been identified in this checkout. The focused host-side regression is
 `scripts/tests/test_soundness_incident_registry.py`.
 
+## Classical propositional and comparison-complement replay rules
+
+The source-neutral goal kernel implements a classical propositional calculus. This is an explicit
+kernel rule set, not a user-supplied trusted premise. The typed API applies these rules to every
+well-formed proposition admitted by its context, including declared abstract `Prop` atoms; it does
+not restrict them to decidable Boolean computations.
+The comparison-complement rows below are separate theory-specific arithmetic rules, not
+propositional complement rules for abstract atoms.
+
+| Rule | Kernel implementation | Accepted shape / limit |
+|---|---|---|
+| Double-negation elimination | `kernel_replay/disjunction_denial.elisa`: `proof_kernel_replay_negated_boolean_goal`; `kernel_replay/signed_fact_projection.elisa`: `proof_kernel_replay_fact_contains_signed_with_work` | Replays `not (not P)` to `P`, subject to proposition-fragment validation, arena validity, depth and goal-work limits. |
+| De Morgan normalization | `kernel_replay/disjunction_denial.elisa`: `proof_kernel_replay_negated_boolean_goal` | Rewrites `not (P and Q)` to `not P or not Q` and `not (P or Q)` to `not P and not Q`. The first direction is classical; both are limited to the admitted denial fragment and bounded work. |
+| Signed fact projection | `kernel_replay/signed_fact_projection.elisa`: `proof_kernel_replay_fact_contains_signed_with_work` | Projects positive conjunction facts and negated disjunction facts; negation flips polarity. Nested-negation elimination is classical. Exact atom matches use kernel expression equality. |
+| Comparison denial in arithmetic replay | `kernel_replay/unsigned_pinned_comparison.elisa`: `proof_kernel_replay_disjunction_refutes_comparison`; `kernel_replay/arithmetic_refutation.elisa`: `proof_kernel_replay_facts_arithmetically_inconsistent_with_work`, `proof_kernel_replay_facts_order_complementary_with_work`; `kernel_replay/goal_metered_negated_bounds.elisa`: `proof_kernel_replay_collect_negated_comparison_with_work`; `kernel_replay/term_arithmetic.elisa`: `proof_kernel_replay_collect_negated_bounds` | Contradiction checks need only establish that the witnessed primitive comparisons are disjoint (with exact or supported mirrored operands); they do not infer a general proposition complement. Translating a negated ordering comparison into a bound requires witnessed integers and the admitted total-order theory. All kernel paths are bounded by replay work limits. |
+| Disjunctive refutation by case split | `kernel_replay/unsigned_pinned_comparison.elisa`: `proof_kernel_replay_disjunction_refutes_conjunction` | A disjunction of comparison denials can refute a conjunction when each branch refutes a conjunct. This is bounded structural case analysis over the admitted comparison fragment. |
+
+Ordinary reports, portable replay results, and package v3 identify the global mode as
+`classical_propositional`; `trusted_assumptions: []` continues to mean no source/user axiom was
+accepted. Package v1/v2 retain their old schemas and are interpreted under the same current
+classical kernel. The output does not yet identify which individual theorem roots actually use
+these classical rules. The focused source/runtime regression is `scripts/test_disjunction_denial.py`;
+it exercises bounded positive and negative denial cases but is not a proof of the calculus's
+soundness. Rule soundness must be justified relative to classical semantics, and any future
+intuitionistic mode must disable or derive the classical cases instead of inheriting them.
+
 ## Guarded arithmetic completeness rules
 
 These rules reuse the ordinary `goal` certificate; they add no trusted fact or arena kind.
@@ -370,10 +403,13 @@ evaluation does not remove their existing source-correspondence limitation.
    Moving a helper into replay by itself is a refactor, not independent assurance.
 
 The independent arithmetic guard above is not a proof of source correspondence for the
-source-adapter rows below. Threaded-summary validation shares callable spelling, reference-marker
-classification and depth-bounded parenthesis normalization with the producer. A bug in those helpers
-can affect source authentication and must be audited with source mutations and alias/lifetime
-controls. Their presence is a remaining common-mode trust dependency, not a verification claim.
+source-adapter rows below. Threaded-summary replay now derives bare callable names, parenthesis
+stripping and expression-name mentions in replay-local, depth-bounded helpers. Threaded-summary
+checks now use source indexes rebuilt in a replay-owned scratch report, and each generic snapshot
+row must match one exact generic identity annotation. The resource type-marker and
+reference-free/storage-alias classifiers themselves remain shared with source analysis. Independent
+semantic re-derivation and source mutations with alias/lifetime controls remain required; these
+dependencies are not a verification claim.
 
 2. **Caller-supplied typing contexts are not source-authenticated by the typed kernel API.**
    `proof_kernel_replay_goal_report_typed` checks proposition formation against the supplied
@@ -399,7 +435,6 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_builtin_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
 | `proof_builtin_scalar_type_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_builtin_unary_operator_protocol` | `proof/check/operator_witness_markers.elisa` | source adapter |
-| `proof_callable_name` | `proof/expr/ast_equal.elisa` | source adapter; extracts callable spelling for threaded-summary source matching |
 | `proof_check_core` | `proof/check/api.elisa` | untrusted producer |
 | `proof_check_structural_function` | `proof/check/function_termination.elisa` | source adapter |
 | `proof_check_with_source_analysis` | `proof/check/api.elisa` | source adapter |
@@ -413,7 +448,7 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_enum_parameter_position` | `proof/check/bounds_and_facts.elisa` | source adapter |
 | `proof_expr_equal` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_expr_has_call` | `proof/expr/constant_arithmetic.elisa` | source adapter; fail-closed syntax effect scan for captured-loop entry iterable |
-| `proof_expr_has_executable_call` | `proof/expr/pattern_support.elisa` | source adapter |
+| `proof_expr_has_executable_call_with_work` | `proof/expr/executable_call_scan.elisa` | source adapter |
 | `proof_expr_has_move` | `proof/expr/constant_arithmetic.elisa` | source adapter; depth-bounded move syntax scan fails closed |
 | `proof_expr_mentions_name` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_expr_shape_mix` | `proof/expr/ast_equal_prefilter.elisa` | source adapter |
@@ -423,27 +458,27 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_has_ambiguous_integer_constant_in` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
 | `proof_head_name` | `proof/expr/ast_equal.elisa` | source adapter |
 | `proof_ident_name` | `proof/expr/ast_equal.elisa` | source adapter |
+| `proof_index_capacity` | `proof/check/name_index_build.elisa` | source adapter; checked power-of-two table sizing |
 | `proof_index_operator_marker` | `proof/check/operator_witness_markers.elisa` | source adapter; builtin index operator marker construction |
 | `proof_infer_structural_decrease` | `proof/check/bounds_and_facts.elisa` | source adapter |
 | `proof_internal_rebind_name` | `proof/check/internal_name_safety.elisa` | source adapter |
-| `proof_index_capacity` | `proof/check/name_index_build.elisa` | source adapter; checked power-of-two table sizing |
 | `proof_is_comparison` | `proof/expr/constant_arithmetic.elisa` | source adapter |
 | `proof_is_ensure_kind` | `proof/check/symbol_and_move_state.elisa` | source adapter |
 | `proof_is_type_cast_index` | `proof/check/index_checks.elisa` | source adapter |
 | `proof_kernel_budget_note` | `proof/model/report_recording.elisa` | report model |
 | `proof_kernel_expression_supported` | `proof/kernel.elisa` | source adapter |
 | `proof_kernel_report_append_allowed` | `proof/model/report_recording.elisa` | report model |
-| `proof_linear_certificate_marker` | `proof/linear/linear_certificates.elisa` | untrusted search (shared) |
 | `proof_literal_argument_fits` | `proof/check/literal_call_arguments.elisa` | source adapter; signed literal fit check for an exact call parameter |
 | `proof_loop_binder_value` | `proof/check/loop_range_facts.elisa` | source adapter; loop binder expression |
 | `proof_loop_range_base` | `proof/check/loop_range_facts.elisa` | source adapter; canonical loop range base expression |
 | `proof_lower_static_effect_call` | `proof/expr/static_effects.elisa` | source adapter |
-| `proof_marker_argument` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); bounded marker argument extraction |
 | `proof_match_closed_pattern` | `proof/expr/pattern_support.elisa` | source adapter |
 | `proof_module_alias_lookup_global` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_module_alias_target` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_module_alias_targets_compatible` | `proof/check/module_alias_resolution.elisa` | source adapter |
 | `proof_module_function_index_for_callee` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_name_equality_sort_index_build` | `proof/linear/name_equality_sort_index.elisa` | untrusted search (shared) |
+| `proof_name_equality_sort_index_lookup` | `proof/linear/name_equality_sort_index.elisa` | untrusted search (shared) |
 | `proof_name_hash` | `proof/check/call_graph_and_lemmas.elisa` | source adapter |
 | `proof_name_index_capacity` | `proof/check/name_index_build.elisa` | source adapter |
 | `proof_name_index_cluster_status` | `proof/check/name_index_build.elisa` | source adapter |
@@ -460,16 +495,18 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_payload_binder_types` | `proof/check/enum_value_types.elisa` | source adapter; pattern binder types |
 | `proof_prepare_semantic_source_with_diagnostics` | `proof/check/api.elisa` | source formation |
 | `proof_qualified_path_segments` | `proof/check/module_alias_resolution.elisa` | source adapter |
+| `proof_report_obligation_event_for_goal` | `proof/model/report_invariants.elisa` | report model |
 | `proof_report_source_work_charge` | `proof/model/report_theorem_source_admission.elisa` | report model; bounded source-work accounting |
 | `proof_report_theorem_source_status_snapshot` | `proof/model/report_theorem_source_admission.elisa` | report model |
 | `proof_resource_pure_conversion` | `proof/resources/places_and_calls.elisa` | shared source adapter |
-| `proof_resource_type_marker_summary_for_owner_with_work` | `proof/resources/type_markers.elisa` | shared source adapter |
-| `proof_safe_comparison_constant` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared) |
+| `proof_resource_type_marker_summary_for_owner_at_offset_with_work` | `proof/resources/type_markers.elisa` | source adapter |
 | `proof_scalar_element_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar element type marker construction |
 | `proof_scalar_primitive_type_name` | `proof/check/flow_and_type_model.elisa` | source adapter |
-| `proof_scalar_reference_parameter_type_in_declarations_with_work` | `proof/check/operator_witnesses.elisa` | source adapter |
+| `proof_scalar_reference_parameter_type_at_owner_offset_with_work` | `proof/check/operator_witnesses.elisa` | source adapter |
 | `proof_scalar_term_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar term marker construction |
 | `proof_scalar_type_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); scalar type marker construction |
+| `proof_scalar_witness_markers_with_work` | `proof/linear/scalar_witness_index.elisa` | untrusted search (shared) |
+| `proof_scalar_witness_name_less` | `proof/linear/scalar_witness_index.elisa` | untrusted search (shared) |
 | `proof_semantic_diagnostic_counts_with_work` | `proof/model/checked_view.elisa` | report model |
 | `proof_signed_constant_at_width` | `proof/linear/fixed_width_arithmetic.elisa` | untrusted search (shared); evaluates a typed returned constant at the declared return width |
 | `proof_signed_place_marker` | `proof/linear/bounds_and_markers.elisa` | untrusted search (shared); signed place marker construction |
@@ -484,6 +521,8 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_source_analysis_report_structure_bound_failure` | `proof/model/checked_view.elisa` | report model |
 | `proof_source_callable_extern_contract_index_build` | `proof/check/extern_contract_effect_index.elisa` | source adapter |
 | `proof_source_conversion_generic_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_generic_line_index_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
+| `proof_source_conversion_generic_owner_index_ensure` | `proof/check/source_conversion_name_lookups.elisa` | source adapter |
 | `proof_source_conversion_indexes_build` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_root_alias_visibility_scan` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
 | `proof_source_conversion_scope_expression_key_hash` | `proof/check/source_conversion_type_aliases.elisa` | source adapter |
@@ -498,6 +537,14 @@ controls. Their presence is a remaining common-mode trust dependency, not a veri
 | `proof_source_extern_contract_unsafe_with_work` | `proof/check/extern_contract_effect_index.elisa` | source adapter |
 | `proof_source_field_conversion_index_build` | `proof/check/field_conversion_index.elisa` | source adapter |
 | `proof_source_function_has_drop_risk` | `proof/check/implicit_effect_guard.elisa` | source adapter |
+| `proof_source_generic_owner_param_index_build` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
+| `proof_source_generic_owner_param_present_in_index_with_work` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
+| `proof_source_generic_owner_param_present_with_work` | `proof/check/source_generic_owner_param_index.elisa` | source adapter |
+| `proof_source_kernel_base_context` | `proof/check/kernel_proposition_environment.elisa` | source adapter |
+| `proof_source_kernel_generic_param_index_from_source` | `proof/check/kernel_proposition_generic_index.elisa` | source adapter |
+| `proof_source_kernel_postcondition_context_index_build` | `proof/check/kernel_proposition_postcondition_environment.elisa` | source adapter |
+| `proof_source_kernel_postcondition_environment_from_index` | `proof/check/kernel_proposition_postcondition_environment.elisa` | source adapter |
+| `proof_source_kernel_scoped_function_index_new` | `proof/check/scoped_function_environment.elisa` | source adapter |
 | `proof_source_literal_ensure_binding_coverage` | `proof/model/report_focused_source_ensures.elisa` | report model |
 | `proof_source_literal_ensure_inventory_has_unsupported_with_work` | `proof/model/report_focused_source_ensures.elisa` | report model; bounded source-inventory scan |
 | `proof_source_operator_masks_from_index` | `proof/check/source_operator_guard.elisa` | source adapter |

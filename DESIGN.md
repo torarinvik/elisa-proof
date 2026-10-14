@@ -14,6 +14,29 @@ trust ledger and known limitations.
 
 The proof kernel is intentionally fail-closed:
 
+### Logical mode and classical rules
+
+The current source-neutral propositional replay calculus is classical, not intuitionistic. In
+particular, its Boolean-denial and signed-fact projection rules include double-negation
+elimination (`not (not P)` entails `P`) and the classical direction of De Morgan's law
+(`not (P and Q)` entails `not P or not Q`). These rules apply to well-formed propositions,
+including explicitly admitted abstract `Prop` atoms, rather than only to decidable Boolean
+computations. They are kernel inference rules, not assumptions supplied by the source or package.
+Separate arithmetic replay rules also use comparison complements for refutation and bound
+collection. Those cases are restricted to the admitted comparison fragment, and ordering
+complements require witnessed integer operands; they do not provide a general complement rule
+for abstract propositions.
+
+The report field `trust.trusted_assumptions: []` means that no user-level trusted assumptions were
+accepted; it does not mean the replay calculus is constructive or that every inference rule has an
+independently proved soundness argument. Ordinary reports and portable replay results expose the
+checker's global `trust.logic_mode: "classical_propositional"`; newly exported v3 portable packages
+also require this field. Legacy v1/v2 packages omit it but are interpreted by this checker under
+the current classical calculus. Neither reports nor packages carry per-theorem dependencies on
+these classical rules. Consumers must therefore interpret all current kernel replay under
+classical propositional logic. The rule inventory and per-root dependency ledger remain open under
+R-008; do not advertise constructive proof results or a complete transitive trust graph.
+
 ### Proposition admission
 
 The source-neutral kernel has two deliberately different contracts. The raw
@@ -426,8 +449,14 @@ adapter's mapping from compiler-checked declarations to this environment remains
     static type still guarantees it; all other symbolic facts retain the ordinary pure-call/frame
     rules. Shadowed loop, pattern, and scoped bindings remove inherited bounds, and ownership
     moves still discard the complete fact state.
-22. Branch complements use only structural Boolean rules that preserve the source proposition:
-    double-negation and De Morgan normalization for `and`/`or`. A guarded Boolean call may then
+22. Branch complements use structural Boolean rules in the current classical propositional
+    calculus: double-negation elimination and De Morgan normalization for `and`/`or` (including
+    `not (P and Q)` to `not P or not Q`). These rules apply to abstract `Prop` atoms as well as
+    Boolean terms; they are not intuitionistic rules and are not listed in the report's
+    `trusted_assumptions` array. Reports and v3 portable packages now identify the global logic
+    mode. Arithmetic replay also uses comparison complements only in its admitted comparison
+    fragment, with ordering cases requiring witnessed integers. Per-theorem rule dependencies
+    remain open under R-008. A guarded Boolean call may then
     consume its exact verified summary equality to expose the equal postcondition; the replay kernel
     repeats that same call-shaped equality rule, while arbitrary equalities are not generalized into
     unrestricted rewriting.
@@ -596,7 +625,9 @@ summary counters, findings, replay coverage, every logical goal attempt (includi
 ### Portable replay packages
 
 `elisa-proof --package <source>` exports the proved goals of one run as an
-`elisa-proof-package-v1` file, and `elisa-proof-replay <package>` re-checks it. The checker is
+`elisa-proof-package-v3` file, and `elisa-proof-replay <package>` re-checks it. The reader keeps
+compatibility with v1 and v2 packages; v3 requires an explicit `trust.logic_mode` field. The
+checker is
 built from `src/replay_main.elisa` with `ELISA_PROOF_MAIN=src/replay_main.elisa scripts/build.sh`.
 It links the kernel, the JSON reader and the package reader. It does not link the compiler front
 end, the search engine, the tactic language or an AI client.
@@ -616,6 +647,13 @@ Exit 0 means every theorem of a nonempty package replayed. Otherwise the first f
 reported, and each theorem keeps its own status.
 
 What the result does not establish is stated in its `trust` record:
+
+- `logic_mode: classical_propositional`. The kernel uses classical propositional rules, including
+  double-negation elimination and the classical direction of De Morgan's law. A v3 package must
+  name this calculus; v1 and v2 packages retain their original schemas and are interpreted under
+  the same current classical kernel. Arithmetic replay additionally uses comparison complements
+  in a restricted fragment; ordering cases require witnessed integer operands. Per-theorem
+  classical-rule dependencies are not yet reported.
 
 - `hypotheses: adapter`. A package carries no derivation of its hypotheses. They are the facts the
   source adapter supplied (contracts, guards, type witnesses), and the checker takes them as given.

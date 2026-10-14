@@ -82,8 +82,11 @@ the top-level `findings` array. The legacy `failed` field remains an alias for t
 not a count of unproven obligations, because one obligation may also produce non-goal diagnostics.
 The `trust` object contains an itemized `boundary_facts` ledger (kind, source owner/line, and
 source-neutral kernel root) whose length must equal `trusted_boundary_facts`, plus an explicit
-`trusted_assumptions` ledger. The latter is empty in the current system, and future foreign axioms
-or unchecked escape hatches must appear there explicitly.
+`trusted_assumptions` ledger. The report also declares `logic_mode: "classical_propositional"`:
+kernel replay currently includes classical rules such as double-negation elimination for arbitrary
+well-formed propositions. The assumptions ledger is empty in the current system, and future foreign
+axioms or unchecked escape hatches must appear there explicitly; an empty ledger does not imply
+constructive logic.
 Each `ensure-unproven` finding and unresolved goal includes `refusal_gate`. It reports recognized
 guards such as literal-width, wrap-safety, and budget refusals; replay failures use
 `kernel-replay-gap`. This is a post-hoc classification rather than a trace of the search order, so

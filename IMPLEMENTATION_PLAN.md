@@ -2,96 +2,16 @@
 
 ## Current execution order — 2026-10-14
 
-This short list is the active plan. Historical experiment logs and older snapshots remain below as evidence, not as current state.
+This is the active high-return sequence. Older toolchain snapshots and experiment logs below are historical evidence, not current status. Use the newest clean Elisa compiler revision that can produce a source-matched Stage1; preserve expression-based Elisa and its safety/effect checks in every source change.
 
-1. **Restore a reproducible pinned-compiler lane.** The proof pins compiler `2a37b88c5acd5399e1653413fe58315348ae3083` and Stage0 `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. The adjacent clean Elisa-compiler `main` is now at `c93a77740053fe9e9350641d095b57b3fe8bed27`, while the installed Stage1 provenance is schema v1 from compiler `f7b6c4a21704f4d3f1b13849d4cd0b6d9ae18b88` with source tree `ca7db88792c0bb146dc8b6495d14948ad3f42f7e8927e837f212b76b31a48787`; neither product matches the proof pin or current compiler checkout. Prior source-matched seed attempts from pinned Stage0 failed parsing the pinned compiler, and a newer Core Stage0 parsed it but Stage1 seeding failed ownership/lifetime checks. No source-matched Stage1 is available. Proof `main` contains committed source-admission, typed replay, and output-budget changes that still lack matched runtime qualification. The bounded owner-specific postcondition environment is now called from report replay after source goal admission and complete premise-source validation. Its contract-to-attempt binding and typed kernel behavior remain unqualified until the matched runtime gates pass. Resolve the bootstrap/compiler semantic mismatch and then run the source-matched proof runtime matrix and frozen-tuple replay gates. Timing remains skipped.
+1. **Restore a trustworthy compiler lane.** The proof project pins Elisa-compiler `c93a77740053fe9e9350641d095b57b3fe8bed27` and Stage0 Core `093ec96e89a951502407fb53d406eba7525cbb39`; `git ls-remote origin refs/heads/main` confirms c93 is still Elisa-compiler `origin/main`. The exact clean c93 Stage0 seed failed before object emission. `/private/tmp/elisa-proof-stage1-seed.log` records 438 `call may store` and 81 `cannot infer region` diagnostic lines across compiler sources; the largest groups are `semantic/check_borrow_after_move.elisa` (153), `semantic/semantic_api.elisa` (62), `backend/codegen_stmt_blocks_exprs.elisa` (25), and `semantic/check_region_escape.elisa` (21). The nine `codegen_stmt_assign_place.elisa` reports and `emit_edir.elisa:1374` inference failure are part of this wider failure. The proof project’s pinned Stage0 and installed Stage1 (`5cda9b4e`) do not qualify the current source tuple. Local Core `main` now includes commit `ce002c04`, which resolves only exact module-qualified direct calls in the StoreFlow read-only scan; its focused tests pass, and the full semantic run has one failure that reproduces identically on the clean 093 baseline. That change is orthogonal to the seed errors, which involve unqualified calls. The latest StoreFlow probes rule out the obvious recursive `Expr.IndexN` annotation path: it returns pointer-free `ValueType`s, while an explicit control that stores an `Expr` handle still reports the expected flow. The remaining concrete conservative flow is the `Expr.Scope` owner path: a borrowed module-name `sview` is temporarily written to `StructTable.visibility.current_owner` and later restored, but StoreFlow has no field-specific save/restore kill analysis. Do not suppress this diagnostic without a sound overwrite/restore model. Next, group the full seed diagnostics by exact root cause, test a source refactor that avoids the temporary borrowed table write, and separately resolve the region-inference failure. Keep true AST-retention controls. Rebuild Stage0 and Stage1 from one clean source tuple only after the focused controls pass; no object emission means the seed is unqualified. Keep timing skipped.
 
-2. **Close the explicit global-mutable authority requirement.** The static source-authority guard and exact-offset owner-identity regression pass. No grant behavior is qualified against the current proof sources: the previous runtime-matrix invocation refused its prebuilt verifier because its proof-source identity did not match the checkout. On a matching compiler product, run the existing matrix for direct reads (`Global.Read`), writes (`Global.Write`), and read-modify-write (both), including exact-grant success plus wrong-member, alias/reference, inferred-row, and transitive-call negative controls.
+2. **Restore the recursive proof semantic gate.** On Core `093ec96e89a951502407fb53d406eba7525cbb39`, `go test ./src/semantic -count=1` fails only `TestGhostRecursiveProofSupportsImmutableLocalsAndSViewIndex`; a clean-baseline isolated run reproduces the same failure, so it predates `ce002c04`. The failing obligations are recursive-call preconditions for `value.len > 0` and `(index + 1) <= value.len`, plus an `ensure` and the `decreases` condition. Earlier SMT-query inspection showed the termination VC includes the function preconditions and branch path, while machine-width casts and `index + 1` lower through `int2bv`/`bv2nat`/`mod`. Treat arithmetic normalization as a lead, not a proven root cause. Repair the prover and require this focused test and the full semantic package to pass before claiming a green semantic gate.
+3. **Qualify global-mutable grants and kernel soundness.** Core’s focused grant tests pass on `093ec96e89a951502407fb53d406eba7525cbb39`, covering separate `Global.Read`/`Global.Write`, read-modify-write, const purity, brace syntax, shadowing, and indexed/reference access. The proof runtime grant regression still refuses the stale proof executable. A typed-kernel fixture now also pins the declared classical mode by requiring replay to derive an abstract `Prop` atom from its double negation. With the matched compiler tuple, run both fixtures plus direct grant cases and wrong-member, alias/reference, inferred-row, and transitive-call controls. Then run frozen proof/kernel replay and mutation tests; malformed certificates, missing identity, and exhausted budgets must fail closed.
 
-3. **Qualify the proof/kernel candidate as one frozen tuple.** The pinned compiler/Stage0 tuple and current proof candidate lack a source-matched Stage1 product; see item 1 for the exact revisions and bootstrap failures. Do not treat these changes as qualified until the frozen compiler/proof tuple passes focused runtime regressions, mutation/replay controls, and the relevant suite. Keep all budget exhaustion, missing identity, and malformed-certificate paths fail-closed. Frame source replay's report/certificate keys use `(name,line,offset)`. The proof importer textually splices includes into one expanded source before parsing, so those line/offset coordinates are global to that parse; module path is not needed to prevent cross-include coordinate collisions. A small set of legacy name-and-line APIs remains: `source_call_with_work` is retained as a compatibility wrapper, and no current in-tree call sites use the legacy line-only callee resolvers outside their compatibility wrapper definitions. Type-bound call-result replay resolves the caller by exact declaration offset and carries the selected callee offset through downstream checks. Exact frame call mapping carries callee offsets through policy, event inventory, lowering, replay, and place typing. Condition-effect replay uses an offset-bearing call resolver, and type-bound call-result replay uses the unique source-index caller row's exact offset; both ordinary and imported-call resolution carry the selected callee declaration offset into exact callee checks. Continue threading exact declaration offsets wherever source position identifies an owner, and module path where lexical visibility or module-sensitive policy requires it; keep ambiguous legacy wrappers fail-closed until runtime parity is validated. Build bounded owner indexes over every AST function, including frameless callees, independently in producer preparation and replay. Charge AST walks, allocations, key text and probes to each path's existing work budget; propagate callee offsets through remaining `source_call_with_work` callers and callee resolution without changing module/import precedence. Exact-offset linear scans alone would retain O(functions × declarations) work. The typed goal API has a bounded direct indexed-read equality rule for typed primitive results. The source adapter now recomputes goal and premise admission snapshots from the frozen parser-owned source, builds budgeted base and owner-specific postcondition contexts, and invokes typed replay from source certificate replay only for admitted, certificate-matched goal attempts. This closes the earlier missing-caller gap at the static source level. Owner-context traversal now canonicalizes fully qualified nested module names when deriving module identities and collecting constants; this remains static-only. The source-neutral replay path remains opaque to indexed reads. The source adapter reuses the last reconstructed environment only after the exact admitted owner tuple matches. Typed indexed-read replay prepares one kernel-owned snapshot/index for declaration-wide bindings, while the source adapter reuses its reconstructed owner environment for adjacent attempts with the same admitted owner. The kernel rebuilds owner-local indexes per attempt under the cumulative type-work budget; caching those owner-local indexes remains a follow-up optimization. Runtime/source-authentication behavior remains unqualified until the proof and compiler are tested as a frozen, provenance-matched tuple.
+4. **Verify proof/kernel soundness and high-return performance changes.** Current static checks pass for authority/admission, structural replay, pattern literals, source-admission budgets, kernel audit accounting, and shared goal-search/index budgets. The inferred-float type recovery was split into `returns/inferred_float_values.elisa`, bringing `returns/declarations.elisa` to 549 lines; the source-length gate and `git diff --check` pass again. Portable replay tests now run the full prebuilt source/compiler qualification before selecting a generation; the current pair is correctly refused because its compiler snapshot differs from the dirty proof source. These checks do not qualify runtime behavior. Once the matching proof build exists, run focused goal-fact, postcondition-context, index-safety, type-bound-local, linear-certificate, structural-replay, and source-authority regressions, then the relevant proof suite. Compare work counters and adversarial scaling where available, and retain bounded accounting for walks, allocation, hashing, and probes.
 
-The type-bound local-scalar result-substitution witness now accepts a final explicit `return expression` as well as an implicit expression tail. Ordinary explicit source returns require the expression span to be on the same line and strictly after the `return` token span. The parser-anchored `return if ...` form checks that the condition and both branch expressions begin after the return token span before accepting equal root spans; compiler-normalized implicit tails retain exact statement/expression span equality. Multiline explicit returns remain outside this witness. The parser source in frozen compiler `c93a77740053` confirms this span distinction; runtime qualification remains pending. A static regression covers the explicit-return branch and span ordering, but a focused runtime regression for local-scalar availability through this replay witness remains unqualified; the body-ensure fixture exercises source result substitution without establishing this separate witness. Return-substitution support is classified from the declared return type, resolving aliases through the bounded, scope-aware kernel type index; the inventory stores the resulting support flag rather than the original return type; absent return types, unresolved sorts, and `void` remain unsupported for result substitution. The source inventory builds this index within its shared work budget, so profile that once the frozen runtime lane is available. A registered negative fixture covers direct and module-aliased `void` result postconditions; its current assertions establish overall source rejection and open/unverified goals, but per-goal source-unbound status remains to be asserted. Runtime qualification still requires a matched compiler and proof tuple. Guarded value-match lowering substitutes named payload binders into guards; registered ensure fixtures cover a positive named-payload guard and a wrong-guard negative. OR-patterns with payload bindings remain rejected until branch-specific projections are represented; preserve that boundary with focused coverage.
-
-4. **Resume performance work after correctness gates.** First profile the qualified compiler and proof workflows, then prioritize costs supported by those measurements. Preserve reproducible inputs and compiler provenance; do not trade kernel soundness or proof coverage for throughput.
-
-### Active Match follow-up
-
-Match lowering, recursive expression checking, substitution, and kernel encoding now thread a caller-owned meter through nested and sibling Matches. The guard-shape walk supports nested value Matches and pure Blocks with local declarations, aligned with lowering support. Pattern-cost accounting charges the measured walk, reserves the closed-pattern and binder passes, and separately reserves scrutinee-scaled condition construction. Static source gates pass; aggregate-budget and nested-form runtime controls, plus qualification on a frozen compiler/proof tuple, remain outstanding.
-
-### Historical execution detail — snapshots from earlier 2026-10-14 runs
-
-The records below preserve earlier diagnostics and artifacts. Their source fingerprints, process state, and worktree state are historical and must not be treated as live evidence.
-
-1. **Qualify the newest compiler before proof runtime gates.** Proof `main` is at `c08aa338` and matches `origin/main`; its compiler pin remains `2a37b88c` with Stage0 `fa65ef62`. The current compiler `main` checkout is at `6fee05cc48670f59c8344ffc80e8a4b876168e2b` with dirty source fingerprint `a64addd6e2c17df94fe0e69b77996b418dd3f730ea7dbe538bf439ce57536ee2` and recipe `ce33ddeb4d0e092261202a4c05cf802a9788cde2bbbd6d785b8ee8aa373f3499`. Its exact-source seed (`/private/tmp/elisa-goal-generic-callee-seed.log`) exited 1 with matching before/after source and stat fingerprints. The 65,172-line log has 2,195 nonwarning source diagnostics; largest buckets are 825 unproved ensures/postconditions, 416 region StoreFlow, 141 region inference, 100 call preconditions, 100 `lmut`, 87 invariants, 62 outer-binding mutation, 33 view invalidation, and 15 ghost-purity diagnostics. This exact-run taxonomy supersedes earlier rough groupings. A clean Core snapshot of commit `1385e964c9548e078d681ae3fa00f79a97a0b822` passes focused direct-call resolver tests and `go test ./src/semantic/ -count=1`, and builds Stage0 `/private/tmp/elisac-stage0-1385` (SHA-256 `dc1aa4bb1b6ee5e68c60f0803865b2675010b25ea4d55bde0accd228fd26cec9`). The O0 seed `build/root-scalar-darray-extend-seed.log` used Core revision `4ca0e20b` (Stage0 SHA-256 `4fc15297…`) on a temporary compiler snapshot with source fingerprint `9e120250…`; it exited 1 with the same lifetime and unproved-obligation families and is not current-main qualification. A separate O3 seed is now running in `/private/tmp/elisa-main-seed-a64` against that `9e120250…` snapshot with the resolver-fixed Stage0; it differs from the current shared `main` source (`a64addd6…`) and cannot qualify that current tree. Once its lock releases, seed the actual current `main` snapshot using the fixed Stage0, capture matching pre/live/post provenance, then rerun the proof product gate. The latest provenance-recorded Stage1 found locally is from compiler `f7b6c4a2` (source SHA-256 `ca7db887…`, recipe SHA-256 `6eca605c…`, schema v1), so it cannot qualify current compiler or proof sources. A Core qualification attempt on snapshot `a39871bf` failed three runtime tests with missing `Global` grants in fixtures/runtime and then timed out after 600 seconds in `TestAoSNarrowedSlotPayloadsRunClean`; preserve its log at `/tmp/stage0-opt-test-core.log` and resolve those failures before treating that lane as a seed candidate. A seed on divergent `codex/stage1-full-optimization-wip` (`f7d3946b`, source `24d37b8b…`, recipe `246c42f5…`) also failed and does not qualify compiler `main`. Keep source fingerprints, compiler revision, build recipes, and product provenance exact; require a clean, source-matched Stage1 before proof runtime gates. Timing remains skipped.
-
-The 2026-10-14 01:22 O0 attempt also failed at Stage0 bootstrap: `seed-o0-continued-2-20261014.log` ends with status 1. The log contains 1,737 `error|failed` matches, including 18 errors in `check_try_fallible.elisa`, 11 StoreThrough/reference-escape diagnostics, and a `codegen_try_lowering.elisa:668` storage-dependency invalidation. These are counts from this run's raw log, not a deduplicated diagnostic taxonomy; its captured compiler source-tree SHA-256 is `70f043db712785f29fe8177abd54006cc487ff7cf65b1e256ddb590bd15a1597`. No Stage1 binary or qualification provenance was produced. This newer failure supersedes the earlier O3-only checkpoint as the latest attempt; classify new diagnostics against a source-matched baseline before fixing them.
-
-The newest clean-Core Stage1 seed was built from compiler `6fee05cc` plus the exact dirty-source fingerprint `cbadbf53445c1e2a07a511823ec915fffb7c20ca8d030b82f4df6094c0ab58e3`; before/live/after fingerprints match. It exited 1 without producing a Stage1. Its log is `build/goal-20261014-current-seed.log`; the current raw grouping reports 2,237 non-warning diagnostics, including 530 from `check_borrow_after_move.elisa`, 427 StoreFlow diagnostics, and 770 unproved ensures. Treat these as a source-stable failure baseline, not a successful compiler product. Triage the dominant borrow-after-move family first, preserving paired valid/invalid cases, then rebuild from a clean exact snapshot and continue until parallel object emission and the self-host gates pass. A subsequent seed process was briefly observed against the current `main` source fingerprint `1933d9f5a504d37a6c6db14ae1a75229be57a4f8e35daecf841395aa86cdc6d0` and recipe fingerprint `ce33ddeb4d0e092261202a4c05cf802a9788cde2bbbd6d785b8ee8aa373f3499`, but it exited without a newly recorded log or matching product. The only fresh provenance file found is for the stale, divergent WIP source hash `7b2a17eca1ea70dd75b256342862f7ece8b09b7429709bb085a289bf76a152f6`; it does not qualify current `main`. Timing remains skipped.
-
-A focused follow-up corrected the four value-block loops in the compiler checkout's `src/semantic/check_try_fallible.elisa` to capture `module_index`, `error_index`, and `function_positions` (as well as the other inputs they carry). The prior seed log contained 48 diagnostics of that missing-capture class in this file; a subsequent Stage0 `-emit semantic` pass contains zero such diagnostics. That whole-compiler pass still exits 1 on unrelated try-lowering and StoreThrough failures, so this proves only removal of the targeted diagnostics, not compiler qualification. Added `test/proofs/check_try_fallback_capture_accounting.py` to the compiler's proof-checker sweep; it passes, as does `git diff --check` for the touched compiler files.
-
-2. **Qualify Global.Read/Write at runtime.** The source-only checker audit previously found 29 positive declarations and 18 false controls across three closure files. The proof-side runtime test currently refuses to run because the pinned proof Stage1 is absent; do not infer runtime success from its source guards. The compiler's incremental cache parity control now includes a same-source strict → permissive → strict transition for an ungranted mutable-global read, requiring both the expected semantic result and a cache miss at each option change; this shell control is syntax-checked but awaits a fresh Stage1. On the matching Stage1, run `test/parity/mutable_global_authority_smoke.sh`, `test/parity/mutable_global_cli_smoke.sh`, and `test/parity/global_permissions_smoke.sh`. Preserve direct read, direct write, read-modify-write requiring both grants, exact-grant success, wrong-member rejection, alias/reference access, and transitive propagation as explicit controls. Source inspection alone does not complete this requirement.
-
-3. **Validate pending proof/kernel changes on one frozen tuple.** The proof tree has uncommitted changes to module/type alias resolution, verification scheduling and work budgets, replay validation, and kernel type-index hashing. Function and lemma scheduler finding queries use bounded incremental summaries rather than rescanning all findings per declaration; the scale suite covers 512 independent failures and now adds 512 same-named failing functions across separate modules. Ownerless ambiguous-name findings are coalesced at the validated name-index slot, with metered row-to-slot accessors, so repeated findings avoid rescanning every duplicate declaration; explicit owner or source-span findings retain exact row attribution. Theorem admission also charges finding count and compared name/kind bytes, then reuses the admitted per-goal snapshot for theorem projection. The checked-view fallback scan for a missing source-obligation finding and its unsupported-inventory scan now charge rows and compared text against the same source-work counter used by admission; exhaustion returns an unissued view. The structural termination checker preflights each function body once and reserves four AST-cost units for the cost walk plus its three whole-body hazard classifiers (drop risk, overloaded operators, unsafe indexing); its structural walk charges visited nodes and environment operations dynamically. Failed body/default/environment reservations exhaust the shared meter, so later declarations cannot repeat expensive scans; final finding-scan exhaustion also prevents certification. Static regression checks guard the shared counter and explicit closure captures without rescanning nested subtrees. Recent static-only changes also bind goal-attempt gaps to exact declaration `(name,line,offset)` identities and make theorem-output budget overflow sticky. The direct API regression now expects the dedicated `semantic-permission-ungranted` finding for compiler permission failures. These changes remain unqualified. Static gates currently pass: whitespace, 600-line source limit, kernel inventory (11 tables/325 entries), adversarial kernel-accounting checks, AST/kernel shared-budget checks, focused source-admission meter checks, and incremental scheduler source guards. Runtime coverage remains held on a provenance-matched compiler/Stage1; keep budget exhaustion fail-closed and exact owner/signature checks authoritative over hashes. `--function-json` accepts a canonical module-qualified selector such as `A::B::f`; it resolves the complete declaration path and carries the selected source offset through dependency closure, finding attribution, and focused source-obligation admission. Preserve fail-closed behavior for missing or ambiguous selectors.
-
-4. **Close the highest-risk replay trust gaps.** Prioritize source-scope parity for local, parameter, and call-result witnesses; whole-trace work ceilings; complete obligation/report accounting; and independent mutation controls for duplicate IDs, cyclic arenas, missing certificates, and malformed counters. AST/kernel mirror validation now reserves a bounded AST cost for supported-form and exact-mirror walks, and production trace, certificate-goal, and certificate-fact paths pass the shared `validation_workspace.source_scan_work_used`; a source-only regression keeps raw wrapper calls out of those paths. Its depth limit still makes wide trees and long names important runtime fail-closed controls, which remain to be exercised. The enum-precedence fixture covers module-local alias precedence and root nominal precedence, and those cases are wired into replay controls. Producer and replay both support a backend-global module-import-alias fallback after lexical miss, with target-chain compatibility checks. Separately, operator-enum witnesses now support globally unique source type-alias fallback when import metadata cannot affect bare-name selection (23.27.723). A root `using ScopedAlias as SA` witness now exercises imported-module enum resolution; `test_enum_module_alias_replay.py` mutates the parsed target between checking and replay, requires refusal, then restores the mapping and requires success. Both controls are registered but remain unexecuted until a fresh pinned Stage1 is available. Next qualify lexical shadowing, invalid/ambiguous refusal, root nominal/type precedence, and alias-hop compatibility on the newest compiler. Extend automation after the verifier boundary is validated. Track overloaded inferred-bound identity/mapping separately; do not accept name-only resolution shortcuts.
-
-5. **Integrate qualified source changes and remove only proven-unused Git state.** Proof `main` (`c08aa338`) matches `origin/main` but has 224 modified/untracked paths, including source, tests, examples, and this plan; the production edits remain statically checked but runtime-unqualified. Elisa-compiler `main` (`6fee05cc`) is also dirty. Its fresh cleanup audit found 130 worktrees and 109 local branches: 42 non-primary worktrees are dirty, 87 are clean, 103 branches are unmerged, and all five merged non-main branches are still checked out. No non-primary worktree is both clean, free of ignored artifacts, merged, and inactive, so no branch or worktree is safe to remove. Preserve unique source and qualification evidence. After a matching compiler product qualifies the proof changes, commit source modifications on `main`; continue to skip timing as instructed.
-
-Current checkpoint: no Stage1 product matches the pinned compiler/proof inputs. Both the prior O3 seed and `seed-r2` exited with status 1 and no object/provenance. The latest run repeats StoreThrough diagnostics at `codegen_stmt_assign_place.elisa:260`, `:582`, and `:587` for try/error-union emission arguments. The Core owner also reports 765 unproved postconditions, 33 storage-dependency invalidations, and one sview/static-u8 mismatch. A passing Stage0 semantic suite and cache tests (34 shard, 30 object) do not qualify the failed seed. Installed Stage1 is schema v1 while proof requires v5. Proof static gates pass; runtime qualification awaits a matching compiler. Current source-only Global grant, decimal, and SView audits pass (29 positive/18 false Global controls; decimal 17/4 arithmetic and 17/9 parser; SView bounds 8/5 and contract 8/6). Proof has uncommitted source changes across alias resolution, verification scheduling/budgets, replay validation, and kernel type-index hashing. Function/lemma scheduler summaries, the 512-finding regression, and bounded theorem-finding accounting are in place. The shared AST/kernel-mirror implementation now threads the shared replay counter through trace, certificate-goal, certificate-fact, and attempt-fact checks; its AST cost reservation accounts for supported-form validation and exact comparison, and quantifier annotation scans charge row count plus owner/name bytes. The enum-precedence and root-import-alias fixtures are wired into typed proposition replay controls. `scripts/test_enum_module_alias_replay.py` mutates the parsed import target after checking, requires replay refusal, and then requires success after restoration; it is registered but unexecuted pending a fresh pinned Stage1. `scripts/test_ast_kernel_mirror_budget.py` guards shared-counter call paths and quantifier lookup metering. Runtime wide-tree/long-name refusal tests and full replay qualification remain pending on the newest compiler. Qualified `--function-json` focus is implemented in source and remains runtime-unqualified pending the matching compiler/Stage1 tuple. Build and validate a fresh Stage1 before proof qualification or committing.
-
-**2026-10-14 Stage0 parser qualification update.** Built a detached, clean Stage0 from the exact proof pin `fa65ef625c4217cf54486821a6aa9348f5f04ec6`; Go build metadata records that revision and `vcs.modified=false`. A direct O0 proof build using this binary first exposed 55 legacy value-loop diagnostics across the proof snapshot. Added explicit inert accumulators to those loops; successive builds reduced that diagnostic class 55 → 37 → 22 → 2 → 0. The latest build still exits with a broad parser failure: 18,393 non-warning source diagnostics across the proof snapshot and pinned compiler snapshot. The principal compatibility failure is confirmed as toolchain skew: compiler revision `2a37b88c5acd5399e1653413fe58315348ae3083` added nursery-on-pool support at `ef0c3fdf7b25a7460b4f679fd7dc5fe9b1e5ca9d`, but its `semantic_parallel.elisa:235–238` counted loop requires yield-accumulator semantics absent from pinned Core Stage0 `fa65ef625c4217cf54486821a6aa9348f5f04ec6`. Parsing then cascades through newer proof syntax. No preserved Stage1 matches `2a37b88c`: installed Stage1 is `5cda9b4e69ff937f00ea43f0e7e4713d5ad3403b`, and archived Stage1 is b8eb. Therefore there is no Stage1 or proof executable and no runtime qualification. Latest log: `/private/tmp/elisa-proof-stage0-pin-build-20261014-5.log`. Keep the proof loop compatibility edits as a targeted reduction, but qualify with a compiler-compatible Stage0 or revision-matched Stage1, recording both source revisions in provenance. The isolated exact-pin Stage0 worktree is `/private/tmp/elisa-core-stage0-fa65-proof-goal` and is preserved for provenance checks. This build is compiler evidence only; no tests were run.
-
-**2026-10-14 newer Stage0 qualification attempts.** The clean Core snapshot Stage0 `7696bdfa458a42fe2f2b848123bcb53f27488774` produced 18,388 non-warning source diagnostics in the isolated proof build, essentially the same failures as pinned `fa65`; log `/private/tmp/elisa-proof-stage0-7696-check.log`. A clean installed Stage0 from Core `4ca0e20b16cfae3de6254b90d49308d31620cbfc` produced 18,220; 18,141 are in proof-source files, with no diagnostics in the compiler snapshot. It removed the compiler parser failure but leaves broad proof-source syntax incompatibilities; log `/private/tmp/elisa-proof-stage0-4ca0-check.log`. The exact pinned compiler `2a37b88c` was then seeded in a detached clean compiler worktree with Stage0 `4ca0e20b`; it parsed and typechecked far enough to report bootstrap semantic failures, then exited 1 without Stage1. Its 2,256 non-warning diagnostics form a few compatibility clusters, rather than independent fixes: region/lifetime inference dominates (`check_borrow_after_move` 530; holder-view 69; region escape 64); hidden-mutation and `lmut` reassignment semantics recur in the same regions; EASM files report unproved contracts/invariants or verifier purity restrictions (`easm_compose_text` 73; `easm_operand_scan` 71). Do not weaken escape checking, mutation analysis, or EASM proof obligations to make this pair seed. The detailed read-only classification is in the completed `soundness_audit` agent report; raw seed log `/private/tmp/elisa-compiler-stage1-2a37-4ca0-seed.log`. The safe next step is a declared compatible Stage0/compiler pair or systematic source adaptation to the selected verifier semantics, then retain the Stage1 seed gate. No tests ran and no Stage1 was produced; proof runtime qualification remains pending.
-
-As a control, the isolated proof build was repeated with compiler source pin `6fee05cc48670f59c8344ffc80e8a4b876168e2b` and the same Core `4ca0` Stage0. It produced the same 18,220 diagnostics and same leading proof-source parse failures as the `2a37` source pin (`/private/tmp/elisa-proof-6fee-4ca0-check.log`). The 2a37→6fee commit range changes build provenance/cache scripts, not language frontend sources. This confirms changing only the proof compiler source pin cannot fix the parser skew: the selected Core Stage0 frontend itself does not yet parse the active proof source language.
-
-The scheduler audit also found that lemma SCC edges included body calls but omitted calls in signature `requires`/`ensures`. `src/proof/check/call_graph_and_lemmas.elisa` now collects both contract sets into the lemma edge list, reserves bounded cost+collection work for each expression, and charges signature-derived edge appends separately before mutation; exhaustion invalidates collection. This fixes a source-visible order-dependent false-negative path without relaxing lemma admission. Runtime confirmation and a focused regression remain pending the compatible compiler pair.
-
-The same audit found an unresolved worst-case cost in `verification_findings.elisa`: each ambiguous finding scans the full duplicate-name declaration chain to match owner/line/offset, so D duplicate declarations and O(D) findings can consume Θ(D²) work before the fixed source-work ceiling refuses. A bounded open-addressed index keyed by `(name, line, offset)` now directs span-qualified function and lemma findings to only rows sharing that source span; a linked row chain preserves correct fanout when multiple modules reuse the same name and span, while the normal owner check filters exact owners. Findings lacking a source line still use conservative duplicate-name attribution. Index construction reserves all array initializations before resizing, charges sentinel/link writes, and charges lookup/hash/identity comparisons; malformed chains or probe exhaustion fail closed. A focused soundness review found no misattribution path in the owner-qualified version, and its resize-accounting gap was fixed; this follow-up extends indexing to ownerless but span-qualified findings. Static checks pass; runtime qualification remains pending the compatible compiler pair. Work now scales with same-span fanout, which is the number of rows the finding may affect.
-
-Historical toolchain inventory (earlier 2026-10-13 snapshot): the exact pinned Stage1 source commit `b8ebc0a6f211f41471d6a42f3b12a2e4482a766a` is available in a clean detached checkout at `/private/tmp/elisa-stage1-b8eb-exact-qualification`; `/private/tmp/elisa-stage1-b8eb-qualification` is the `16e04fd0ecc9214d9669cef9492948ae2e95339a` derivative, and the similarly named `/private/tmp/b8eb-stage1-seed-wt` is actually at descendant snapshot `61340c1d13d7174a13283974798849a6af289725`. The exact pinned Stage0 product is present at `/private/tmp/elisa-core-stage0-fa65ef625c42/compiler/bin/elisac`; Go build info records revision `fa65ef625c4217cf54486821a6aa9348f5f04ec6` with `vcs.modified=false`. Newer clean Core source snapshots are also available at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2` (`4d17e30f443b2433eee2959869df11b9bbf630bc`) and `/private/tmp/elisa-core-stage0-snapshot-20261013` (`7696bdfa458a42fe2f2b848123bcb53f27488774`); neither commit is in canonical Core `main`’s object database. A Stage0 was rebuilt from the `4d17` snapshot at `/private/tmp/elisa-core-stage0-snapshot-20261013-r2/compiler/bin/elisac`; Go build info records that exact commit with `vcs.modified=false` (SHA-256 `9cdf503a3a5e6b4b3e5d0d76c16fe8eb84a90b555f1be5f837c425a6baa42af2`). The `7696` snapshot still has no Stage0 product. No schema-v5 Stage1 matching compiler `main` and its current source snapshot is available. The proof-local installed Stage1 and Stage0 remain the mismatched products described above. After freezing the selected compiler source and confirming Core seed compatibility, build and provenance-check that Stage1 before running proof qualification.
-
-Focused scheduler test coverage now includes a function entry whose transitive closure is a mutually recursive SCC; the regression requires both SCC members to be verified when one is selected and both to remain not-requested under an unrelated focus. Python syntax and static source gates pass; runtime execution awaits a provenance-matched Stage1.
-
-Historical cleanup audit (earlier 2026-10-13 snapshot): proof had eight worktrees including `main`; all eight were dirty, and its three merged branch refs were checked out in dirty trees. Elisa-compiler had 127 worktrees including `main`, 43 dirty; seven clean non-root worktrees pointed to commits already on `main` and retained Stage1 seed/source, proof-compiler, or profiler baseline state. The other clean compiler trees pointed to candidate commits not merged to `main`. Of 103 local compiler branch refs, only `main` was merged; the other 102 were unmerged. The current cleanup decision is in the execution order above.
-
-Current cleanup audit (2026-10-14): proof has one worktree (`main`) and no auxiliary local branches. Elisa-compiler has 128 worktrees; 41 non-main trees contain changes, 85 contain ignored artifacts, 94 point at commits not merged to `main`, and three appear in active process commands. One clean, merged, ignored-artifact-free, inactive detached checkout remains: `/private/tmp/elisa-stage1-reference-2a37b88c`. Preserve it because it is the exact compiler source reference pinned by proof, not disposable state. The five merged non-main branch refs are each checked out in dirty trees; 101 other non-main branch refs remain unmerged. No worktree or branch is safe to remove without discarding possible source, seed, or qualification evidence.
-
-Current committed milestones include `2392099d` (shared package-ingress preflight), `3d6c958e` (inadmissible arenas report zero theorems), `fc990f84` (P-01 gated on a pinned semantic workload inventory), `796aaa40` (disjunction replay soundness controls), `f2d37570` (direct-branch `assert_by` source-obligation inventory), `4238f5b0` (duplicate-key package mutation tests), and `af759740` (independent cyclic-arena runtime controls). The package tests establish that exact-key-count validation rejects duplicates in security-relevant package schemas and that duplicated fields in opaque hypothesis-origin presentation metadata do not alter replay; they do not establish general decoder assurance. The cycle controls verify the target function's runtime rejection and a valid-DAG/two-node-cycle mutation set, while the whole-file gate separately checks report accounting; they do not prove the target function through imported opaque helpers. These milestones improve boundaries and regression coverage; they do not close the known replay gaps, nested/loop obligation inventory, Stage0 parity, or performance-baseline gate. The controls added in `796aaa40` intentionally reproduce the multiline-disjunction gap in that snapshot: 4 certificates were emitted, 3 replayed, and 1 remained a gap. The exact `f2d37570` suite reported loop-binding/guard controls, collection reach, ADT/pattern facts, CLI/proof status consistency, and incomplete-report cases. Its 138 failure events are now classified in `docs/evidence/2026-10-06-a21-failure-classification.md`; that completed historical census is not a current-HEAD result.
-
-Static-audit delta (2026-10-13): the dirty proof tree now extracts qualified module-path segments once under the type-work budget and reuses them for owner and type-scope matching. This removes repeated recursive prefix counting and rejects paths whose base is not an identifier; each segment must also pass canonical arena-shape validation. A well-shaped arena with a call expression as a nested scope base now has an owner-path rejection control in `examples/kernel_proposition_owner_path_tests.elisa`; it remains unrun. Static invariants, `git diff --check`, and the source-length gate pass; runtime behavior remains unqualified under the hold above. After a provenance-matched compiler is available, add malformed-segment replay coverage, run the focused owner/type-scope suite, and add direct scalar/indexed write-only self-update controls to the compiler grant suite before merging.
-
-Replay follow-up (2026-10-13): direct call-result type witnesses now resolve qualified scalar aliases and nominal declarations using the compiler's root-or-enclosing-module path rule, selecting the deepest matching owner and charging each compared path segment to the replay work budget. The exact callee module path is already known at this boundary. Parameter and local-variable witnesses still reject qualified type paths until their validators carry the owning function scope. `git diff --check` and the source-length gate pass; parser, build, tests, and replay remain under the static-only hold.
-
-Static review scope (2026-10-13): source-bound tactic import now precharges source annotation row count and owner/name bytes against the aggregate action-AST budget before copying annotations into the caller buffer. The later AST census remains in place and charges annotations again conservatively. This change has static review only; no parser, build, tests, or replay were run.
-
-Toolchain recheck (2026-10-13): the newest additional Stage1 artifact found is `../Elisa-compiler/build/goal-compiler-latest-b11e/bin/elisac-stage1`, stamped to compiler commit `b11e9121` from 2026-10-09 with provenance schema v1. It predates current compiler `main` (`d4338ced`) and is not a qualification candidate; no schema-v5 or `d4338ced`-matched provenance artifact was found.
-
-Toolchain recheck (2026-10-13, local benchmark worktree): `/Users/torarinvikbjarko/.codex/worktrees/v5-local-bench-bootstrap/Elisa-compiler/bin/elisac-stage1` has SHA-256 `948a525c3f46dc34b9f4146245e7b9d9d7e13ef4dedae38a981bde4ffa633c8f`; its provenance schema-v5 freshness check passes and records source revision `b77499d4f`. That detached worktree has 77 dirty paths, and its HEAD is not a descendant of current compiler `main` (`cce6b6afc`), so this artifact does not qualify the current Global.Read/Write candidate or proof pin. This check ran only the read-only freshness verifier, not the compiler, tests, or proof replay.
-
-Compiler handoff (2026-10-13): the compiler owner confirmed current `main` is `d4338ced` with
-147 dirty paths and the retained candidate remains `b11e9121`/schema v1. Stage1 provenance v5
-hashes exact source and build-recipe contents, but the proof grant gate also requires a clean
-Stage1 source tree. The requested qualification setup is an isolated clean snapshot commit of the
-current compiler candidate, a Stage1 seeded from that snapshot and checked with `check-exact`, then
-a disposable proof validation copy pinned to that snapshot. Shared compiler `main` and canonical
-proof pins stay untouched until the result is reviewed; timing remains skipped.
-
-Static performance audit (2026-10-13): qualified module-owner lookup repeatedly scanned the entire
-typing environment to validate each candidate identity and retrieve each path segment. The replay
-typing index now builds a bounded owner-identity table with validated contiguous path spans and
-reuses direct span reads for exact and context-relative matching; candidate search remains
-O(owner-count × path-depth), while the repeated O(owner-count × binding-count) validation scans are
-removed. Scoped indexes advance the validated source count only across checked value-only overlays,
-and stale/malformed spans fail closed. `git diff --check` and the source-length gate pass; runtime
-behavior and throughput remain unqualified under the compiler hold. Once an exact Stage1 is
-available, run the existing owner-path admission cases (including malformed base, duplicate identity,
-extra-segment, and context controls) and a large-owner scaling workload before merging this change.
-
-The clean validation checkout `/private/tmp/elisa-proof-f2d37570` records proof HEAD `f2d37570`, Stage1 source revision `6b475d894331f0a81c3112167ef7fcf5c642a424`, product SHA-256 `65a9308c53b510365aa69644a0bcaa9a071ea2006683dad6bf2ec12fc394f6b3`, and runtime SHA-256 `b51e6114f0576681e432e1162a3dbdcdac46c140d3b7e7256c0069be0bd11897`; the proof source was clean when built. The last recorded status for its full-suite run was active, but the checkout and `build/full-test-f2d37570.log` are now missing and no matching process is running, so the final result is unknown and provides no current qualification evidence. A pinned Stage0 candidate at revision `370110bc2913831f59fc190f266491efcf3ccabe` is available, but some proof modules currently fail to compile under it with optional-AST-field diagnostics. Do not call this a Stage0 bug or a valid source rejection until reduced differential examples establish which interpretation is correct. Keep the Stage1 identity/freshness evidence separate from semantic qualification.
-
-Previously recorded cache, package, signed-integer, profiler-contract, and typed-local gains remain scoped to their exact tests. None is a general package-codec proof, full fixed-width semantics, complete obligation inventory, or measured speedup. The dirty main checkout currently contains marker-audit, call/replay, loop, arithmetic, and inventory edits; do not describe them as landed or use them to certify the immutable `f2d37570` test run.
+5. **Commit qualified source improvements and refresh this plan.** Core’s exact-qualified StoreFlow resolver is committed locally as `ce002c04` with focused tests; proof still pins Stage0 `093ec96`, so this change is not yet part of a source-matched proof build. Record exact compiler/proof revisions and commands with results. Keep timing skipped. Refresh the proof pin only after Stage0 and Stage1 come from one coherent tuple and the relevant proof/kernel regressions pass.
 
 ## 0A. Active execution priority — correctness and iteration speed (2026-10-05)
 
@@ -158,6 +78,7 @@ For comparisons with Lean/Rocq and Dafny/Verus, define equivalent theorem/query 
 ### Remove recurring overhead without losing evidence
 
 - No complete rebuild for an unrelated source change; no repeated whole-file checking just to render another query; no repeated linear declaration/fact scans where a measured index is warranted.
+- Type-bound scalar-constant replay now reuses the report-local declaration-name index and resolves each candidate's full module scope from its exact declaration path, preserving duplicate counts and type/mutability checks. This source change is uncompiled and untested pending the qualified compiler lane above; it is not yet a measured performance result.
 - No copy/rewrite of unchanged snapshots or artifacts; no duplicated mandatory parse/check pass inside one request; no ever-growing AST/report retention; no blanket budget increases presented as optimization.
 - Partition tests by actual dependencies and reuse results only under exact binary/input/environment identities. Provide rapid focused correctness checks on every change and full source-admission, adversarial, replay, differential and dogfood qualification at integration/release checkpoints. A cached full gate applies only to its exact identity; broad correctness changes trigger the full affected gate.
 - Preserve negative cases, coverage, unsupported classifications, trusted-boundary records and required declaration inventories. Timing improvements bought by checking fewer required paths are rejected.
@@ -11187,6 +11108,23 @@ whole-declaration scans, so exact indexing remains a performance task rather tha
 gap. Static whitespace and source-length gates pass. No Elisa build, tests, replay, or timing were
 run.
 
+### 23.27.1367 Remove stale unmetered arithmetic safety builder
+
+The report API now performs unsigned and signed arithmetic safety checks through its shared
+goal-work path, but `fixed_width_arithmetic.elisa` still defined an unused whole-frame builder
+that recursively collected bounds, equalities, differences, and per-root safety without passing
+the report meter. Repository-wide search found only its definition and an explanatory API comment.
+Removed the dead builder; the live API path and metered helpers are unchanged. Static diff and
+source-length gates pass; no tests or builds were run.
+
+### 23.27.1368 Complete kernel traversal for resource alternative groups
+
+The explicit `resource-alternatives` transition also needs to remain visible to summary return
+analysis. Both the resource producer and kernel return-witness walks now descend through alternative
+group children, preserving branch-local return markers. Group creation rejects scope counts beyond
+the kernel schema limit, and resource joins reject moved slots outside the replay encoding range
+before mutating parent state. This source path has not yet been compiled or replay-tested.
+
 ### 23.27.143 Indexed required-reference record classification (2026-10-12)
 
 Required-reference fact generation and record-branch restoration now classify a named record through
@@ -13533,11 +13471,12 @@ and semantic parity remain unqualified under the exact-toolchain hold.
 ### 23.27.375 Cover additional numeric-looking string pattern spellings (2026-10-13)
 
 The pattern-collision regression already exercised leading-zero decimal strings, Boolean/null
-spellings, and fixed-width integer boundaries. It now also includes hexadecimal-looking and
-exponent-looking string pairs (`"0x1"`/`"1"` and `"1e0"`/`"1.0"`) in the same report, theorem,
-package, and focused CLI checks. These source forms are valid string patterns, but their punctuation
-keeps them outside the prover's exact string-fact subset. Python syntax, `git diff --check`, and the
-source-length gate pass; runtime assertions remain unqualified under the exact-toolchain hold.
+spellings, and fixed-width integer boundaries. It also includes hexadecimal-looking and
+exponent-looking string pairs (`"0x1"`/`"1"` and `"1e0"`/`"1.0"`) in report, theorem, package,
+and focused CLI checks. Those adversarial pairs must remain distinct string facts; their spellings
+are now admitted as exact string facts only under authenticated `sview`/`cstr` scrutinee types.
+Fixed-width integer patterns remain closed. The runtime assertions are not qualified by the
+current proof product.
 
 ### 23.27.376 Exercise additional unsigned pattern widths (2026-10-13)
 
@@ -15795,6 +15734,15 @@ could match the old reuse key. A strict Stage1 compile of the exact builder help
 discharged the contracts. Diff and source-length checks pass; whole-project qualification remains
 pending.
 
+### 23.27.1096 Clarify kernel-only checked-view replay status
+
+The public `proof_checked_view_replay_complete` query reports completion of the kernel
+certificate batch; it does not establish source-obligation or attached-premise admission.
+Internal report-verdict paths add those gates, but the API lacked a local explanation of this
+distinction. Added a doc comment directing callers to the source-complete/source-admissible
+queries for report authority. Read-only audit found no acceptance bypass. `git diff --check` and
+the source-length gate pass; no tests, builds, or runtime qualification were run.
+
 ### 23.27.568 Reject generic call-result types through transparent wrappers (2026-10-13)
 
 Call-result scalar-width replay now checks generic parameter names through the same transparent
@@ -17832,7 +17780,8 @@ this exporter. The public exporter now requires the shared work counter and char
 overflow-checked reserve internally, clears output arrays before use, and so direct callers cannot
 bypass the bound with pre-populated vectors. Near-miss builds the serialized rows before emitting
 its completeness field, through the same meter-aware API. This is static path and cost analysis
-only; no runtime qualification was run.
+only; no runtime qualification was run. The quadratic estimate described here has since been
+removed from the exporter and replaced with incremental shared-meter accounting in 23.27.1039.
 
 ### 23.27.760 Cache the suggestion target expression cost per goal (2026-10-14)
 
@@ -18346,6 +18295,42 @@ quota; completing exactly at the limit remains complete. If the shared meter alr
 assert-by collector's stricter local quota, refusal preserves the actual shared count instead of
 lowering it to the sentinel.
 `git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1373 Preserve resource event one-use history across scopes
+
+Nested resource scopes cloned the parent event histories and discarded child updates when joining.
+That allowed a child to consume an inherited call-result or return witness while the parent retained
+it as unused. Sequential scopes now validate and adopt append-only call, allocation, result, and
+return-witness histories. Resource alternatives evaluate from the same incoming history, retain
+new call/allocation/return witnesses only when every arm provides them, and union one-use
+consumption markers across arms. History comparisons and merges use the shared resource meter.
+The scope-history helpers were split into their own module to keep source units below the size gate.
+Static source-length and diff checks pass; no tests or builds were run.
+
+### 23.27.1380 Reject malformed oversized arenas before returning the encoder sentinel
+
+The encoder's stable invalid-root sentinel is the node budget. That is guaranteed out of range
+only when the caller's existing shared arena respects the node budget; a direct caller could pass
+an oversized arena where the sentinel aliases an existing node. The public encoder now rejects
+node or child prefixes above their limits before mutation or sentinel construction. Added a kernel
+inventory guard for this preflight and the two-array rollback. Source-length and diff checks pass;
+compiler/runtime qualification remains outstanding.
+
+### 23.27.1376 Keep resource source correspondence explicit in the trust boundary
+
+The raw resource-replay APIs accept caller-supplied arenas and validate them as abstract resource
+event programs; a `resource-alternatives` node means nondeterministic choice in that language and
+does not authenticate a source branch. The checked-view path creates a fresh report from the
+parser-owned AST, so callers cannot inject a raw arena into a source-authorized view. Its resource
+certificate check binds the root to an owner and source location, and separately authenticates
+embedded disjointness premises, but it does not compare the complete event trace with the AST.
+Current nodes and producer events carry no source origin sufficient for that comparison. The
+source-bound resource result therefore trusts the complete AST-to-event producer translation.
+Do not treat an alternatives-only origin check as closing this boundary: a complete independent
+validator needs a canonical resource-flow IR covering every supported transition, ordering,
+scope and control-flow choice, with exact source coverage and normalized payload comparison.
+This remains a larger source-admission project; raw API comments and the trust register now state
+the current boundary explicitly. Static review only; no tests or builds were run.
 
 ### 23.27.799 Avoid redundant open-goal writes during structural validation (2026-10-14)
 
@@ -19096,6 +19081,15 @@ active certificate declaration offset and refuses an absent offset. Added and re
 source guard. The requires-call, global-constant, global mutable array, and indexed-read guards pass,
 as do source-length and diff checks. Runtime replay remains unqualified without the pinned compiler
 product.
+
+### 23.27.1032 Recheck the pinned Stage1 bootstrap path
+
+Built in a detached checkout of the exact compiler pin. The proof project's pinned Stage0 and
+another clean older Stage0 both failed to parse the compiler sources; the installed newer Stage0
+parsed them but its seed failed on compiler contract proof obligations and lifetime-escape errors
+in `backend/codegen_stmt_assign_place.elisa` and `semantic/check_append_only_store_body.elisa`.
+The compiler pin and proof-project sources were not changed by these attempts. This confirms the
+current provenance hold is a bootstrap compatibility blocker, not a proof-source diagnostic.
 
 ### 23.27.868 Share resource static-scope discovery work across the report (2026-10-14)
 
@@ -20067,9 +20061,10 @@ from the leading contract statements and final expression or explicit return, an
 the same owner-local order. Only a valued final expression or return in a non-void declared return
 type supports substitution; absent expressions, unit/void returns, unsupported body shapes, and a
 parameter named `result` fail closed. The end-to-end fixture covers both implicit and explicit
-return substitution. Match-pattern binding work is included in the precharged source-expression
-walks; the visibility helper separately charges emitted binder-name comparisons without an extra
-pattern-cost debit.
+return substitution. Each match arm separately reserves three pattern traversals for cost
+measurement, closed-pattern validation, and binder collection; the source-expression scan charges
+the arm and expression nodes. The visibility helper additionally charges emitted binder-name
+comparisons, without another pattern-cost debit or repeated scrutinee projections.
 `git diff --check` and the source-length gate pass; parser/build/runtime qualification remains held
 until a matched proof and compiler product is available.
 
@@ -20114,9 +20109,10 @@ the source-length gate pass; dynamic qualification remains pending a matched com
 ### 23.27.959 Bind local-scalar result consumers to explicit return expressions (2026-10-14)
 
 The replay-side type-bound local-scalar witness now recognizes a final explicit `return expr` as
-well as an implicit tail. It requires the parser-owned return token and expression spans to be on
-the same line and ordered without overlap; multiline block returns remain unsupported. Added a
-static regression for both the explicit-return branch and span ordering. `git diff --check` and the
+well as an implicit tail. It requires nonempty, parser-owned return-token and expression spans ordered without overlap;
+multiline values are accepted when both line and absolute-offset order are clear. Added a static
+regression for the explicit-return branch and span ordering; that guard has not been extended to
+assert the multiline case. `git diff --check` and the
 source-length gate pass; the source-local runtime regression remains unqualified until a matched
 proof/compiler product is available.
 
@@ -20494,6 +20490,15 @@ attempt-fact admission before replay, requires an exact owner postcondition even
 match, and only then passes the source-admitted fact slice to the cumulative typed kernel API.
 `git diff --check` and the source-length gate pass; no tests or builds were run.
 
+**Current-state clarification (2026-10-14):** The postcondition source scan charges visited
+expression nodes incrementally; it does not hold a repeated whole-expression reservation. Match
+patterns are handled separately by `proof_report_match_pattern_closed_with_work`: the pattern-cost
+reader measures one pass without debiting the shared meter, so the helper now charges that pass
+plus the two following passes for closed-pattern validation and binder collection. The visibility
+helper separately charges emitted-name comparisons. This corrects the earlier specialized-pass
+accounting without a redundant whole-expression reservation; no large-pattern admission claim has
+been runtime-qualified.
+
 ### 23.27.994 Include the source-authenticated typed replay adapter (2026-10-14)
 
 The typed postcondition replay implementation had been moved into
@@ -20523,6 +20528,22 @@ earlier per-owner full declaration scans while preserving exact source offsets a
 ambiguity checks. `git diff --check` and the source-length gate pass; scaling measurement and matched
 parser/build/runtime qualification remain open.
 
+**Current-state follow-up (2026-10-14):** A review found that both nested-module traversals
+reconstructed qualified scope paths after charging the module name, but had not charged the width
+of the copied parent path. They now debit the enclosing segment count before calling
+`proof_global_constant_scope_with_module`. The per-owner projection also reads owner and module
+scope rows by index, avoiding copies of parameter/module-path arrays and accumulated module
+constant arrays before their element-level debits. Owner-key probes likewise compare the indexed
+row in place after charging the key text, avoiding a copy of its parameter array on each probe.
+Line-metadata annotation updates owner rows in place, avoiding another copy of each owner’s
+parameter and module-path arrays during index construction.
+The scoped-function projection now charges rows copied into or out of its cache, and the
+bare-call marker scan charges every visited row, including skipped kinds. The name-deduplication
+hash pass also charges the bytes it hashes. This closes the identified allocation-work gaps;
+cache reuse is also disabled when its lexical-context epoch saturates, preventing distinct
+contexts from sharing a repeated saturated key. Measured scaling and matched runtime
+qualification are still required.
+
 ### 23.27.997 Meter guard-summary fact admission rescans (2026-10-14)
 
 After deduplicating an instantiated ensure, guard-summary expansion calls the shared function-fact
@@ -20540,6 +20561,22 @@ same near-limit scan. Centralize expression-cost measurement so a failed bounded
 report-wide meter exhausted, and propagate budget exhaustion when fact deduplication reaches the
 limit. This stops repeated attempts and ensures the existing one-time budget finding is emitted.
 `git diff --check` and the source-length gate pass; tests and builds were not run.
+
+### 23.27.1069 Close two bounded replay/source-admission gaps
+
+Call-summary source-site replay now recognizes both plain `=` and `<-` assignment RHS forms;
+compound assignments remain outside the match. This aligns replay's occurrence census with the
+producer's supported local-rebind path used by `assignment_rhs_state`, while preserving exact
+call-span and unique-occurrence checks. A registered static source guard locks the syntax boundary.
+
+The postcondition result-substitution preflight's combined unsafe-shape walker now charges every
+visited expression node and each looped collection wrapper through the caller's shared meter. It
+also charges the identifier bytes compared with `result`/`old`, plus comprehension and block-local
+names. Exhaustion returns unsafe and refuses source admission. This bounds the recursive walk that
+runs before substitution; match pattern passes retain their separate explicit reservation. The
+source-admission budget regression and new assignment source guard pass, as do shell syntax and
+`git diff --check`. No fresh proof binary was built and no runtime proof regression was run because
+the current proof/compiler product tuple is still unqualified.
 
 ### 23.27.999 Exhaust guard summaries when reservations do not fit (2026-10-14)
 
@@ -20777,3 +20814,3960 @@ shared-work certificate path, including conditional case splits, and retain exac
 Intermediate fixed-bound probes use the same per-function solver and tactic-preflight counters.
 Fact-context scans are reserved before each certificate or probe; exhausted work emits a failed
 obligation and a budget finding. Static source checks pass; no tests or builds were run.
+
+### 23.27.1026 Share alias-transfer tactic preflight fuel per function
+
+Saved-value alias rewrites already carried solver and frame source work across a function, but
+their tactic-preflight counter restarted for each transfer. Store that counter in the per-function
+analysis budgets and pass it through every derived-fact attempt, preventing repeated transfers
+from restarting recursive tactic admission scans. Static checks pass; no tests or builds were run.
+
+### 23.27.1027 Meter standalone linear-certificate producer work
+
+The linear certificate producer previously reserved and charged its repeated input scans only on
+shared per-function searches; standalone per-goal searches ran the same source-driven scans
+without the tactic-preflight budget. Apply the bounded reservation and metered elimination to
+both paths, while shared calls continue accumulating against their per-function counter. The
+reservation currently scales the input scan estimate conservatively by 128; profile and tighten
+that estimate before treating large-match/fact admission efficiency as qualified. Static checks
+pass; no tests or builds were run.
+
+### 23.27.1028 Preserve exact-budget deduplication results
+
+Type-bound fact deduplication now distinguishes a completed comparison that ends exactly at the
+shared source-work ceiling from a failed walk, which saturates past the ceiling. An exact-budget
+duplicate can return without requiring further work; a nonduplicate still fails closed when its
+next classification step has no remaining budget. Static checks pass; no tests or builds were run.
+
+### 23.27.1029 Avoid MIN_I64 overflow in certificate row normalization
+
+GCD normalization could negate `MIN_I64`, whose positive magnitude is not representable. When
+either input is `MIN_I64`, use divisor one, which is always a valid normalization divisor and
+leaves the combined row unchanged. Later checked arithmetic still declines unsupported sums.
+Static checks pass; no tests or builds were run.
+
+### 23.27.1030 Index linear-search width witnesses once per search
+
+The certificate producer builds a bounded `ProofScalarWitnesses` index, including signed markers,
+so candidate normalization no longer decodes every fact at each AST node. The metered builder also
+creates open-addressed signed/place term indexes using shape hashes as candidate filters and exact
+AST equality as the authority. Construction and lookup work are bounded by the shared safety
+budget; probing continues across the table instead of stopping at a fixed local probe cap. The
+initial implementation used a conservative `(facts.count + 1) * scan_work` reservation, but the
+follow-up in 23.27.1036 removed that reservation and meters index construction, width lookup,
+premise comparison, primitive-scalar witness checks, and row alignment against the shared search
+allowance. Recursive expression comparisons use a bounded shape scan followed by the canonical
+equality function. Expressions exceeding the existing 65,536-node safety ceiling still fail closed.
+Static diff and source-length checks pass; no tests or builds were run.
+
+### 23.27.1032 Reuse scalar witness index in linear certificate search and checking
+
+Certificate search and source-side certificate checking build a bounded `ProofScalarWitnesses`
+index with signed markers enabled, then reuse it for candidate recognition and row construction.
+This removes repeated full-fact marker decoding and hash-table construction while preserving the
+kernel's independent revalidation. Incomplete index construction rejects the producer candidate
+or source certificate. Metered producer searches also use collision-safe signed/place term
+indexes. The former broad repeated-scan reservation has since been removed: producer comparison,
+premise selection, and row work now debit a shared search meter directly, while the checker retains
+its independent canonical path. Static diff and source-length checks pass; no tests or builds were
+run.
+
+### 23.27.1031 Share short-circuit guard support work
+
+Index-safety guard classification created fresh local meters for expression-support walks on the
+left and right operands, even though the analysis has a per-function source-work counter. Route
+both support scans through the offset shared meter and reserve only the remaining unmetered scans
+(operator, freshness, and move classification); call presence and purity retain their own shared
+runtime-call meter. Added `scripts/test_index_safety_shared_work.py` to guard this accounting.
+Static gates pass; semantic qualification remains pending the exact compiler product.
+
+### 23.27.1033 Preserve exact-budget index-call scans
+
+Index-call contract replay now keeps support, call, move, and old-state expression scans in the
+per-function source meter. Completed walks that land exactly on the cap remain distinct from
+walks that need more work: effect scanners mark overflow as `limit + 1`, and shared callers
+report exhaustion only above the cap. This avoids rejecting exact-budget summaries while
+keeping partial scans fail-closed. Static checks pass; no tests or builds were run.
+
+### 23.27.1033 Share work across indexed call summaries
+
+Indexed-call proof summaries previously restarted work in positional/named argument mapping and
+default validation. They now share the index-safety per-function meter across mapping, default
+support and state/call scans, substitution, candidate classification, and fact-context snapshots.
+Parameter/default metadata materialization is charged before the arrays are built. The default
+purity gate reuses the known call result and reserves its freshness and purity traversals against
+the same meter, avoiding the old 16,384-unit fallback refusal.
+The shared support walker adapts its 1,048,576-unit internal counter to the stricter 65,536-unit
+index-safety allowance, bounding each traversal as it runs. Static diff and source-length checks
+pass; tests, builds, and runtime qualification were not run.
+
+### 23.27.1034 Expand unique module aliases without caller owner context
+
+When source conversion has no caller module owner, producer and replay now follow Stage1's final
+globally unique alias fallback even when the unique alias is module-owned. The indexed lookup
+still rejects ambiguous aliases, aliases shadowed by concrete types or builtins, and generic
+aliases; expansion then resolves the alias RHS in its recorded declaring owner. This restores
+the backend's fallback behavior for contexts that lack owner metadata. Static diff and
+source-length gates pass; runtime qualification remains pending the pinned compiler.
+
+### 23.27.1035 Inventory installed Stage1 products for qualification
+
+Checked every installed Stage1 product under `~/.elisac` that has provenance metadata. The current,
+`stage1-d126-source`, `stage1-d390`, and `stage1-ec41-20261008` products all declare provenance
+schema v1, while this checkout requires schema v5. Three older backup products have no provenance
+manifest and cannot be admitted by the build guard. No installed product can currently qualify a
+proof build; the bootstrap mismatch is an external validation blocker, not evidence about the
+proof changes. No compiler source or pin was changed.
+
+### 23.27.1036 Enforce shared search limits inside linear width scans
+
+Linear certificate search measured recursive width and scalar-witness construction work with
+fresh local counters, then debited the shared tactic budget after each walk. A single walk could
+therefore exceed the remaining shared allowance before failing. Initialize these readers at an
+offset that caps their fixed internal meter to the remaining shared budget, then debit only the
+completed traversal; exhaustion saturates the shared counter and declines the candidate. Added
+source guards for the width-query and witness-index paths. The focused budget guard, structural
+replay source guard, pattern-literal source guard, source-authority guard, `git diff --check`, and
+source-length gate pass. Runtime qualification remains pending the matched compiler product.
+
+### 23.27.1037 Exercise local-callable structural reentry and built-in controls
+
+Source-bound structural replay conservatively marks calls through lexical function-valued locals
+as unresolved and propagates that hazard through reachable helpers. Added a same-measure reentry
+fixture where a local function-typed binding aliases the owner and is invoked before a descending
+recursive call. Added an end-to-end check in the ADT suite requiring a source-clean rejection, the
+specific structural-decreases finding, complete replay, and no trusted assumptions. The existing
+captured-tree case remains the positive control for built-in array iteration and scalar addition.
+Extended the structural source guard to check the local-binding unresolved-dispatch path and both
+matrix cases. Static guard, `git diff --check`, and source-length checks pass; executable
+qualification remains pending the matched compiler product.
+
+### 23.27.1038 Close remaining index-safety source-work gaps
+
+The final indexed-call ensure comparison and summary-fact publication now consume the shared
+per-function source-work allowance, including freshness/purity walks, support and encoding
+passes, argument/result snapshots, and exact-cap equality status. Old-state scans on substituted
+requires/ensures terms are precharged. Short-circuit guard preflight now reserves its full set of
+future walks, and both guarded-fact copies are charged before materialization. The default-purity
+helper charges the legacy purity traversal after its shape walk. Static diff and source-length
+checks pass; tests, builds, and runtime qualification were not run.
+
+### 23.27.1039 Meter linear-hint row export incrementally
+
+`proof_linear_export_rows` used to reserve a quadratic expression-cost estimate before checking
+whether inputs were relevant linear facts. It now builds the bounded scalar-witness index once,
+then meters fact-name collection, atom de-duplication, row conversion, and equality classification
+against the existing replay source-work allowance. Fact-loop visits and output materialization are
+charged, and scanning stops when the existing row cap makes later facts irrelevant. Exported rows
+and row-fact ordering are unchanged; incomplete work declines the export. The witness-index builder
+retains its existing 65,536-unit local cap. Static diff and source-length checks pass;
+compiler-backed equivalence and runtime qualification remain pending the matched compiler product.
+
+### 23.27.1039 Recheck pinned Stage1 seed qualification
+
+Confirmed the proof pin `2a37b88c5acd5399e1653413fe58315348ae3083` is available in the local
+compiler repository and declares Stage1 provenance schema v5. No installed Stage1 product has
+that schema. Attempted an isolated seed from the exact pinned compiler worktree using the pinned,
+fresh Stage0 bootstrap and an 8 GiB RSS ceiling, with output directed to `/private/tmp`; the Stage0
+compile exited with status 1 after extensive lifetime-escape diagnostics. The installed compiler
+schema mismatch therefore cannot be bypassed by selecting an existing binary, and this checkout
+still lacks a qualifying Stage1 product. The seed did not touch the installed compiler. No proof
+source validation was possible in this attempt.
+
+The pinned Stage0 proof build was also attempted with output directed to `/private/tmp`. Stage0
+passed its provenance gate but failed during parsing before code generation: it rejects newer
+`for ... |captures|:` loop syntax in the current proof snapshot and reports EOF recovery errors.
+No proof compiler output was produced by that path either.
+
+### 23.27.1040 Key scoped-function cache by exact proposition owner
+
+Scoped proposition typing cached selected function bindings, but revalidated the cache by
+comparing every local name on each proposition query, leaving repeated typing O(L) in the local
+context width. Local binders and scope restoration can change names within one function, so reuse is
+keyed by declaration line, byte offset, module identity, global binding count, and a context epoch
+advanced whenever lexical bindings change. This removes the per-query full-name comparison and
+cached name-vector copy while invalidating across shadowing changes. Postconditions advance the
+epoch after constructing their copied context and optional `result` binder. Static diff and
+source-length checks pass; compiler qualification remains pending the matching Stage1 toolchain.
+
+The goal fact provenance index was moved into `report_goal_fact_index.elisa` so report recording
+remains below the source-file length limit without dropping the indexed matching path.
+The builder's `darray.resize` calls declare `Memory.Allocate`; the report recorder grants that
+effect in a local scope around the optional index construction, so the allocation capability does
+not propagate through proof-check callers. This source-level containment has not been compiler-
+checked under the current toolchain provenance hold.
+
+### 23.27.1040 Reconcile structural-termination source replay audit
+
+A read-only audit found that structural-safety is not admitted from the producer's AST walk alone.
+Source-bound replay reconstructs the retained source declaration index and executable call graph,
+requires unique owner and callee identities, matches each certificate edge to its exact source call
+site and recursive SCC, reruns structural checking from the parser-origin owner declaration, and
+compares the complete owner certificate set and witness subjects against the independently
+reconstructed result. Ambiguous source lookup, scoped or unresolved indirect dispatch, and missing
+edge coverage fail closed. The local function-value reentry negative and captured-array positive
+fixtures are now wired to the relevant suites, alongside direct-API offset/callee/subject/binder,
+omission, and ambiguous-source mutations. This closes the source correspondence gap at the static
+implementation level; these adversarial runtime controls remain unqualified until a matched
+compiler/proof product is available.
+
+### 23.27.1041 Meter branch-fact expansion and remaining source sizing walks
+
+Short-circuit branch-fact publication now reserves the whole-premise scans, bounded conjunct
+splitter, and worst-case five-pass equality work against the shared index-safety source budget,
+using the post-summary fact context and the actual component count. If conjunct expansion cannot
+fit, it reports the existing resource finding and retains only the whole branch premise. The
+indexed-call equality wrapper no longer repeats support scans already covered by its five-pass
+comparator reservation. Indexed-default freshness classification reserves its own AST traversal,
+and type-bound result-substitution sizing now uses the tighter 65,536-unit meter sequentially for
+each measured expression. `git diff --check` and the source-length gate pass; tests, builds, and
+runtime qualification were not run.
+
+### 23.27.1041 Share work across linear-hint trace lookup
+
+Linear-hint fact capture reserved a worst-case exact comparison against every trace, charging the
+largest trace expression even when owner and root filters rejected almost all candidates. The hint
+path now reuses a shared-meter trace lookup that charges support checks, root/name filtering, and
+exact comparisons as they run; fact cost sizing is charged as one pass. The existing first-match
+trace order and unsupported-fact refusal remain unchanged. Static diff and source-length checks
+pass; compiler-backed equivalence and runtime qualification remain pending.
+
+### 23.27.1042 Keep linear-hint premise indices aligned with goal recording
+
+Hint capture now applies the same kernel-root range check as `proof_add_goal_attempt` after an
+AST-matching trace is found. This keeps hint premise indices aligned with the eventual certificate
+facts even if a partially invalid report contains a trace with an out-of-range kernel root.
+Static checks pass; executable qualification remains pending the matched compiler.
+
+### 23.27.1043 Gate source-index and bounded-search regressions in kernel audit
+
+The focused static guards for shared index-safety work, linear-certificate search budgeting, and
+postcondition-context indexing existed as standalone scripts but were not invoked by the repository
+test matrix. Wired them into the kernel replay audit shard so future regressions fail the standard
+audit. `git diff --check` passed; the guards and runtime suite were not run under the current
+compiler-product qualification hold.
+
+### 23.27.1044 Require theorem-admission completeness for whole-source verdicts
+
+The checked-view's report-level `source_complete`, target-admission base, and `source_checks_complete`
+queries now require a complete theorem-source admission snapshot with cardinality matching the
+report's theorem summaries, alongside the existing per-goal and premise snapshots. This keeps
+whole-source authority fail-closed when theorem admission is incomplete, even for callers that do
+not separately invoke the combined source-admissions query. Extended the source-authority static
+guard and wired three previously unreferenced bounded-work guard scripts into the kernel audit
+shard. `git diff --check` passed; no tests or builds were run.
+
+### 23.27.1045 Meter every linear-combination GCD entry
+
+The per-entry GCD scan in `proof_linear_combine` now charges each vector visit before calling the
+Euclidean helper. Previously the helper could return without charging for zero or `MIN_I64`, leaving
+that traversal absent from the shared-work ledger. Extended the wired linear-search guard to require
+the debit before reading the entry. `git diff --check` passed; the guard and executable suite were
+not run.
+
+### 23.27.1046 Skip structural kernel equality for identical arena roots
+
+Kernel fact-trace lookup now recognizes identical arena node indices before starting the bounded
+structural equality walk. It still runs candidate trace validation, so provenance and arena checks
+remain in force. The direct root-ID comparison retains the equality pair's fixed work charge. This
+uses the producer's existing structural interning to avoid repeat traversal for shared terms.
+Static diff and source-length checks pass; build and runtime qualification remain pending the
+matching compiler.
+
+### 23.27.1047 Bound module-alias cycle detection without repeated scans
+
+Module-alias root resolution already limits traversal to the number of alias rows and fails closed
+when a chain exceeds that bound. Removed its per-hop linear `seen` scan and temporary string list;
+each hop still uses the charged lexical/global lookup paths, and cycles still exhaust the same
+finite traversal bound. `git diff --check` and the source-length gate pass; tests and compiler-backed
+qualification were not run.
+
+### 23.27.1048 Record exact generic-owner metadata integration boundary
+
+A read-only review of the adjacent compiler candidate confirmed its new generic owner-offset column
+identifies declaration starts and is emitted alongside generic line/name rows, including bound rows.
+The pinned compiler API still has only line/name metadata, so exact same-line binder identity cannot
+be added safely in proof alone. The coordinated follow-up is to commit and pin the compiler metadata
+change, then snapshot and index `(owner offset, decoded line, name)` in proof while retaining the
+current conservative line-only validity for unmigrated consumers. No compiler or proof runtime
+validation was performed.
+
+### 23.27.1048 Preserve broad-root fact candidates in indexed trace lookup
+
+The report fact index's unclassified-root fast path checked the matched sentinel backwards, so a
+fact with an unmatched source trace could be skipped when trace and fact roots were not among the
+index's specialized tags. It now admits any still-unmatched fact as a candidate and leaves exact
+equality to the existing matcher. Added a focused static guard to the kernel replay audit shard.
+
+### 23.27.1049 Avoid double-counting the left operand in local equality sizing
+
+Type-bound local expression equality now sizes left and right into separate counters. The right
+cost walk starts after the left sizing debit, while the final reservation combines both sizes once
+for the comparator pass. This avoids counting the left cost both in the right walk's initial cost
+and its work offset. Added a focused static guard to the kernel replay audit shard. `git diff
+--check` passed; no tests or builds were run.
+
+### 23.27.1050 Avoid duplicate postcondition source-cost reservations
+
+Postcondition AST admission first reserved a whole-expression cost walk even though its source
+scanner charges each visited node and identifier directly, overloaded-operator classification
+charges its own walks, and substitution/equality reserve their own transformations. Remove that
+redundant reservation so large valid postconditions are less likely to fail admission solely from
+counting an AST scan twice; the remaining walkers retain shared fail-closed work accounting. Nested
+module-path construction now scans qualification explicitly and charges parent-path copying only
+for relative module names. Relative-path accounting includes a second width allowance for possible
+geometric backing-buffer relocation during `extend`; assignment of saved/restored darray values is
+fixed-size header copying. Static diff and source-length checks pass; no tests, builds, or runtime
+checks were run.
+
+### 23.27.1051 Filter replay equality by kernel root shape
+
+Kernel fact-trace lookup now checks the candidate and premise root kinds and operators before
+walking structurally distinct arena terms. The filter charges its comparisons and only skips full
+equality when a necessary root condition fails; identical arena roots retain their direct fast
+path, while possible matches still use bounded structural equality and full trace validation.
+Static checks pass; compiler and runtime qualification remain pending.
+
+### 23.27.1052 Bind theorem snapshot cardinality into replay receipts
+
+The public receipt completeness query can now detect a truncated theorem-admission snapshot
+without access to the associated checked view. The opaque receipt records the expected theorem
+summary count when the snapshot is created and requires it to match the stored admission rows;
+checked-view APIs continue to check against the report's live theorem table. Extended the source
+authority static guard. `git diff --check` passed; no tests or builds were run.
+
+### 23.27.1053 Review indexed goal-fact matching invariants
+
+A read-only soundness review of the current goal-fact index and its certificate-validation
+integration found no actionable mismatch: traces are scanned in source order, duplicate facts
+remain distinct, hashes only select candidates before exact equality, and broad roots retain a
+conservative candidate path. Index shape and budget failures fail closed before certificate
+production; replay still validates provenance and kernel expressions independently. This is static
+review evidence only, not a runtime qualification result.
+
+### 23.27.1054 Reconcile the current Stage1 provenance blocker
+
+Rechecked the live proof and compiler checkouts: the proof repository pins compiler revision
+`2a37b88c5acd5399e1653413fe58315348ae3083`, while the clean adjacent compiler checkout is at
+`c93a77740053fe9e9350641d095b57b3fe8bed27`. All four installed Stage1 manifests found under
+`~/.elisac` use schema v1; the current compiler provenance checker requires v5 and rejects the
+installed product. The current compiler source/build-recipe digest is
+`7a1b63f981cde8b7a26064526b1fc717f1504720fa1aaf974c3ac3c20b420a19`; no Stage1 matching the pinned
+compiler tuple is available. Restore the pinned compiler checkout or intentionally update the pin,
+then resolve the documented Stage0 escape-analysis errors and publish fresh v5 provenance before
+runtime qualification. No build or test was run.
+
+### 23.27.1055 Make indexed root buckets selective across every expression constructor
+
+The goal-fact index now uses a bounded full-shape hash mixed with the explicit stripped-root
+constructor tag. This avoids putting less common AST forms with intentionally coarse general
+hashes into shared long chains, while collisions remain candidate-only and exact equality stays
+authoritative. Current root constructors have explicit tags; unknown/future tags remain in a
+conservative hash bucket and are decided by exact comparison. Unsupported or overdeep roots fail
+closed in the metered shape-hash preflight. Removed the broad-fact side list and updated its static regression. `git diff --check`
+passed; no tests or builds were run. Structural-safety source binding is already implemented in
+the current replay path; runtime qualification remains blocked by the compiler provenance issue
+above.
+
+### 23.27.1056 Recheck receipt vector cardinality at public query boundaries
+
+Receipt completeness now checks that kernel attempt statuses and proven-attempt statuses have
+matching lengths, and per-goal source admission rechecks its snapshot length against the checked
+view's current report attempt count. Receipt construction already guarantees these equalities;
+the public predicates now fail closed if that invariant changes in a future construction path.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1058 Propagate premise-selection budget exhaustion
+
+Linear certificate premise selection now returns an explicit completion status. Exhausted
+comparisons/name scans abort the caller immediately, and a failed fact parse that reaches the
+work limit is treated as exhaustion rather than an unsupported candidate. This preserves the
+existing bounded candidate policy while making fail-closed behavior explicit. The earlier
+static review found no soundness or unbounded-work path; this is a clarity and avoid-wasted-work
+improvement. `git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1059 Scope generic shadow checks to the active function
+
+Producer generic-name lookup now hashes and compares the exact active declaration line together
+with the binder name. Replay's call-site lookup also requires its requested owner line to match the
+active function line captured in the call target before consulting the line/name index. This keeps
+same-named binders in unrelated functions from affecting alias and conversion classification.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1060 Recheck the pinned Stage1 bootstrap with available compiler binaries
+
+Located the exact pinned compiler source checkout at revision
+`2a37b88c5acd5399e1653413fe58315348ae3083` and retried its isolated Stage1 seed. The installed
+October 14 Stage0 parsed the source but rejected it with compiler diagnostics, including 110
+value-block outer-mutation errors, 23 termination-proof errors, 9 invalidated-view errors, and 11
+local-storage escape diagnostics. The October 11 Stage0 is too old to parse newer syntax in that
+checkout. Neither attempt produced a Stage1 product, so the proof build remains unqualified; use a
+Stage0 whose source semantics match the pinned compiler lineage, then rerun the seed. Logs are in
+`/private/tmp/elisa-proof-pinned-stage1-seed.log` and
+`/private/tmp/elisa-proof-pinned-stage1-seed-ef042.log`.
+
+### 23.27.1061 Verify newer Stage0 and older Stage1 bootstrap candidates
+
+Rebuilt the available Go Stage0 from clean compiler revision
+`8f822f83b15c3e1c243366d9693815ac49107a88` and retried the exact pinned compiler seed; it reports
+the same 11 escaping-reference diagnostics and exits before producing a product. The only verified
+nearby Stage1 product found is from `f7b6c4a`; its source provenance checks, but its parser emits
+many unexpected-token diagnostics on the pinned compiler source, so it cannot bootstrap this
+revision. The available artifacts therefore do not supply a compatible bootstrap. The next step
+is a compiler-lineage repair or an explicitly reviewed compiler pin update, followed by fresh
+Stage1 provenance and proof qualification. No proof tests were run.
+
+### 23.27.1060 Reuse fact-trace shape hashes across both index levels
+
+The fact index now computes one bounded full-term shape hash per fact/trace and reuses it for
+both exact-expression buckets and constructor-partitioned root buckets. Root extraction strips
+only parentheses, which the shape hash also ignores. The trace scanner passes its measured hash
+to the exact bucket probe instead of traversing the expression a second time. Unknown/future AST
+root tags remain in a conservative hashed bucket and defer to exact comparison rather than being
+dropped. This supersedes the prior note that unknown tags fail closed. Updated the static guard.
+`git diff --check` passed; no build or test was run under the compiler provenance hold.
+
+### 23.27.1061 Recheck explicit-return spans and match-pattern admission work
+
+A source-only review of the current explicit-return local-scalar path against the compiler parser
+confirmed its span cases: ordinary returns retain the `return` token position, while normalized
+implicit tails retain the full expression span; `return if ...` is separately checked against
+its child spans. Multiline explicit values require the return token to precede the expression in
+line and absolute-offset order. The focused local-scalar explicit-return runtime fixture remains
+missing, and compiler/runtime qualification remains unavailable for the current proof/compiler
+product tuple.
+
+The match admission work accounting was also rechecked. Each match-pattern validation call pays
+for its cost-discovery walk and reserves the two subsequent walks (closed-pattern validation and
+binder collection); emitted binder-name comparisons have their own byte charges. The source
+contract scan and a returned-expression scan cover distinct ASTs when both contain matches, so
+these reservations do not duplicate accounting for the same traversal. No work-limit change was
+needed. Static review only; no tests or builds were run.
+
+### 23.27.1063 Correct the current Match-pattern admission accounting note
+
+Current source inspection contradicts the repeated-expression reservation described in the
+clarification below §23.27.993: `proof_report_postcondition_source_scan_depth` charges each
+expression node as it visits it and does not call a whole-expression repeated-cost reservation.
+`proof_report_match_pattern_closed_with_work` separately charges pattern-cost discovery and
+reserves the two following traversals, closed-pattern validation and binder collection. Emitted
+binder-name comparisons are charged in their helper. Thus the current code does not overlap a
+whole-expression pattern reservation with these specialized passes; the §23.27.993 clarification
+is stale and should not motivate reducing the current reservation. No code change was warranted.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1062 Admit exact digit-leading and keyword-like string patterns
+
+The compiler retains the interior bytes for string patterns, and its `sview`/`cstr` match
+lowering compares those bytes as string content. Once the checker authenticates a direct string
+scrutinee type, rejecting `"01"`, `"0x1"`, `"true"`, or `"null"` is unnecessary: those spellings
+become string-valued proof facts and cannot become integer facts. Removed the identifier-start
+and reserved-word restrictions while retaining the bounded length check and the conservative
+ASCII/no-escape/no-control/no-quote subset. Added positive controls for these forms alongside
+existing adversarial string/integer collision and fixed-width boundary cases. The pattern-literal
+source guard passed. The end-to-end collision script refused to select a binary because the
+prebuilt proof binary was built from a different proof HEAD. No current-source build/runtime
+qualification was performed.
+
+### 23.27.1064 Charge repeated text work in producer linear search
+
+The metered primitive-comparison mirror previously charged repeated structural comparisons by
+node count after one shape scan. Long identifier and field text could therefore be revisited by
+the equality passes without proportional meter cost. Shape charging now returns its measured
+node-and-text work; repeated equality and marker parsing reserve that full cost, and direct field
+name checks charge both compared strings. `git diff --check` and the source-length gate pass; no
+tests or builds were run.
+
+### 23.27.1065 Give each typed owner environment a fresh descriptor-cache epoch
+
+The source-derived type index is copied into per-owner workspaces, but its descriptor slot and
+slot-epoch arrays are shared. The scalar epoch was copied by value, so each owner reused the
+same generation; a stale descriptor slot could then be interpreted as an index into the new
+owner's shorter binding vector and reject valid typed replay. Added a shared one-element mutable
+epoch counter to the type index. Environment construction advances it, copies the new nonzero
+generation into that workspace's local index view, and fails closed on malformed counter shape or
+wraparound. Descriptor slots remain reusable across owners without an O(capacity) clear per owner.
+`git diff --check` and the source-length gate pass; tests and builds were not run.
+
+### 23.27.1066 Review pattern boundaries, structural replay, and output authority
+
+Independent source reviews confirmed that the newly admitted digit-leading and keyword-like
+string patterns preserve backend byte semantics for direct authenticated `sview`/`cstr`
+scrutinees; escape-bearing, control, quote, and non-ASCII spellings remain outside the subset.
+The structural-safety replay path rebuilds owner/callee resolution and recursive call edges from
+retained parser-origin declarations, binds the witness to a unique source call site, reruns the
+structural checker, and compares the complete owner certificate set. The public status audit
+found proof-status, theorem `verified`, suggestions, and package outcomes remain source-gated;
+kernel replay fields are diagnostics, and portable packages disclose adapter-provided source
+correspondence. Pattern-literal, structural-replay, source-authority, and AST/kernel mirror
+work-budget static guards pass. The end-to-end pattern regression was refused by the binary
+qualification gate because the prebuilt proof product does not match the current proof HEAD;
+these static checks do not qualify runtime behavior.
+
+### 23.27.1067 Meter source replay of linear certificates
+
+The source goal checker could structurally compare each of up to fifteen cited premises against
+every fact without charging those repeated equality walks to its shared work budget. It also
+rebuilt the scalar witness index once per candidate certificate. The checker now meters its
+candidate scan, builds the witness index once only when candidates exist, and charges certificate
+parsing, premise lookup, and constraint reconstruction to the existing goal budget. Exhaustion
+fails closed and stops later goal tiers. `git diff --check` and the source-length gate pass; no
+tests or builds were run under the compiler provenance hold.
+
+### 23.27.1068 Iterate linear premise selection to a bounded fixpoint
+
+The producer previously scanned facts twice while expanding the atom set. Since facts are
+processed in source order, a backward-ordered dependency chain could require further scans: a
+later fact can introduce an atom that makes an earlier fact relevant on the next pass. Premise
+selection now repeats until a full pass adds no atoms, with at most the atom limit plus one passes.
+The existing search meter charges each repeated fact scan and fails closed on exhaustion. The
+explicit-return postcondition inventory was also rechecked: it already rejects absent expression
+sentinels and unsupported void/unit return types. `git diff --check` and the source-length gate
+pass; no tests or builds were run under the compiler provenance hold. The explicit-return
+local-scalar path is implemented: `proof_replay_type_bound_result_consumer_matches` accepts a
+final `Ast::Stmt.Return` and validates its parser-owned spans, with source assertions in
+`scripts/test_source_admission_budget.py`. The remaining item is a focused runtime fixture that
+exercises local-scalar availability through this witness after a provenance-matched build; this
+is a qualification gap, not an unsupported-expression boundary.
+
+### 23.27.1069 Avoid overflow in linear atom-budget admission
+
+The fixpoint premise selector checked whether a fact's fresh atom count fit by adding it to the
+current atom count. Although both are practically bounded by source and expression limits, the
+addition is unnecessary and could theoretically wrap `usize`. The selector now validates its
+current-count invariant and compares the fresh count against the remaining atom capacity by
+subtraction. It stops counting as soon as the candidate is proven too wide, avoiding charged name
+comparisons that cannot change the outcome. The bounded collection of fresh names is now reused
+for insertion, so selection avoids a third names-by-atoms comparison pass; collection and insertion
+are charged to the search meter. Exhausted name-comparison work still fails closed. The whitespace
+diff and source-length gates pass; no tests or builds were run under the compiler provenance hold.
+
+### 23.27.1072 Meter repeated linear-certificate trace comparisons
+
+Boundary preflight charged report counts and expression sizes, but the linear-certificate trace
+validator then revisited matching attempts, fact expressions, and origin records. In particular,
+origin kind/name/dependency comparisons were repeated without charging their source bytes. The
+validator now receives the shared report work counter, meters attempt matching and its fixed-cost
+source-position checks, exact-position expression equality, trace metadata, and per-row scans, and
+fails closed when that budget is spent.
+`git diff --check` and the source-length gate pass; no tests or builds were run under the compiler
+provenance hold.
+
+### 23.27.1070 Reuse the source-admission postcondition index for typed replay
+
+The typed indexed-read adapter called `proof_source_analysis_goal_admission_snapshot`, which
+already builds a bounded postcondition AST index and uses it to bind each admitted goal to its
+exact source contract. The adapter then rebuilt the same index and looked up the same contract for
+each candidate, duplicating source work and allocations. Candidate replay now relies on the
+per-goal `goal_candidates.statuses` produced by that exact snapshot and no longer repeats the index
+construction or lookup. The adapter still independently requires postcondition obligation identity,
+owner identity, premise-source admission, and typed kernel replay. `git diff --check` and the
+source-length gate pass; no tests or builds were run under the compiler provenance hold.
+
+### 23.27.1071 Derive transitive typed index equality through admitted premises
+
+The source-authenticated typed indexed-read rule previously accepted structurally equal indices or
+one directly stated equality premise. It now searches the undirected graph of equality premises
+iteratively, so a bounded chain such as `i == j`, `j == k` can justify reads at `i` and `k`. The
+search deduplicates reached terms by structural equality, meters every edge and term comparison,
+and fails closed at the cumulative goal-work limit; it uses no recursive proof search. The three
+private call paths validate typed proposition formation for the goal and every premise before
+entering this search, so the repeated per-edge recursive arena-validity walk was removed while
+retaining the root and fact index bounds checks. `git diff --check` and the source-length gate pass;
+no tests, builds, or runtime qualification were performed under the compiler provenance hold.
+
+### 23.27.1073 Restrict transitive index equality to exact-sort edges
+
+Review of the equality-graph rule found that kernel typing admits numeric comparisons across
+different sorts. Operand coercion does not necessarily preserve integer identity, so traversing
+such a proposition as an undirected edge could prove an invalid indexed-read correspondence. The
+graph walk now infers both endpoint sorts and traverses an edge only when each exactly matches the
+goal's index sort. Unknown sorts and type-work exhaustion fail closed. This preserves transitivity for same-sort terms while
+excluding coercive cross-sort edges. Reached-term storage is explicitly bounded by the maximum
+two endpoints per admitted equality fact plus the starting term, with the existing goal-work limit
+remaining tighter in normal operation. A dedicated runtime negative for the coercive
+counterexample remains pending a provenance-matched toolchain. Static source checks only; no tests
+or builds were run.
+
+The same pass now caches each equality premise's exact-sort eligibility, charging the state array
+initialization to goal work. This avoids repeating endpoint type inference when traversal later
+reaches the edge from its opposite endpoint.
+
+### 23.27.1074 Audit indexed goal-fact trace matching
+
+Static review of the bounded goal-fact index confirmed that shape hashes only select candidates;
+exact replay-expression equality still decides each match. Trace rows are streamed in source order,
+so each fact retains the earliest matching trace, as in the linear implementation. Hash collisions
+are handled by bounded chains and probe work; incomplete index construction or scanning marks fact
+admission exhausted rather than admitting a partial set. The index is currently enabled only for
+8–128 supported facts and at least 256 active traces. That threshold is a workload-tuning boundary:
+the root prefilter scans each fact per trace, and should be profiled before widening it. Static
+source review only; no tests or builds were run.
+
+An independent performance audit confirmed that root-prefilter visits are charged to AST support
+work while exact expression comparisons retain their separate replay-equality meter; both counters
+remain shared for the full scan and neither resets per trace. The current 128-fact ceiling bounds
+the prefilter's O(active traces × supported facts) worst case. Any threshold change should account
+for both meters and the shared early-stop behavior after all facts are matched.
+
+### 23.27.1075 Require exact integer types for transitive bound aliases
+
+The source and kernel interval-bound closures treated every witnessed identifier equality as an
+undirected alias. Elisa comparisons coerce the right integer operand to the left operand's type,
+so mixed-width equalities can both hold while the endpoint values differ. A chain such as
+`i:u64=255`, `j:u8=255`, `k:u64=511`, with `i==j`, `j==k`, and `k>=500`, could therefore copy
+`k`'s lower bound to `i` and close the false goal `i>=500`. Both closures now add an alias edge
+only when each endpoint has the same known signedness and width; unknown/conflicting width
+witnesses do not create edges. Kernel width inference is debited to the same cumulative closure
+work meter, and a local width-reader exhaustion exhausts the enclosing closure meter as well.
+`git diff --check` and the source-length gate pass; no tests, builds, or runtime
+qualification were performed under the compiler provenance hold.
+
+### 23.27.1076 Reproduce the current compiler-seed provenance hold
+
+The proof pin is compiler `2a37b88c5acd5399e1653413fe58315348ae3083`; the proof's pinned Core
+Stage0 `fa65ef625c4217cf54486821a6aa9348f5f04ec6` is a clean, freshness-verified binary but its
+seed attempt cannot parse that compiler source. A probe with the clean current Core Stage0
+`4af3702064f4ef518e42684a8c34ccbf04a0afd5` passed parsing but failed compiler self-checking with
+unsupported/runtime-key, value-block capture, storage escape, and StoreThrough diagnostics; it
+published no product. Cached Stage1 v1 candidates at `5cda9b4e` and `d1260b00` pass their own
+source/product checks but also reject syntax in the pinned compiler source (`arena.elisa` and
+`collections.elisa` among the first errors). The d126 attempt was stopped after repeated parse
+errors and its trap removed temporary products and locks. A workspace inventory found no Stage1
+for compiler `2a37b88c` or later and no current v5 Stage1 candidate; a separate `c93a777` seed
+also published no product. Thus there is still no matched proof/replay build or end-to-end
+qualification. The next build-lane step needs a Stage1 bootstrap that parses this compiler source,
+followed by the target v5 provenance check and required Stage0/Stage1 parity controls. These
+attempts changed no compiler pins or shared installed products.
+
+### 23.27.1077 Apply exact integer types in replay name-equality closure
+
+Certificate replay also formed alias edges from scalar-witnessed identifier equalities. Its name
+equality graph now requires both endpoint types to have the same known signedness and width before
+adding an edge. Marker construction, scale calculation, and width lookups share a bounded local
+meter, which is charged to the enclosing replay closure; malformed or exhausted work fails closed.
+`git diff --check` passed. At the time of this note, the source-length gate reported 642 lines in
+`src/proof/replay/summary_call_sites.elisa`; a subsequent source split brought the current file
+below the 600-line limit. No tests, builds, or runtime qualification were run.
+
+### 23.27.1078 Reject conflicting width markers in kernel alias closure
+
+The replay alias sort reader previously returned the first signed marker and the minimum unsigned
+marker for an identifier. Since source-neutral replay accepts caller-supplied facts, contradictory
+width rows could make alias admission depend on fact order. The kernel now scans the raw premise
+rows for each endpoint, rejects conflicting widths and signed/unsigned overlap, and debits marker
+parsing plus exact signed-term comparisons to the enclosing closure meter. Exhausting the local
+marker reader exhausts the closure rather than silently treating the endpoint as merely unknown.
+Both producer and kernel dispatch width parsing by marker callee, avoiding three full marker
+decodes per premise row while preserving the validating parser for the selected marker. The
+producer's alias-specific sort reader now scans raw fact rows too, so contradictory marker
+widths cannot create producer edges even though general arithmetic consumers retain their existing
+merged-witness semantics. The metered producer path charges each fact's structural size plus a
+conservative parser/comparison allowance to its shared analysis budget; marker dispatch by callee
+avoids invoking irrelevant decoders for every row. `git diff --check` and the source-length gate
+pass. No tests or builds were run.
+
+The source-neutral goal API contract now explicitly states that scalar-witness premises are
+conditional arithmetic sort metadata only. Their presence does not authenticate source declarations
+or marker provenance; source-level callers still need typed formation and source binding.
+
+### 23.27.1079 Index exact replay declaration lookups
+
+Kernel replay's type/field binding lookup scanned every environment row per query. A bounded
+composite-key bucket index now covers type, field, enum-member, enum-tag, and enum-underlying rows; lookups compare exact
+kind, name, owner, and owner identity after hashing, preserve evidence-based duplicate ambiguity,
+and fail closed after the collision-chain work bound. The index is built for ordinary workspaces
+and cached-global combinations, then reused by value-only scoped overlays. Type/field queries,
+container descriptor resolution, enum-tag owner existence, exact-singleton enum-underlying lookup, and both unqualified and
+owner-qualified enum member resolution now use it. Enum-member buckets hash only kind and name,
+then qualified lookup filters exact owner and identity while unqualified lookup retains ambiguity
+checks across owners. Enum-tag buckets hash by owner and identity because the call-place check asks
+only whether such an owner has any tag. Enum-underlying lookup traverses the exact owner bucket and
+rejects repeated rows even when they are identical. The
+summary call-site local-scope helper was split into its own module to restore the 600-line source
+gate after concurrent edits. `git diff --check` and `scripts/check_source_length.py` pass; no tests
+or builds were run because the available Stage1 snapshot does not match the pinned compiler.
+
+### 23.27.1080 Reuse the indexed owner group for summary call-site replay
+
+After the per-replay deterministic declaration index is built, summary call-site validation now
+uses its collision-checked name group instead of recursively scanning every source declaration for
+each call-summary witness. Duplicate-name rows remain in the candidate walk; exact owner lines,
+source call spans, consumer positions, and the single-match requirement still govern admission. The
+same index supplies the consumer owner's body after an exact unique `(name, line)` lookup. Added a
+static regression guard for index use and duplicate preservation. `check_source_length.py`, the
+targeted guard, and `git diff --check` pass; runtime qualification remains blocked on a matched
+compiler product.
+
+### 23.27.1081 Index conflict-aware alias sort summaries
+
+The conflict-aware producer, kernel, and replay alias sort readers scan all premise rows for each
+equality endpoint so contradictory signed/unsigned width markers cannot make an alias depend on
+fact order. Replay now uses its existing marker-name hash index as a bounded positive fast path for
+scalar-witness checks; misses still use the raw scan so parenthesized markers and collision fallback
+retain their old behavior. The width readers remain O(equalities × facts), bounded by shared work
+meters and fail-closed on exhaustion, so dense graphs can lose transitive closure proofs before the
+cap. A per-name summary index with scalar-witness presence and signed/unsigned widths plus explicit
+conflict bits can reduce those repeated scans to O(facts + equalities); it must preserve exact
+signed-term matching and charge index construction, hashing, and collision probes. Static source
+review only; no tests or builds were run.
+
+### 23.27.1082 Meter source disjunct pruning inside goal search
+
+The source linear goal search called disjunct pruning with legacy recursive equality and primitive-witness readers outside its shared work counter. Pruning now builds the scalar-witness index once, charges recursive visits, uses metered equality and primitive-witness readers, and propagates incomplete work as goal-search exhaustion. The stale unmetered pruning implementation was removed. `git diff --check` and the source-length gate pass. No tests or builds were run; runtime qualification still requires a matched compiler product.
+
+### 23.27.1083 Carry stable expression-if guards into index-safety branches
+
+The index-safety expression walk checked both arms of `if` expressions against the unchanged
+incoming facts, so a stable guard such as `i < xs.count` could not justify an indexed read in
+either arm. The walk now checks the condition in evaluation order, clones the resulting branch
+facts, and adds the condition to the true arm and its negation to the false arm only when the
+condition is supported and does not invalidate facts. The branch-fact helper independently
+rejects fresh values, moves, overloaded connectives, and inadmissible terms. `git diff --check`
+and the source-length gate pass; no build or tests were run, so runtime behavior remains
+unqualified.
+
+The expression-block safety walk was expanded into a statement traversal covering expression,
+declaration, assignment, return, branch, loop, match, contract, nested-block, and control-transfer
+statements. It invalidates facts at mutation and control-flow joins, retains stable branch guards,
+and fails closed on unsupported statements and work exhaustion. A review caught that pre-loop
+facts could be stale on later `while` iterations; the loop condition/body now start without
+incoming dynamic facts and may use only the re-evaluated stable guard. The current proof admission
+gates still reject many value-block statement shapes, so broader source admission remains future
+work. Static whitespace/source-length checks pass; runtime behavior remains unqualified. The
+compiler pin `2a37b88c5acd5399e1653413fe58315348ae3083` is
+present as an ancestor in `../Elisa-compiler`, but the available `bin/elisac-stage1` artifact
+records source revision `f7b6c4a21704f4d3f1b13849d4cd0b6d9ae18b88` with provenance v1; the pinned
+checker at the proof revision requires v5, and no `bin/elisac-stage0` exists in that checkout.
+Thus the compiler provenance hold remains, though its source commit is locally available.
+
+### 23.27.1084 Locate the remaining source linear-pruning meter gap
+
+At the time of this entry, the adjacent `proof_linear_prune_facts` call in `proof_goal_depth` still ran the pure producer-side affine collector and Fourier-Motzkin refuter. The later §23.27.1087 entry records the completed metered path and caller switch. Runtime qualification remains unavailable under the compiler provenance hold.
+
+### 23.27.1086 Reuse pruning witnesses and signed bounds
+
+The source linear-pruning pass rebuilt scalar witness markers and signed safety bounds for each
+comparison alternative, although both are derived from the unchanged fact list. It builds the
+witness markers once and lazily computes signed bounds once after the first primitive comparison
+candidate. The later §23.27.1087 entry records the metered affine collector and refuter integration.
+`git diff --check` and the source-length gate pass. No tests or builds were run.
+
+### 23.27.1364 Remove unreachable unmetered arithmetic replay rules
+
+Call-site search found two legacy non-work implementations still included in the kernel replay
+module: unsigned literal progress and signed constant disequality. The live resource-model path
+uses the shared-meter implementations. Related unsigned disequality helpers in the integrated
+resource helper file also had only internal references to the dead helper chain. Removed the
+unreachable rules and includes, leaving the metered replacements as the sole replay paths.
+Repository search found no remaining calls to the removed signatures; `git diff --check` and the
+source-length gate pass. No tests or builds were run.
+
+The producer already has reusable metered parts: `proof_scalar_witness_markers_with_work`,
+`proof_normal_comparison_signed_with_witnesses_work`,
+`proof_collect_normal_terms_with_witnesses_work`, and `proof_linear_search_width_debit`. A direct
+work-aware pruning sibling can preserve the existing semantics by feeding those into metered
+comparison-to-span collection and a metered copy of `proof_linear_refutes`; keep the current 24
+constraint, 8 atom, and 256 row caps, and charge atom interning, row products, gcd steps, and
+Farkas validation loops. The existing certificate-search matrix has different row semantics and
+should not be substituted without proving the same signed-only pruning behavior.
+
+The work-aware refuter and Farkas validator are in `src/proof/linear/linear_refuter_work.elisa`;
+they return `(complete, refutes)` and charge the bounded elimination loops as they run. The same
+file has metered affine term collection and comparison-to-span helpers, using the existing
+work-aware width and comparison readers. `proof_collect_normal_terms_with_witnesses_work` also
+charges literal parsing for its multiplication cases. See §23.27.1087 for their caller integration
+and the current review state.
+
+### 23.27.1085 Align replay name-sort calls and cache endpoint results
+
+The replay name-equality collector passed a marker index and marker-scale arguments to
+`proof_name_equality_sort_with_work`, whose actual API takes the fact list and its shared work
+counter. The call now uses that API and keeps sort inference on its shared width-work meter. It also
+caches results by exact endpoint name in a dynamically resized, bounded open-addressed table, so
+each unique endpoint scans the facts at most once. Hashes only select candidates; exact string
+equality remains authoritative. Table sizing, initialization, rehashing, queries, collisions, and
+sort misses are charged to the shared replay work budget; malformed cache state, probe exhaustion,
+or either budget exhaustion refuses alias admission. `git diff --check` and the source-length gate pass. No build,
+tests, or runtime qualification were run under the compiler provenance hold.
+
+### 23.27.1087 Meter source linear disjunction pruning
+
+The source goal search now uses a work-aware pruning path with metered fact classification,
+primitive checks, signed-safety checks, affine collection, Fourier–Motzkin elimination, Farkas
+validation, and recursive disjunct traversal. Its collector and refuter helpers are included in
+the source linear module, and the goal caller treats incomplete work as search failure rather than
+continuing with a reset budget. Negated-order integer checks now premeasure the fact list once and
+reuse that cost when reserving for their repeated legacy scans; without it, large facts could
+undercharge the shared meter. Empty spans remain an ordinary no-prune result, while exhaustion is
+incomplete. `git diff --check` and the source-length gate pass. No build, tests, or runtime
+qualification were run under the compiler provenance hold.
+
+Base constraints use witnesses and bounds derived only from unconditional facts; alternative
+checks use the full fact context, matching the former behavior. The old unmetered pruning helper
+was removed. Static review also confirmed that `i64::MIN` coefficients cause a checked decline.
+
+Follow-up review verified that base constraints use witnesses derived only from unconditional base
+facts, while candidate disjuncts use the full fact set; incomplete optional pruning falls through
+without consuming partial output. The shared disjunction-presence query also uses the goal budget.
+The comparison-goal-shape predicate after pruning is a constant-time constructor/operator match.
+The propositional-inconsistency and order-complementarity scans immediately before pruning still
+need work-aware handling or a bounded reservation. Therefore the arithmetic prune traversal is
+bounded, but the enclosing goal-depth path is not yet fully metered.
+
+### 23.27.1088 Charge pruned disjunction reconstruction and recheck toolchain identity
+
+The recursive source-pruning path now charges the synthesized `or` node before returning a
+reduced branch expression, so reconstruction is included in the same goal-search budget as the
+walk and arithmetic checks. The adjacent compiler checkout is currently at `c93a7774`, has a
+modified backend file, and has no `bin/elisac-stage0`; its available Stage1 artifact is still from
+the earlier mismatched snapshot. `git diff --check` and the source-length gate pass. No build,
+tests, or runtime qualification were run.
+
+Follow-up review found that Fourier–Motzkin could directly negate `i64::MIN` while taking
+coefficient magnitudes or forming the positive scale. The source metered refuter, pure producer
+refuter, and kernel replay refuter now use checked subtraction and decline that arithmetic case;
+the certificate-search combiner already guarded this coefficient. Runtime qualification remains
+pending.
+
+### 23.27.1089 Meter source early contradiction and disequality scans
+
+The goal path still called pure propositional-inconsistency, complementary-order, and linear
+disequality readers before/after its metered pruning tier. These call sites now use shared-budget
+counterparts: propositional denial recursively meters exact premise containment, complementary
+orders share a witness snapshot and charge conjunct collection and pairwise structural equality,
+and disequality refutation builds metered base constraints before invoking the work-aware affine
+collector/refuter. The `!=` goal path now adds its equality directly to the metered base spans,
+avoiding a copied fact list and a second witness-index rebuild. Disequality premise discovery now
+charges only the parentheses and negation nodes it traverses rather than repeating a whole-fact
+cost walk; hitting the AST-depth limit marks the shared search exhausted. Incomplete work now
+stops the path rather than allowing a later tier to restart without its cost. `git diff --check` and the
+source-length gate pass. No build or tests were run, so the new source paths still need compiler
+and runtime qualification.
+
+### 23.27.1090 Reuse metered bounds for goal inconsistency checks
+
+After the source goal path had built and closed its safety bounds under the shared work budget, it
+called the legacy inconsistency helper, which rebuilt the fact bounds without charging that work.
+The goal now scans the already computed bound rows with the same budget and uses the earlier
+metered propositional check for propositional contradictions. Exhaustion refuses the goal. Static
+whitespace and source-length gates pass; no tests or build were run.
+
+### 23.27.1091 Meter call-summary fact scans in source goal search
+
+The source goal path used the pure call-summary substitution helper after the shared work budget
+was established. That helper scanned every summary/fact pair and performed recursive structural
+equality and conjunction containment checks. It now has a work-aware counterpart using the
+existing metered equality and containment readers, and the goal path returns unknown on exhaustion.
+`git diff --check` and the source-length gate pass. No tests or build were run; compiler and runtime
+qualification remain pending.
+
+### 23.27.1092 Keep source goal tiers reachable and meter call consequences
+
+The source goal path had an unconditional return after call-consequence search, making the later
+goal-safety, certificate, bounded-model, and logical tiers unreachable when that search failed.
+The path now falls through after a failed consequence attempt and stops only on shared-budget
+exhaustion. Call-consequence discovery also uses metered witness construction, structural
+containment/equality, and charged recursive goal search. Static whitespace and source-length gates
+pass; no tests or build were run, and runtime qualification remains pending. The call and move
+effect scans now use local per-expression caps backed by exactly one additional shared-budget
+reservation, avoiding a third full-expression charge while preserving both bounds.
+The goal caller now maps every `complete = false` result from these structural and linear readers
+to the shared `exhausted` state, including local recursion or shape limits that do not set the
+budget flag themselves. This keeps proof failure distinct from an unfinished search.
+
+### 23.27.1093 Tighten result-substitution replay reservation
+
+The source-bound type-bound consumer validator conservatively charged the ensure AST size
+multiplied by the returned-expression size before calling `proof_replay_substitute`. That copier
+walks the ensure once and reuses the returned AST at each `result` leaf; it does not recursively
+copy the inserted expression per occurrence. The validator retains separate sizing charges for
+the ensure and returned expression, reserves one ensure-sized traversal for substitution, and
+keeps independent reservations for its overloaded-operator, call, move, and runtime-index scans.
+This avoids rejecting otherwise valid large postconditions solely because a large return
+expression was multiplied by the size of its ensure. `git diff --check` and the source-length
+gate pass; no tests, builds, or runtime qualification were performed under the compiler
+provenance hold.
+
+### 23.27.1094 Meter the source Fourier–Motzkin goal path
+
+Positive and negated comparison goals in `proof_goal_depth` still entered the pure linear goal
+helpers, which rebuilt fact bounds and ran Fourier–Motzkin outside the shared search budget. They
+now use the existing work-aware producer refuter after metered witness-index construction; the
+duplicate pure fallback was removed. A failed refutation falls through to other proof tiers, while
+meter exhaustion refuses the goal. `git diff --check` and the source-length gate pass. No tests or
+builds were run; runtime qualification remains pending.
+
+### 23.27.1095 Meter remaining producer goal-depth identity rules
+
+The signed scaled-quotient rule and logical-join identity rule now run through the shared goal
+work budget. They use metered witness construction, scalar/order reads, conjunction traversal,
+structural equality, and (for quotient arithmetic) the work-aware linear refuter. The goal caller
+stops on incomplete work instead of treating it as an ordinary failed proof. This supersedes the
+earlier note in 1087 about the enclosing goal-depth contradiction/complementarity scans: those
+scans were subsequently moved to shared-budget helpers in 1089 and 1090. Static whitespace and
+source-length gates pass. No compiler build or tests were run; runtime qualification remains
+pending. The goal boundary now also promotes any `complete = false` from metered readers to the
+shared exhausted state, including local shape/depth limits that do not themselves set that flag;
+this preserves the distinction between a completed negative proof search and an unfinished one.
+
+### 23.27.1096 Clarify kernel-only checked-view replay status
+
+The public `proof_checked_view_replay_complete` query reports completion of the kernel
+certificate batch; it does not establish source-obligation or attached-premise admission.
+Internal report-verdict paths add those gates, but the API lacked a local explanation of this
+distinction. Added a doc comment directing callers to the source-complete/source-admissible
+queries for report authority. Read-only audit found no acceptance bypass. `git diff --check` and
+the source-length gate pass; no tests, builds, or runtime qualification were run.
+
+### 23.27.1097 Share the source bounded-model goal budget
+
+The source bounded-model fallback had a separate evaluation allowance and did not debit the
+shared goal-search work budget. It now reserves the conservative repeated-scan estimate (including
+one setup pass) from that shared budget before enumerating assignments, and keeps a separate local
+assignment counter for its hard enumeration cap. Exhaustion prevents later goal tiers from
+continuing. `git diff --check` and the source-length gate pass. No build or tests were run.
+
+### 23.27.1098 Bound the public logical-join compatibility entry point
+
+`proof_logical_join_identity` was still public and used legacy recursive/fact-cross-product
+helpers, although internal goal search had moved to its shared-budget counterpart. The legacy
+helper family is now private, and the public compatibility function delegates to
+`proof_logical_join_identity_with_work` with the standard local work cap; goal search continues to
+pass its existing shared budget. This closes the unmetered public traversal while preserving the
+entry-point signature. `git diff --check` and the source-length gate pass; no tests or build were
+run, so compiler qualification remains pending.
+
+### 23.27.1099 Meter the scalar disequality goal shortcuts
+
+The source goal dispatcher now handles signed and unsigned disequality cases with one work-aware
+scalar-witness index, measured marker scale, and metered width, literal-fit, primitive-comparison,
+and exact-expression readers. These reads consume the goal's shared work counter and propagate
+incomplete work as exhaustion. The coarse frame reservation and calls into the pure rules were
+removed. Static whitespace and source-length checks pass; no build or tests were run.
+
+### 23.27.1100 Meter the unsigned reflexive-goal shortcut
+
+The source dispatcher handles unsigned reflexive identity with a work-aware scalar-witness index,
+metered primitive comparison, and a checked quadratic allowance for recursive definitional
+rewriting. The pure identity reader is no longer called from goal search. Incomplete marker,
+comparison, or equality work stops later tiers. Static whitespace and source-length checks pass;
+no build or tests were run.
+
+### 23.27.1101 Cache repeated alias endpoint sorts
+
+Conflict-aware alias collection used to rescan every premise to establish an endpoint's signed or
+unsigned width for every equality edge. The bounded producer and kernel paths now memoize that
+result by exact identifier name for the duration of one closure query; cache lookups and insertions
+consume the same caller work meter. The source producer also measures structural fact cost lazily
+once per closure and reserves that measured cost for each uncached marker scan, avoiding repeated
+AST cost walks. This removes repeated fact scans for names reused across alias edges while
+preserving the conflict-aware readers and their fail-closed behavior. Distinct endpoint names still
+incur one full marker scan each; a collision-safe per-name summary index remains a follow-up
+for dense, mostly-unique equalities. Legacy producer closure entry points now delegate to the same
+bounded implementation, and the duplicate unmetered component-closure implementation was removed.
+`git diff --check` and the source-length gate pass. No tests, builds, or runtime qualification were
+run.
+
+### 23.27.1102 Meter signed product-growth goal search
+
+The source goal dispatcher called the pure signed product-growth rule, which collects bounds and
+revisits the fact frame while deriving interval sign cases. A work-aware adapter measures the
+complete frame and reserves work proportional to frame size and premise count before invoking the
+existing rule. Incomplete sizing and reservation failure stop goal search. `git diff --check` and the
+source-length gate pass. No build or tests were run.
+
+### 23.27.1103 Meter bounded-model frame sizing
+
+The source bounded-model preflight previously traversed its capped fact/goal frame before charging
+that work to the shared goal budget. Its structural walk now charges each visited node and the
+identifier or member-name payloads as it reads them. A shared-budget failure marks search
+exhaustion; the independent frame-node cap still bounds supported model size. `git diff --check`
+and the source-length gate pass. No build or tests were run.
+
+### 23.27.1104 Debit bounded-model preflight during traversal
+
+The bounded-model frame counter now consumes the caller's shared work budget at each node, charging
+identifier and member-name lengths before reading them. This removes the previous fixed-size
+preflight overshoot; recursive depth and total-node caps remain independent fail-closed limits.
+`git diff --check` and the source-length gate pass. No build or tests were run.
+
+### 23.27.1121 Meter comparison complements and normalized cancellation
+
+Goal-depth's comparison-complement, cancellation, and antisymmetry shortcuts now use the shared
+source work counter. The complement reader meters pin lookup and exact operand comparisons. The
+cancellation reader reuses one work-aware scalar-witness snapshot for primitive checks and
+normal-form collection, then meters bounds, equality closure, difference constraints, and
+Floyd–Warshall closure. It preserves the certified-range bypass used after the arithmetic wrap
+guard. Antisymmetry stops before recursive subgoals when primitive checking is incomplete. The
+source forms retain the kernel's `+`/`-` normal-difference syntax. Static whitespace and
+source-length checks pass; no build or tests were run.
+
+### 23.27.1105 Stop goal search after incomplete pinned-comparison reads
+
+The unsigned pinned-comparison implementation already used work-aware readers, but bool-only
+wrappers could swallow `complete = false` and let later goal tiers continue. The direct wrapper,
+premise-scan wrapper, and public compatibility entry point now mark incomplete witness, scale,
+strip, and comparison reads as exhausted. Goal dispatch invokes the pinned tier separately and
+checks exhaustion before proceeding. `git diff --check` and the source-length gate pass. No build or
+tests were run.
+
+### 23.27.1106 Meter unsigned span-descent inference
+
+The source goal dispatcher called the pure span-descent shortcut, which searches order and equality
+facts and repeatedly compares nested expressions. A work-aware adapter now measures the complete
+frame and reserves work scaled by expression size and premise count before invoking that rule.
+Incomplete sizing and reservation failure stop goal search. `git diff --check` and the source-length
+gate pass. No build or tests were run.
+
+### 23.27.1107 Include compiler type-marker arguments in bounded-model sizing
+
+The bounded-model frame walker recognized canonical compiler type-marker calls without counting
+their marker argument trees. Those arguments are part of the marker parser's bounded work and can
+contain nested places. The walker now charges each argument node and identifier/member payload
+before validating the marker. This preserves the model's existing interpretation of canonical
+markers while including their parse cost and size in the frame cap. `git diff --check` and the
+source-length gate pass. No build or tests were run.
+
+### 23.27.1108 Apply the remaining closure budget during kernel marker scans
+
+The kernel alias-sort reader previously performed its per-endpoint marker walk under the global
+goal-search ceiling and charged the caller's smaller remaining closure allowance only after the
+walk. It now seeds the local counter from the remaining closure budget and debits the consumed
+amount back to that same meter. A low-budget query stops its marker scan at the closure boundary
+instead of doing a full local-ceiling scan first. Static whitespace and source-length checks pass;
+no tests, builds, or runtime qualification were run.
+
+### 23.27.1109 Let the source equality work meter govern alias reachability
+
+Producer-side `proof_names_equal_from_facts_with_work` capped equality candidates at 32 even though
+it already bounds fact count, AST depth, and total work. The collector now uses the existing shared
+work ceiling as its root limit, allowing larger witnessed alias chains when budget remains. It
+cannot exceed the caller's meter, and incomplete queries still return no alias. `git diff --check`
+and the source-length gate pass; no tests, builds, or runtime qualification were run.
+
+### 23.27.1110 Meter scalar disequality and unsigned reflexive goal shortcuts
+
+The shared-budget goal dispatcher had used fixed frame-size multipliers around scalar
+disequality and unsigned reflexive-identity rules. Those estimates did not account for the
+marker-count-by-term-size comparisons inside primitive witness checking. The rules now build one
+work-aware scalar witness index, measure marker scale, and use work-aware width, literal-fit,
+primitive-comparison, and exact-term-equality readers. Definitional identity rewriting reserves a
+checked quadratic bound separately. Signed and unsigned disequality-from-equality and distinct
+literal disjunction cases remain available; exhaustion is reported as incomplete work. The
+targeted static source guard checks these two shortcut helpers for the unmetered readers they
+replaced. The source-admission guard, `git diff --check`, and source-length gate pass. Runtime and
+semantic qualification remain pending the exact pinned compiler product.
+
+### 23.27.1111 Replace signed product-growth reservation with work-aware reads
+
+The signed product-growth path previously wrapped legacy interval and overflow-safety readers in a
+coarse frame-size estimate. It now uses work-aware factor equality, signed witness/width lookup,
+bound collection and equality closure, interval evaluation, and fixed-width safety checks directly.
+The span-descent reservation now squares measured frame cost to cover nested conjunct expansion and
+per-conjunct marker-index reconstruction. Static whitespace and source-length gates pass. No build
+or tests were run; compiler/runtime qualification remains pending.
+
+### 23.27.1112 Preserve signed product-growth bound admission
+
+Static parity review found the first work-aware signed product-growth implementation collected all
+recognized bounds, while the original rule intentionally filtered premise trees to those containing
+a direct identifier-versus-literal order bound. The work-aware path now meters that same narrow
+filter and feeds only selected premises to the marked collector. It also checks the left product
+candidate first, matching rule order and returning early on proof.
+`git diff --check` and the source-length gate pass. No build or tests were run.
+
+### 23.27.1113 Propagate incomplete signed-growth and span scans
+
+The signed product-growth and span-descent readers return completeness separately from proof
+success. Goal dispatch previously stopped on an incomplete result without setting the shared
+`exhausted` flag, allowing outer callers to treat a truncated search as a completed negative. Both
+boundaries now promote incomplete reads to exhaustion before returning. `git diff --check` and the
+source-length gate pass. No build or tests were run.
+
+### 23.27.1114 Meter unsigned nonzero-bound inference
+
+The goal-depth unsigned nonzero lower-bound rule previously rebuilt primitive scalar witnesses in
+its fact loop. It now builds one work-aware witness index, meters goal and candidate comparisons,
+constant reads, unsigned width lookup, and exact term matching, then reports incomplete work to the
+shared goal caller as exhaustion. The unreachable legacy unmetered helper was removed. Static
+whitespace and source-length gates pass. No build or tests were run; compiler and runtime
+qualification remain pending.
+
+### 23.27.1118 Index kernel declaration binding lookups
+
+Kernel replay now builds a collision-chained bucket index for type, field, and enum declaration
+bindings. Queries select the composite-key bucket, then charge and compare exact key fields while
+retaining the existing ambiguity and typing-evidence checks. Enum-tag owner checks reuse the same
+index. `git diff --check` and the source-length gate pass; no build or tests were run, so replay
+qualification remains pending.
+
+### 23.27.1115 Share a metered witness index across pinned-comparison scans
+
+Unsigned pinned-comparison inference used to rebuild primitive witnesses inside each fact row and
+then repeat those scans while checking pinned premises. The goal now routes both direct and
+premise-derived checks through one work-aware wrapper that shares the witness snapshot and meter;
+row traversal, scalar checks, exact equality, width reads, and fact reduction are charged. Exhaustion
+stops later goal tiers. `git diff --check` and the source-length gate pass. No build or tests were
+run; compiler and runtime qualification remain pending.
+
+### 23.27.1116 Meter scaled-child quotient shape inference
+
+The unsigned scaled-child quotient rule previously flattened facts and called the pure readable-order
+reader for every conjunct, rebuilding scalar witnesses during the scan. A metered companion now
+reuses the work-aware scaled-product witness, charges AST traversal, literal-sort checks, width and
+constant safety, and exact term comparisons, and checks completeness before the later goal tiers run.
+The unused pure rule was removed after confirming its only in-repository caller was goal-depth.
+`git diff --check` and the source-length gate pass. No builds or tests were run; compiler/runtime
+qualification remains pending.
+
+### 23.27.1117 Meter scaled-product upper-bound inference
+
+Goal-depth now uses a work-aware scaled-product upper-bound rule instead of calling the pure witness
+reader. It builds one metered witness index, reuses the work-aware quotient/product witness scan,
+and compares the exact bound under the same shared budget. Incomplete work stops later tiers. Static
+whitespace and source-length gates pass. No build or tests were run; compiler and runtime
+qualification remain pending.
+
+### 23.27.1119 Keep goal-fact root filtering constructor-partitioned
+
+The current `proof_goal_fact_index` prefilter uses fixed root-tag buckets, checking the matching tag
+and the wildcard bucket for unknown constructors. The exact-expression shape hash remains in the
+separate exact-match table and is measured once, after root and supported-form checks. This updates
+the earlier §23.27.1060 description of shape-hash root buckets. Root-name and operator payload
+comparisons are charged by the shared source-work meter. `git diff --check` and the source-length
+gate pass; no tests or builds were run.
+
+### 23.27.1120 Reuse indexed module context for enum path typing
+
+Qualified enum typing previously scanned all bindings to rediscover the module-context identity,
+then scanned them again to find that context's owner-path segment range. The validated owner-path
+index already stores both facts and verifies them during construction. The query now reads the
+indexed identity, range-checks it, and resolves the context by indexed owner identity, removing two
+full environment scans per qualified enum path while retaining fail-closed index and path checks.
+`git diff --check` and the source-length gate pass. No build or tests were run, so replay
+qualification remains pending.
+
+### 23.27.1121 Meter structural comparison-chain scans
+
+Comparison-chain reasoning now builds one metered scalar witness index and reuses it while scanning
+lower/upper candidates and equality hops. Fact rows, marker checks, order steps, and exact structural
+comparisons debit the shared goal meter; the existing 32-candidate order and strictness rules are
+preserved. Goal-depth treats incomplete work as exhaustion. Static whitespace and source-length
+gates pass. No builds or tests were run; compiler/runtime qualification remains pending.
+
+### 23.27.1122 Index enum-scope candidates by leaf name
+
+Qualified enum path typing now uses the declaration bucket index to visit only enum-scope path-start
+rows whose owner leaf hashes to the requested terminal path segment, then checks each candidate's
+complete contiguous path, identity, and current module context. Indexing starts only keeps path
+segments out of the candidate chain. The chain remains bounded by the shared kernel work meter and
+total indexed rows, so repeated legitimate enum leaf names do not hit the unrelated 64-entry probe
+cap. `git diff --check` and the source-length gate pass; no build or tests were run.
+
+### 23.27.1123 Meter Boolean comparison equation closure
+
+The linear goal's Boolean-equation shortcut used pure recursive logical-form, context-value, and
+primitive-comparison readers despite receiving the shared search budget. Its goal and fact
+parenthesis walks, witness checks, primitive comparisons, fact-row scans, and exact operand
+equalities now use work-aware helpers. The same 128-step logical-context fuel and comparison
+complement rules are retained, and marker construction is limited to relevant Boolean/comparison
+candidates. `git diff --check` and the source-length gate pass; no build or tests were run, so
+compiler/runtime and semantic qualification remain pending. The old pure helper definitions remain
+available for compatibility but have no in-repository goal-path callers.
+
+
+### 23.27.1124 Bound declaration-chain lookup by indexed rows
+
+Type, field, enum-member, enum-tag, and enum-underlying readers previously stopped after 64
+declaration rows even though their collision chains are bounded by the index size and shared type
+work. They now traverse up to the indexed row count, charging each row to the shared work meter;
+row-count exhaustion before the sentinel still rejects malformed cycles. This complements the
+enum-scope chain update in §23.27.1122. `git diff --check` and the source-length gate pass. No
+builds or tests were run.
+
+### 23.27.1125 Charge call and move scans in call-summary closure
+
+The goal-search call-summary adapter premeasured each consequence, then reserved only one extra
+expression-sized pass before running separate call and move scans with local counters. It now
+reserves for both scans from the shared goal budget. Incomplete work still stops later goal tiers.
+`git diff --check` and the source-length gate pass. No builds or tests were run.
+
+
+### 23.27.1126 Preserve strict-progress order witnesses
+
+Static parity review found the new work-metered unsigned strict-progress reader had computed but not
+required both scalar witnesses, and had only conditionally checked integer evidence for negated
+orders. It now matches the legacy order reader: both operands need scalar witnesses, and each operand
+of a negated order needs integer evidence before `not (a <= b)` can support `a > b`. The checks use
+the shared work meter. `git diff --check` and the source-length gate pass; no tests or builds were
+run.
+
+### 23.27.1127 Meter conditional-alias case elimination
+
+The unsigned conditional-alias goal shortcut accepted a shared budget but used raw goal/fact
+stripping, alias occurrence checks, scalar comparison, subtraction safety, width lookup, readable
+order witnesses, and operand equality. It now reuses one work-aware marker index, meters those
+readers, charges each fact row and branch-fact copy before allocation, and propagates incomplete
+reads as exhaustion. Strict and complemented order witnesses retain scalar and integer evidence
+requirements. `git diff --check` and the source-length gate pass; no builds or tests were run, so
+compiler/runtime and semantic qualification remain pending.
+
+### 23.27.1128 Index scoped type-path candidates
+
+Kernel type-path resolution now reuses the validated owner-path index for module context and the
+declaration bucket index for root types plus qualified and module-relative scoped type candidates.
+The declaration index stores only `type-scope-segment` path starts keyed by the terminal type name;
+candidate paths still undergo the existing contiguous-row, exact-segment, deepest-match, and
+ambiguity checks. Index-chain traversal is charged to the kernel work budget and bounded by indexed
+rows, and dynamic terminal-name bytes are charged before each key hash. Static whitespace and
+source-length gates pass. No build or tests were run, so replay qualification remains pending.
+
+### 23.27.1129 Meter sum-bound goal witnesses
+
+The comparison-goal sum-bound tier now builds one work-metered scalar marker snapshot and uses
+the work-aware witness search rather than rebuilding marker state while scanning facts. It retains
+the raw rule's first-orientation preference, strictness check, and exact bound match. Unsigned sums
+keep the same peer-width and literal-cap range checks; width-zero sums reuse the snapshot while
+running the general unsigned and signed safety checks. Incomplete scans stop later goal rules.
+`git diff --check` and the source-length gate pass; no build or tests were run, so compiler/runtime
+and semantic qualification remain pending.
+
+### 23.27.1130 Avoid revalidating indexed type-scope groups per query
+
+After typing-index construction validates every contiguous type-scope group against its canonical
+type row, each candidate query was repeating that full path validation before matching the requested
+path. Candidate lookup now checks the indexed start row and canonical declaration, then relies on
+the already-validated immutable environment for the group interior. Exact path matching and
+deepest-owner ambiguity handling remain in the query. `git diff --check` and the source-length gate
+pass; no build or tests were run, so replay qualification remains pending.
+
+### 23.27.1131 Keep replay alias sorting on the current metered API
+
+The replay alias collector retained a call site for an older four-argument name-sort helper,
+although the shared producer implementation had moved to an eight-argument API. Added a metered
+uncached sort computation that shares the producer's conflict-aware marker scan and one-time fact
+sizing without repeating the producer cache's linear lookup inside replay's hash-indexed cache.
+Replay keeps its hash arrays aligned with sort values and canonicalizes parenthesized equality
+endpoints to their bare identifier before sort lookup. Graph-edge endpoints now reuse the same
+collision-checked hash table to assign vertex indices in first-seen order, replacing two linear
+name-array searches per edge. The shared sort and vertex-index helpers live in
+`name_equality_indexes.elisa` to keep source files below the 600-line limit. Static whitespace and
+source-length gates pass; no build or tests were run.
+
+### 23.27.1132 Remove the unused unmetered linear row reader
+
+The certificate search no longer calls the legacy `proof_linear_row` reader; its active path uses
+`proof_linear_search_row`, which meters constraint parsing, atom matching, and row alignment. The
+dead reader duplicated that logic with unmetered name scans, so it was removed to keep the search
+surface centered on the budget-aware implementation. `git diff --check` and the source-length gate
+pass. No builds or tests were run.
+
+### 23.27.1134 Reserve both index-safety fact name scans
+
+Block-local declaration shadowing used `proof_index_safety_preflight_expr_work` with one pass,
+which charged the preflight cost walk but not the following `proof_expr_mentions_name` traversal.
+It now reserves two expression-sized passes before the legacy predicate runs; exhausted work
+clears the carried facts and reports the existing fail-closed budget finding. `git diff --check`
+and the source-length gate pass. No builds or tests were run.
+
+### 23.27.1133 Preserve parenthesized name equalities in the producer
+
+Replay already recognizes equality endpoints wrapped in parentheses and sorts their canonical bare
+identifiers. The producer's work-metered alias collector previously used bare-only identifier
+extraction, dropping those same witnessed equalities. It now strips endpoint parentheses under the
+shared work budget before extracting names and checking sort evidence, matching replay's treatment.
+No builds or tests were run.
+
+### 23.27.1134 Reserve fact scans for strict-progress integer evidence
+
+The work-metered strict-progress adapter passed a zero aggregate fact cost to integer-evidence
+helpers for negated orders. Those helpers scan marker rows and compare nested terms across the full
+fact context, so row counts alone did not reserve their source-sized work. The adapter now lazily
+measures fact AST costs once under the shared budget and reuses that bounded aggregate for both
+operands. Incomplete measurement stops the shortcut. No builds or tests were run.
+
+### 23.27.1135 Meter product-sign and strict-shift goal rules
+
+The product-sign shortcut now builds one signed-aware scalar marker index, meters its direct fact
+scans and structural comparisons, and retains the existing mirrored sign cases and top-level fact
+shape. The strict-shift shortcut now uses the shared goal budget for its unit-increment shape,
+signed/unsigned range context, order parsing, and exact endpoint matches rather than rebuilding
+scalar markers for each fact. Both callers stop on incomplete work. Static whitespace and
+source-length gates pass; no build or tests were run, so compiler/runtime and semantic
+qualification remain pending.
+
+### 23.27.1136 Verify the Stage1-bootstrap fallback against the current compiler pin
+
+The clean pinned Stage0 `093ec96e` attempt to seed compiler `c93a7774` exited nonzero without a
+product. I verified the installed Stage1 `d3909e55` snapshot against its own provenance, then used
+the compiler's supported Stage1-bootstrap path with its recorded runtime object. That attempt
+emitted about 95,000 parser/type diagnostics against the c93 compiler sources and exited nonzero;
+no Stage1 product was published. The available Stage1 v1 snapshots also lack the recursive
+Stage0-bound provenance chain required by proof qualification. No proof source or installed
+compiler product was changed. Runtime qualification remains blocked until a newer bootstrap can
+parse the pinned compiler sources and produce a v5 Stage1 artifact whose seed chain validates to
+the exact Stage0 pin.
+
+An expanded local artifact sweep found a parser-combined Stage1 snapshot at compiler revision
+`62bc92d7`, alongside the previously inspected `4bff8824` and `7080f92f` snapshots. The
+parser-combined product hash matches its manifest, but its schema is
+`elisa-stage1-selfhost-provenance-v1`; the other handoff artifacts also use provenance v1. None
+establishes the required recursive Stage0 chain. At the time of that sweep, the exact compiler
+checkout was clean at `c93a7774`. A current read-only check finds it dirty at
+`src/backend/codegen_literals_decode.elisa` (2 insertions and 5 deletions, including trailing
+whitespace). Its ignored `bin/elisac-stage1` records revision `f7b6c4a` with provenance v1, so the
+compiler-checkout wrapper cannot treat that binary as a qualified c93 product. A separate
+`go build -o bin/elisac ./src` process in `Elisa-core-wt-selfhost-misc` terminated and produced a
+binary, but that checkout is at `70524f89`, has a modified
+`src/semantic/analyzer_for_range_var_invariants.go`, and has no provenance manifest beside the
+binary. It is not a qualification artifact. No candidate compiler or proof binary was installed
+or substituted.
+
+### 23.27.1137 Meter comprehension capture scans in result substitution
+
+Type-bound result substitution reused the returned AST at each `result` leaf but performed unmetered
+comprehension capture scans and record-field lookup loops. A work-aware copier now charges recursive
+nodes, collection rows, identifier and field-name comparisons, each constructor/record-update field
+lookup, and each comprehension capture scan as it runs. The type-bound caller reserves its four
+separate source-shape walks and shares the remaining local work counter with the copier. The helper
+lives in a separate module to keep the availability file below its source-length ceiling. Both
+`git diff --check` and the whole-tree source-length gate now pass after the concurrent linear files
+were split. No build or tests were run, so compiler and semantic qualification remain pending.
+
+### 23.27.1138 Meter unsigned nonnegative goal checks
+
+The comparison fallback previously recomputed unsigned width and place-marker scans while
+recursing through arithmetic terms. It now uses one work-metered unsigned marker snapshot and
+metered width/place lookups, preserving the original zero/operator selection and arithmetic
+shapes. Incomplete work stops before later comparison rules. `git diff --check` and the
+source-length gate pass; no build or tests were run, so compiler/runtime and semantic qualification
+remain pending.
+
+### 23.27.1139 Share alias connectivity with affine bound closure
+
+Affine comparison previously built the equality graph once to check whether its base names
+were aliases, then rebuilt it to propagate bounds. The closure pass now answers the name
+connectivity query while it traverses components and applies bound closure, so this path builds
+the graph once. The terminal-value inventory also treats `Absent` tails and returns as
+unsupported. Pattern binders are collected after a charged pattern-cost reservation for both
+postcondition scans; source-expression traversal itself is charged node by node. Static
+whitespace and source-length gates pass. No build or tests were run, so compiler/runtime and
+semantic qualification remain pending.
+
+### 23.27.1140 Bound value-threading dependency scans
+
+The value-thread rewrite checked every threaded parameter against each recursive subtree, then
+performed parameter matching and rewriting without a shared cost bound. It now charges expression
+cost before those scans against one budget carried by the threading plan and subsequent contract
+rewrites. Argument validation, local-name and duplicate checks, substitution name lookup, parameter
+confinement, unsigned-marker lookup, and reachable-callee effect/call-graph scans use that same
+budget. Planning must leave half the budget for application, so an exhausted optimization declines
+to the existing opaque call path before activating partial threaded state. `git diff --check` and
+the source-length gate pass. No builds or tests were run.
+
+### 23.27.1141 Fix pruning fact-cost projection
+
+Static review found the work-metered pruning helper checked an unbound `cost` name after measuring
+each fact expression into `measured`. The limit check now uses `measured.cost`, preserving the
+aggregate overflow guard. No builds or tests were run.
+
+### 23.27.1142 Recheck public verdict authority and unsigned goal parity
+
+Read-only review traced the public output and CLI verdict routes through `ProofCheckedView`.
+Aggregate acceptance requires source admission; per-goal acceptance combines receipt replay,
+goal-source admission, and attached-fact admission. Serializer access to mutable producer claims
+is diagnostic and is not used as a verdict. I found no public admission bypass in the reviewed
+routes. A separate parity review of the metered unsigned-nonnegative goal helper found the same
+accepted comparator shapes, strict-comparison refusal, arithmetic whitelist, depth cap, and
+zero-neutral/minimum-positive witness merge as the legacy helpers. Budget/index failure can
+reduce completeness but does not strengthen the inferred fact. These are source reviews only;
+the current compiler provenance mismatch still prevents runtime qualification.
+
+### 23.27.1143 Audit structural replay and metered linear rule parity
+
+Independent read-only passes found no source-correspondence fail-open in structural-safety replay:
+it binds unique source owner/callee identities, a unique direct callsite and graph edge, recursive
+component membership, and the complete source-generated certificate set. Ambiguous identities,
+imports, unsupported/scoped dispatch, unresolved reachable calls, unsafe extern paths, and
+incomplete work fail closed. Separate semantic reviews of strict progress, comparison negation,
+comparison chains, pruning, and product-sign/unsigned-nonnegative paths found no stronger rule
+than the legacy conditions; incomplete metered work declines the optimization. This evidence is
+source-only and does not qualify compilation or execution under the pinned toolchain.
+
+### 23.27.1144 Debit alias-component bound merge scans
+
+Review of the combined alias connectivity and bound-closure pass found that its two component
+member loops could traverse members without a debit when no bound rows existed. Both loops now
+charge each member before processing it. Bound updates remain staged until successful completion.
+The typed signed-constant readers were split from the fixed-width arithmetic module to restore
+the 600-line source ceiling, and two redundant comments were shortened in the large goal-depth
+module. `git diff --check` and the source-length gate pass. No builds or tests were run; runtime
+qualification remains pending the matched compiler.
+
+### 23.27.1145 Meter unsigned span cursor order scans
+
+The fallback `proof_unsigned_span_cursor_bound` repeatedly rescanned all facts for identifier
+widths and order evidence for each candidate span row. Replaced it with a shared-budget reader
+that builds one scalar/unsigned marker snapshot, flattens conjunctions once, caches readable
+orders, and meters exact order and goal comparisons. The sibling unsigned subtraction upper
+shape now uses the same cached marker/order data. The nonnegative shortcut at this dispatch
+point uses its metered reader, and a complete miss falls through to later proof rules; incomplete
+work sets exhaustion and stops. The whitespace and 600-line source gates pass; no build or tests
+were run, so compiler/runtime and semantic qualification remain pending.
+
+### 23.27.1146 Charge cached unsigned order rows
+
+Review found that the span-cursor reader charged parsing and comparison work but not the three
+parallel-array appends for each cached order. It now debits those row writes before appending.
+An independent producer/kernel review found matching `<=`/`>=` orientation, width checks,
+premise shapes, and fail-closed exhaustion; deep conjunctions can still lose completeness at the
+structural cap. `git diff --check` and the source-length gate pass. No builds or tests were run.
+
+### 23.27.1147 Meter exact integer-marker comparisons in negated order checks
+
+Negated-order classification reserved aggregate fact AST walks but still called legacy width
+readers that compared marker terms repeatedly without debiting each exact equality. The producer
+now uses the work-aware unsigned-name, place, and signed-term marker indexes for width checks;
+exact primitive-integer marker comparisons use the byte-aware five-pass equality debit. Callers
+that need signed widths build signed marker indexes before classification. `git diff --check` and
+the 600-line source gate pass. No build or tests were run, so compiler/runtime and semantic
+qualification remain pending.
+
+### 23.27.1148 Validate producer generic-index rows before dereference
+
+The source-conversion generic-name lookup checked the generic table dimensions and index
+capacity, but a corrupted row value could still pass the sentinel check and be dereferenced
+after a hash match. It now declines if the row is outside either recorded line/name array,
+matching the replay lookup's defensive bounds checks. This preserves declaration-line scoping
+while failing closed on malformed index state. No builds or tests were run.
+
+### 23.27.1149 Include fact-row overhead in cached order-scan budgets
+
+The unsigned span-cursor reader's repeated-scan reservation counted each fact's AST cost but omitted
+the per-row traversal overhead. It now debits that overhead in the shared work counter and includes
+it in the overflow-safe reservation total, matching the strict-progress reader. This only affects
+bounded completeness; it does not change accepted proof shapes. No builds or tests were run.
+
+### 23.27.1150 Charge replay equality width scans within the shared budget
+
+Name-equality graph construction used a separate 65,536-unit marker/sort counter and merged it
+into the 1,048,576-unit replay counter only after graph collection. A failing search could thus
+exceed the combined cap. Each marker build and sort miss now gets a chunk limited by both the
+remaining local ceiling and replay budget, then immediately debits its actual work to the replay
+counter. The cache still reuses its measured fact cost. Static whitespace and source-length
+gates pass; no builds or tests were run.
+
+### 23.27.1154 Search field and index receivers for conditional aliases
+
+Conditional-alias relevance checking previously descended through unary, binary, and `if`
+expressions only. It now also visits field receivers, one-dimensional index operands, and every
+multi-index operand, so an alias used inside those scalar terms does not make the case-split
+optimization silently decline. The existing caller reserves work from expression cost and
+alias-name length before this scan. Static whitespace and source-length gates pass; no build or
+tests were run.
+
+### 23.27.1151 Reconcile the goal-depth metering follow-up note
+
+The earlier follow-up note below §23.27.1087 said that the propositional-inconsistency and
+order-complementarity scans immediately before pruning still needed work-aware handling. The
+current `proof_goal_depth` dispatch calls `proof_linear_facts_propositionally_inconsistent_with_work`
+and, under case splitting, `proof_linear_facts_order_complementary_with_work`; both share the
+goal budget and propagate exhaustion before later proof rules. This closes that specific outer
+goal-depth gap. It is source evidence only; compilation and runtime qualification remain pending
+the provenance-matched compiler.
+
+### 23.27.1152 Fold small safe constants in one pass
+
+The small-nonnegative constant readers recursively validated each arithmetic child, then refolded
+the full expression at every binary node. Replaced those subtree folds with the same safe binary
+operator evaluator applied to the already-known child values. This preserves the child range,
+shift, overflow, and final-result checks while reducing skewed expression evaluation from
+quadratic to linear visits. Both pure and work-metered readers now share the operation semantics.
+Whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1153 Centralize replay equality width-chunk limits
+
+The replay graph's local width meter now obtains a chunk start from one helper that checks both
+counter ranges and limits each chunk to the minimum of local-width and shared-replay capacity.
+Marker construction and sort-cache misses use the same helper, then debit actual chunk work to the
+shared counter. This avoids duplicated allowance arithmetic and keeps both paths under the same
+combined cap. Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1155 Reuse conditional-alias occurrence cost
+
+Conditional-alias transport searched the same goal once per candidate alias and recalculated
+the goal's structural cost for every search. It now measures the goal once before scanning
+candidate facts, then charges each occurrence walk using that cached cost and the candidate
+name length. This removes one full cost traversal per candidate while retaining the prior
+per-search work bound. Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1156 Confirm bounded resource callee lookup and marker uncertainty handling
+
+The opaque-call result walk delegates callee resolution to `proof_function_index_for_callee`,
+which uses the bounded resolver and its shared module-resolution work counter; exhaustion marks
+the lookup unavailable, so this path does not add an unmetered linear function-table scan. Generic
+marker checks use the prebuilt source-effect-index name tables. The marker helper's incomplete
+results distinguish semantic uncertainty from exhausted work; reviewed resource transitions check
+completeness or keep the conservative unknown flags. `git diff --check` and the whole-tree source
+length gate pass. This was a source audit only; no build or tests were run.
+
+### 23.27.1157 Reuse goal-only cost from the shared frame scan
+
+The conditional-alias path also invoked a separate goal-cost walk after the frame-cost helper
+had already measured that same goal. The helper now returns both the goal-only cost and the
+combined goal/fact cost; conditional-alias scan reservations reuse the former, while disequality
+continues using the latter. This removes the duplicate goal traversal without making alias-scan
+reservations depend on unrelated fact sizes. Static whitespace and source-length gates pass; no
+build or tests were run.
+
+### 23.27.1162 Meter float-mode direct fact containment
+
+The ordinary goal API's float-mode shortcut called recursive fact containment before the
+metered Boolean solver, bypassing the supplied goal-search counter. It now uses the existing
+work-aware conjunct/double-negation containment reader, debiting structural comparisons as they
+run and marking incomplete work exhausted before fallback. Boolean fallback uses its shared-work
+entry point. Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1158 Capture shared costs in conditional-alias range loops
+
+The optimized alias-occurrence reservation reads the frame's cached goal cost inside the
+candidate loop, and the nested order scan reads the marker snapshot and frame cost. Both range
+loop capture lists now include those values and the shared meter state. Static whitespace and
+source-length gates pass; no build or tests were run.
+
+### 23.27.1158 Meter monotone-order unsigned width inference
+
+`proof_monotone_order_goal` used the raw unsigned-width reader for its `smaller` term. That
+reader could rescan every fact for each symbolic leaf without charging the shared goal budget.
+The helper now builds the metered scalar-witness snapshot, reads the width from that snapshot,
+and propagates incomplete/exhausted work. The dispatcher stops immediately if the monotone check
+exhausts its budget, before attempting conditional-alias reasoning. `git diff --check` and the
+whole-tree source-length gate pass. No build or tests were run.
+
+### 23.27.1159 Charge function return types in control-source declaration scans
+
+Control-source declaration preflight counted parameter type trees but omitted each function's
+return type. Runtime-fact purity checks compare that return type against builtin scalar spellings,
+so an unusually large identifier could consume comparison time outside the shared source budget.
+The declaration scan now charges every return type with its bounded expression-cost reader before
+the scalar classification can run. This keeps malformed or oversized source work fail-closed.
+
+### 23.27.1160 Include pattern-cost preflight in Match admission work
+
+The postcondition Match admission path measured recursive pattern cost before reserving work for
+closed-pattern validation and binder collection, but the cost reader did not debit the shared
+meter itself. The reservation now charges three measured passes, with checked multiplication,
+covering the preflight and both later traversals. Emitted-name comparisons remain charged by the
+visibility helper. Static whitespace and source-length gates pass; no tests or builds were run.
+
+### 23.27.1161 Meter monotone-order shape readers
+
+The monotone-order shortcut still used raw parenthesis stripping and constant folding after
+starting its shared-budget check. Its goal, sum, weakening, quotient, and scaled-dividend shape
+readers now use work-aware stripping and constant readers, and propagate exhaustion. This bounds
+the remaining syntax-directed scans in that rule. `git diff --check` passes; no tests or builds
+were run.
+
+### 23.27.1162 Debit postcondition Match arm rows
+
+The postcondition visibility scan charged the pattern cost walk, closed-pattern validation, and
+binder collection for each Match arm, but did not debit the outer arm-list traversal itself. It
+now charges one unit before inspecting each arm, so a wide Match cannot spend unaccounted work on
+the row walk. Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1163 Preserve exact unsigned markers and charge scaled-quotient rows
+
+The indexed unsigned-width snapshot now retains every valid exact-term marker, including markers
+for call results, while the separate place parser still requires a root binding. This preserves
+integer classification of witnessed unsigned calls without broadening place retention. Signed
+marker snapshots are enabled at the complementary-order, strict-progress, and cast-bound callers
+that pass into integer classification. The scaled-quotient fact reservation now includes one
+unit per row with a checked limit. `git diff --check` and the source-length gate pass. No tests or
+builds were run.
+
+### 23.27.1164 Require a positive divisor for monotone quotient replay
+
+The quotient monotonicity rule required a positive divisor for non-strict goals but accepted the
+strict rewrite without that premise. The producer and kernel now both require `0 < divisor` after
+proving the reduced multiplication bound. This keeps their rule conditions aligned and avoids
+depending on division-by-zero behavior. `git diff --check` passes; no tests or builds were run.
+
+### 23.27.1165 Share metered witnesses in conditional-comparison refutation
+
+The named-condition shortcut inside conditional comparison used a private recursion counter that
+ignored the caller's shared budget, then rebuilt scalar witnesses inside per-fact scans. It now
+builds one metered scalar-witness snapshot for both truth assignments, charges condition visits,
+fact sizing/scans, primitive comparisons, and structural equality checks to the shared budget, and
+returns an explicit incomplete result on exhaustion. The outer conditional comparison now meters
+its own primitive-comparison precheck and fails closed when any nested search exhausts. Static
+whitespace and source-length gates pass; build/test qualification remains with the serialized
+compiler gate.
+
+### 23.27.1166 Meter ordinary literal-width prechecks
+
+The non-shared goal API invoked `proof_state_literals_fit` before search without charging its
+local goal budget. It now measures goal, fact, and annotation costs first; charges the recursive
+literal-width probe; and reserves the cubic legacy marker/literal traversal only when the probe
+finds integer-width work, including supported constant collection counts. Both ordinary and
+shared-work callers skip the validator when no closed integer constant can be width-sensitive;
+shared callers reuse their existing preflight and do not pay a second reservation. Incomplete or
+oversized work declines before arithmetic search. Static whitespace and source-length gates pass;
+no build or tests were run.
+
+### 23.27.1167 Reuse monotone-order unsigned safety context
+
+The monotone-order producer built scalar witnesses to check the smaller operand's unsigned
+width, then rebuilt safety markers and bounds for the same fact list. It now builds the complete
+metered safety context once and shares its marker snapshot across width inference and expression
+safety validation. This removes duplicate fact scans while keeping both checks on the same shared
+work budget. `git diff --check` passes; no build or tests were run.
+
+### 23.27.1168 Reuse kernel unsigned widths in conditional refutation
+
+The kernel replay's named-condition refuter already retained parsed witness markers, but its order
+branch still called the fact-scanning peer-width reader twice. The unsigned marker cache now keeps
+the validated marker width alongside each name, and the refuter resolves both identifier widths
+from that cache with charged name comparisons. Minimum-width selection matches the previous reader.
+Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1179 Guard metered signed-literal comparison dispatch
+
+Extended the source-budget regression guard to require charged recursive literal parsing and
+work-aware parenthesis stripping, and to reject a return to the legacy unmetered comparison call
+in goal dispatch. Updated the same guard to expect signed markers in the active legacy-shape
+adapter, matching the live implementation. The targeted guard passes; no compiler or runtime test
+was run.
+
+### 23.27.1169 Meter and share goal parenthesis stripping
+
+The shared-budget goal search repeatedly used the legacy recursive parenthesis stripper across
+its disjunction, comparison, call, boolean-literal, and disequality dispatches. It now strips the
+goal once with the work-aware reader, fails closed on incomplete work or exhaustion, and shares
+the resulting expression across those dispatches. This avoids repeated syntax walks while
+charging the traversal to the caller's budget. `git diff --check` passes; no build or tests were run.
+
+### 23.27.1170 Replace removed fact-term scan helper at cast checking
+
+The builtin-index cast path still called the removed `proof_linear_safety_fact_term_scan_with_work`
+helper, leaving an unresolved reference after the scan API was consolidated. It now uses the
+aggregate fact-scan reservation, with expression cost plus one row unit per fact and checked
+limit arithmetic. Its separate receiver-to-fact comparison reservation remains in place.
+`git diff --check` and the source-length gate pass; no build or tests were run.
+
+### 23.27.1171 Index goal-fact root compatibility keys
+
+The bounded fact index previously narrowed trace candidates only by root tag, then could compare
+each same-tag fact for every trace before full shape hashing. The root prefilter now indexes
+Binary and Unary operators, Ident names, and IntLit values; other known constructors retain
+tag-only matching, and an unknown/depth-truncated root remains a wildcard. Root-key hash-table
+collisions still pass through `proof_trace_root_may_equal`, so hashes only prune work. The
+unknown-fact wildcard list advances monotonically as facts find their earliest trace, avoiding a
+repeated scan of already-matched wildcard facts. New allocation, root-key hashing, slot probes,
+collision-chain visits, and exact identifier-byte comparisons all debit the existing shared
+support-work meter. Full expression hashing/equality and source-order trace streaming remain
+unchanged, preserving earliest-match behavior. Static source review only; no build or tests were
+run.
+
+### 23.27.1172 Reuse kernel witness markers for monotone-order widths
+
+Kernel monotone-order width inference rescanned the complete fact list for each identifier in
+the smaller expression. It now builds the existing bounded witness-marker cache once and uses
+the cached widths during recursive expression-width inference. Place and element width lookups
+retain their existing readers. This avoids repeated fact parsing for compound terms while sharing
+the goal-search work meter. `git diff --check` passes; no build or tests were run.
+
+### 23.27.1173 Fail closed at literal-width probe depth cutoff
+
+The probe used to decide whether literal-width validation could be skipped returned “not
+required” at its recursion limit. The validator itself rejects at that depth, so a nested term
+could bypass that refusal and reach goal search. The probe now treats its cutoff as requiring
+validation, preserving fail-closed depth behavior and reserving the bounded validator work.
+Static whitespace and source-length gates pass; no builds or tests were run.
+
+### 23.27.1174 Split kernel type-environment admission to restore the source ceiling
+
+The concurrent declaration-index changes brought `type_environment.elisa` to 603 lines, above
+the whole-tree 600-line source cap. Moved the complete environment-validity entry point into the
+existing admission module without changing its checks or callers. `type_environment.elisa` is
+now 586 lines, and `git diff --check` plus the source-length gate pass. No build or tests were run.
+
+### 23.27.1175 Meter closed signed-literal comparison evaluation
+
+The goal search evaluated signed literal comparisons with recursive legacy readers after its
+budgeted AST strip. It now parses the optional negation and each signed literal through
+work-charged readers, and stops the search when the shared budget is exhausted. The dispatch
+reuses the already stripped goal expression to avoid another parenthesis walk. `git diff --check`
+passes; no build or tests were run.
+
+### 23.27.1176 Remove dormant float-integer goal path
+
+`proof_float_integer_goal` and its two helpers had no call sites and retained an older path with
+an independent local budget. Removed the dead private branch; active float-mode reasoning uses
+the metered containment check and shared-work propositional solver. Static whitespace and
+source-length gates pass; no build or tests were run.
+
+### 23.27.1177 Share kernel width cache across conditional alias checks
+
+Conditional-alias replay now reuses its validated unsigned-marker snapshot for the alias width,
+conditional expression width, and subtraction safety operands. Identifier widths therefore avoid
+repeated full-fact scans across candidate aliases. Field and element width readers remain metered
+fallbacks because the snapshot currently indexes name widths only. Static whitespace and
+source-length gates pass; no build or tests were run.
+
+### 23.27.1178 Recognize parenthesized disjunctions in kernel pruning
+
+Source pruning strips parentheses before classifying a fact as a disjunction. Kernel dispatch now
+peels validated parenthesis nodes with work charges before checking for `or`; hitting the source
+analysis depth cap marks the kernel search exhausted, preserving the source-side refusal boundary.
+This makes kernel pruning select the same parenthesized alternatives as the source pruner.
+Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1180 Reuse conditional witness markers while scanning order facts
+
+The two kernel conditional-plan order scans repeatedly called the readable-order reader, which
+reconstructed a witness-marker cache for each fact even after the plans had filled one shared
+snapshot. Direct binary order facts now check scalar operands against the existing snapshot;
+negated order facts retain the previous reader and its integer checks. `git diff --check` and the
+source-length gate pass. No compiler build or tests were run.
+
+### 23.27.1181 Meter direct literal-comparison dispatch
+
+Direct integer/string literal comparison still used a legacy recursive parenthesis stripper;
+string equality also compared attacker-controlled text without debiting the shared meter. The
+goal path now uses a work-aware direct-literal reader, charges both string lengths before byte
+equality, and stops if the meter is exhausted. The source-budget regression guard checks the new
+dispatch and its byte charges. Removed both unused unmetered literal-comparison wrappers so
+future dispatch code cannot accidentally restore those recursive paths. The targeted guard and
+`git diff --check` pass; no compiler or runtime test was run.
+
+### 23.27.1182 Remove a dormant context-free widening dispatch
+
+The unsigned-widening comparison helper had been made fail-closed because it lacked resolved cast
+identity, but the main goal search still invoked it on every goal. It always returned unknown and
+had no other callers. Removed that no-op dispatch and helper; the separate bounded-u8 return
+analysis remains live. `rg` confirms no remaining widening-comparison references, and
+`git diff --check` passes. No build or tests were run.
+
+### 23.27.1183 Meter goal fact-disjunction pruning
+
+Goal search previously stripped fact parentheses recursively outside its shared work counter when
+building the plain-facts attempt. The classifier now uses the bounded work-aware parenthesis
+reader and fails closed on an incomplete walk. Ordinary, shared-work, and cached report goal paths
+all use this classifier. `git diff --check` and the source-length gate pass; no build or tests were
+run.
+
+### 23.27.1184 Share budgets across cached goal attempts
+
+The report-cache wrapper previously restarted solver and tactic-preflight work for its plain-facts
+attempt and full-facts fallback. It now uses the shared-work cache API and carries both counters
+across the attempts, stopping before fallback when either cap is exhausted. `git diff --check` and
+the source-length gate pass; no build or tests were run.
+
+### 23.27.1185 Bind deterministic declaration-index cache and depth to source identity
+
+The shared deterministic declaration index is now rebuilt when either the report object or its
+source-file identity changes, preventing public cache-reuse APIs from consulting rows derived from
+another report. Its module-scope traversal now uses the existing global-constant depth ceiling
+(127); the shared source-work budget still bounds construction. The postcondition Match-pattern
+reservation was reviewed: its measured cost plus two reserved pattern passes covers the cost walk,
+closed-pattern validation, and binder extraction, so no additional repeated whole-expression
+charge is needed there. `git diff --check` passes. The source-length gate still flags the
+concurrently edited `src/proof/linear/congruence_goal_depth.elisa` at 606 lines; the changed replay
+file is at the 600-line limit. No build or tests were run.
+
+### 23.27.1186 Preserve representable bounds through unary interval negation
+
+The source reader retains each endpoint of `-x` independently when the other endpoint overflows
+at `I64_MIN`; the kernel reader previously dropped the whole interval. Kernel negation now mirrors
+the source flags and computes only representable endpoints, restoring equality-bound transport for
+one-sided intervals. The source-length gate and `git diff --check` pass. No build or tests were run.
+
+### 23.27.1187 Meter conditional operand inspection
+
+Conditional elimination used a recursive parenthesis check outside the goal work meter, and its
+branch matcher did not unwrap parenthesized conditional operands. Replaced the check with a bounded
+stripped view, used that view to select branches, and reused it for split-limit detection. Removed
+the now-unused unmetered predicate. Static whitespace and source-length gates pass; no build or
+tests were run.
+
+### 23.27.1188 Avoid redundant literal-goal parenthesis walks
+
+The linear goal dispatcher passed its already stripped expression to both closed-literal comparison
+helpers, which each stripped it again and charged the same root traversal a second time. The helpers
+now match that expression directly while retaining their charged operand and negated-inner walks.
+`git diff --check` and the source-length gate pass; no build or tests were run.
+
+### 23.27.1189 Mirror conditional operand unwrapping in kernel replay
+
+Source conditional comparison now accepts parenthesized `if` operands, so replay must recognize the
+same shape. The kernel comparison plan now strips each operand's parentheses with depth and work
+checks, uses the stripped roots for conditional and null recognition, and retains the original
+nonconditional operand when constructing branch goals. Static whitespace and source-length gates
+pass; no build or tests were run.
+
+### 23.27.1190 Include report pruning in shared tactic work
+
+The cached report path used a bounded local counter for disjunction pruning, then started the
+shared tactic-preflight counter at zero. It now debits the pruning traversal to that counter before
+either cached goal attempt, so both proof attempts and their prepass share the same cap. Static
+whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1186 Scope every deterministic replay cache to its source report
+
+The cache audit found report-derived alias indexes, alias/import support results, analysis context,
+and cast-site rows sharing the public deterministic replay cache without report/source identity
+checks. Each now rebuilds or clears its state when either identity changes. The cache entrypoints
+were moved into focused companion files to keep individual Elisa source files under the 600-line
+gate. The declaration-index depth expansion was independently reviewed: it matches the existing
+source constant traversal limit, though it also allows the shared collector to index rows at those
+deeper levels. `git diff --check` and `python3 scripts/check_source_length.py` pass. No build or tests
+were run.
+
+### 23.27.1191 Remove the unused goal-cache mask wrapper
+
+The private `proof_goal_reported` wrapper had no call sites and independently rebuilt the operator
+mask before forwarding to the shared-work cache path. Removed it so callers use the API that accepts
+the already-derived mask and preserves aggregate accounting. Static whitespace and source-length
+gates pass; no build or tests were run.
+
+### 23.27.1193 Keep cached proof fallback when pruning is incomplete
+
+The report-cache wrapper previously returned no proof when optional plain-facts classification hit
+its local depth/work bound. It now charges the work already spent, skips that optimization, and
+tries the full fact set with shared counters. Static whitespace and source-length gates pass; no
+build or tests were run.
+
+### 23.27.1192 Reuse readable-order markers in sum-bound scans
+
+Repeated sum-witness scans reconstructed scalar markers for each candidate order fact. Added a
+shared readable-order reader that reuses one metered marker snapshot across direct binary order
+rows, and carry that snapshot across both forward and reverse sum-bound scans. Unary negated order
+rows retain their scalar and integer witness checks while reusing the cache. Static whitespace and
+source-length gates pass; no build or tests were run.
+
+### 23.27.1194 Support block expressions in metered type-bound substitution
+
+The metered `result` substitution did not handle blocks, so source ensures with local declarations
+could be skipped after substitution returned `Invalid`. Added block-local result substitution with
+the prior sequential shadowing and capture refusal rules; declaration rows, name checks, capture
+scans, and recursive initializer/value substitution use the shared source-work meter. Unsupported
+statements remain unprovable. Static whitespace and source-length gates pass; no build or tests were
+run.
+
+### 23.27.1195 Meter return conversion classification and bounded receiver checks
+
+Return-site conversion classification now meters recursive expression and receiver scans, and the
+bounded `u8` receiver proof uses the work-aware scalar, bounds, safety, and interval readers. Its
+work is charged to the per-function return-source budget; exhaustion fails the return closed. The
+targeted source-admission budget guard, whitespace check, and source-length gate pass. Compiler
+qualification remains unavailable because the installed compiler artifacts do not match the
+current source revision.
+
+### 23.27.1196 Bound typed enum lookup to indexed rows in scoped environments
+
+Scoped typing environments append validated value overlays while reusing their parent declaration
+index. Typed enum-member lookup now derives the indexed base-row count by subtracting the overlay
+count, validates that count, and uses it for chain sentinels and traversal bounds. This restores
+valid enum-member lookups in scoped propositions while excluding overlay rows from declaration
+chains. Added a direct kernel fixture with the same `Some` name in `Option` and `Other`, including
+successful lookup through a quantifier-created value overlay. Its source guard, focused static
+checks, `git diff --check`, and source-length gate pass; no Elisa build or runtime test was run.
+
+### 23.27.1199 Include owner and consumer offsets in cast-site cache identity
+
+An audit found that widening-cast site rows were keyed by owner name/line and consumer line even
+though owner selection can use a declaration offset and liveness uses a specific consumer
+certificate. Same-line functions or goals could therefore reuse a row discovered in a different
+context. The cache key now includes owner offset/validity and consumer certificate/attempt indices,
+with those values mixed into the hash and checked exactly after probing. The added fixed hash work is
+charged. `git diff --check` and the source-length gate pass; no build or tests were run.
+An independent audit traced every `report.analysis_2` read in the site builder and confirmed the
+owner offset and consumer certificate/attempt fields cover that context.
+
+### 23.27.1197 Bound return-conversion work by the remaining function budget
+
+Return conversion admission now seeds its linear meter from the remaining per-function return
+source allowance, so a scan can consume at most the shared budget left when that return is reached.
+The conversion selector scan charges the maximum 24 candidate comparisons (integer target checks
+plus numeric cast lookup) times selector bytes before numeric-cast resolution, and the bounded-`u8`
+target comparison is charged separately. Diagnostics
+distinguish linear work exhaustion, AST depth exhaustion, and the shared return-source limit; the
+metered receiver predicate also retains the legacy rejection of empty field selectors. The
+focused source-admission guard, whitespace check, and source-length gate pass. End-to-end pattern
+qualification still refuses the installed proof binary because it was built from another proof
+HEAD; no compiler build was started while other self-host probes were active.
+
+### 23.27.1198 Reuse flattened facts and order markers in kernel sum witnesses
+
+The kernel sum-bound witness search now flattens premise conjunctions once for both forward and
+reverse scans. Its nested order queries reuse that same conjunct list and the shared marker snapshot,
+including direct and negated integer order facts. Other callers retain the existing has-order entry
+point, which delegates through the cache-aware helper. This removes repeated premise flattening and
+marker reconstruction while preserving the existing readable-order checks and shared work meter.
+`git diff --check` and the source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1200 Avoid copying match scrutinees during result-name admission
+
+Postcondition match-arm visibility only needs the pattern's bound names, but the binder collector
+also constructs projected values. Passing the complete scrutinee into that collector could copy a
+large expression into one generated projection per binder without charging that multiplication to
+the admission meter. It now uses `Ast::Expr.Invalid` as the discarded projection root; pattern
+shape and emitted binder-name comparisons remain charged. The same current-state review confirmed
+that terminal valued returns are gated by a known non-void declared return type, while both bare
+`return` and `Absent` expression tails are rejected. `git diff --check` and the repository-wide
+source-length gate pass in the current tree; no build or tests were run.
+
+### 23.27.1199 Reuse scalar markers in comparison-chain candidate scans
+
+Comparison-chain replay now passes its already-filled scalar marker cache through both direct
+candidate scans and nested equality-hop scans. Order candidates use the cached readable-order
+reader, avoiding a full marker refill for each row while retaining the same direct and negated
+integer comparison validation. `git diff --check` and the source-length gate pass; no compiler build
+or runtime tests were run.
+
+### 23.27.1200 Share order markers in scaled-product witness replay
+
+Unsigned scaled-product upper-bound replay now reuses one marker snapshot across its conjunct
+scan. Signed scaled-quotient sum replay also shares the flattened conjunct list and marker cache
+across both nonnegativity queries and the quotient witness scan. Both paths continue to use the
+cached readable-order reader, which retains direct scalar checks and negated integer-denial checks.
+`git diff --check` and the source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1201 Reuse operator masks across indexed-write proof candidates
+
+`proof_carry_stale_bindings`, `proof_close_written_cell`, and `proof_transfer_to_place_aliases`
+can ask the goal solver about many candidate facts under one annotation snapshot. Each `proof_goal`
+call rebuilt the same seven-pass primitive-operator mask with a fresh local counter, so failed
+candidates repeated annotation scans without an aggregate bound. Extracted the plain-facts-first
+solver wrapper that accepts a precomputed mask and compute that mask once per transfer. This keeps
+the ordinary `proof_goal` path and solver budget behavior while reducing nested candidate scans.
+Moved the catch-return helper into its companion source file to keep the expanded statement
+checker under the 600-line cap. `git diff --check` and the whole-tree source-length gate pass; no
+build or tests were run.
+
+### 23.27.1203 Index equality sort summaries once per closure
+
+Producer and kernel equality closure previously rescanned the complete fact set for every distinct
+name endpoint to recover signed and unsigned widths and detect conflicting markers. Both paths now
+build one metered, collision-safe name-to-sort summary per fact set and reuse it for all equality
+edges. The summary preserves first-width conflict semantics for signed and unsigned markers; kernel
+capacity is based on relevant marker rows to avoid allocating in proportion to unrelated facts.
+`git diff --check` and the source-length gate pass. No tests or builds were run.
+
+### 23.27.1205 Reuse the equality sort index in source replay
+
+The source replay equality graph still had a per-name width resolver call whose implementation
+was absent, while the compiler-side closure had moved to a shared collision-safe summary. The
+replay path now builds that bounded summary once per fact set, charges its sizing and marker scan
+to both replay and width budgets, and uses the existing hash cache only for repeated endpoint
+lookups. This removes the unresolved resolver and avoids rescanning the fact frame for each unique
+equality endpoint. `git diff --check` and the repository-wide source-length gate pass; no build or
+tests were run.
+
+### 23.27.1202 Meter the conditional return-value prepass
+
+`proof_check_returns` ran conditional-value splitting before its bounded per-statement loop, so a
+large body could be fully scanned first, and continuations copied for branch checks had no shared
+return-source charge. The splitter now charges statement visits, recursive conversion and index
+classification, array traversal/copies, and duplicated continuation rows against the remaining
+per-function return-source allowance. On exhaustion it discards the tentative rewrite and refuses
+the proof path. Bodies with no split now return the original array without allocating a duplicate.
+Added a focused source guard and wired it into the kernel replay audit script. The focused guard,
+the source-admission budget guard, whitespace check, and source-length gate pass; no compiler build
+or runtime tests were run because the installed proof binary does not match this proof HEAD.
+
+### 23.27.1204 Reuse operator masks in bounded fact-restatement loops
+
+Candidate restatement in collection pop and binding-range analysis, plus indexed-write separation
+checks, could issue several `proof_goal` calls under one unchanged annotation array. Each call
+repeated the seven-pass primitive-operator annotation scan. These loops now compute one mask when
+they have candidates and pass it through the plain-facts-first solver wrapper; the indexed-write
+separation branches likewise share one mask across their paired or tripled inequalities. This
+preserves per-goal solver limits and conservative mask fallback while reducing repeated annotation
+work. Static whitespace and source-length gates pass; no build or tests were run.
+
+### 23.27.1205 Charge runtime assertion effect scans to return-source work
+
+Return substitution admission reserves source expansion and copied-value work. Follow-on runtime
+assertion scans independently inspect the original and substituted ASTs for old-state use, moves,
+fresh values, overloaded operators, and calls. These passes now reserve their consumer traversal
+cost against the same per-function `return_source_work` counter; the pass reservation includes the
+preflight cost walk plus one reader traversal. The direct call/move/operator checks before runtime
+assertion handling also reserve each scan. Exhaustion reports a return-source budget finding and
+does not publish the assertion as a fact. Focused return-work and source-admission guards,
+`git diff --check`, and the source-length gate pass. No compiler build or runtime tests were run.
+
+### 23.27.1201 Skip impossible name-bound scans in interval lookup
+
+Kernel interval lookup now returns immediately when a term cannot form a loop-range name/offset key,
+so ordinary expressions no longer scan the full bounds array a second time after expression-bound
+lookup. A broader repeated structural-equality hotspot remains: interval recursion compares each
+query term against every expression-key bound. A follow-up should add a per-search kernel structural
+hash index with a sparse memoized node hash, charge construction/probes, and preserve exact equality
+on hash matches; align the source producer using its existing AST shape hash and exact comparator.
+`git diff --check` and the source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1210 Reuse the source operator mask through indexed-write preservation
+
+Indexed-write preservation recursively inspects nested expressions and can check several facts for
+one write. Each nested check rebuilt the primitive-operator mask from annotations. The write path
+now passes the report's source mask through recursive preservation, strict index separation,
+conjunct restoration, narrowed-range candidates, and stored-value checks. Place-alias transfer
+uses the same cached mask. This preserves the existing goal solver and refusal behavior while
+removing repeated annotation scans from the recursive candidate path. `git diff --check` and the
+whole-tree source-length gate pass; no build or tests were run.
+
+### 23.27.1211 Size producer equality sort summaries from marker candidates
+
+The producer equality-sort summary previously sized its hash table from every fact, even when
+most facts were unrelated to integer sort markers. It now makes a metered constant-time callee
+prepass, then sizes the collision-safe table from candidate marker rows. The full marker parser
+still validates each candidate, and both the prepass and table work consume the shared linear
+budget. This aligns producer allocation behavior with kernel replay and avoids rejecting otherwise
+usable fact sets solely because unrelated rows inflated the summary table. `git diff --check` and
+the source-length gate pass; no builds or tests were run.
+
+### 23.27.1212 Bound return-path condition effect scans
+
+Return analysis now routes both `if` and `while` condition call, move, and overloaded-operator
+classification through the shared bounded frame-source meter. If a condition scan exhausts that
+budget, the path records a failed proof obligation and stops before branch/loop reasoning continues.
+The assertion scan reservation now measures under the AST walker's 1 Mi ceiling, then debits its
+preflight and one reader pass to the aggregate 8 Mi return-source meter; this avoids passing an
+unsupported limit that previously made every reservation fail. Stability checks that run both a
+call scan and a freshness scan reserve each traversal separately. The return-work source guard checks
+both conditions and the compatible scan limits, and forbids the old raw while-condition operator
+scan. Focused source guard, `git diff --check`, and source-length gate pass; no compiler build or
+runtime tests were run.
+
+### 23.27.1213 Meter nested-call classification in expression statements
+
+The generic return-analysis expression-statement arm previously called the raw recursive call
+scanner multiple times before checking or invalidating nested-call effects. It now classifies once
+through the shared frame-source meter, refuses the statement if that budget exhausts, and reuses the
+cached result for traversal, substitution, and state invalidation. The focused return-work guard
+checks the metered call and absence of raw rescans. Static guards, `git diff --check`, and the
+source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1213 Restore source-size gate after return-check growth
+
+The latest source edits pushed `statement_checks.elisa` and the combined source-admission static
+guard past the 600-line limit. The captured-block transfer checker now lives in its own included
+Elisa unit, and the source-obligation inventory guard is a separate script invoked by the same
+kernel replay audit runner. Both split tests pass, as do `git diff --check` and the whole-tree
+source-length gate. This is structural cleanup only; the proof sources still await the newest
+compiler seed qualification before build and runtime validation.
+
+### 23.27.1214 Index equality-graph vertices during edge construction
+
+Producer and kernel equality closure previously resolved every relation endpoint by scanning the
+growing distinct-name array, giving edge construction quadratic name comparisons for mostly
+distinct endpoints. Both paths now allocate a bounded open-addressed vertex table sized from the
+maximum two endpoints per edge, charge initialization and probes to the existing shared work
+counter, and confirm hash candidates with exact string equality. The kernel's now-unused linear
+endpoint lookup helper was removed. `git diff --check` and the whole-tree source-length gate pass;
+no build or tests were run.
+
+### 23.27.1215 Reuse marker snapshots in progress and quotient candidate scans
+
+Kernel unsigned literal-progress, unsigned maximum-equality, quotient-child, signed quotient-sum,
+and strict-shift fact scans now route readable order candidates through a shared per-search marker
+snapshot. This removes repeated marker-cache reconstruction while retaining the cached reader's
+scalar and negated-integer validation. `git diff --check` and the source-length gate pass; no build
+or runtime tests were run.
+
+### 23.27.1216 Build kernel name-equality adjacency once
+
+Kernel reachability previously rescanned the complete equality-edge list for every reached name
+and linearly searched the growing reachable list to avoid revisits. It now interns endpoints with
+the shared collision-safe vertex table, builds bounded adjacency lists, and performs a metered
+queue traversal with a Boolean visited array. This matches the producer's graph strategy and
+reduces reachability from repeated edge scans to one graph build plus a linear walk. `git diff
+--check` and the whole-tree source-length gate pass; no build or tests were run.
+
+### 23.27.1217 Bound nested-call scans for return values
+
+Return-value analysis now reserves substitution through the shared return-source budget before
+copying binding values into the expression, and refuses the return path if reservation fails. It
+then computes call presence for the original and substituted expression once
+with the bounded frame-source meter, checks exhaustion before using either result, and reuses the
+cached source classification for nested-call handling and alias invalidation. After pure-call
+rewriting, it reclassifies the changed value under the same meter before freshness handling. The
+return-work source guard rejects reintroduction of the raw repeated scanners. Static guards,
+`git diff --check`, and source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1218 Cache signed partitions during propositional inconsistency replay
+
+Propositional inconsistency replay previously re-decoded every fact's polarity inside every
+candidate/fact comparison. A single ordered scan now caches prior polarity and checks both signed
+denial directions per root pair, including nested-negation cases. This avoids repeated polarity
+decoding and reduces all-positive contexts to linear work. Out-of-range roots fail closed.
+`git diff --check` and the whole-tree source-length gate pass; no compiler build or runtime tests were
+run.
+
+### 23.27.1219 Meter call readers over return postconditions
+
+Return postcondition handling previously scanned goal ASTs repeatedly with the raw call detector
+before adding quantified summaries or rewriting pure-call facts. It now classifies current and
+substituted goals with the shared frame-source meter, reclassifies after projection where needed,
+and refuses the return path if work runs out. The typed-return helper consumes the already checked
+call classification instead of rescanning. Focused return-work guard, `git diff --check`, and
+source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1220 Index bounds against equality-graph vertices
+
+Producer and kernel equality closure previously rescanned the full bound array for each member of
+each equality component, then rescanned it again to add propagated lower and upper bounds. Each
+closure now maps the first non-term bound row for every graph vertex in one metered pass, preserves
+first-match behavior for duplicate names, and updates or appends by row. This removes repeated
+name comparisons while retaining the same max-lower/min-upper merge rules. `git diff --check` and
+the source-length gate pass; no build or tests were run.
+
+### 23.27.1221 Reuse safety witness snapshots for goal checks
+
+Goal search and refusal reporting built a scalar-witness snapshot while classifying the premise
+frame, then rebuilt the same snapshot to check the goal under the already-derived safety bounds.
+The premise classifier now exposes its validated snapshot to these callers, which reuse it for the
+goal safety check. The existing work counter covers construction once and both goal readers; no
+partial snapshot is consumed after an incomplete construction. `git diff --check` and the source
+length gate pass; no build or tests were run.
+
+### 23.27.1223 Reserve recursive pure-call summary rewrites
+
+The shared pure-call summary rewriter recursively compares call expressions against every fact and
+performs occurrence checks over fact subtrees. Each of its five return/catch call sites now
+preflights expression and fact AST costs, then bounds up to two replacement scans per call node,
+both occurrence scans, candidate support/old/move validation, recursive visits, and rewrite depth
+separately against the per-function return-source budget. Checked multiplication fails closed
+before rewriting when the reservation does not fit. Static source guards, `git diff --check`, and
+the source-length gate pass; compiler/runtime qualification remains unavailable.
+
+### 23.27.1222 Remove duplicate safety-context preflight
+
+Unsigned safety-context construction charged a 32x whole-frame shape estimate before building
+markers and bounds, then the work-aware collectors charged their actual traversals. Each fact's
+later safety check also reserves any legacy recursive reader work at the point of use. Removed the
+duplicate frame preflight; marker, bound, equality, difference, signed-safety, and per-expression
+reader work remain charged before use, while contexts with large but inexpensive facts no longer
+fail solely on a second worst-case estimate. `git diff --check` and the source-length gate pass;
+no build or tests were run.
+
+### 23.27.1224 Tighten the pure-call rewrite work bound
+
+The initial summary-rewrite reservation overestimated ordinary small expressions by multiplying
+fact-subtree work by the combined AST size more than once. The current checked formula separately
+accounts for endpoint equality's quick-difference, support, and structural walks, candidate
+validation, two fact-subtree occurrence scans with the depth limit, recursive visits, and rewrite
+fuel. The static return-work guard now checks each formula term, overflow guard, budget debit, and
+all five external rewrite call sites. The focused guard, `git diff --check`, and source-length gate
+pass; executable qualification remains unavailable for the current source revision.
+
+### 23.27.1225 Preserve exact function generic ownership across same-line declarations
+
+Producer and replay now build bounded, collision-safe indexes for parser-emitted generic identity
+and function-owner annotations, keyed by declaration line and offset (plus binder name for generic
+rows). This lets exact function ownership distinguish multiple generic-capable declarations on a
+single line without weakening the conservative line/name fallback in contexts lacking a matching
+function marker. Index construction and lookup consume the existing source-work budgets and fail
+closed on malformed or duplicate owner markers. `git diff --check` and the source-length gate pass;
+no build or runtime tests were run.
+
+### 23.27.1226 Index endpoint bounds during difference propagation
+
+Producer and kernel difference-bound closure previously repeated linear bound-name lookups for
+each constraint endpoint on every propagation round, and repeated them again while updating bounds.
+Both paths now intern the constraint endpoint names once, map existing first-match bound rows onto
+those vertices in one pass, and propagate by cached vertex and bound rows. New bounds update the
+same row map. Endpoint hashing, bound-map construction, reads, and updates use the existing shared
+work counters; exact text equality remains authoritative after hash matches. `git diff --check` and
+the source-length gate pass; no build or tests were run.
+
+### 23.27.1227 Reduce generic-owner index construction scans
+
+Generic-owner and function-owner annotation tables now share one population pass after the
+capacity-count pass, instead of scanning the full annotation stream separately for each table.
+The count pass no longer charges marker-name bytes it does not inspect, and generic collision
+checks inspect prior owner text only after a hash match. Exact-key checks, cluster validation,
+source-work accounting, and fail-closed behavior remain in place. `git diff --check` and the
+source-length gate pass; no build or tests were run.
+
+### 23.27.1244 Stop pure-call expansion when shared source work is exhausted
+
+Qualified-constant lookup can exhaust the shared implicit-effect source-work meter while
+collecting a `Scope` argument. Pure-call witness expansion now observes that exhaustion and stops
+the enclosing recursive walk before visiting later siblings or adding follow-up witnesses. The
+binary, conditional, and call-argument traversals propagate exhaustion immediately. `git diff
+--check` and the source-length gate pass; no build or runtime test was run.
+
+### 23.27.1228 Bound quantified call-summary expansion work
+
+Quantified call-summary preparation now charges recursive AST visits, finite-quantifier
+predicate substitutions, and fact-array copies with AST-size work to the shared
+source-effect budget. Call-result resolution opts into the existing index-safety meter
+for parameter mapping and precondition scans. Exhaustion stops optional summary search
+and records a resource-analysis finding. Added a static regression and wired it into
+the kernel replay audit script. The quantified-call and return-work guards, diff check,
+and source-length gate pass; no build or runtime tests were run because the available
+compiler products do not match the proof/compiler source revisions.
+
+### 23.27.1229 Defer structural interval-bound indexing in goal replay
+
+The current goal-metered interval lookup still scans expression-keyed bounds in source order and
+stops at the first exact structural match. An eager index was prototyped, but hashing every
+expression-bound root before either query can consume the shared 262,144-unit goal allowance even
+when the old scan would have stopped at an early match. Allocation and initialization can be
+preflighted from row counts; hash work cannot be bounded tightly enough from this path before it
+starts without another structural traversal, which itself consumes the same allowance. Keep the
+linear early-stop behavior until an already-charged arena summary (node-text bytes and structural
+edge work) can support a checked setup-cost preflight and a reserved query budget. This is a
+completeness/performance concern rather than a replay soundness issue; exact equality remains the
+current lookup authority.
+
+### 23.27.1230 Share solver work across quantified summary probes
+
+Finite quantified instances and disjunction shortcuts in call-summary expansion now share one
+linear solver-work counter and exhaustion flag across the whole optional search. This prevents
+up to 1024 instances or 8192 recursive nodes from each receiving a fresh linear-search allowance.
+The source regression requires both probes to use the work-aware goal API and rejects the
+budget-resetting wrapper. Quantified-call and return-work guards, diff check, and source-length
+gate pass; runtime qualification remains pending the matched compiler chain.
+
+### 23.27.1231 Bound pure-call witness scans during quantified expansion
+
+The legacy pure-call witness helper rebuilds scalar markers from the growing fact frame once per
+call argument, then compares marker terms against each argument. Quantified call-summary expansion
+now precharges a checked quadratic bound in measured fact-frame and call-expression size, scaled by
+the argument count, before invoking that helper. Any failed cost walk, arithmetic overflow, or
+budget shortfall stops optional expansion. The quantified-call source guard, `git diff --check`,
+and source-length gate pass; no matched compiler build or runtime qualification is available.
+
+### 23.27.1232 Meter quantified contract classification traversals
+
+Quantifier-marker lookup now charges each scanned annotation row to the shared source-work
+budget, and the outer quantifier kind is reused by logical-contract validation. Repeated
+`proof_expr_supported` checks in logical-contract classification now use that same counter,
+including the quantified iterable and predicate-call purity walks. Exhaustion fails closed and is
+reported through the existing quantified-call budget finding. `git diff --check` and the
+source-length gate pass; no build or tests were run.
+
+### 23.27.1233 Preserve quantified witness-helper budget charges
+
+The quantified call-summary witness preflight now uses a factor of 64 to cover the scalar-marker
+builder's bounded collision probes, heap-sort fallback, and repeated marker-list comparisons.
+Before invoking the legacy helper, it publishes the reserved source-work counter; after the helper
+returns, it reloads the report counter into the local meter. This prevents helper-side return-type
+resolution charges from being overwritten at wrapper exit. Call-purity classification in the
+quantified walker also uses the shared source-work API, including nested call target traversals.
+The source guard checks both counter synchronization points and metered purity routing;
+`git diff --check` and the source-length gate pass. Runtime qualification remains unavailable.
+
+### 23.27.1234 Qualify explicit-return local-scalar witnesses
+
+The current `proof_replay_type_bound_result_consumer_matches` handles a final valued
+`Ast::Stmt.Return` and checks parser-owned return-token/value spans. The earlier claim that a
+separate implicit-result consumer handled only expression statements was stale: that function is
+not present in the live source. Static source guards assert the explicit-return branch and span
+ordering, but no focused source-local runtime fixture exercises a local scalar bound flowing
+through that return. Keep this as a qualification gap, not an implementation gap; runtime evidence
+requires the matched proof/compiler product.
+
+### 23.27.1235 Require primitive equality for typed index-graph edges
+
+The transitive typed indexed-read rule previously inferred matching operand sorts for equality
+premises but did not establish that each `==` was builtin primitive equality. The kernel rule now
+builds the admitted scalar-witness markers once and checks every candidate edge with the metered
+primitive-comparison reader before traversing it. Added direct and transitive same-sort positive
+fixtures plus a mixed-sort-chain negative, and wired the runtime regression into the kernel audit
+matrix. Kernel index-work and parity source guards, `git diff --check`, and source-length gate pass;
+matched compiler/runtime qualification remains outstanding.
+
+### 23.27.1236 Include nested call arguments in witness scan reservations
+
+Pure-call witness construction recursively visits calls nested inside argument expressions. Its
+fact-scan reservation now scales by the measured full call-subtree cost, which bounds all nested
+argument checks, instead of only the outer call's argument count. Checked multiplication and
+remaining-budget checks still fail closed before the legacy helper. The quantified-call guard,
+`git diff --check`, and source-length gate pass; no runtime qualification was run.
+
+### 23.27.1237 Preserve binding identity in compiler StoreThrough summaries
+
+The adjacent compiler's StoreThrough walk currently collects every `Expr.Ident` as a bare name
+and uses name-only alias classes. AST values such as `Ast::Expr` contain identifier and call
+nodes describing user syntax; interpreting those nodes as executed compiler calls can inflate
+store-through summaries and produce false borrow-escape rejections. A name-only AST exception is
+unsafe because local shadowing and same-spelled nominal types are possible, and the current
+`annotation_type_id` path does not preserve the qualified declaration identity needed to prove the
+syntax type. The sound fix requires StoreThrough summaries keyed by `DeclId` and formal position,
+plus per-function bindings resolved from `(DeclId, source position)` to exact `BindingId` and
+nominal type identity. Suppress recursive syntax-name/call interpretation only for bindings whose
+exact nominal declaration is `Ast::Expr`; keep current conservative unification whenever binding,
+callee, or type resolution is incomplete. The compiler checkout is at the pinned `c93a7774` with
+an unrelated dirty backend edit; the installed Stage1 provenance remains v1 and does not match the
+current source tuple. No compiler edits or runtime qualification were performed.
+
+### 23.27.1238 Cache primitive index-equality edges and add overload attack control
+
+The typed index-equality graph now computes primitive-edge eligibility once per premise and
+stores it beside the cached endpoint-sort state, removing repeated marker scans for every
+reachable term. Added a dedicated source fixture where `i64.__eq__` deliberately returns
+inequality; its equality chain must not justify indexed-read congruence. Runtime coverage is wired
+into the kernel audit. Static kernel/parity guards, quantified-call work guard, diff check, and
+source-length gate pass. The runtime fixture remains unqualified pending a matching compiler and
+proof binary. The quantified empty-fact fast path is explicitly guarded by its expression-size
+charge and the walker’s metered purity traversal.
+
+### 23.27.1239 Meter ordinary pure-call witness expansion
+
+The quantified-call path reserves work before invoking `proof_add_pure_call_witnesses`, but
+ordinary postcondition, return, catch, frame, and unfolded-summary callers do not. The helper
+recursively visits source expressions and, for each argument, calls `proof_scalar_term_witnessed`,
+which rebuilds scalar marker tables from the full fact frame. This leaves a source-driven repeated
+scan outside the shared source-work meter. Do not copy the quantified path's factor-64 worst-case
+reservation indiscriminately: it can reject large frames when the actual query is cheap. The
+preferred repair is a shared-meter helper using the existing work-aware marker builder, marker
+scale, and scalar-witness query, with one marker snapshot per call after child witnesses have
+been added; meter other legacy classifiers in the traversal or precharge their bounded work.
+Exhaustion must propagate as an incomplete/unknown report. This gap was later repaired by
+23.27.1242–23.27.1255; matched-runtime qualification remains pending.
+
+### 23.27.1240 Local continuation checkpoint (2026-10-14)
+
+The proof checkout is on `main` at `e7deec10`, 45 commits ahead of `origin/main`, with no other
+proof branches or worktrees and a broad 205-path uncommitted batch. Source-length, diff,
+source-admission, typed-enum-index, shared goal-fact-index, index-safety, linear-certificate
+budget, postcondition-context, quantified-call, return-work, type-bound-local, kernel-index-work,
+source-authority, structural-replay, owner-identity, and indexed-read parity guards pass. Runtime
+regressions for pattern-literal collisions and typed index-read equality reject the installed
+binary because its proof HEAD does not match this tree; it is not validation for these changes.
+The adjacent Elisa-compiler task passes its focused StoreFlow/ReadOnlyStoreFlow Go tests and is
+isolating a false `annotation_value_type(Expr, StructTable&)` flow edge before attempting a fresh
+Stage1 seed. Keep timing skipped and leave the broad source batch unmerged until the newest matched
+compiler/runtime pair passes relevant proof replay, authority, and mutation gates. Preserve other
+compiler snapshots until their active owners confirm they are obsolete.
+
+### 23.27.1247 StoreFlow false-edge source diagnosis
+
+The compiler agent localized the `annotation_value_type(Expr, StructTable&)` overapproximation to
+qualified annotation lookup: it temporarily assigned an AST-backed module-name view to
+`StructTable.visibility.current_owner`, then restored the previous owner. The candidate refactor
+resolves that path through the registered `scope_owner_order` table and uses the stable
+table-backed owner spelling; unregistered/builtin paths use the global fallback without retaining
+the AST view. This preserves StoreFlow's general conservative retention rules. The compiler agent
+is validating the exact regression and real AST-retention negative controls; no fresh Stage1 seed
+has yet qualified the candidate.
+
+### 23.27.1241 Traverse field receivers in quantified call-summary metering
+
+The pure-call witness builder descends through `Ast::Expr.Field` receivers and can encounter
+nested calls there, while quantified summary preparation previously skipped those field subtrees.
+Added a field branch to the metered preparation traversal so each nested call gets its own witness
+scan reservation before the legacy witness builder revisits that subtree. The focused quantified
+call work guard, diff check, and source-length gate pass. No runtime qualification was run.
+
+### 23.27.1242 Share bounded work in ordinary pure-call witness expansion
+
+Ordinary pure-call witness expansion now carries one linear-safety work counter through its
+recursive expression walk and publishes the consumed allowance to the shared frame-call budget.
+Each admitted call builds one work-metered scalar witness index after visiting child calls, then
+checks every argument through the metered scalar-witness query. Call classification reserves for
+its repeated expression scans and function-name walk; depth or budget exhaustion emits the existing
+frame-analysis budget finding, so the report cannot claim a fully supported result. `git diff
+--check` and the source-length gate pass. No build or runtime test was run.
+
+### 23.27.1243 Reuse scalar marker indexes across pure-call arguments
+
+Pure-call witness construction now shares a work budget across recursive visits, meters scalar
+marker construction and argument queries, and reports exhaustion as an analysis budget finding.
+For each call, it builds one marker snapshot after recursive child processing and reuses that
+snapshot for every non-binding argument. Added a source guard to the kernel replay audit shard.
+The focused source-admission and call-work checks pass; runtime qualification was not run.
+
+### 23.27.1245 Meter qualified-constant witness lookup
+
+A read-only review found that quantified pure-call witness collection can reach
+`proof_add_qualified_constant_witness` for a `Scope` argument. Its recursive source-declaration scan
+and exact constant-reference comparisons were outside the shared source-work meter, including when
+the fact frame was empty and the quantified-call witness reservation returned early. The lookup now
+charges scope-expression traversal, parameter-shadow checks, declaration rows, module-scope
+construction, and metered exact expression equality to the shared implicit-effect work counter.
+Incomplete lookup marks that counter exhausted, so no witness is added. `git diff --check` and the
+source-length gate pass; no build or tests were run.
+
+### 23.27.1246 Meter tuple-field witnesses reached from pure calls
+
+The ordinary pure-call witness walk reached named-tuple field projection handling through a
+legacy helper that restarted purity classification and rebuilt scalar witnesses for every
+argument. Replaced it with a work-aware variant that shares the caller's counter for purity,
+marker construction, scalar argument queries, and tuple-label traversal, and checks the separate
+type-source meter after adding tuple-label witnesses. Added source assertions for this handoff.
+Pure-call witness, source-admission, quantified-call, source-length, and diff checks pass; no
+compiler build or runtime qualification was run.
+
+### 23.27.1248 Recheck StoreThrough identity prerequisites
+
+Re-audited the adjacent compiler after its parser and loop-view edits. Exact `DeclId` and
+identifier-use `BindingId` APIs exist, and declared binding types are keyed by `BindingId`, but
+StoreThrough does not join those identities to formal/local types. Bare type annotations still
+resolve to name-only `TypeId`s without their nominal `DeclId`, so identifying `Ast::Expr` by its
+spelling can misclassify shadowed or imported types. No safe isolated preparatory edit was available;
+the needed producer change is a resolved annotation-use index carrying exact nominal declaration
+identity and ambiguity state into binding types. Until that identity path exists, keeping the
+conservative StoreThrough summary avoids unsound exclusions.
+
+### 23.27.1251 Avoid broad per-call reservations in ordinary witness checks
+
+The ordinary witness meter briefly charged every function name for each call and reserved eight
+extra traversals of each call subtree. Callee resolution already uses its own bounded indexed
+module-resolution meter, and the numeric-cast path performs at most one expression scan of its
+receiver. Removed the unnecessary function-table charge and matched the shared frame reservation
+to that measured receiver scan; the purity helper retains its own three-pass reservation. This
+avoids rejecting large valid functions solely because their function table or AST exceeds an
+overestimated constant factor. `git diff --check` and the source-length gate pass; no build or
+runtime test was run.
+
+### 23.27.1258 Meter deterministic-call witness scans
+
+Deterministic-call witness generation still scanned scalar call markers across the fact frame,
+searched for matching nested calls inside terms, and checked arithmetic links with legacy
+recursive readers. It now charges those scans and structural comparisons to the shared
+frame-call-work budget, uses one metered scalar marker index for call arguments, meters
+value-binding/shared-borrow checks, and reports exhaustion instead of emitting a partial witness.
+The pure-call source guard, quantified-call guard, source-admission guard, source-length gate, and
+`git diff --check` pass. No compiler/runtime qualification was run.
+
+### 23.27.1255 Remove duplicate quantified witness-scan reservation
+
+Quantified call-summary preparation retained a worst-case factor-64 fact-scan reservation from
+before ordinary pure-call witness expansion had its own shared frame-work counter and metered
+marker/query helpers. It charged those scans again to the implicit-effect counter and could refuse
+large fact frames despite the witness helper enforcing its own limit. Removed the obsolete
+reservation while retaining the quantified AST/copy/effect meter and checking the witness helper's
+completion result. Quantified-call, pure-call, and source-admission guards, source-length, and
+`git diff --check` pass; runtime qualification remains pending.
+
+### 23.27.1250 Preserve nested source-work charges in call witness checks
+
+A focused review found that a parent call's local source-work snapshot could overwrite charges made
+by a nested qualified-constant `Scope` argument. The call branch now reloads the shared implicit-
+effect counter after processing arguments and before metered return-type checks, so nested charges
+remain cumulative. `git diff --check` and the source-length gate pass; no build or runtime test was
+run.
+
+### 23.27.1252 Meter value-binding classification in pure-call arguments
+
+The pure-call and tuple-field witness paths used `proof_value_binding_argument` for every
+argument; that helper recursively scanned value-binding and alias-name arrays without charging
+the shared witness budget. Added a work-aware classifier that charges each visited expression,
+array row, and compared name byte, and switched both metered witness paths to fail closed when
+classification exhausts the counter. A later shared-budget refactor made the pure-call source
+guard's old report-counter handoff assertion stale; updated it to assert the direct work-aware
+widening and purity paths, one marker index, and metered value-binding checks. The focused
+pure-call and source-admission guards, source-length check, and `git diff --check` pass. No
+compiler/runtime qualification was run.
+
+The current compiler freshness audit also found `Elisa-compiler/main` at committed revision
+`c93a7774` with ten dirty source files across backend literal decoding, parser modules, and
+semantic loop views. The isolated StoreFlow candidate is based on that clean commit plus targeted
+annotation and EDIR edits, so its seed would not qualify the newest local compiler source. Preserve
+those edits and establish their ownership and inclusion in the frozen candidate before seeding;
+record exact source hashes in the product provenance.
+
+### 23.27.1256 StoreFlow regression and current proof guard validation
+
+The compiler agent reports its focused semantic tests now reproduce the false AST-view edge, prove
+that registered table-backed owners remove it, and retain a negative control for real borrowed-view
+storage. `go test ./src/semantic -run 'StoreFlow|ReadOnlyStoreFlow' -count=1` passes. It copied the
+eleven dirty compiler-main edits into the isolated candidate without altering the main checkout;
+the initial patch SHA-256 is
+`ad7e7e450392e44a45dadee9035cf8d98c934faa59f9d3c068208330de41a139`. A separate Stage1 build
+process was active, so no overlapping compiler invocation was started. On the proof side, the
+pure-call guard had stale expectations after the shared-budget refactor; it now asserts the
+work-aware widening/purity paths, marker-index reuse, and metered value-binding checks. That guard,
+source-admission, quantified-call, index-safety, kernel-index, source-authority, structural-replay,
+exact-owner, pattern-literal, and indexed-read parity guards, source-length, and `git diff --check`
+pass. The proof batch still lacks a matched compiler/runtime qualification.
+
+### 23.27.1258 Wait for the isolated StoreFlow regression suite
+
+Probe58's self-host `elisac` process has exited. The compiler agent's focused Go tests are still
+running as PID 74237 with test child PID 74263; the child has a ten-minute test timeout. No Stage1
+seed was launched concurrently. The exact frozen candidate remains based on compiler commit
+`c93a77740053fe9e9350641d095b57b3fe8bed27` plus the eleven current local source edits and the
+annotation/EDIR refactor, patch SHA-256
+`7d9b53589dbb071110ef4a68e54677190c4969641a24ffae314f88b8ec867688`. After the Go gate exits,
+run a fresh seed against that exact candidate and record new output provenance; the prior r2 log
+still documents the earlier failure and does not qualify this source snapshot.
+
+### 23.27.1257 Cover all AST-backed owner writes in compiler annotation lookup
+
+The compiler agent found a third qualified annotation path, `annotation_application_value_type`,
+that also assigned an AST-backed module-name view into `StructTable.visibility.current_owner`.
+The candidate now routes annotation scope, indexed annotation, and generic-application scope
+through the registered owner cache, using a stable table-backed view and an empty-owner fallback
+for unregistered/builtin names. Its focused StoreFlow tests pass, including a real-retention
+negative control. After cleaning copied whitespace, the exact candidate patch SHA-256 is
+`7d9b53589dbb071110ef4a68e54677190c4969641a24ffae314f88b8ec867688`; its focused StoreFlow Go
+test and diff check pass. Probe58 remains live (PID 74589); no Stage1 seed or proof runtime test
+has run on this full candidate.
+
+The pure-call source guard now also checks that every caller handles the helper's completion flag,
+so exhaustion cannot silently leave a caller treating incomplete witness expansion as complete.
+The guard, `git diff --check`, and source-length check pass.
+
+### 23.27.1260 Use exact generic-owner identity for resource classification
+
+Resource type classification previously used only a declaration line to decide whether a name was
+a generic binder. Same-line declarations could therefore shadow each other's aliases and builtins.
+Added a bounded `(line, declaration offset, name)` index and threaded exact owner identity through
+function parameter and return classification, function resource checks, record-branch validation,
+and shared-borrow frame analysis. Offset `0` remains representable; incomplete exact metadata makes
+classification incomplete, while callers without owner identity retain the line-index fallback.
+Scoped `git diff --check` passes. No tests or builds were run. Replay threaded-type checks have
+since migrated to the shared bounded owner/name index; other line-only consumers still need an
+owner-identity audit.
+
+### 23.27.1253 Charge declaration-index allocation and initialization work
+
+The theorem source-admission name index now debits work for capacity-growth steps, both capacity-
+ sized hash/slot allocations, and every initialized slot, in addition to its declaration and probe
+scans. This keeps report admission within the configured source-work cap as declaration inventories
+scale. `git diff --check` and the source-length gate pass; no build or runtime test was run.
+
+### 23.27.1254 Propagate pure-call witness exhaustion to consumers
+
+The pure-call witness helper now returns a completion flag, but several postcondition and call
+summary consumers ignored it. Updated ordinary postconditions, returns, catch-arm checks, quantified
+summary expansion, unfolded summaries, and statement-call application to stop or mark the result
+incomplete when witness expansion exhausts its shared budget. The source helper's budget finding
+remains the report diagnostic. `git diff --check` and the source-length gate pass; no build or
+runtime test was run.
+
+### 23.27.1259 Reuse bounded call detection for ordinary postconditions
+
+Function postcondition checking previously used an unmetered `proof_expr_has_call` scan once for
+quantified summary preparation and again before pure-call witness expansion. It now uses the frame
+call walker's work-aware detector once and reuses the result across both paths. If the call scan
+exhausts its budget, the frame walker conservatively reports a call and the witness completion
+check prevents certification. `git diff --check` and the source-length gate pass; no build or
+runtime test was run.
+
+### 23.27.1261 Fail closed on ambiguous generic parameter rows
+
+Producer and replay generic shadow lookups now require exactly one row for the queried generic
+identity. Line-scoped fallback rejects duplicate `(line, name)` rows, and exact owner lookup rejects
+duplicate `(line, offset, name)` rows. This prevents malformed or ambiguous source metadata from
+making an unrelated name appear to be a generic during alias/type conversion. `git diff --check`
+and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1262 Reuse the bounded generic-owner index during replay
+
+The replay threaded-type generic check now uses the producer's cached `(line, owner offset, name)`
+hash index instead of scanning every generic row for each AST type name. This retains fail-closed
+behavior for missing or duplicate identity data while making repeated checks proportional to the
+bounded hash probe length. `git diff --check` and the source-length gate pass; no tests or builds
+were run.
+
+### 23.27.1263 Short circuit identical arena roots in interval-bound lookup
+
+Both goal-metered and legacy interval lookup now return an expression bound immediately when its
+stored root is the exact query root. This avoids charging or traversing recursive equality for the
+common shared-arena case while preserving exact structural comparison for separately encoded
+expressions. The broader structural-hash index remains an optimization opportunity. `git diff
+--check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1262 Bound tuple witness comparisons by generated fact size
+
+An initial tuple-call work guard reserved comparisons around the legacy tuple witness inserter.
+Review found that the candidate bound could undercount generated range facts and comparisons
+against newly appended witnesses. This estimate was replaced by direct metered insertion in
+§23.27.1268, which charges each exact comparison as the fact list grows.
+
+### 23.27.1263 Bind threaded-summary generic checks to exact owner identity
+
+Replay's threaded-call safety check identified generic binders using declaration line alone and
+treated high-bit lines as an unconditional generic sentinel. It now carries the source declaration
+offset through callee and caller type walks, uses the shared indexed `(line, offset, name)` generic
+lookup, and uses the exact-owner resource marker classifier. Missing or ambiguous owner metadata
+fails closed. Added a static regression to the kernel replay audit shard. Focused source guard,
+source-length check, and `git diff --check` pass; compiler/runtime qualification remains pending.
+
+### 23.27.1264 Resolve pure-call return generics by exact owner
+
+The shared pure-call witness expander classified each callee's return type using only its source
+line, even though the function index retains declaration offsets and the source generic-owner
+index is available. Same-line generic declarations could therefore be rejected as ambiguous or
+classified against the wrong owner. The return-type marker check now uses `(line, offset)` and
+fails closed if exact owner metadata is incomplete. `git diff --check` and the source-length
+gate pass; no build or runtime test was run.
+
+### 23.27.1265 Preserve line-only generic lookup when owner offsets are incomplete
+
+The new owner-offset validity bit had been coupled to line/name row alignment in source snapshots
+and replay copies, disabling legacy generic lookups when offsets alone were incomplete. Split line
+and exact-owner validity and copying. Deterministic-call and structural replay call-site metadata
+now pass line validity independently, while exact-owner lookup still requires aligned offsets. The
+snapshot work meter charges offset rows only when it copies them. Scoped `git diff --check` passes.
+No tests or builds were run.
+
+### 23.27.1266 Reserve comparisons against earlier tuple witnesses
+
+An intermediate fix added the triangular candidate-to-candidate comparison tail to the reserve.
+That conservative estimate was superseded by the direct metered insertion in §23.27.1268.
+
+### 23.27.1250 Index fact membership for linear certificate validation
+
+Certificate validation previously rescanned every fact for each premise of every candidate
+certificate. Added a per-invocation open-addressed index keyed by `proof_expr_shape_hash`, with
+collision chains and exact metered `proof_expr_equal` checks on hash hits. Index allocation,
+construction, probes, and query comparisons use the existing shared safety-work meter; any
+incomplete build or lookup rejects the certificate search. Shape charging now includes string,
+float, and character payload bytes plus call argument names. Unsupported oversized block shapes map
+to a constant prefilter hash so hashing cannot scan their unmetered arrays. `git diff --check` and
+the source-length gate pass; no compiler build or runtime tests were run.
+
+### 23.27.1267 Bind pop-snapshot parameter evidence to the replay owner
+
+Pop-snapshot replay selected a reference parameter by function name alone, although its body and
+local-binding checks were already bound to the replay owner's exact source offset. Added a bounded
+parameter selector keyed by function name, line, and declaration offset; parameter shadow checks
+and resource-marker classification now use that same owner. The focused static regression, source-
+length gate, and `git diff --check` pass. Compiler/runtime qualification remains pending.
+
+### 23.27.1270 Remove the last line-only generic check from type-bound replay
+
+Type-bound local call return-type checks now pass the resolved declaration offset into generic
+name scans, including recursive collection and qualified-path visits. The lookup uses the shared
+bounded owner/name index. Removed the now-unused line-only name-count helper so future callers
+cannot accidentally restore same-line generic leakage. `git diff --check` and the source-length
+gate pass; no tests or builds were run.
+
+### 23.27.1268 Meter tuple witness insertion as facts grow
+
+Replaced the conservative tuple-call comparison reserve with a work-aware insertion path. Each
+generated scalar marker and range fact now checks for duplicates through metered exact expression
+equality against the current fact list, including witnesses emitted earlier in the same expansion.
+Type-bound insertion also charges those comparisons before delegating provenance/source checks to
+the existing source-work meter. Tuple label-existence scans and sibling-label generation charge
+label bytes and preserve the prior behavior of emitting witnesses for every scalar field once the
+requested projection is known to exist. Aggregate-local binding also uses the metered insertion
+path and reports frame-budget exhaustion. `git diff --check` and the source-length gate pass; no build or runtime
+test was run.
+
+### 23.27.1271 Carry exact generic owner identity through resource-state analysis
+
+The resource analyzer retained only a declaration line in its branch context, so parameter, local,
+and region type-marker checks could still confuse same-line generic owners. Added the declaration
+offset to resource context, copied it into child states, and threaded it through resource parameter,
+local, and region type classification. Exact metadata incompleteness remains conservative. Scoped
+`git diff --check` passes; no tests or builds were run.
+
+### 23.27.1272 Reject duplicate line-scoped generic rows in drop analysis
+
+The destructor/drop-risk generic lookup now treats a duplicate `(line, name)` index entry as
+incomplete rather than accepting any positive count. Its caller already handles incomplete source
+classification conservatively, matching the producer and replay generic lookup invariant.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1272 Make replay parameter-shadow lookup exhaustive and owner-aware
+
+The line-only parameter lookup returned after the first matching function declaration. With
+same-name functions on one line, that could miss a shadowing parameter in a later declaration.
+The fallback now scans every same-line candidate and treats any match or incomplete traversal as
+shadowed; replay paths carrying an exact owner offset use that offset directly. Added a static
+regression and wired it into the replay audit shard. The regression, pop-snapshot owner guard,
+source-length check, and `git diff --check` pass. Runtime qualification remains pending.
+
+### 23.27.1273 Reuse exact tuple-witness duplicate checks
+
+Tuple-result witness expansion now meters exact duplicate comparisons against the current fact
+list as each marker or range fact is added, including aggregate-local result bindings. A
+known-unique type-bound insertion entry point reuses that result and skips the otherwise repeated
+full-fact scan, while retaining source charging, type-bound classification, seen-index updates,
+and provenance tracing. Removed the obsolete reserve helper and unmetered tuple call-result
+inserter. The precheck uses the same replay equality comparator as the normal type-bound dedupe,
+so skipping that second scan preserves duplicate semantics. Updated the existing static guard;
+static diff/source-length gates pass, but the guard was not run. No build or runtime test was run.
+The existing pure-call witness static guard now checks the metered tuple path and sibling-label
+behavior; it was not run.
+Bound-local tuple insertion passes an empty field and skips the projection-existence scan because
+there is no requested label to validate.
+
+### 23.27.1274 Propagate tuple-field witness incompleteness
+
+The pure-call AST walker now consumes the completion result from tuple-field witness expansion.
+A false result marks the shared expansion as exhausted and stops the walk, preventing callers
+from treating an incomplete tuple witness pass as complete. `git diff --check` and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1275 Finish exact-owner resource marker callsites
+
+Carried the active declaration offset through old-parameter entry-state setup, return-provenance
+classification, primitive operator witness checks, local return analysis, and collection-push
+receiver classification. Local return analysis now performs one owner-aware generic lookup instead
+of a line lookup followed by an exact lookup. Callers with known owners fail closed when exact
+metadata is incomplete. Remaining line-only paths serve unknown local owner contexts and
+global-constant classification, where no function owner applies. Scoped `git diff --check` passes;
+no tests or builds were run.
+
+### 23.27.1276 Skip duplicate scans after the scalar witness cap
+
+Call-derived scalar witness insertion now returns immediately when the per-function witness cap
+is already full, avoiding an exact duplicate scan that cannot change the fact set. It first checks
+the independent source-work counter, so an exhausted source analysis still fails closed.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1277 Precompute candidate cost for fact deduplication
+
+Call-derived fact deduplication now measures the candidate expression once before scanning the
+fact list, then reuses that size while reserving the candidate side of each exact comparison.
+The per-existing-fact cost and comparison reservation remain in place, so equality work stays
+bounded while avoiding a redundant candidate cost traversal for every row. Empty fact lists skip
+the preflight entirely. `git diff --check` and the source-length gate pass; no tests or builds were
+run.
+
+### 23.27.1278 Stop parameter-shadow search after a positive match
+
+The compatibility parameter-shadow lookup still scans every same-line declaration to detect a
+later match. It now stops once any candidate parameter is confirmed, while continuing the full
+bounded traversal when no match has been found. This preserves conservative same-line behavior and
+avoids needless declaration scans after the answer is known. `git diff --check` and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1279 Bind drop-risk generic checks to exact type owners
+
+Drop-risk analysis previously classified generic field types by declaration line, allowing
+same-line struct or enum declarations to affect one another. The classifier now carries each
+type declaration's source offset through recursive type inspection and queries the shared exact
+`(line, offset, name)` generic-owner index. Ownerless alias expansion retains the line-independent
+fallback; known owners fail closed if exact metadata is unavailable. Added a source guard to the
+kernel replay audit shard. The guard, source-length gate, and `git diff --check` pass; no matched
+compiler build or runtime test was run.
+
+### 23.27.1280 Reject unlike interval roots before structural equality
+
+Goal-metered interval lookup and expression-bound insertion now check root node kind and operator
+before invoking recursive structural equality. The kernel equality relation requires both fields
+to match, so these metered text comparisons skip impossible candidates without changing which
+stored expression bounds can match. Invalid lookup roots return an empty bound before node access,
+and insertion reuses a stored bound directly when both roots are the same validated arena node.
+Prefilter exhaustion fails closed. `git diff --check` and the source-length gate pass; no tests or
+builds were run.
+
+### 23.27.1281 Preserve early closure before linear-certificate fact indexing
+
+Linear-certificate replay previously built and hashed a full-fact premise index before checking
+any candidate certificate. It now checks the first candidate with a bounded exact linear premise
+scan and returns immediately on closure. Index construction is lazy: zero-premise candidates skip it, and each premise-bearing candidate
+gets an exact linear lookup before indexing. After a candidate fails, the shared index is built
+only if a later candidate can reuse it. Candidate order remains unchanged. This retains exact
+premise equality and charges the fallback scan to the same work meter. `git diff --check` and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1282 Index local region annotations and preserve alias declaration scope
+
+Function collection now uses a collision-checked, source-metered local-region index for repeated
+`(line, name)` lookups. The local pin collector uses the same bounded index shape keyed by
+`(line, region)`, eliminating a full annotation scan per pin while retaining duplicate rows and
+source order. The builder and lookup live in `function_region_annotation_index.elisa` to keep the
+function collection source below the 600-line cap. Resource marker recursion now disables caller-generic shadow checks only after a
+unique root alias is selected, so names in the alias RHS resolve in root declaration scope; normal
+caller type expressions retain exact owner checks. `git diff --check` passes; no tests or builds
+were run.
+
+### 23.27.1283 Bind conversion generic guards to exact declaration owners
+
+Implicit-effect and structural-operator generic classification now receives whether its caller
+has an exact declaration owner. When known, the lookup uses the active owner line and offset and
+fails closed if that identity is unavailable or ambiguous; only genuinely ownerless callers may
+use the unique-line compatibility index. Purity and structural-risk traversals install and restore
+the exact function identity around those checks. The structural replay source guard now asserts
+this behavior. The structural replay, source authority, pattern-literal, source-admission-budget,
+and exact drop-owner source guards, source-length check, and `git diff --check` pass. Compiler and
+runtime qualification remain pending the matched pinned compiler product.
+
+### 23.27.1284 Index stable interval bounds once per goal search
+
+Kernel interval lookup now builds an ordered structural-hash index after defining-equality closure
+has finished mutating bounds, then reuses it for both sides and recursive subterms. Hashes are
+memoized by arena node and only route candidates; exact kernel equality confirms each hit. Queries
+whose shape cannot be hashed fall back to the ordered metered scan. Stable external interval lookups also build a local index. The internal helper used while
+bounds are changing stays on the ordered scan, avoiding repeated index construction on every
+transport lookup. Index allocation, node/hash work, probes, and exact comparisons use the shared
+search meter, including each table-capacity doubling step. A no-match result now skips the fallback
+scan only when every bound hash and the query hash were complete; otherwise it retains the ordered
+exact scan. `git diff --check` and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1285 Recheck postcondition result-substitution work accounting
+
+A read-only audit raised a possible under-reservation around result substitution. The current
+`proof_report_source_postcondition_ast_goal_attempt_admitted` path does not use a shared
+`repeat_charge(source_expression, 2)` reservation: its source scan and overloaded-operator scan
+charge `source_work` independently. The result matcher separately charges every node and compared
+identifier byte in the returned-expression safety walk, and the overloaded-operator helper
+charges its measured AST/text cost before its structural walk. `proof_substitute_with_work` then
+reserves mapping, repeated source traversal, and output work on the same counter; the final AST
+comparison also uses that counter. No uncovered traversal or duplicate `source_expression_cost`
+charge was found in this path, so no code change was warranted. This is source inspection only;
+compiler/runtime qualification remains pending.
+
+### 23.27.1286 Preserve early interval hits when index setup is too costly
+
+The stable-bound index is an optional lookup accelerator, but its builder currently charges and
+performs table allocation and whole-bound hash discovery before the first indexed query. If that
+setup reaches the shared goal-search limit, the goal fails before the ordered scan can return an
+early exact match. Keep the meter fail-closed, but make index admission conditional on a bounded
+setup reserve (including worst-case structural hashing and text bytes), or retain a budget-safe
+ordered lookup path when setup cannot fit. The fallback must use the same meter and exact equality;
+it must not refund work already spent or claim a miss from an incomplete index. Add a focused
+regression where a large late bound set would exhaust setup but an early bound matches. This is a
+source-inspection finding; no tests or builds were run.
+
+### 23.27.1287 Build the linear-certificate fact index only after a real lookup
+
+The certificate search used candidate shape to decide when to build its shared fact index. A
+well-shaped candidate can still fail validation before reaching any premise-membership query, so
+that heuristic could spend or exhaust the budget on an index that no candidate used. The closure
+walker now reports whether it actually attempted a premise lookup, and index construction is
+deferred until such a candidate fails and later candidates remain. Candidate order and exact
+metered linear lookup are unchanged. Static inspection only; no tests or builds were run.
+
+### 23.27.1288 Bound producer-side disjunctive fact resolution
+
+Moved unit resolution into `disjunctive_fact_resolution.elisa` and replaced its all-pairs scan
+with a per-invocation expression-shape index. Hash matches are confirmed by metered exact
+equality, and ordered duplicate chains retain source order while excluding the current disjunction
+from its own premises. The same index checks derived-fact duplicates. Index allocation, hashing,
+probes, exact comparisons, and fact publication consume the shared source-work meter; exhaustion
+adds a resource-analysis budget finding and marks the proof obligation false. `git diff --check`
+passes, including a whitespace check of the new file; no tests or builds were run.
+
+### 23.27.1289 Charge producer fact-list copies in disjunctive goal search
+
+The producer built branch fact arrays and appended denial, negation, implication, and conditional
+assumptions without charging those writes, while kernel replay meters each loop visit and fact
+index push. Producer search now charges each copied slot, loop visit, and appended assumption
+before writing; denial expansion charges each emitted fact. The relevant-disjunction split was
+moved to `congruence_goal_splits.elisa` to keep the goal-depth source below the 600-line limit.
+The source-length and `git diff --check` gates pass. No compiler build or runtime tests were run;
+matching compiler/runtime qualification remains pending.
+
+### 23.27.1290 Reconcile goal-depth split-copy budget finding
+
+Read-only review of both correlated and final disjunction-split builders found their two per-fact
+pushes already reserved by `proof_linear_safety_work_charge_scaled(..., facts.count, 2)`. Each loop
+also charges its row visit, and each appended alternative is charged separately. The proposed
+unmetered-copy finding is therefore already covered; no code change was needed. Source inspection
+only; no tests or builds were run.
+
+### 23.27.1291 Reuse stable interval indexes across paired root queries
+
+Signed subtraction safety checks now build one local expression index and reuse it for the left
+and right range queries, retaining the existing early exit when the left range is insufficient.
+Signed scaled-product checks use a paired-query helper that builds once for both roots. Each
+lookup retains its shared work meter, exact equality check, and ordered fallback if indexing is
+disabled or incomplete. `git diff --check` and the source-length gate pass; no tests or builds
+were run.
+
+### 23.27.1292 Answer equality scalar-witness misses from the complete name index
+
+Equality closure previously scanned every fact for every distinct endpoint name after an indexed
+miss. Marker names now include parenthesized identifiers, matching the replay scanner, and the
+bounded hash table uses its empty-slot sentinel to prove a miss. Collision-heavy tables use their
+complete sorted index for exact binary-search misses; a source scan remains only when bounded
+probing cannot prove completeness. Name bytes and search steps are metered. Static hygiene gates
+pass; no tests or builds were run.
+
+### 23.27.1293 Meter conditional comparison fact copies
+
+The conditional-comparison producer copied its entire premise array into two branch arrays and
+appended each condition without charging those writes. Each branch now reserves both copies and
+both appended assumptions before allocating the arrays. To restore the source-length cap after
+concurrent indexed-equality work, the already-metered replay bound-name lookup moved into
+`name_equality_indexes.elisa`; its callers and behavior are unchanged. The source-length gate and
+`git diff --check` pass. No compiler/runtime qualification was run.
+
+### 23.27.1294 Reuse interval indexes through recursive signed-safety checks
+
+Signed expression safety now carries a lazy interval-index context across recursive descendants.
+The first range query builds once; later arithmetic descendants and their guarded-subtraction or
+nonnegative-sum checks reuse it while bounds remain immutable. If indexing is ineligible, the
+context remains ready with indexing disabled and each query uses the existing ordered metered
+scan. This avoids rebuilding the same index at every nested arithmetic node without building it
+for expressions that never need a range. Static whitespace and source-length gates pass; no tests
+or builds were run.
+
+### 23.27.1295 Bound optional interval-index hashing and preserve fallback budget
+
+The interval expression index now sets a setup deadline before even counting candidate rows or
+allocating tables, limiting all optional setup to half the remaining goal-search allowance.
+Recursive hashing and node text share that ceiling. Any refused setup disables the index and
+clears the setup ceiling, so callers take the existing ordered exact scan under the remaining shared
+meter; successful setup restores the ordinary global ceiling for query hashing. A static guard now
+checks this admission/fallback contract. Static checks pass; compiler/runtime qualification is still
+unavailable.
+
+### 23.27.1296 State the interval-index fallback reserve precisely
+
+The latest builder sets one setup deadline before candidate census, capacity growth, array
+allocation and initialization, and hash construction. Setup refusal leaves half of the entry
+budget available for the ordered exact lookup, including the `remaining == 2*slots` storage
+boundary that previously consumed the entire remainder. This closes that boundary case. The
+remaining reserve is still not a worst-case bound for every exact comparison. The specific
+early-row setup rejection is addressed by §23.27.1299's ordered first lookup; cases where the
+initial exact scan itself exhausts its meter still need dynamic qualification. This correction is
+source inspection only; no tests or builds were run.
+
+### 23.27.1297 Preserve owner provenance when expanding generic resource aliases
+
+Resource-marker classification still treats applied aliases as incomplete. The source AST's
+`Ast::Decl.Alias` contains only its target; alias formals are carried separately in the parser's
+`__alias_owner` and ordered `__alias_param` annotations. These annotations contain names and
+source lines, while the proof generic-owner index covers a different parser metadata table and
+does not identify alias formals. A plain substitution of actual type
+arguments into the alias target is unsafe: substituted identifiers belong to the caller's generic
+scope, while free identifiers in the target belong to the alias declaration's scope. Rechecking
+the substituted tree under only one owner can either shadow an alias-local name with a caller
+generic or miss a caller-generic argument.
+
+Implement expansion with an explicit owner-aware formal-to-actual environment. The compiler parser
+now stamps `__alias_owner` and ordered `__alias_param` rows with the alias declaration's byte
+offset and declaration identity; the source-conversion and replay indexes key marker association
+by `(name, line, offset)` and require the corresponding nonzero identity tag. Legacy generic
+markers without that tag invalidate the index and fail closed. This removes same-line,
+same-spelled alias cross-association within the parsed source, but applied aliases remain
+unexpanded. The compiler's bare alias-target unknown-type check also replaces its previous
+file-global formal-name exemption with a single ordered identity table and per-declaration binary
+search; malformed mixed identity metadata grants no formal exemption, while wholly legacy rows
+retain the compatibility fallback. Next require unique formals and exact argument arity; interpret
+actual arguments under the caller owner while resolving target free names under the alias owner;
+carry this split context through nested aliases and fail closed on missing or ambiguous metadata,
+cycles, or exhausted work.
+This is an expressivity limitation, not a current soundness failure. Source changes have only
+static review; parser/build/runtime qualification remains outstanding.
+
+The compiler's law-refinement checker also used to match `__alias_owner` rows to the first AST
+alias with the same spelling and attach formals to the most recently seen alias. It now collects
+AST declaration lines and byte offsets and validates owner and formal rows against the parser's
+exact identity. When a spelling is ambiguous across declarations, that spelling is omitted from
+the bounds registry; malformed or mismatched identity metadata clears the registry. This keeps
+the checker conservative without coupling bounds to a same-named alias in another scope. Static
+diff checks pass; compiler build/runtime qualification remains outstanding.
+
+### 23.27.1298 Derive finding admission from the checked view
+
+A public finding-summary helper accepted a caller-owned `source_admitted_goals` array. A forged
+array could cause goal-linked findings to be labeled `disproved` or `unsupported`. The helper now
+queries goal and fact admission directly from `ProofCheckedView` for each finding, charging both
+queries and the status-text scan against the shared output-work meter. Updated report/CLI call sites
+no longer pass the array to this summary path. The source-authority static guard covers the route;
+compiler/runtime qualification remains pending.
+
+### 23.27.1299 Search early interval rows before optional index construction
+
+A fresh interval index is now lazy. Each new query first performs the existing ordered exact scan;
+an early match returns without spending setup work. After a complete miss, the first eligible
+query builds the index once for recursive and subsequent lookups. Indexes with too few eligible
+rows stay scan-only, and the helper used while bounds mutate marks setup attempted so it cannot
+build against a changing collection. The initial scan, setup, and later indexed work share the same
+goal-search meter. `git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1300 Index generic-name checks during proposition formation
+
+Proposition formation checked each generic type leaf by scanning every parser generic row. A
+checker-run open-addressed index now keys rows by declaration line and exact generic name, and is
+shared by global signature collection, per-proposition environments, and typed postcondition
+replay. Hash matches still verify the source line and name, exact duplicate pairs remain ambiguous,
+and bounded cluster, shape, and work-budget failures refuse the projection. This changes repeated
+generic checks from whole-file scans to bounded lookups. Static source review only; no tests or builds
+were run.
+
+### 23.27.1301 Bound the scope of lazy interval lookup fallback
+
+The lazy first-query scan in §23.27.1299 resolves the original early-hit case for the query that
+triggers index construction: a complete ordered exact scan returns an early match before optional
+setup begins, and a miss is charged before the remaining budget is split. It does not establish
+the same guarantee for a later recursive query after the shared index has been built. That query
+must hash its root and confirm exact candidates under the residual goal meter; an expensive
+recursive query may still exhaust work where an early ordered match would have fit before setup.
+Keep §23.27.1286 open for that recursive-query case until query admission reserves a measured
+comparison bound or uses a bounded ordered precheck before index hashing. Source inspection only;
+no tests or builds were run.
+
+### 23.27.1302 Avoid repeated-scan reservation for rejected call arguments
+
+Call-stability analysis reserved a repeated AST/name-list scan for every argument before invoking
+the by-value shortcut. That shortcut accepts only identifier/field/parenthesis chains and rejects
+other shapes at their root, so complex arguments could consume a large budget reservation for work
+the shortcut did not perform, then be traversed again by the recursive classifier. A metered shape
+check now limits that reservation to supported place chains; unsupported arguments pay for the
+bounded shape prefix and the actual recursive classification. For supported place chains, the
+metered shape walk's AST cost is reused to reserve the shortcut and membership scans, avoiding a
+second cost-discovery debit. `git diff --check` and the source-length gate pass; no tests, builds,
+or runtime qualification were run.
+
+### 23.27.1303 Reuse exact arena-root identity in interval lookups
+
+The interval hash index already memoizes hashes by node root, but after reaching a same-hash row
+it still ran structural equality even when the bound and query referenced the identical arena root.
+The lookup now returns that exact row on root identity before traversing either expression. Hash
+collisions and structurally equal expressions with distinct roots still require the existing exact
+metered comparison. This removes an avoidable whole-expression walk for recursive exact-root hits;
+it does not close the distinct-root fallback-budget case in §23.27.1301. Static whitespace and
+source-length gates pass; no tests or builds were run.
+
+### 23.27.1304 Index exact arena-root bounds directly
+
+An enabled interval-expression index hashed every recursive query before it could recognize a
+bound already keyed by that exact kernel-node root. The index now builds a direct root-to-first-row table alongside structural-hash buckets. Exact
+root hits return before AST hashing only when the shared hash census marked the node valid, and
+preserve first-bound order; unknown or malformed nodes retain the prior fail-closed
+path. Structurally equal expressions with different roots still use the collision-checked
+structural path. The extra array is included in the bounded setup reservation, so insufficient work abandons
+optional indexing. Lookup also validates every parallel array shape
+before indexing, so malformed index state falls back to the ordered scan. The focused source guard, diff check, and source
+length gate pass; compiler/runtime qualification remains pending.
+
+### 23.27.1305 Preserve ordered exact scans for uncached recursive roots
+
+When a recursive interval query's root has no cached hash, hashing it is optional overhead before
+checking for an exact bound. Such roots now take the ordered exact scan directly; a completed miss
+is memoized in the local index state so subsequent recursive queries do not repeat that scan. The
+state read and cache write are charged, and it is safe because these local index contexts only
+serve immutable bounds. Already-hashed roots continue through the indexed path, whose exact-root
+bucket handles identical arena nodes and whose structural candidates retain metered exact equality.
+This preserves early matches for uncached, structurally equal roots while retaining index reuse for
+shared subterms. A residual setup-budget case remains when a large query root was already hashed
+as a subterm and structural equality with a distinct bound root is expensive. `git diff --check`
+and source-length pass; no tests or builds were run. Any separate setup allowance must be
+cumulative across the top-level goal search: several interval callers create independent index
+contexts, so a per-index allowance could multiply optional work beyond the shared search bound.
+
+### 23.27.1306 Reuse the source generic pair index in proposition formation
+
+Proposition formation no longer allocates a duplicate `(declaration line, generic name)` table
+inside its 1 MiB workspace. It borrows the already-built source-effect index, after validating the
+metadata and table shape, and uses the same collision-checked exact lookup for global signatures,
+local environments, and typed postcondition replay. The checker-run work meter now includes any
+initial pair-index build. Static review only; no tests or builds were run.
+
+### 23.27.1307 Preserve exact alias declaration offsets
+
+The source conversion alias index retained declaration lines and module owners but discarded
+`Ast::Decl.Alias.position.offset`. Generic formal rows are keyed by exact line and owner offset,
+so same-line aliases cannot be associated safely from line metadata alone. Alias collection now
+stores each alias and opaque-extern row's offset, charges the additional row work, resets the field,
+and validates its alignment before existing alias consumers proceed. This supplies the exact key
+needed for owner-aware resource-marker expansion; generic applied-alias classification itself
+remains open. `git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1308 Keep exact function generic misses scoped during replay
+
+Replay's generic-name helper already prefers the active function's exact declaration
+offset and validates that the queried line matches the active function line. However,
+when that exact function-owner lookup returned no row, it fell through to the
+line-only compatibility index. Two functions declared on one line could therefore
+let one function's binder shadow a type name at the other's call site. The exact
+identity path now returns a completed non-match on an owner miss; line-only lookup
+is reserved for call sites that lack exact declaration identity. Static diff and
+source-length checks pass; no tests or builds were run.
+
+### 23.27.1309 Preserve two-sided unit resolution and exact comparison budgets
+
+The indexed producer's unit-resolution pass now publishes consequences from both distinct
+earliest refuters for a disjunction, in original row order. When one original fact refutes both
+sides, it preserves the old `if/elif` precedence and derives only the right side. This restores
+the producer facts the former nested scan could emit while keeping exact indexed deduplication.
+The shared bounded expression comparators now account for both operands' sizes in their budget.
+The unbounded-limit variant was made explicit with separate left/right cost variables and sizes
+the right operand against the allowance remaining after the left; the limited variants use the
+same cumulative rule. This makes the combined reservation reviewable without relying on the cost
+walker’s accumulator behavior. The
+resource-marker comment now describes the owner-aware alias behavior. Static diff check passes;
+no tests or builds were run.
+
+### 23.27.1310 Keep exact function generic misses scoped in source conversion
+
+Source conversion already checks generic names by the active function's source line
+and, when function-check context matches that line, queries the exact owner row using
+the function declaration offset. If that exact function-owner lookup missed, the
+helper previously fell through to the line-only compatibility index. It now returns
+a completed non-match, preventing another same-line function's generic binder from
+shadowing a type name during this function's conversion checks. Call sites without
+the active-function context retain their prior line-scoped compatibility behavior.
+`git diff --check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1311 Close optional interval-index setup exhaustion finding
+
+The earlier §23.27.1286 finding described index setup reaching the goal-search limit before an
+ordered lookup could return an early hit. The current builder reserves at most half the remaining
+goal-search work for optional setup, applies that ceiling to row counting, allocation initialization,
+hash discovery, and bucket insertion, then abandons the index without consuming the rest of the
+budget when the reserve is insufficient. The caller retains its already-metered ordered lookup;
+hashing remains only an accelerator, and incomplete indexes do not certify misses. This closes the
+setup-exhaustion false-refusal case by source inspection. The separate residual case recorded in
+§23.27.1305 concerns a distinct-root structural comparison after successful setup and remains open.
+Static diff and source-length gates pass; no tests or builds were run.
+
+### 23.27.1312 Extend explicit-return span coverage to multiline values
+
+The local-scalar result-consumer source matcher now handles explicit `return expr` and validates
+the return-token and expression spans, including the parser's equal-span rewrite for implicit
+tails. Added `examples/type_bound_local_multiline_return.elisa` and wired it into the ordered test
+matrix as a focused positive source-bound postcondition case whose explicit return value starts on
+the next line. It runs in its own shard so every shell test source stays below 600 lines. This
+closes the fixture-wiring gap, but expected proof and source-span behavior remain unqualified until
+the test runs with a matched proof binary; no source defect is established.
+
+### 23.27.1313 Make classical propositional replay an explicit kernel trust boundary
+
+The denial and signed-projection replay rules implement double-negation elimination and the
+classical direction `not (P and Q) -> not P or not Q`. The typed kernel admits arbitrary
+well-formed `Prop` atoms, so these rules are not restricted to decidable Boolean computations.
+Ordinary report serializers and portable replay results emit
+`trust.logic_mode: "classical_propositional"`; the `trusted_assumptions: []` field continues to
+describe user-level assumptions only. Portable packages now use v3 to require this logic-mode
+declaration, while the reader retains the v1 and v2 schemas and interprets them under the current
+classical kernel. Per-root dependencies still need to identify which admitted roots use classical
+rules, so consumers cannot distinguish a classically derived theorem from one using only
+intuitionistic rules. `DESIGN.md` and the R-008 trust register state that current replay is
+classical. Next kernel work is to expose classical-rule dependencies per admitted root (or remove
+these rules from any intuitionistic mode). These changes have only static validation; no compiler
+build, runtime test, or replay was run, and R-008/R-009 remain open.
+
+### 23.27.1305 Meter dynamic direct-write frame classification
+
+Direct frame-write analysis repeatedly traversed the assignment target while checking direct
+places, dynamic selector prefixes, and possible aliases against every `changes` and `preserves`
+path. It also compared path text without debiting the shared frame source-work budget. The common
+path now measures the target once and reserves only for the traversal phases it actually reaches;
+per-path text and binding-name scans are charged before use. The alias fallback reserves an eight-pass
+checked quadratic bound because its recursive mention check can rescan descendant subtrees and nested
+block checks rescan calls, moves, and supported-expression shape. If a reservation cannot fit, the frame
+obligation fails closed and the report records an opaque write. Added a focused static guard and wired it
+into the borrow/frame test shard. The guard, diff check, and source-length gate pass; no compiler/runtime
+qualification has been run.
+
+### 23.27.1313 Track the current shared equality meter in source-admission guards
+
+The source-admission regression still expected the former single-accumulator equality helper after
+the implementation had moved to separate left and right costs, sizing the right term after the left
+and charging the combined cost twice for comparison. Updated the guard to require that exact cumulative
+reservation contract. The source-admission budget guard, AST/kernel mirror guard, pattern-literal
+source guard, source-authority guard, structural replay guard, diff check, and source-length gate pass.
+Compiler/runtime qualification remains pending the matched compiler build.
+
+### 23.27.1314 Define work-bounded kernel bound-table operations
+
+Kernel goal-search callers had been migrated to work-aware bound lookup/insertion names that did
+not exist, while the inventory's module-resolution check found those unresolved calls. Added
+implementations that debit queried-name bytes, each inspected row and stored-name bytes, plus new
+row insertion; exceeding the caller's limit marks the meter exhausted and returns an unusable
+result. Refreshed the checked kernel/replay external-call inventory for current source dependencies
+and added a focused guard wired into the kernel replay audit shard. Kernel inventory, bounded-bound guard, adversarial kernel-audit fixture, diff check, and source-length
+gate pass. The audit fixture now supplies its required kernel logic mode. Compiler/runtime qualification
+remains pending the matched compiler product.
+
+### 23.27.1315 Precheck early bounds before recursive interval-index lookup
+
+When an interval index is enabled and a recursive query root already has a cached hash, lookup
+now checks the direct arena-root table first, then compares at most the first four bound rows in
+source order under the same goal-search meter before probing structural-hash buckets. Structural
+equality remains mandatory; hashes and the prefix only choose candidates. A hit in this prefix
+avoids spending residual budget on indexed lookup work, while an exhausted comparison still refuses
+the query. Matches beyond the prefix retain the existing indexed path and may still conservatively
+refuse at the work limit. Source inspection and whitespace checks only; no tests or builds were run.
+
+### 23.27.1316 Guard kernel workspace cache reuse and synchronize structural version inventory
+
+Kernel validation workspaces expose reusable scratch arrays. Public workspace APIs route through
+arena admission with memo reuse disabled, so passing a same-sized but mutated arena cannot inherit
+an earlier validity result. The sole cache-reusing path is private to tactic replay: it validates
+all roots against the same unchanged arena arrays before tactic transitions begin. Added a static
+regression guard for that boundary and wired it into the kernel audit shard. The kernel inventory
+also now records `structural-v2`, matching source admission and source-bound replay, and checks
+those versions stay synchronized. Kernel inventory and workspace-boundary guards pass; compiler
+and runtime qualification remain pending the matched compiler product.
+
+### 23.27.1317 Audit every workspace-taking kernel API
+
+The cache-boundary regression previously listed only the basic arena/resource/effect/goal/index
+workspace endpoints, so a newly added typed or congruence entry point could avoid the check. The
+guard now discovers every API definition accepting `ProofKernelReplayValidationWorkspace&` and
+requires local arena admission or delegation to the explicitly checked cached-global wrapper; the
+metered private helper is separately required to disable cache reuse. The focused guard and the
+kernel inventory, structural replay, bounded-bound, source-authority, source-admission, pattern
+literal, whitespace, and source-length gates pass. No compiler/runtime qualification was run.
+
+### 23.27.1318 Meter unsigned plain-bound fixed-point closure
+
+The goal-metered unsigned path charged fact collection but then called the legacy
+`proof_kernel_replay_close_bounds_through_differences`, whose repeated constraint/bound scans did
+not debit the shared goal-search meter. It now uses the indexed work-aware difference closure;
+failure sets the shared counter beyond its limit so later safety checks refuse rather than consume
+partial bounds. Added a static regression and wired it into the kernel replay audit shard. The new
+guard, kernel audit accounting, kernel inventory, diff check, and source-length gate pass. No
+compiler/runtime qualification was run.
+
+### 23.27.1319 Keep finite-model arithmetic within source-width semantics
+
+The bounded finite-model evaluator stores values as `i64`, while source integer expressions can
+have narrower signed or unsigned widths. It now runs the existing signed/unsigned arithmetic
+safety admission over every fact and the goal before enumerating assignments. Since the model
+backend still lacks result-width semantics for shifts and bitwise operators, its integer evaluator
+returns unknown for `<<`, `>>`, `&`, `|`, and `^` rather than treating an `i64` result as a
+source-level result. Static source review and `git diff --check` only; no tests or builds were run.
+The bounded symbol collection now runs before arithmetic-bound construction, so formulas outside
+the finite model's six-symbol domain refuse before the more expensive safety walk; acceptance
+conditions are unchanged. Model setup now follows positive conjunctive branches to add metered
+signed and unsigned type-marker endpoints before equality closure; it does not infer bounds from
+negated or disjunctive markers. Aliases inherit type ranges as well as fact-derived bounds.
+Machine-word unsigned values receive a natural lower endpoint but still require an explicit
+fact-derived upper bound; the `i64` maximum is not treated as the `u64` maximum. Signed `i64`
+ordering therefore agrees with unsigned ordering for every enumerated value. Small primitive
+domains can be enumerated without separate endpoint facts. The
+interval evaluator also requires constant `/` and `%` divisors to pass the width-independent
+constant fragment; an ambiguous shift or bitwise divisor now produces an unknown interval.
+Unsigned remainder range proofs additionally check the constant divisor and every closed
+intermediate against the witnessed unsigned width before using its machine-i64 fold. This keeps a
+width-wrapping divisor from establishing a range in either the expression-safety path or the
+direct remainder-comparison shortcut. `git diff --check` passed; no tests or builds were run.
+
+### 23.27.1320 Guard finite-model source-width admission
+
+Added a static kernel regression requiring arithmetic safety admission before bounded-model frame
+enumeration, checking that both signed and unsigned safety paths cover facts and the goal, and
+ensuring unsupported shifts and bitwise operators return unknown before integer operands are
+evaluated. The guard also confirms the signed-overflow runtime fixture remains wired into the
+integration shard. It passes with the focused kernel, source-authority, structural-replay, source
+admission, and pattern-literal guards, along with diff and source-length checks. Runtime proof
+qualification remains unavailable.
+
+### 23.27.1321 Meter plain-difference collection end to end
+
+The unsigned plain-bound path's outer collector charged each visited fact, but its nested
+primitive-comparison, guarded-difference recognition, order-side checks, and recursive constraint
+collection still used legacy helpers. These now use the goal-metered counterparts and explicitly
+refuse if collection exhausts the shared budget before fixed-point closure, including when the
+last fact is the one that exhausts it. The focused regression forbids raw helper calls in the
+goal-tier collector and requires the indexed metered closure. Kernel difference/bounded-model
+guards, inventory and accounting checks, structural replay, source authority/admission, pattern
+literal, diff-check, and source-length gates pass. No compiler/runtime qualification was run.
+
+### 23.27.1322 Preserve loop-range fallback before optional interval-index setup
+
+Interval-bound lookup performed optional expression-index construction immediately after an
+ordered expression miss, before its independent `(name, offset)` loop-range fallback. Setup could
+therefore consume budget needed for a match that the existing fallback would have returned. The
+lookup now completes that fallback before attempting optional setup, while preserving the shared
+goal-search meter and the index path for later queries. This removes the same-query starvation case;
+later recursive searches can still be conservatively refused after bounded setup work. Diff check
+only; no tests or builds were run.
+
+### 23.27.1323 Correct explicit-return local-scalar fixture status
+
+The qualification notes in §§23.27.1234 and 23.27.1312 say the focused explicit-return
+local-scalar fixture is missing. The current harness already defines
+`LOCAL_SCALAR_TYPE_BOUND_API_SOURCE` with a local `u8` and explicit `return status`, then passes it
+through `api_probe` and checks that the source-owned type-bound trace is accepted in
+`scripts/test_direct_api_semantic_admission.py`. The fixture is present; it remains unqualified
+because this harness has not been run against a matched proof/compiler product. §23.27.1312's
+separate multiline-expression coverage gap remains open. This corrects plan state only; no runtime
+qualification was performed.
+
+### 23.27.1324 Keep finite collection quantifier domains aligned with i64 binders
+
+The parser and source mirror admit contract quantifiers with an `i64` binder, but typed kernel
+formation previously inferred collection binders directly from their domain elements. That let a
+parser-authentic quantifier over Boolean or floating values be admitted under a different local
+type than the source binder. Proposition formation now requires finite collection elements, and
+dictionary keys and values, to have the erased binder's exact `integer/i64` sort; heterogeneous
+domains remain rejected. Source inspection and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1325 Bind result postconditions through straight-line local returns
+
+The fixture identified in §23.27.1323 only checks availability of the source-owned type-bound
+trace; it does not prove that the surrounding `result` postcondition was admitted. The return
+inventory currently marks a function unsupported when any pre-tail statement is a `VarDecl`, and
+`proof_report_postcondition_result_substitution_matches` refuses unsupported rows. Consequently,
+an explicit `return local` can be recognized by local-scalar replay while the source postcondition
+that should consume it remains inadmissible. A first straight-line slice can admit contracts, one
+local declaration, and a final `return local`, while rejecting control flow, nested declarations,
+reassignment, and alternate returns. Keep `result` substitution at the exact returned identifier;
+inlining the initializer would change the proof goal and is unnecessary to state which value is
+returned. The fixture should assert goal source-admission as well as trace replay, with
+changed-return and ambiguous/shadowed-local refusal controls. No source behavior was changed and no
+tests or builds were run in this audit.
+
+### 23.27.1326 Type symbolic weakening markers as i64 binders
+
+Symbolic range proposition formation admits integral endpoints but fixes the quantified binder at
+`i64`. The weakening rule copied signed or unsigned type markers from the upper endpoint onto its
+fresh arbitrary binder, so a narrow endpoint such as `i8 n` could incorrectly constrain an `i64`
+marker to the `i8` domain and prove a false body below `-128`. Replay now gives the fresh marker
+only the admitted binder's primitive-integer and signed-64 markers; the proof producer generates
+the same facts. Source review and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1327 Require primitive equality for indexed-read congruence
+
+The typed indexed-read equality rule checked receiver, index, and result sorts, then certified a
+conclusion with `==` without checking which comparison implementation source resolution selected.
+An overloaded equality can return false even for identical values, so typing alone does not justify
+the rule. It now reconstructs witness markers from the admitted facts and requires the conclusion
+to pass the kernel's primitive-comparison check before using index congruence, then reuses that
+query-local marker cache for premise edges instead of scanning the same facts twice. Static review
+and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1328 Admit a bounded straight-line local return in result postconditions
+
+The direct-body return inventory now supports one local integer declaration followed by a terminal
+valued return of that exact identifier, provided its classified type sort, canonical name, and
+identity match the function return type, the local does not collide with a parameter or the
+reserved `result`/`old` names, and parser spans
+show the declaration name and complete initializer precede the returned value. Initializer
+scanning must complete and may not contain `result` or `old`; unsupported initializer forms,
+statements, multiple locals, non-identifier returns, and alternate control flow still fail closed.
+The existing explicit-return local-scalar source fixture is configured to traverse this inventory
+path. `test_source_admission_budget.py`,
+`test_source_authority_static_guards.py`, `test_kernel_inventory.py`, `git diff --check`, and the
+source-length gate pass. No compiler build or runtime replay was run, so source-admission behavior
+still needs qualification on a matched proof/compiler product.
+
+### 23.27.1329 Reject overloaded comparisons in finite-model evaluation
+
+The bounded-model fragment validated scalar operands for comparison nodes but did not reject an
+untrusted operator marker attached to the comparison itself. The evaluator would then interpret
+that source operation using built-in comparison semantics. Its preflight now checks the comparison
+root against the query's untrusted-operator marker cache and refuses that fragment when a marker
+applies. This keeps overloads outside the finite evaluator's built-in arithmetic model. Static
+review and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1330 Fail closed on malformed recognized witness markers
+
+The witness-marker cache classified reserved marker callees but silently skipped rows whose
+payload parser returned unknown. The cache now refuses recognized-but-malformed untrusted,
+primitive-scalar, primitive-integer, unsigned-bound, or scalar-element markers. Primitive-integer
+markers retain their intended scalar-witness behavior through a distinct classifier tag and the
+same one-term validation. Out-of-range fact roots and invalid call-callee indices also invalidate the
+cache. This prevents malformed metadata from being confused with absent metadata.
+Static review and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1331 Refuse incomplete overloaded-operator marker checks
+
+The scalar witness checker uses `false` to mean that an untrusted operator marker does not apply.
+Its recursion-bound exits could also return `false` when the comparison had not been completed,
+allowing a deep term to pass as primitive. Recursion-bound exits in the untrusted-operator check
+and indexed-container path now exhaust the shared witness budget, which makes all callers refuse
+the incomplete result. Static review and `git diff --check` only; no tests or builds were run.
+
+### 23.27.1332 Regress bounded-model overload refusal and marker-depth exhaustion
+
+Added a non-reflexive `Eq for i64` example whose result postcondition must remain unproved when
+the finite-model evaluator encounters `value == value`. The kernel replay shard now checks that
+the report remains open without a counterexample, while its static guard requires the marker check
+to precede scalar-witness admission. The indexed-read source guard also requires recursion-limit
+exits in both overloaded-operator matching and indexed-container-path matching to exhaust their
+shared meter rather than return an ambiguous `false`. Focused static guards, kernel accounting,
+diff check, and source-length gates pass. Runtime replay remains unavailable for the mismatched
+prebuilt proof binary.
+
+### 23.27.1333 Reject overloaded comparison roots in arithmetic replay
+
+Scalar operand witnesses establish the primitive sorts of comparison operands, but do not
+establish which source implementation was selected for the comparison node itself. The finite
+model had a root-marker check, while general order-goal replay, order-fact extraction, and interval
+bound collection could still interpret a marked overloaded relation as built-in arithmetic. A
+shared metered comparison-root admission check now rejects such roots (and refuses incomplete
+marker scans) before those paths derive or consume numeric bounds. Primitive-comparison admission
+also checks untrusted marker roots against the operand pair, covering consumers that receive only
+the operands and not the enclosing relation node. Exact proposition membership remains available
+for a directly assumed goal. Static review, `git diff --check`, and the
+source-length gate pass; no tests or builds were run, so runtime qualification remains open.
+
+### 23.27.1333 Record current compiler qualification mismatch
+
+A proof build was attempted from the current worktree. The pinned Stage1 wrapper stops because it
+reports `elisa-stage1-provenance-v1` while this proof tree requires v5. Retrying with the clean
+pinned Stage0 binary (`093ec96e89a951502407fb53d406eba7525cbb39`) passes its embedded revision check,
+but that compiler cannot parse the current pinned-front-end source snapshot and exits with parser
+errors. The build script cleaned its lock; no new proof product was emitted. Static gates still
+pass, but the local-return change and other current source edits remain unqualified until a
+compatible provenance-v5 Stage1 product is available from the exact pinned compiler source.
+
+### 23.27.1335 Guard source-validation cache lifetime
+
+Structural replay memoizes a source-validated owner in its mutable validation cache. Added source
+guard assertions that certificate replay resets prior replay flags, creates this cache within the
+public synchronous batch, passes that same local cache through the certificate loop, and disables
+replayed-dependency memoization before the final completeness check. This protects the current
+unchanged-report lifetime assumption against accidental movement into persistent report/global
+state. The structural replay guard and `git diff --check` pass; the assertion is static evidence and
+does not replace runtime qualification.
+
+### 23.27.1334 Wire malformed witness-marker regression into kernel audit
+
+The marker-cache source guard still referenced the deleted pre-metering readers and was not run by
+the kernel replay audit shard. Replaced it with a source-level regression for the current
+work-aware classifier/cache: invalid fact or callee indices and exhausted marker-name scans must
+be incomplete, every reserved marker kind must reach its strict reader, and malformed recognized
+payloads must refuse the cache. Wired the guard into `01a-kernel-replay-audit.sh`. The focused
+marker guard, indexed-read parity, bounded-model width, source-admission budget, diff check, and
+source-length gates pass. This is static evidence only; malformed-marker runtime refusal still
+needs qualification on a matched proof/compiler product.
+
+### 23.27.1335 Audit bounded local-return source binding (2026-10-14)
+
+An independent source review found no concrete binding flaw in the new local-return admission
+subset. Its terminal identifier must follow the complete initializer span, local and function
+return types must resolve to the same canonical integer identity, and unsupported statements,
+shadowing, absent values, and void returns remain inadmissible. The existing fixture covers one
+valued local return; semantic negative controls should still cover duplicate locals, parameter
+collisions, mismatched or ambiguous types, absent initializers, wrong terminal identifiers,
+span overlap, and result/old references inside the initializer. Runtime qualification remains
+held until a compatible proof/compiler product is available.
+
+### 23.27.1339 Reserve interval-index setup work for recursive lookups (2026-10-14)
+
+The optional interval-expression index could consume half the remaining goal-search budget during
+the first lookup, leaving a recursive interval child without enough work for its bound scans.
+Index admission now reserves, per immediate arithmetic child, the larger of the current lookup's
+measured work and the minimum row-loop charges for two bound-table passes (expression lookup plus
+loop-range fallback). Setup remains capped at half the remaining budget and cannot consume that
+reserve. This does not bound data-dependent structural equality or tuple-key extraction in future
+children; it mitigates starvation but does not guarantee a complete child lookup. The same-query
+ordered fallbacks still run before setup. The exact-root shortcut was also removed: indexed lookup
+now runs the bounded source-order precheck and then walks its source-ordered hash chain, preserving
+the ordered scan's first structurally equal row while charging candidate comparisons. The focused
+source guard now checks overflow-safe reserve arithmetic and that setup cannot consume the reserved
+continuation budget. The guard,
+`git diff --check`, and the source-length gate pass; no compiler build or runtime replay was run.
+
+### 23.27.1340 Review arithmetic, portable identity, and local-binding replay boundaries (2026-10-14)
+
+Independent read-only reviews found no concrete flaw in the checked affine difference-constraint
+path or the inspected local-binding owner selection. Strict comparisons use checked integer
+decrement, unsafe arithmetic refuses admission, and ambiguous legacy name/line owner matches
+refuse replay. Portable package replay checks the stated sequent against admitted kernel roots but
+does not authenticate the package's included source text; its output and mutation tests preserve
+`source_authenticated: false` and identity-hint trust. This review is scoped evidence, not a
+whole-kernel soundness proof. `scripts/test_kernel_inventory.py` passes with 11 tables and 340
+source-matched entries. The interval-index budget guard requires identical closed constructor sets
+for equality and hash dispatch, then checks each constructor's equality-relevant payload fields are
+included in its hash branch. This is a static source correspondence check, not a proof of the
+runtime implementation; dynamic qualification remains pending a matched compiler product.
+
+### 23.27.1341 Regress custom struct indexing against typed read congruence
+
+Typed indexed-read congruence must remain unavailable for Elisa's user-defined `Index` protocol,
+whose `__index__` calls may have semantics unrelated to built-in array selection. Added a runtime
+negative fixture with `Index for Box` and an ensure that equal indices imply equal indexed reads;
+the source guard verifies that the fixture reaches the index-equality matrix and expects the goal
+to remain unproved. The source guard, diff check, and source-length gate pass. Runtime qualification
+remains pending a matching proof/compiler product.
+
+### 23.27.1342 Recheck source typed replay and report-status boundaries (2026-10-14)
+
+The typed indexed-read retry remains confined to parser-origin postconditions with exact owner
+metadata, admitted goals and premise snapshots, and a reconstructed owner typing environment.
+Before it changes replay flags, it verifies the report counters against the certificate snapshot;
+receipt completion then checks replay counters and per-certificate flags again. The raw type-bound
+generic-name lookup reuses the source owner/name hash index built with generic metadata, avoiding a
+full generic-table scan per queried name. No additional report-status or indexing defect was found
+in this pass. `git diff --check` passed; no tests or builds were run.
+
+### 23.27.1343 Pin typed indexed-read admission to builtin receiver sorts
+
+Extended the indexed-read parity source guard to require typed receiver inference, the built-in
+`container`/`string` family gate, and element-sort derivation from that receiver. This prevents a
+future widening of the rule from treating a named user-defined `Index` implementation as array
+semantics. The parity guard, kernel accounting guard, diff check, and source-length gate pass. This
+remains source-only evidence until the overloaded-index negative fixture is run against the matched
+compiler product.
+
+### 23.27.1344 Preserve overload checks in closed constant evaluation
+
+Closed-width formula folding and unsigned-condition folding evaluate comparison nodes outside the
+main comparison dispatch. Nested overloaded comparisons could therefore be interpreted with
+built-in semantics even when the outer goal was a Boolean combination. The metered closed-width
+path now carries facts through recursion, checks comparison roots, and requires scalar witnesses
+for arithmetic operands. Unsigned constant-Boolean folding likewise carries facts, checks the
+comparison root, and validates both operand trees before constant evaluation. Static diff and
+source-length gates pass; no tests or builds were run.
+
+### 23.27.1345 Make typed postcondition replay retries transactional (2026-10-14)
+
+Review found that the typed retry could replay an early certificate, then exhaust source work
+while processing a later candidate and return with that partial upgrade still visible to receipt
+status. Successful certificate indices are now staged; the checked sequential certificate-ownership
+invariant makes staging unique and linear. All candidates must finish and the complete commit cost
+must be reserved before replay flags and counters change. Thus every
+early return leaves report replay state at its baseline. `git diff --check` and the source-length
+gate pass; no runtime tests or build were run. The local-scalar availability check already handles
+final valued explicit returns in the current source, including the parser's distinct return-token
+and value-expression spans. The earlier review note that it accepted only a final expression was
+stale and is withdrawn.
+
+### 23.27.1346 Route all constant comparison shortcuts through overload witnesses
+
+The audit of direct constant-evaluation callers found two remaining paths beyond closed-width
+folding: disjunct refutation evaluated a relation using typed constants, and fact inconsistency
+could turn a constant comparison into a contradiction without validating its relation root. Those
+paths now check the relation marker and primitive scalar operands. The shared fact-constant
+comparison helper also carries facts and validates both operand trees, covering goal and
+equality-literal shortcuts. Static diff and source-length gates pass; no tests or builds were run.
+
+### 23.27.1347 Exercise refused escaped string-pattern facts
+
+The typed pattern lowering intentionally refuses string spellings containing backslashes until
+parser-decoded values are source-bound to replay. Added an end-to-end negative case with an
+escaped newline pattern and a false postcondition, plus a source guard that keeps the case in the
+collision matrix. The pattern source guard, Python syntax check, diff check, and source-length gate
+pass. The executable collision matrix remains unqualified because the available proof binary does
+not match the current source revision.
+
+### 23.27.1348 Keep bounded-model type metadata out of logical goals
+
+The finite-model evaluator treats recognized type markers as metadata in premises so they can
+constrain the enumerated domain. The same evaluator also recognized them as `true` at arbitrary
+goal nodes, which could make a distinct marker goal (or a Boolean goal containing one) appear
+valid. Bounded-model admission now rejects a marker anywhere in the goal's unary/binary tree using
+the shared replay work meter; marker premises retain their existing domain-bound behavior. The
+portable adversarial sequent combines a signed-width premise and `x == 1` with an unsigned marker
+disjoined against `x == 0`, so it must remain unproved. Focused source guards, authority and
+structural replay guards, Python syntax, diff, and source-length gates pass. Portable runtime
+qualification remains unavailable because the installed proof binary has a different proof HEAD;
+the active unrelated compiler probe terminated with inference and lifetime diagnostics. The
+recursive goal scan only invokes marker parsers on call nodes, avoiding five needless recognizer
+passes at ordinary Boolean nodes while retaining per-node metering. The static guard also inventories
+kernel replay sources to ensure this remains the sole automatic-true marker evaluator.
+
+### 23.27.1349 Remove unmetered constant-relation replay entry points
+
+A source audit found a private legacy constant-Boolean path that called typed comparison folding
+without the fact arena needed to check relation overload markers. It had no callers, but was an
+unsafe alternate entry point. Removed that path and its unmetered comparison helper. The retained
+typed width evaluator now leaves conditional guards containing comparisons unknown; its interface
+also has no fact arena, while the work-metered goal evaluator checks relation roots and primitive
+operand witnesses before folding. `git diff --check`, the source-length gate, and a repository
+search confirming there are no references to the removed helpers pass. No build or runtime test
+was run.
+
+
+### 23.27.1350 State typed-kernel call-purity trust boundary (2026-10-14)
+
+An independent audit confirmed that typed proposition formation infers sorts for ordinary call
+terms, while `ProofKernelTypeEnvironment` has no effect or purity metadata. This is sound for the
+kernel's logical-function interpretation but is not, by itself, evidence that source calls are
+pure or deterministic. The public typed indexed-read APIs and context comments now say callers
+must authenticate source provenance and applicable call-purity conditions. The checked
+postcondition adapter admits a goal/fact snapshot before replay; its source goal scanner rejects
+calls, and source contract call checks require verified purity. No source-supported false
+acceptance was found. `git diff --check` and the source-length gate pass; no runtime tests or build
+were run. Direct typed API soundness remains conditional on the caller's logical-context
+interpretation.
+
+### 23.27.1351 Reject unrecognized finding statuses at the report boundary (2026-10-14)
+
+The source-structure check required a `disproved` finding to carry a counterexample, but it did not
+restrict other status strings. An unexpected label could be omitted from every finding count, so a
+complete report might appear proved. The report invariant now accepts only the producer's four
+statuses (`unknown`, `unsupported`, `timeout`, and `disproved`), and report rendering maps any
+unexpected label to `unknown`. Both checks meter the status bytes they inspect. A parallel typed
+indexed-read audit found no reachable custom `Index` path into builtin container/string replay:
+compiler dispatch resolves builtins and aliases before selecting custom struct overloads. No
+runtime tests or builds were run; `git diff --check` passes. The source type classifier still has a
+defensive missing shadow check for builtin-looking heads; current compiler resolution makes it
+unreachable for the indexed-read rule, but a future namespace/type-resolution change should close
+that inconsistency explicitly.
+
+### 23.27.1352 Remove dead unmetered fact-inconsistency replay
+
+The legacy fact-model module retained an unreachable non-metered inconsistency chain. Its
+constant-comparison branch did not receive facts and therefore could not validate overload
+witnesses; the public resource path instead calls the work-metered implementation in
+`goal_metered_fact_inconsistency.elisa`. Repository-wide lookup confirmed the legacy functions
+were only self-referenced. Removed the dead chain and its unused non-metered `fact_denies` wrapper.
+`git diff --check`, the source-length gate, and source searches pass. No tests or builds were run.
+
+### 23.27.1353 Remove dead non-metered negated-constant wrapper
+
+After removing the unreachable legacy fact-inconsistency chain, its negated-constant adapter in
+`safe_comparison_constants.elisa` had no callers. The underlying constant reader remains used by
+the bounded arithmetic path; only the unmetered polarity adapter was removed. Source search,
+`git diff --check`, and the source-length gate pass. No tests or builds were run.
+
+### 23.27.1354 Replay conditional resource arms from the same state (2026-10-14)
+
+The resource producer snapshots both `if` arms from the pre-branch state, but previously emitted
+each arm scope followed immediately by its moved-slot joins. Replay applied the first arm's join
+before copying state for the second arm, which could reject valid branch-local use or moves. The
+producer now emits both scopes first, then emits a bounded, source-work-metered union of their
+moved inherited slots. This preserves the existing conservative merge while making replay start
+each arm from the same state. No tests or builds were run; a focused branch fixture should exercise
+move/use and move/move alternatives in future verification.
+
+### 23.27.1355 Bound portable JSON integer tokens before DOM parsing (2026-10-14)
+
+Package ingress already bounds total bytes and nested container rescans, but the lexical preflight
+could still pass a numeric token as large as the entire file to the DOM parser's binary64 number
+conversion. Since every admitted JSON number is an exact nonnegative index below 2^53, no valid
+token needs more than sixteen digits. The preflight now rejects longer tokens before DOM creation;
+the portable package validation suite includes a 17-digit theorem-index case, and the trust
+inventory statically asserts that preflight ordering and limit. Static inventory, Python syntax,
+diff, and source-length gates pass. Runtime qualification awaits a proof binary matching the current
+source tree.
+
+### 23.27.1356 Cache completed interval-index misses
+
+Recursive interval reasoning can ask for the same arena root more than once. The expression index
+cached successful matches but repeated the full hash-bucket walk for every completed miss. The
+search-local match-row table now uses a separate sentinel for a miss only after a complete index
+has exhausted the source-ordered bucket. Incomplete indexes still require the ordered fallback,
+and the cached miss skips only expression-key lookup; loop-range name/offset lookup still runs.
+This reduces repeated candidate work without changing first-match semantics. `git diff --check`
+passes; no tests, build, or runtime replay were run.
+
+### 23.27.1357 Remove unused scalar-witness budget wrappers
+
+The kernel replay source audit found several private wrappers in `scalar_witness_work.elisa` that
+reset local meters but had no call sites. Their work-aware implementations remain in place and are
+the paths used by replay. Removed the dead wrappers for untrusted-operator matching, scalar-element
+lookup, scalar-term budget lookup, and scalar-name matching. Repository search, `git diff --check`,
+and source-length gates pass. No tests or builds were run.
+
+### 23.27.1358 Filter interval precheck candidates by complete hashes
+
+The interval index's ordered precheck compared same-kind roots structurally even when their
+already-computed hashes differed. Since only state-2 hashes are considered and the hash/equality
+constructor sets are kept aligned, unequal hashes safely reject candidates; hash matches still
+require exact structural equality. Added this filter before the potentially deep comparison to
+reduce repeated structural work. `git diff --check` and source-length gates pass. No tests, builds,
+or runtime replay were run.
+
+### 23.27.1359 Replay resource alternatives from a shared pre-branch state
+
+The conditional resource join fix now covers expression `if` and statement/expression
+match/catch alternatives as well. Each alternative is serialized as a scope against the incoming
+state; inherited moved slots are accumulated in a bounded mask and joined only after all arm scopes
+are present. This removes order-dependent false rejections while retaining the conservative moved
+state union. `git diff --check` and the source-length gate pass. No tests or builds were run; source
+compilation remains needed to validate the new helper signatures and branch fixtures are still
+needed for runtime coverage.
+
+### 23.27.1360 Recheck interval expression miss-cache invariants
+
+The interval expression lookup's helper was split into its own source file, leaving the static
+index-work guard tied to the prior function body and causing it to fail before inspecting the new
+miss-cache path. Updated the guard to locate the current helper and assert that only a fully
+completed ordered miss is cached, the miss cache does not skip the independent loop-range key
+fallback, and hash inequality filters candidates before exact structural equality. The focused
+index-work guard, bounded-model guard, portable trust inventory, diff check, and source-length gate
+pass. Runtime/build qualification remains pending the matched compiler product.
+
+### 23.27.1359 Reject shadowed builtin container spellings in typed source classification
+
+The typed source classifier derived builtin container element sorts from `darray[T]`, `view[T]`,
+and `array[T, N]` spellings without first checking whether declarations shadowed those names.
+It now consults the existing bounded declaration scan before treating these heads as builtin
+container types. A shadowed head remains available to ordinary declared-type resolution, where
+indexed reads do not gain builtin array semantics. `git diff --check` and source-length gates pass;
+no tests or builds were run.
+
+### 23.27.1361 Bound diagnostic counterexample fallback
+
+The diagnostic model fallback could interpret comparisons with built-in semantics even when the
+source overloads that primitive operator. It also decremented its leaf budget only at complete
+assignments, so an oversized Cartesian candidate search could traverse far more branches than the
+budget suggested. The fallback now uses the work-metered primitive-operator mask and source guard,
+reserves its repeated AST/frame scans under a fixed work limit, and rejects candidate products
+above the leaf budget before recursion. `git diff --check` passes. No tests, builds, or runtime
+replay were run.
+
+### 23.27.1362 Fail closed on malformed resource alternative state dimensions
+
+Conditional resource joins now validate the parent name/move alignment, the child name/move
+alignment, and that the child retains every inherited moved slot before indexing branch state.
+The join mask is also checked against the parent dimension before mutation. Child-local bindings
+may extend the child arrays, so validation permits that extension while requiring the inherited
+prefix. A mismatch marks source work exhausted and prevents partial joining. Compiler/runtime
+qualification and branch-fixture execution remain pending because the installed proof binary does
+not match the current source revision.
+
+### 23.27.1363 Validate dimensions at the shared resource child-scope boundary
+
+The common `proof_resource_close_child` helper is also used by loop and other scoped resource
+transitions. It now checks parent and child binding-name/move alignment and requires the child to
+retain the complete inherited prefix before calculating or applying move joins. Both join scans
+validate their name and child slots before access. Malformed state exhausts source work and stops
+the transition. This broadens the guard beyond conditional alternatives. Runtime qualification is
+pending the currently active matched compiler build.
+
+### 23.27.1364 Encode resource alternatives as one kernel transition
+
+The first shared-state branch serialization left sibling `resource-scope` events flat. Kernel
+replay correctly forbids any event between a scope that records pending moves and its explicit
+`resource-join-move` transitions, so a moving first arm made a following arm fail replay. The
+producer now wraps all arm scopes in one `resource-alternatives` node. Kernel replay recognizes
+that node, checks every child is a scope, replays each scope from a copy of the same incoming state,
+and unions only the pending moved slots before the explicit joins. Arena shape validation and
+source fact traversal include the new node. This keeps the pending-join ordering rule strict while
+supporting alternatives. Static source review and runtime replay are still needed; the matched
+compiler build is ongoing.
+
+### 23.27.1364 Confirm checked-get recovery non-join boundary
+
+An audit questioned whether resource replay could drop moves made by a `GetElse` recovery. The
+resource trace intentionally does not join recovery state into the success continuation. The public
+proof API first runs semantic preparation and the function checker; `proof_check_returns` rejects
+any recovery with a normal path and records a failed obligation. `ProofKernelReplay` documents
+recovery termination/state isolation as a source-level control-flow obligation. Independent review
+confirmed this is required admission, not just a compiler diagnostic. No code changes or runtime
+tests were needed for this boundary check.
+
+### 23.27.1365 Bind repair failure output to its checked view
+
+The repair failure renderer accepted a report, finding, and checked view as independent inputs,
+leaving an internal helper vulnerable to accidental report/finding mismatches. It now resolves the
+canonical report and goal attempt from the checked view and selects witness rows only from that
+report. These helpers are not exported through the public proof namespace. Updated both internal
+call sites; this also aligns the focused-goal call with the renderer's checked-view input.
+`git diff --check` passes. No tests or builds were run.
+
+### 23.27.1362 Avoid repeating interval-index prefix comparisons
+
+The source-ordered precheck and hash-bucket walk could compare the same early collision candidates
+twice, including expensive exact structural comparisons. The precheck now returns its covered row
+prefix; bucket traversal skips those already-ruled-out rows. An exact same-root match is returned
+directly from the precheck, preserving source-order semantics. Later bucket candidates still use
+metered structural equality, and incomplete work still declines the indexed result. The diff check,
+source-length gate, and direct whitespace scan of the split helper pass; no tests or
+builds were run.
+
+### 23.27.1363 Meter operator-witness marker inspection during logical comparison replay
+
+Logical comparison atom admission used the legacy unmetered operator-marker parser before its
+already-metered witness applicability check. The parser inspects attacker-controlled identifier
+and protocol text, so charging only the enclosing fact row did not bound that work. The call site
+now uses the shared work-aware marker parser, checks exhaustion immediately, and the unused
+unmetered parser was removed. `rg` confirms no callers of the removed helper remain;
+`git diff --check` and the source-length gate pass. No tests or builds were run.
+
+### 23.27.1366 Preserve inherited resource capabilities across kernel scopes
+
+Resource-scope replay already checked region identity and liveness, but did not explicitly compare
+the full inherited binding prefix. The boundary now validates parent/child array alignment and
+requires inherited names, scope depths, reference/writability/borrowability flags, origin places,
+and borrow metadata to remain identical. Only moved bits may differ for the existing pending-join
+protocol to carry out of a child; pending-join bits must remain unchanged and fully discharged.
+Every compared row and place field is charged to the shared resource replay meter. `git diff
+--check` and the source-length gate pass; no tests or builds were run.
+
+### 23.27.1367 Remove stale unmetered arithmetic safety builder
+
+The report API now performs unsigned and signed arithmetic safety checks through its shared
+goal-work path, but `fixed_width_arithmetic.elisa` still defined an unused whole-frame builder
+that recursively collected bounds, equalities, differences, and per-root safety without passing
+the report meter. Repository-wide search found only its definition and an explanatory API comment.
+Removed the dead builder; the live API path and metered helpers are unchanged. Static diff and
+source-length gates pass; no tests or builds were run.
+
+### 23.27.1369 Keep child resource traces local to the child scope
+
+Resource state snapshots inherited the parent's `trace_events`, then the kernel replayed those
+same transitions again inside the child scope after already applying the parent state. Replayed
+binds, calls, and moves could reject otherwise valid nested resource scopes. `proof_resource_copy_into`
+now copies the resource environment and facts but starts the child event trace empty. Parent history
+stays in the parent trace; the child's scope serializes only transitions performed in that scope.
+All current copy sites create child scopes. Runtime branch, nested-scope, and call regressions still
+need execution with a source-matched proof binary.
+
+### 23.27.1370 Stop arena encoding when aggregate budgets fail
+
+The source-to-arena encoder could exhaust its shared lowering meter inside a collection child
+and still walk the remaining siblings while pushing failed roots into temporary arrays. Aggregate
+loops now stop on work exhaustion and check remaining node/child capacity before staging or
+extending roots. The outer encoder returns an invalid root after any budget failure. Static review
+and `git diff --check` pass; no tests or builds were run.
+
+### 23.27.1371 Align the resource root inventory with the live schema
+
+The kernel inventory described `resource-v1` in `secondary_name`, but current source emits
+`resource-v2` in `operator` and stores the exact owner module in `secondary_name`. Updated the
+node-shape and certificate-rule rows to match the producer, admission boundary, arena validator,
+and replay dispatcher. `git diff --check` passes; no tests or builds were run.
+
+### 23.27.1372 Validate staged typed replay upgrades before commit
+
+The typed postcondition retry already stages certificate upgrades so budget exhaustion cannot
+partially change report status. Before committing, it now meters and validates the complete staged
+set: every index must be in range, still unreplayed, and strictly increasing; the batch must fit
+the report's replay-gap and counter bounds. The mutation pass therefore has no silent skip path
+that could leave replay counters out of sync with certificate flags. `git diff --check` and the
+source-length gate pass; no tests or builds were run.
+
+### 23.27.1373 Record scoped resource reinitialization boundary
+
+The scope-prefix audit confirmed that inherited `binding_region_live` may change false-to-true
+only through explicit resource rebind/allocation or assignment events, which require an active
+region and validate the target/source capability. Scope exit rejects live-to-dead changes but
+does not copy the scoped liveness upgrade back to the parent, so some later-valid uses can remain
+unprovable. This is conservative incompleteness, not a resurrection path; any future propagation
+must also define a safe all-branches merge rule. No code or tests changed in this audit.
+
+### 23.27.1374 Exercise resource move/use and move/move alternatives
+
+Extended `resource_branch_join.elisa` with one branch where only one arm moves an inherited value
+and another branch where both arms move it. The existing report assertion now requires all three
+branch groups to serialize as `resource-alternatives`, all three inherited moves to replay through
+`resource-join-move`, and the report to have no replay gaps. The existing rejected branch fixture
+continues to cover use after a conservative join. These regressions are wired but have not been
+executed because no proof binary matches the current source.
+
+### 23.27.1375 Preserve resource event one-use history across scopes
+
+Nested resource scopes cloned the parent event histories and discarded child updates when joining.
+That allowed a child to consume an inherited call-result or return witness while the parent retained
+it as unused. Sequential scopes now validate and adopt append-only call, allocation, result, and
+return-witness histories. Resource alternatives evaluate from the same incoming history, retain
+new call/allocation/return witnesses only when every arm provides them, and union one-use
+consumption markers across arms. History comparisons and merges use the shared resource meter.
+The scope-history helpers were split into their own module to keep source units below the size gate.
+Static source-length and diff checks pass; no tests or builds were run.
+
+### 23.27.1377 Roll back incomplete report-owned kernel terms
+
+The checked report encoder could refuse an out-of-range root after appending a partial term, yet
+leave that unreachable node/child suffix in the shared arena. Both annotated and expression-only
+report encoders now truncate their appended suffixes on refusal, so failed attempts cannot consume
+capacity needed by later terms. `git diff --check` passes; no tests or builds were run.
+
+### 23.27.1378 Make the raw kernel encoder transactional too
+
+The source-neutral encoder wrapper is also used directly with shared arenas. It now snapshots the
+node and child lengths and restores both suffixes when lowering exhausts its work limit or returns
+an invalid root. Refusal returns a stable out-of-range sentinel, and the shared-work recursive
+helper is private so callers cannot bypass the transaction. Checked report callers retain their
+explicit rollback as a second boundary guard. `git diff --check` passes; no tests or builds were run.
+
+### 23.27.1379 Separate branch-available calls from calls already seen
+
+Resource call roots serve two different replay checks. Result-witness nodes may use a call only
+when that call is available on every path, while duplicate-execution rejection must remember a
+call seen on any path. The resource replay state now stores those histories separately: alternatives
+intersect `resource_call_events`, union `resource_call_events_seen`, and sequential scopes adopt
+both histories. Call and lend transitions consult the seen set and record into both; result readers
+continue to consult the all-path availability set. Initialization, copying, merges, and insertions
+are charged to the resource work meter. Static diff and source-length checks pass; no tests or builds
+were run.
+
+### 23.27.1380 Reject malformed oversized arenas before returning the encoder sentinel
+
+The encoder's stable invalid-root sentinel is the node budget. That is guaranteed out of range
+only when the caller's existing shared arena respects the node budget; a direct caller could pass
+an oversized arena where the sentinel aliases an existing node. The public encoder now rejects
+node or child prefixes above their limits before mutation or sentinel construction. Added a kernel
+inventory guard for this preflight and the two-array rollback. Source-length and diff checks pass;
+compiler/runtime qualification remains outstanding.
+
+### 23.27.1381 Audit postcondition return admission and match-pattern work
+
+Read-only review confirmed that absent terminal expressions and void/omitted-unit functions cannot
+claim a supported `result`; result-dependent ensures require an inventory row that permits
+substitution. Explicit-return local support requires one preceding typed integer local returned by
+its exact name, with replay separately authenticating immutable-local facts and source ordering.
+No false-admission path was found. Match-pattern binder collection is prepaid by the measured
+pattern cost before closed-pattern and binder traversals, and each emitted name comparison is charged.
+Repeated scans across goal attempts are charged against one shared source-work budget; caching them
+could improve large reports if profiling shows this boundary is material. A positive/negative
+explicit-return local fixture pair would strengthen future coverage. No tests/builds or code changes
+were made for this audit.
+
+### 23.27.1382 Guard branch-available and duplicate-call histories
+
+Added kernel-inventory source guards for the resource call-history distinction: alternative joins
+intersect calls available to result witnesses, union calls seen for duplicate-execution rejection,
+sequential scopes adopt the seen history, and call/lend transitions both check and record it. The
+guard also requires the duplicate history to be charged and copied with resource state. Runtime
+qualification remains outstanding.
+
+### 23.27.1383 Close raw encoder and interning API boundary gaps
+
+The raw encoder now returns the dedicated maximum-`usize` invalid-root sentinel for both oversized
+prefixes and transactional refusals, so later appends cannot turn a failure into an in-range root.
+The report suffix interner is private because caller-selected start indices could truncate a prior
+prefix; checked report encoders remain its only callers. The independent audit found no checked-view
+verdict bypass. `git diff --check` passes; no tests or builds were run.
+
+### 23.27.1384 Keep resource availability histories lexical
+
+An audit found two child-scope histories that can authorize later replay after names resolve in a
+different lexical environment. A child-only `resource-region-call-alloc` is checked against the
+child region and binding state, then used by membership in a later call actual; a child-only
+`resource-use` can similarly be re-resolved as a regionless formal return witness. Allocation and
+return-witness availability therefore retain only the inherited prefix across alternative joins
+and nested-scope exits. Their consumed histories still propagate. The prefix checks are metered.
+
+The same audit ruled out the proposed call-root restriction: call result markers require the call
+root to be the immediately previous event, and call roots may be shared in a replay DAG. Call-root
+availability consequently keeps append semantics for sequential scopes and intersection semantics
+at alternative joins; duplicate-execution history remains a separate union/adoption channel. This
+preserves shared-DAG expressivity while preventing child allocation and return witnesses from
+escaping. Runtime qualification remains outstanding.
+
+### 23.27.1385 Speed ordered resource call-root lookups
+
+Resource call-root membership was linear for every call, lend, and call-result witness, making
+ordered traces quadratic. Replay state now tracks whether its call-availability and duplicate-use
+histories remain sorted. Sorted histories use metered binary search; any arbitrary or out-of-order
+roots keep the previous full linear check. Scope copies, appends, branch intersections, and branch
+unions preserve or invalidate the flags with the corresponding history update. `git diff --check`
+passes; no tests or builds were run.
+
+### 23.27.1386 Use sorted membership while merging resource call histories
+
+Tracked resource call-event histories now use the existing metered binary membership search while
+their root IDs remain ordered, and a linear two-pointer intersection when both branch histories
+remain ordered. A replay DAG that contributes an older root flips the sorted flag and retains the
+complete metered fallback. Prefix validation and duplicate suppression keep their prior semantics,
+while ordered branch/scope merges avoid repeated full-history scans. Static diff and source-length
+checks pass; no tests or builds were run.
+
+### 23.27.1384 Rebuild threaded-summary source indexes during replay
+
+Threaded-summary certificate validation and mutable-local resymbolization now classify source types
+against a replay-owned scratch report whose indexes are reconstructed from source declarations and
+annotations. The scratch builder also checks every exact generic-row snapshot against one matching
+generic identity annotation and shares its work delta with replay's source budget. This prevents
+caller-mutated report indexes or generic rows from directly authorizing a threaded summary. The
+type-marker and reference-free classifiers remain common-mode dependencies. Static diff and
+source-length checks pass; runtime qualification and source mutation tests remain outstanding.
+
+### 23.27.1385 Reuse threaded-summary indexes during mutable-local scans
+
+The mutable-local liveness walker now carries one lazy threaded-summary source cache through its
+recursive statement scan and reuses it across matching calls and branches. This avoids rebuilding
+the replay source indexes for each intervening call while preserving the shared source-work limit.
+Static diff and source-length checks pass; runtime qualification remains outstanding.
+
+### 23.27.1387 Use tracked sorted membership for resource result and witness histories
+
+Resource call-result, call-allocation, and return-witness histories now keep sorted-state flags
+through replay copies and scope/branch merges. Ordered histories use metered binary membership;
+appends or joins that break order switch to the full metered linear fallback. This removes repeated
+linear scans from long ordered resource traces while retaining arbitrary-DAG behavior. The diff
+passes `git diff --check`; no tests or builds were run.
+
+### 23.27.1388 Close marker-scan accounting and proof-export admission gates
+
+Primitive-comparison witness checks now charge every cached marker examined, including trusted
+markers skipped during matching. This applies both to operand-level primitive classification and
+whole-root untrusted-comparison classification; their source regression requires the charge before
+the marker-kind skip. Resource arena runtime fixtures now encode all 97 `resource-safety` roots
+with the current `resource-v2` operator, and the inventory guard checks that exact argument
+position. Proof-text and focused-goal JSON exports now require successful replay plus selected-goal
+and premise source admission at the emission site. Structural replay guards also require the full
+source-regenerated certificate-set comparison to precede the per-owner validation memo.
+Marker-work, kernel-inventory, source-authority, and structural-replay guards, source-length, and
+diff checks pass. The source-admission runtime matrix refuses the installed proof binary because
+it does not match the current proof source; these changes remain unqualified at runtime.
