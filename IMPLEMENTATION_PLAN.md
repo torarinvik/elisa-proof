@@ -25234,3 +25234,11 @@ whole-root arena walks before checking the transition. It now shares one validat
 one aggregate transition allowance across those roots, reusing already admitted DAG nodes while
 retaining fail-closed validation for each supplied root. Static diff and source-length checks pass;
 no tests or build were run.
+
+### 23.27.1437 Keep float comparisons out of integer difference replay (2026-10-14)
+
+Difference constraints encode strict comparisons using discrete integer offsets. Both ordinary and
+metered replay now require integer-denial evidence for comparison operands before importing a row,
+including negated comparisons; this prevents float comparisons from acquiring integer strictness.
+The metered path charges the operand checks to the caller's goal-search budget. Source review and
+`git diff --check` pass; no tests or build were run.
