@@ -73,6 +73,13 @@ assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work" in bod
 assert "proof_kernel_replay_unsigned_expression_safe_with_goal_work" in body(
     unsigned_path, "proof_kernel_replay_unsigned_report_safe_with_goal_work"
 )
+unsigned_safety = body(unsigned_path, "proof_kernel_replay_unsigned_expression_safe_with_replay_work")
+conditional_gate = unsigned_safety.index('if node.kind == "if":')
+shortcut = unsigned_safety.index("proof_kernel_replay_unsigned_conditional_difference_safe_with_goal_work", conditional_gate)
+shortcut_accept = unsigned_safety.index("return true if conditional_safe", shortcut)
+branch_checks = unsigned_safety.index("then_signed_width:", conditional_gate)
+assert conditional_gate < branch_checks < shortcut < shortcut_accept
+assert unsigned_safety.index("then_signed_width != 0 and else_unsigned_width != 0", branch_checks) < shortcut
 
 overflow_fixture = (ROOT / "examples/signed_overflow_bounded_model.elisa").read_text(encoding="utf-8")
 assert "signed_square_wraps_in_model_domain" in overflow_fixture

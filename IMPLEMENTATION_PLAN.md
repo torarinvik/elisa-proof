@@ -25146,3 +25146,11 @@ Signed and unsigned producer safety walks now recurse through field and scope re
 kernel replay for expressions such as `(x + 1).i8()`. The signed legacy entry point follows the
 same path as the work-aware helper. This closes a source-side false-safe precheck; the audit found
 no kernel replay verdict bypass. `git diff --check` passes; no tests or build were run.
+
+### 23.27.1427 Guard the unsigned conditional shortcut with branch-width consistency (2026-10-14)
+
+The unsigned conditional-difference fast path could return before the general conditional branch
+walk checked signedness and width consistency. Move those checks ahead of the shortcut and retain
+them under the shared goal-search work meter. The bounded-model source guard now enforces this
+ordering. Focused static checks and source-length checks pass; runtime replay remains unqualified
+until a source-matched compiler pair is available.
