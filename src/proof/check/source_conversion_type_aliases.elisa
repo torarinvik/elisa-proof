@@ -214,16 +214,40 @@ extend ElisaProof:
             cluster_status: (complete: bool, bounded: bool, observed: usize) = proof_name_index_cluster_status(values, name_count, source_work)
             return cluster_status.complete and cluster_status.bounded
 
-        def proof_source_conversion_alias_formal_index_build(annotations: darray[Ast::EnumAnnotation]&, formals: mutable darray[Ast::EnumAnnotation]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
+        def proof_source_conversion_alias_formal_index_build(annotations: darray[Ast::EnumAnnotation]&, formals: mutable darray[Ast::EnumAnnotation]&, hashes: mutable darray[u32]&, values: mutable darray[usize]&, counts: mutable darray[usize]&, formal_names: mutable darray[sview]&, formal_starts: mutable darray[usize]&, formal_counts: mutable darray[usize]&, source_work: mutable usize&) -> bool:
             formals.clear()
             hashes.clear()
             values.clear()
             counts.clear()
+            formal_names.clear()
+            formal_starts.clear()
+            formal_counts.clear()
+            active_owner: mutable usize = 0
             for annotation in annotations |formals, source_work|:
                 return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(annotation.owner), source_work) or not proof_report_source_work_charge(sview_len(annotation.name), source_work)
                 if annotation.owner == "__alias_owner":
                     return false if annotation.identity_id == 0 or annotation.identity_id.u64() != annotation.offset.u64() + 1u64
                     formals.push(annotation)
+                    formal_starts.push(formal_names.count)
+                    formal_counts.push(0)
+                    active_owner <- formals.count - 1
+                elif annotation.owner == "__alias_param":
+                    return false if:
+                        active_owner >= formals.count
+                        annotation.identity_id == 0
+                        annotation.identity_id != formals[active_owner].identity_id
+                        annotation.line != formals[active_owner].line
+                        annotation.offset != formals[active_owner].offset
+                        annotation.name == ""
+                    duplicate: mutable bool = false
+                    for prior in formal_starts[active_owner]..<(formal_starts[active_owner] + formal_counts[active_owner]) |prior, formal_names, annotation, source_work, duplicate|:
+                        return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(formal_names[prior]), source_work)
+                        duplicate <- true if formal_names[prior] == annotation.name
+                    return false if duplicate
+                    formal_names.push(annotation.name)
+                    formal_counts[active_owner] <- formal_counts[active_owner] + 1
+                else:
+                    active_owner <- formals.count
             count: usize = formals.count
             return true if count == 0
             capacity: usize = proof_name_index_capacity(count)
@@ -372,9 +396,9 @@ extend ElisaProof:
             return (true, false) if seen_status.already_seen
             return (true, true)
 
-        def proof_source_conversion_owner_rows_collect(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_alias_index: ProofSourceEffectIndexAliases&, seen: mutable ProofSourceOpaqueExternSeen&, formals: darray[Ast::EnumAnnotation]&, formal_hashes: darray[u32]&, formal_values: darray[usize]&, formal_counts: darray[usize]&, alias_lines: mutable darray[u32]&, alias_offsets: mutable darray[u32]&, alias_owners: mutable darray[sview]&, alias_has_formals: mutable darray[bool]&, declared_type_owners: mutable darray[sview]&, registration_visible: bool, owner: sview, source_work: mutable usize&, depth: usize) -> bool:
+        def proof_source_conversion_owner_rows_collect(declarations: darray[Ast::Decl]&, annotations: darray[Ast::EnumAnnotation]&, source_alias_index: ProofSourceEffectIndexAliases&, seen: mutable ProofSourceOpaqueExternSeen&, formals: darray[Ast::EnumAnnotation]&, formal_hashes: darray[u32]&, formal_values: darray[usize]&, formal_index_counts: darray[usize]&, formal_names: darray[sview]&, formal_starts: darray[usize]&, formal_counts: darray[usize]&, formal_owner_uses: mutable darray[usize]&, alias_lines: mutable darray[u32]&, alias_offsets: mutable darray[u32]&, alias_owners: mutable darray[sview]&, alias_has_formals: mutable darray[bool]&, generic_formal_names: mutable darray[sview]&, generic_formal_starts: mutable darray[usize]&, generic_formal_counts: mutable darray[usize]&, generic_application_valid: mutable darray[bool]&, declared_type_owners: mutable darray[sview]&, registration_visible: bool, owner: sview, source_work: mutable usize&, depth: usize) -> bool:
             return false if depth >= PROOF_SOURCE_CONVERSION_ALIAS_DEPTH_LIMIT
-            for declaration in declarations |annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_offsets, alias_owners, alias_has_formals, declared_type_owners, registration_visible, owner, source_work, depth|:
+            for declaration in declarations |annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_index_counts, formal_names, formal_starts, formal_counts, formal_owner_uses, alias_lines, alias_offsets, alias_owners, alias_has_formals, generic_formal_names, generic_formal_starts, generic_formal_counts, generic_application_valid, declared_type_owners, registration_visible, owner, source_work, depth|:
                 return false if not proof_report_source_work_charge(1, source_work)
                 match declaration:
                     Ast::Decl.Struct(_, _, _, _, _, _, _) | Ast::Decl.Enum(_, _, _, _, _):
@@ -384,11 +408,23 @@ extend ElisaProof:
                         return false if not proof_report_source_work_charge(sview_len(owner), source_work)
                         has_formals: (complete: bool, found: bool) = proof_source_conversion_alias_has_formals(alias_name, position.line, position.offset, formals, formal_hashes, formal_values, formal_counts, source_work)
                         return false if not has_formals.complete
+                        formal_owner: (complete: bool, found: bool, owner_row: usize, start: usize, count: usize) = proof_source_conversion_alias_formal_owner(alias_name, position.line, position.offset, formals, formal_hashes, formal_values, formal_index_counts, formal_names, formal_starts, formal_counts, source_work)
+                        return false if not formal_owner.complete or formal_owner.found != has_formals.found
+                        if formal_owner.found:
+                            return false if formal_owner.owner_row >= formal_owner_uses.count or formal_owner_uses[formal_owner.owner_row] != 0 or formal_owner.count == 0 or formal_owner.start > formal_names.count or formal_owner.count > formal_names.count - formal_owner.start
+                            formal_owner_uses[formal_owner.owner_row] <- 1
                         alias_lines.push(position.line)
                         return false if not proof_report_source_work_charge(1, source_work)
                         alias_offsets.push(position.offset)
                         alias_owners.push(owner)
                         alias_has_formals.push(has_formals.found)
+                        generic_formal_starts.push(generic_formal_names.count)
+                        generic_formal_counts.push(formal_owner.count) if formal_owner.found else generic_formal_counts.push(0)
+                        generic_application_valid.push(formal_owner.found and formal_owner.count > 0)
+                        if formal_owner.found:
+                            for formal_index in formal_owner.start..<(formal_owner.start + formal_owner.count) |formal_index, formal_names, generic_formal_names, source_work|:
+                                return false if not proof_report_source_work_charge(1, source_work) or not proof_report_source_work_charge(sview_len(formal_names[formal_index]), source_work)
+                                generic_formal_names.push(formal_names[formal_index])
                     Ast::Decl.Extern(alias_name, _, arity, _, callable, return_type_name, _, position):
                         opaque: (complete: bool, opaque_alias: bool) = proof_source_conversion_opaque_extern_alias(alias_name, arity, callable, return_type_name, owner, registration_visible, source_alias_index, seen, source_work)
                         return false if not opaque.complete
@@ -401,13 +437,16 @@ extend ElisaProof:
                             # The target is intentionally absent: this row shadows wider
                             # lookups but cannot be expanded as a source type alias.
                             alias_has_formals.push(true)
+                            generic_formal_starts.push(generic_formal_names.count)
+                            generic_formal_counts.push(0)
+                            generic_application_valid.push(false)
                     Ast::Decl.Module(module_name, body, _):
                         module_registration_visible: bool = registration_visible and depth == 0
                         return false if:
                             not proof_report_source_work_charge(sview_len(module_name), source_work)
-                            not proof_source_conversion_owner_rows_collect(body, annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_offsets, alias_owners, alias_has_formals, declared_type_owners, module_registration_visible, module_name, source_work, depth + 1)
+                            not proof_source_conversion_owner_rows_collect(body, annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_index_counts, formal_names, formal_starts, formal_counts, formal_owner_uses, alias_lines, alias_offsets, alias_owners, alias_has_formals, generic_formal_names, generic_formal_starts, generic_formal_counts, generic_application_valid, declared_type_owners, module_registration_visible, module_name, source_work, depth + 1)
                     Ast::Decl.Scoped(body, _):
-                        return false if not proof_source_conversion_owner_rows_collect(body, annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_counts, alias_lines, alias_offsets, alias_owners, alias_has_formals, declared_type_owners, false, owner, source_work, depth + 1)
+                        return false if not proof_source_conversion_owner_rows_collect(body, annotations, source_alias_index, seen, formals, formal_hashes, formal_values, formal_index_counts, formal_names, formal_starts, formal_counts, formal_owner_uses, alias_lines, alias_offsets, alias_owners, alias_has_formals, generic_formal_names, generic_formal_starts, generic_formal_counts, generic_application_valid, declared_type_owners, false, owner, source_work, depth + 1)
                     Ast::Decl.Func(_, _, _, _, _, _, _) | Ast::Decl.Law(_, _, _) | Ast::Decl.Import(_, _) | Ast::Decl.Const(_, _, _, _, _):
                         pass
                     Ast::Decl.Invalid:
@@ -423,6 +462,8 @@ extend ElisaProof:
                     if annotation.name == "__extern_resource":
                         return false if not proof_report_source_work_charge(sview_len(annotation.owner), source_work)
                         declared_type_owners.push("")
+                for used in formal_owner_uses |source_work|:
+                    return false if not proof_report_source_work_charge(1, source_work) or used != 1
             return true
 
         # Resource marker classification asks whether a source type name is a unique alias,
@@ -467,7 +508,10 @@ extend ElisaProof:
             formal_hashes: mutable darray[u32] = []
             formal_values: mutable darray[usize] = []
             formal_counts: mutable darray[usize] = []
-            return false if not proof_source_conversion_alias_formal_index_build(report.source.source_annotations, &alias_formals, &formal_hashes, &formal_values, &formal_counts, source_work)
+            alias_formal_names: mutable darray[sview] = []
+            alias_formal_starts: mutable darray[usize] = []
+            alias_formal_counts: mutable darray[usize] = []
+            return false if not proof_source_conversion_alias_formal_index_build(report.source.source_annotations, &alias_formals, &formal_hashes, &formal_values, &formal_counts, &alias_formal_names, &alias_formal_starts, &alias_formal_counts, source_work)
             index.markers.resource_marker_type_index_valid <- false
             index.markers.resource_marker_type_names.clear()
             index.markers.resource_marker_type_targets.clear()
@@ -493,17 +537,26 @@ extend ElisaProof:
             index.types.declared_type_index_valid <- false
             index.types.declared_type_scope_index_valid <- false
             index.aliases.alias_has_formals.clear()
+            index.aliases.alias_generic_formal_names.clear()
+            index.aliases.alias_generic_formal_starts.clear()
+            index.aliases.alias_generic_formal_counts.clear()
+            index.aliases.alias_generic_application_valid.clear()
             return false if index.aliases.alias_names.count != index.aliases.alias_targets.count
             index.aliases.alias_lines.clear()
             index.aliases.alias_offsets.clear()
             index.aliases.alias_owners.clear()
             index.types.declared_type_owners.clear()
+            formal_owner_uses: mutable darray[usize] = []
+            return false if not proof_report_source_work_charge(alias_formals.count, source_work)
+            formal_owner_uses.resize(alias_formals.count)
+            for owner_row in 0..<formal_owner_uses.count |owner_row, formal_owner_uses|:
+                formal_owner_uses[owner_row] <- 0
             seen_opaque_externs: mutable ProofSourceOpaqueExternSeen = ProofSourceOpaqueExternSeen{}
             return false if:
                 not index.aliases.source_alias_index_valid
                 not proof_source_conversion_opaque_seen_init(index.aliases.source_opaque_extern_count, &seen_opaque_externs, source_work)
-                not proof_source_conversion_owner_rows_collect(report.source.source_declarations, report.source.source_annotations, index.aliases, seen_opaque_externs, alias_formals, formal_hashes, formal_values, formal_counts, &index.aliases.alias_lines, &index.aliases.alias_offsets, &index.aliases.alias_owners, &index.aliases.alias_has_formals, &index.types.declared_type_owners, true, "", source_work, 0)
-                index.aliases.alias_lines.count != index.aliases.alias_names.count or index.aliases.alias_offsets.count != index.aliases.alias_names.count or index.aliases.alias_owners.count != index.aliases.alias_names.count or index.aliases.alias_has_formals.count != index.aliases.alias_names.count or index.types.declared_type_owners.count != index.types.declared_types.count
+                not proof_source_conversion_owner_rows_collect(report.source.source_declarations, report.source.source_annotations, index.aliases, seen_opaque_externs, alias_formals, formal_hashes, formal_values, formal_counts, alias_formal_names, alias_formal_starts, alias_formal_counts, formal_owner_uses, &index.aliases.alias_lines, &index.aliases.alias_offsets, &index.aliases.alias_owners, &index.aliases.alias_has_formals, &index.aliases.alias_generic_formal_names, &index.aliases.alias_generic_formal_starts, &index.aliases.alias_generic_formal_counts, &index.aliases.alias_generic_application_valid, &index.types.declared_type_owners, true, "", source_work, 0)
+                index.aliases.alias_lines.count != index.aliases.alias_names.count or index.aliases.alias_offsets.count != index.aliases.alias_names.count or index.aliases.alias_owners.count != index.aliases.alias_names.count or index.aliases.alias_has_formals.count != index.aliases.alias_names.count or index.aliases.alias_generic_formal_starts.count != index.aliases.alias_names.count or index.aliases.alias_generic_formal_counts.count != index.aliases.alias_names.count or index.aliases.alias_generic_application_valid.count != index.aliases.alias_names.count or index.types.declared_type_owners.count != index.types.declared_types.count
             if alias_index_reusable:
                 alias_capacity: usize = proof_name_index_capacity(index.aliases.alias_names.count)
                 return false if (index.aliases.alias_names.count > 0 and alias_capacity == 0) or index.aliases.alias_index_hashes.count != alias_capacity or index.aliases.alias_index_values.count != alias_capacity or index.aliases.alias_index_counts.count != alias_capacity
