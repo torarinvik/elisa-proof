@@ -28,11 +28,13 @@ assert code == 0 and positive["status"] == "proved", positive["findings"]
 assert not positive["findings"]
 for target, kind in (("stored_checked_zero_wrong", "ensure-unproven"),
                      ("missing_checked_zero_precondition", "call-requires-unproven"),
-                     ("shadowed_checked_zero_wrong", "ensure-unproven")):
+                     ("shadowed_checked_zero_wrong", "ensure-unproven"),
+                     ("reassigned_checked_zero_wrong", "ensure-unproven"),
+                     ("branch_reassigned_checked_zero_wrong", "ensure-unproven")):
     code, negative = run(target)
     assert code == 1 and negative["status"] == "failed"
     assert any(f["name"] == target and f["kind"] == kind for f in negative["findings"]), negative["findings"]
-print("stored checked result replays; wrong result, missing precondition and shadow controls reject")
+print("stored checked result replays; wrong result, missing precondition, shadow and reassignment controls reject")
 
 p = subprocess.run([BIN, "--function-json", "wrong_narrowed_result",
                     str(ROOT / "examples/local_call_result_width_rejected.elisa")],
