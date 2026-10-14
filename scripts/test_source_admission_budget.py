@@ -21,6 +21,8 @@ theorem_suggestions = (ROOT / "src/app/theorem_output_suggestions.elisa").read_t
 goal_admission = (ROOT / "src/proof/model/report_goal_admission.elisa").read_text(encoding="utf-8")
 postcondition_inventory = (ROOT / "src/proof/model/report_postcondition_ast_inventory.elisa").read_text(encoding="utf-8")
 type_bound_local = (ROOT / "src/proof/replay/type_bound_local_availability.elisa").read_text(encoding="utf-8")
+linear_goal_api = (ROOT / "src/proof/linear/goal_api.elisa").read_text(encoding="utf-8")
+kernel_resource_model = (ROOT / "src/proof/kernel_replay/resource_model.elisa").read_text(encoding="utf-8")
 return_matches = (ROOT / "src/proof/check/returns/matches.elisa").read_text(encoding="utf-8")
 assert "source_work: mutable usize&" in termination_body.splitlines()[2]
 assert "proof_replay_summary_expr_cost_body(body, &body_cost, source_work, 0)" in termination_body
@@ -558,7 +560,9 @@ for requirement in (
     "local_return_count <- local_return_count + 1",
     'local_name == "result" or local_name == "old"',
     "initializer == Ast::Expr.Absent or initializer == Ast::Expr.Invalid",
-    'sview_len("result") + sview_len("old") + sview_len(return_type_name)',
+    'proof_report_source_postcondition_work_charge(sview_len("result"), source_work)',
+    'proof_report_source_postcondition_work_charge(sview_len("old"), source_work)',
+    'proof_report_source_postcondition_work_charge(sview_len(return_type_name), source_work)',
     "local_sort.type_name != return_type_name",
     "parameter.name == local_name",
     "Ast::Stmt.VarDecl(local_name, Ast::Expr.Ident(local_type, local_type_position), initializer, local_position)",
@@ -579,4 +583,19 @@ assert "local_return_count != 1" in postcondition_returns
 assert "return_supported <- false" in postcondition_returns.split("_:", 1)[1]
 local_return_fixture = (ROOT / "scripts/test_direct_api_semantic_admission.py").read_text(encoding="utf-8")
 assert 'ensure result == 7\\n    status: u8 = 7\\n    return status' in local_return_fixture
-print("source admission budget: fallback scans and structural termination traversal refuse when shared work is exhausted")
+shared_goal = linear_goal_api.split("def proof_goal_with_shared_work(", 1)[1].split("def proof_goal_with_precomputed_operator_mask(", 1)[0]
+shared_float = shared_goal.split("if (proof_float_mode can Global.Read):", 1)[1].split("goal_width_probe:", 1)[0]
+assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, float_square_cost, 8)" in shared_float
+assert "proof_goal_tactic_preflight_charge_scaled(&preflight_work, shape_cost, 16)" in shared_float
+assert "proof_float_goal_with_work(facts, goal, operator_mask, &float_work, &float_exhausted)" in shared_float
+assert "proof_float_goal(facts, goal)" not in shared_float
+assert "if float_exhausted:" in shared_float
+goal_replay = kernel_resource_model.split("def proof_kernel_replay_goal_depth_remaining_with_work(", 1)[1]
+goal_root_gate = goal_replay.index("if not (proof_kernel_replay_unsigned_safe_closing_with_goal_work(nodes, children, goal_root")
+binary_solver = goal_replay.index("proof_kernel_replay_goal_binary_with_work(nodes, children, facts")
+assert goal_root_gate < binary_solver
+assert "proof_kernel_replay_signed_expression_safe_with_bounds_goal_work(nodes, children, goal_root" in goal_replay[goal_root_gate:binary_solver]
+unsafe_goal_fallback = goal_replay[goal_root_gate:].split("linear_certificate_closed:", 1)[0]
+assert "return (proof_kernel_replay_nested_conditional_goal(" in unsafe_goal_fallback
+assert "proof_kernel_replay_goal_binary_with_work(" not in unsafe_goal_fallback
+print("source admission budget: bounded fallback, float containment, and normalized-goal gates")
